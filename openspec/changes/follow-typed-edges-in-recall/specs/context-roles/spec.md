@@ -27,8 +27,33 @@ to load SHALL fall back to the shipped registry and report the failure in the pa
 - **THEN** the effective registry contains `connections` with lane `graph`, and a resolved anchor
   of any kind selects it
 
+### Requirement: Deterministic role selection
+Roles for a turn SHALL be selected as the union of the defaults for each resolved
+anchor's kind and the roles whose cue patterns match the turn, evaluated with the same
+normalisation the anchor resolver uses, with no model call and no randomness; the
+selected set SHALL be bounded (at most 6 lenses, plus at most one `graph`-lane role that
+runs beside them because it serves only bounded pointers) in the registry's priority order,
+and the packet SHALL list the selected roles and, for each, whether it came from an anchor
+default or a turn cue. A further `graph`-lane role counts as one of the 6 lenses. A context
+profile reads only through the lenses and runs no `graph` lane.
+
+#### Scenario: Planning verbs add plan and method roles
+- **WHEN** a turn contains a planning cue ("I'm planning to", "how should I") and a
+  resource anchor resolves
+- **THEN** the selected roles include `resources`, `current_state`, `constraints`
+  (anchor defaults) and `active_plans`, `methods` (cues), in registry order
+
+#### Scenario: Same turn, same roles
+- **WHEN** the same turn is activated twice against the same index generation and
+  registry hash
+- **THEN** the selected roles and their attributions are identical
+
 #### Scenario: The connections role takes no lens slot
 - **WHEN** a resolved anchor's defaults and a carried page's `material` together fill the six
-  lenses that spend the unit allowance
-- **THEN** `connections` is still selected beside them, because it serves only bounded pointers,
-  and no lens is reported as `role_limit` on its account
+  lenses
+- **THEN** `connections` is still selected beside them, and no lens is reported as
+  `role_limit` on its account
+
+#### Scenario: A second graph role is an ordinary lens
+- **WHEN** a vault override adds another `graph`-lane role that the turn's anchors select
+- **THEN** it counts against the six lenses, and the packet lists at most seven roles

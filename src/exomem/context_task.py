@@ -637,6 +637,8 @@ def compile_context(
         # A lead is admitted together with its first connection when both fit; the rest fill the
         # room every lead and method leaves, in lead order. A link never displaces a lead or method.
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
+        # The links each admitted lead may still list, by lead; its first link can return here.
+        tails: dict[int, list[dict[str, str]]] = {}
         for item in candidates:
             links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
@@ -654,7 +656,8 @@ def compile_context(
                     elif links:
                         item["links_omitted"] = item.get("links_omitted", 0) + len(links)
                 elif links:
-                    linked.append((item, links[1:], False))
+                    tails[id(item)] = links[1:]
+                    linked.append((item, tails[id(item)], False))
             elif links:
                 # The turn slice carries no links, so a named lead returns here only to list them.
                 linked.append((item, links, True))
@@ -662,6 +665,13 @@ def compile_context(
                 if any(method is served for served in block["methods"]["items"]):
                     continue  # a page that is both a lead and a lead's declared method is served once
                 block["methods"]["items"].append(method)
+                if packet_chars(block) > allowance and item.get("links") and id(item) in tails:
+                    # The lead's own method outranks its first link, which returns if room remains.
+                    first = item.pop("links")
+                    if packet_chars(block) <= allowance:
+                        tails[id(item)][:0] = first
+                    else:
+                        item["links"] = first
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
                     _add_missing(block, "budget")

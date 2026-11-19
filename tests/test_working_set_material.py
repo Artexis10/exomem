@@ -50,7 +50,7 @@ def material_vault(vault: Path) -> Path:
 def test_project_material_is_relevant_scoped_and_does_not_bypass_contact(material_vault: Path):
     # Catches both categorical exclusion and a recency sort erasing content rank.
     packet = working_set.compile_packet(material_vault, turn="harbor-study turbine calibration")
-    assert [r["id"] for r in packet["roles"]] == [
+    assert [r["id"] for r in context_roles.lenses(packet["roles"])] == [
         "preferences", "constraints", "recent_change", "active_plans", "material", "precedents",
     ]
     material = [u for u in packet["units"] if u["role"] == "material"]
@@ -353,7 +353,7 @@ def test_wider_material_query_still_filters_common_background(material_vault: Pa
 def test_role_ceiling_reports_material_omission(material_vault: Path):
     # Six higher-priority lanes cannot silently look like material was searched.
     packet = working_set.compile_packet(material_vault, turn="harbor-study who is currently turbine calibration")
-    assert len(packet["roles"]) == 6
+    assert len(context_roles.lenses(packet["roles"])) == 6
     assert "material" not in [r["id"] for r in packet["roles"]]
     assert {"role": "material", "reason": "role_limit"} in packet["missing"]
 

@@ -6,8 +6,10 @@ neighbour API in both directions, under the caller's view, and SHALL serve each 
 its relation key, its direction relative to the page, the target's canonical ref and title, and a
 `why`. The `why` SHALL state the relation and direction followed by the sentence or bullet of the
 authoring page that carries the link, or the target's opening clause when that line holds no
-prose beyond the link. It SHALL contain no wikilink, SHALL pass the egress rules that govern unit
-text, and SHALL NOT exceed 140 characters. Connections SHALL be ranked only by closed relation
+prose beyond the link. It SHALL contain no wikilink: a link in that line or clause is shown by its
+display name only when it resolves to a page the caller sees, and otherwise the bare relation and
+direction stand. It SHALL pass the egress rules that govern unit text, and SHALL NOT exceed 140
+characters. Connections SHALL be ranked only by closed relation
 attributes, in this order: a relation carrying `replaces`, `corrects`, `opposes` or `settles`;
 then one carrying `sources`; then any other relation that is neither `generic` nor `associative`;
 then generic and associative relations. An inbound connection whose relation carries `replaces`
@@ -39,8 +41,10 @@ missing reasons.
 ### Requirement: A lead keeps its first connection
 Task discovery SHALL admit each lead together with its first ranked connection when both fit the
 allowance. When only the lead fits, it SHALL be served without connections and the candidate
-SHALL count the connections it omits. Further connections SHALL fill the room that remains after
-every lead and method, in lead order. The connection line SHALL tell the agent to read a
+SHALL count the connections it omits. A lead's own methods SHALL outrank its first connection: when
+a method does not fit beside the connection, the connection waits and returns only if room remains.
+A first connection MAY take the room of a later lead. Further connections SHALL fill the room that
+remains after every lead and method, in lead order. The connection line SHALL tell the agent to read a
 connection when its reason bears on the answer. The served-context record SHALL keep each offered
 connection's relation, target ref and tier, with no title or `why`.
 
@@ -50,6 +54,10 @@ connection's relation, target ref and tier, with no title or `why`.
 - **THEN** four leads are served, each with its first connection, and the remaining leads are
   reported as cut for budget
 
+#### Scenario: A lead's method outranks its first connection
+- **WHEN** the allowance holds a lead with either its method or its first connection, not both
+- **THEN** the lead is served with its method, and the connection is served only if room remains
+
 #### Scenario: The record names what was offered
 - **WHEN** a packet serves a lead with two connections
 - **THEN** the served-context record lists both connections' relation, target ref and tier
@@ -58,7 +66,9 @@ connection's relation, target ref and tier, with no title or `why`.
 For each resolved anchor, activation SHALL serve up to four of the anchor page's ranked
 connections as `pointers[]` entries (ref, title, why) through the `graph` lane. The anchor's
 neighbourhood for the other lanes SHALL be traversed under the `recall` traversal profile at
-depth at most 2, within the existing node and edge bounds.
+depth at most 2, within the existing node and edge bounds, and under the reader's release decision:
+a page the reader cannot see is never a hop, so a restricted packet is identical whether or not
+that page exists. A connection pointer's reason is `requires_read`.
 
 #### Scenario: An anchor names its typed connections
 - **WHEN** a turn resolves an entity anchor that one note `refines` and that links its owner's

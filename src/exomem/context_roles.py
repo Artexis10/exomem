@@ -36,13 +36,15 @@ REGISTRY_FILENAME = "context-roles.yaml"
 MAX_SELECTED_ROLES = 6
 
 
-def takes_lens_slot(role: Mapping[str, Any]) -> bool:
-    """Whether a selected role counts against `MAX_SELECTED_ROLES`.
+def lenses(roles: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The roles that count against `MAX_SELECTED_ROLES`: all but the first `graph`-lane role.
 
-    The ceiling bounds the lanes that spend the unit allowance. The `graph` lane serves only
-    bounded pointers, so it runs beside the six lenses and never displaces one.
+    The ceiling bounds the lanes that spend the unit allowance. One `graph` lane serves only
+    bounded pointers, so it runs beside the six and never displaces one; a further graph role
+    an override adds is an ordinary lens, which keeps a packet at seven roles at most.
     """
-    return role.get("lane") != "graph"
+    beside = next((role for role in roles if role.get("lane") == "graph"), None)
+    return [role for role in roles if role is not beside]
 
 #: Refused before parsing (mirrors `activation_conventions.MAX_FILE_BYTES`,
 #: design.md decision 2): a typo-sized override is one thing, an
@@ -859,8 +861,8 @@ def select_roles(
                 continue
         selected.append({"id": role.id, "source": source, "lane": role.lane})
     cap = max(0, int(limit))
-    lenses = [role for role in selected if takes_lens_slot(role)]
+    counted = lenses(selected)
     if omitted is not None:
-        omitted.extend(role["id"] for role in lenses[cap:])
-    kept = {id(role) for role in lenses[:cap]}
-    return tuple(role for role in selected if id(role) in kept or not takes_lens_slot(role))
+        omitted.extend(role["id"] for role in counted[cap:])
+    dropped = {id(role) for role in counted[cap:]}
+    return tuple(role for role in selected if id(role) not in dropped)

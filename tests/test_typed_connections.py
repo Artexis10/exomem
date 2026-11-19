@@ -133,6 +133,29 @@ def test_a_line_that_also_links_a_withheld_page_is_never_quoted(vault: Path, mon
     assert "restricted" not in str(task)
 
 
+def test_a_lede_reason_shows_link_names_and_never_a_withheld_one(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare relation bullet takes the target's lede; its links read as names, and a withheld one drops the lede."""
+    _warm_resolver(monkeypatch)
+    hidden = _linked(vault, "restricted-reference")
+    shown = _linked(vault, "field-log")
+    summary = _page(vault, "survey-summary", body=f"Compiled from [[{shown.removesuffix('.md')}]] readings.\n")
+    sealed = _page(vault, "sealed-summary", body=f"Compiled from [[{hidden.removesuffix('.md')}]] readings.\n")
+    lead = _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\n## Relations\n\n- derived_from [[{summary.removesuffix('.md')}]]\n"
+        f"- derived_from [[{sealed.removesuffix('.md')}]]\n"
+    ))
+    real = egress.release_walk_filter
+
+    def refuse_hidden(*args, **kwargs):
+        inner = real(*args, **kwargs)
+        return lambda path: path != hidden and (inner is None or inner(path))
+
+    monkeypatch.setattr(egress, "release_walk_filter", refuse_hidden)
+    whys = {link["target_ref"]: link["why"] for link in _lead(_discover(vault, monkeypatch), lead)["links"]}
+    assert whys[summary] == "derived_from (outbound): Compiled from field-log readings."
+    assert whys[sealed] == "derived_from (outbound)"
+
+
 def test_a_lead_admitted_alone_counts_the_connections_it_lost(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When only the lead fits, it serves without connections and counts every one it omitted."""
     targets = [_linked(vault, f"reference-{index}") for index in range(3)]
@@ -162,6 +185,17 @@ def test_the_served_record_keeps_relation_ref_and_tier_only(vault: Path, monkeyp
         {"relation": "evidenced_by", "target_ref": report, "tier": 1},
         {"relation": "links_to", "target_ref": plain, "tier": 3},
     ]
+
+
+def test_every_tier_behaviour_is_one_the_registry_declares() -> None:
+    """A misspelt behaviour would silently never match and drop its relations to the last tier."""
+    from exomem import relation_registry
+
+    tiers = (
+        working_set._CONNECTION_TIER_ZERO_BEHAVIOURS | working_set._CONNECTION_LAST_TIER_BEHAVIOURS
+        | {working_set._CONNECTION_TIER_ONE_BEHAVIOUR, working_set._CONNECTION_INBOUND_REPLACES_BEHAVIOUR}
+    )
+    assert tiers <= relation_registry.RELATION_BEHAVIOURS
 
 
 def test_the_connections_role_is_the_graph_lane_default_for_every_anchor_kind() -> None:
@@ -282,6 +316,18 @@ def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: 
     assert len(task["methods"]["items"]) == len(served)
     assert {"role": "task_context", "reason": "budget"} in task["missing"]
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
+
+
+def test_a_leads_own_method_is_never_cut_while_its_link_is_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Across tight allowances the lead's method outranks the lead's first link."""
+    target = _linked(vault, "reference-card")
+    _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\n- [technique] Inspect the optical alignment. ^step\n- [[{target.removesuffix('.md')}]]\n"
+    ))
+    for max_chars in range(700, 1101, 50):
+        task = _discover_packet(vault, monkeypatch, max_chars=max_chars)["task_context"]
+        for lead in task["candidates"]:
+            assert not (lead.get("links") and not task["methods"]["items"]), max_chars
 
 
 def test_the_default_recall_budget_is_six_thousand_with_a_half_turn_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

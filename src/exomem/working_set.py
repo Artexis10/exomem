@@ -627,6 +627,8 @@ def build_packet(
     promoted_used = 0
     order = _role_order(roles)
     material_roles = {str(role["id"]) for role in roles if role.get("lane") == "material"}
+    # A graph lane serves pointers by design: its pages are read, not cut for room.
+    pointer_roles = {str(role["id"]) for role in roles if role.get("lane") == "graph"}
     present_paths = {item.path for item in items if item.path}
     material_positions = {
         promoted: {order[item.role] for item in items
@@ -857,7 +859,7 @@ def build_packet(
                 previous_group = group
             if item.role in material_roles:
                 reserve = 0
-            if item.role in material_roles and item.level == "page":
+            if item.role in material_roles | pointer_roles and item.level == "page":
                 _defer(item, "requires_read")
                 continue
             text = bounded_text(item.text)
@@ -1282,7 +1284,7 @@ def run_lanes(
     material_scopes: dict[str, frozenset[str]] = {}
     if neighbourhood is None:
         neighbourhood = _neighbourhood_paths(
-            root, anchors, reached=reached, material_scopes=material_scopes,
+            root, anchors, reached=reached, material_scopes=material_scopes, visible=visible,
         )
     indexable = _store_indexable(root)
 
@@ -1831,6 +1833,21 @@ def _connection_context(
     return None
 
 
+def _links_released(vault_root: Path, text: str, *, resolver: Any, seen: Callable[[str], bool]) -> bool:
+    """Whether every wikilink in `text` resolves to a page the caller sees, so its display names may be shown."""
+    if resolver is None:
+        return False
+    from . import vault as vault_module
+
+    for match in vault_module.iter_body_wikilinks(text):
+        _norm, _warning, candidate = vault_module._normalize_wikilink(
+            match.group(1), vault_root, resolver=resolver, strict=False
+        )
+        if candidate is None or not seen(candidate.path):
+            return False
+    return True
+
+
 def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
     """`text` with each wikilink shown as the name a reader sees: the alias, else the resolved
     title, else the target's last path segment. Callers quote a line only once every link on
@@ -1895,6 +1912,14 @@ def _connection_why(
         context = working_set_index.lede(
             egress.prose_for_caller(vault_root, target_body, owner_path=target_rel)
         )
+        # A lede link is shown by its display name only when it names a page the caller sees;
+        # otherwise the bare relation stands, so no path or withheld name reaches the reason.
+        if context and context != egress.without_wikilinks(context):
+            context = (
+                " ".join(_link_display_prose(vault_root, context, resolver=resolver).split())
+                if _links_released(vault_root, context, resolver=resolver, seen=seen)
+                else ""
+            )
     if not context:
         return f"{relation} ({direction})"
     prefix = f"{relation} ({direction}): "
@@ -2159,8 +2184,12 @@ def _store_indexable(vault_root: Path) -> Callable[[str], bool] | None:
 def _neighbourhood_paths(
     vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None,
     material_scopes: dict[str, frozenset[str]] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
-    """Anchor paths plus their typed neighbours, at the depth each status allows."""
+    """Anchor paths plus their typed neighbours, at the depth each status allows.
+
+    A page the reader cannot see is never a hop: otherwise the reach through it would show it exists.
+    """
     paths: set[str] = set()
     for anchor in anchors:
         depth = graph_depth_for(getattr(anchor, "status", "unresolved"))
@@ -2172,7 +2201,7 @@ def _neighbourhood_paths(
         if depth >= 2:
             if budget_exhausted("working_set.graph"):
                 raise BudgetExhausted("working_set.graph")
-            mine.update(_graph_neighbours(vault_root, path, depth=depth))
+            mine.update(_graph_neighbours(vault_root, path, depth=depth, keep=visible))
         paths.update(mine)
         if material_scopes is not None:
             material_scopes[working_set_state._anchor_ref(anchor)] = frozenset(mine)
@@ -2181,7 +2210,9 @@ def _neighbourhood_paths(
     return frozenset(paths)
 
 
-def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[str]:
+def _graph_neighbours(
+    vault_root: Path, path: str, *, depth: int, keep: Callable[[str], bool] | None = None,
+) -> frozenset[str]:
     if not path or not path.endswith(".md"):
         return frozenset()
     try:
@@ -2194,6 +2225,7 @@ def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[s
             max_nodes=GRAPH_MAX_NODES,
             max_edges=GRAPH_MAX_EDGES,
             traversal_profile=GRAPH_TRAVERSAL_PROFILE,
+            keep=keep,
             # Activation consumes nodes, never unavailable-graph diagnostics.
             include_lag=False,
         )
@@ -4365,11 +4397,10 @@ def _carried_material(
         (role for role in candidates.values() if role["id"] not in used_roles),
         key=lambda role: (role["source"] != "turn_cue", registry.roles[role["id"]].priority),
     )
-    slots = max(0, context_roles.MAX_SELECTED_ROLES - sum(map(context_roles.takes_lens_slot, used_roles.values())))
-    lenses = [role for role in remaining if context_roles.takes_lens_slot(role)]
-    used_roles.update((role["id"], role) for role in remaining if not context_roles.takes_lens_slot(role))
-    used_roles.update((role["id"], role) for role in lenses[:slots])
-    missing.extend({"role": role["id"], "reason": "role_limit"} for role in lenses[slots:])
+    # Carried pages select only unit and material lenses (`_carry_roles`), so each remaining role counts.
+    slots = max(0, context_roles.MAX_SELECTED_ROLES - len(context_roles.lenses(tuple(used_roles.values()))))
+    used_roles.update((role["id"], role) for role in remaining[:slots])
+    missing.extend({"role": role["id"], "reason": "role_limit"} for role in remaining[slots:])
     # A retrieval-carried page the turn names by its own title has name
     # contact, exactly as an anchor would (`title_names`): `lexical_overlap`
     # beside `retrieval`, which the soundness rule resolves. Owner ruling of
