@@ -106,6 +106,24 @@ def packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(lines)) + (1 if lines else 0)
 
 
+def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
+    """Build a link's `why` when the allocation first tries it; False when it cannot be listed.
+
+    The reason reads pages, so a link the allowance never reaches costs no read; the line's length is part of
+    what the allowance charges, so it is built before the link is measured. A reader view that cannot be read
+    leaves the link unlisted and the lane reported failed, as an unreadable graph does.
+    """
+    build = link.pop("build_why", None)
+    if build is None:
+        return True
+    try:
+        link["why"] = build()
+    except egress.ReaderViewUnavailable:
+        _add_missing(block, "lane_failed")
+        return False
+    return True
+
+
 def _source(root: Path, source_ref: str, caller: Any):
     # Continuation references are read hints, so confinement and current admission precede every read.
     path = (root / source_ref).resolve()
@@ -635,7 +653,8 @@ def compile_context(
         ):
             _add_missing(block, reason)
         # A lead is admitted together with its first connection when both fit; the rest fill the
-        # room every lead and method leaves, in lead order. A link never displaces a lead or method.
+        # room every lead and method leaves, in lead order. A lead's own method outranks its first
+        # link, but a first link may take the room that a later lead would have used.
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         # The links each admitted lead may still list, by lead; its first link can return here.
         tails: dict[int, list[dict[str, str]]] = {}
@@ -643,21 +662,18 @@ def compile_context(
             links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
             if item["ref"] not in covered and item["source_ref"] not in covered:
-                if links:
-                    item["links"] = links[:1]
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
-                    item.pop("links", None)
-                    block["candidates"].append(item)
+                    _add_missing(block, "budget")
+                elif links and _reasoned(block, links[0]):
+                    item["links"] = links[:1]
                     if packet_chars(block) > allowance:
-                        block["candidates"].pop()
-                        _add_missing(block, "budget")
-                    elif links:
+                        item.pop("links")
                         item["links_omitted"] = item.get("links_omitted", 0) + len(links)
-                elif links:
-                    tails[id(item)] = links[1:]
-                    linked.append((item, tails[id(item)], False))
+                    else:
+                        tails[id(item)] = links[1:]
+                        linked.append((item, tails[id(item)], False))
             elif links:
                 # The turn slice carries no links, so a named lead returns here only to list them.
                 linked.append((item, links, True))
@@ -689,6 +705,8 @@ def compile_context(
                 served = item["links"] = []
             before = len(served)
             for link in links:
+                if not _reasoned(block, link):
+                    break
                 served.append(link)
                 if packet_chars(block) > allowance:
                     served.pop()

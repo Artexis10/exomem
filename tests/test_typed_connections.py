@@ -341,6 +341,42 @@ def test_each_served_lead_keeps_its_first_connection_until_room_runs_out(vault: 
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
 
+def test_a_reason_is_built_only_for_a_connection_the_allocation_tries(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reason-building reads pages, so a tight packet builds about one reason per lead, not five."""
+    leads = []
+    for lead_index in range(3):
+        targets = [_linked(vault, f"reference-{lead_index}-{index}") for index in range(5)]
+        leads.append(_page(vault, f"alignment-visit-{lead_index}", body=(
+            LEAD_BODY + "\n" + "\n".join(f"- [[{t.removesuffix('.md')}]]" for t in targets) + "\n"
+        )))
+    builds: list[str] = []
+    real = working_set._connection_why
+
+    def counted(*args, **kwargs):
+        builds.append(kwargs["target_rel"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "_connection_why", counted)
+    task = _discover_packet(vault, monkeypatch, max_chars=1500)["task_context"]
+    served = sum(len(lead.get("links", ())) for lead in task["candidates"])
+    assert len(task["candidates"]) == len(leads) and 0 < served < 5 * len(leads)
+    assert len(builds) <= served + len(leads)
+
+
+def test_an_unreadable_reader_view_keeps_the_leads_and_reports_the_links_lane(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reason that cannot be read for the caller lists no link; the lead still serves and the gap is named."""
+    target = _linked(vault, "calibration-report")
+    lead = _page(vault, "alignment-visit", body=f"{LEAD_BODY}\n- [[{target.removesuffix('.md')}]]\n")
+
+    def unreadable(*args, **kwargs):
+        raise egress.ReaderViewUnavailable("the release plane could not decide a unit")
+
+    monkeypatch.setattr(working_set, "_connection_why", unreadable)
+    task = _discover(vault, monkeypatch)
+    assert "links" not in _lead(task, lead)
+    assert {"role": "task_context", "reason": "lane_failed"} in task["missing"]
+
+
 def test_a_leads_own_method_is_never_cut_while_its_link_is_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Across tight allowances the lead's method outranks the lead's first link."""
     target = _linked(vault, "reference-card")
