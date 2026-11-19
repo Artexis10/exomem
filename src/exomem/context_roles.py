@@ -35,6 +35,15 @@ SCHEMA_VERSION = 1
 REGISTRY_FILENAME = "context-roles.yaml"
 MAX_SELECTED_ROLES = 6
 
+
+def takes_lens_slot(role: Mapping[str, Any]) -> bool:
+    """Whether a selected role counts against `MAX_SELECTED_ROLES`.
+
+    The ceiling bounds the lanes that spend the unit allowance. The `graph` lane serves only
+    bounded pointers, so it runs beside the six lenses and never displaces one.
+    """
+    return role.get("lane") != "graph"
+
 #: Refused before parsing (mirrors `activation_conventions.MAX_FILE_BYTES`,
 #: design.md decision 2): a typo-sized override is one thing, an
 #: alias-expansion document is another, and this registry now BEARS
@@ -850,6 +859,8 @@ def select_roles(
                 continue
         selected.append({"id": role.id, "source": source, "lane": role.lane})
     cap = max(0, int(limit))
+    lenses = [role for role in selected if takes_lens_slot(role)]
     if omitted is not None:
-        omitted.extend(role["id"] for role in selected[cap:])
-    return tuple(selected[:cap])
+        omitted.extend(role["id"] for role in lenses[cap:])
+    kept = {id(role) for role in lenses[:cap]}
+    return tuple(role for role in selected if id(role) in kept or not takes_lens_slot(role))

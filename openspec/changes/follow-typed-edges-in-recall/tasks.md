@@ -15,7 +15,7 @@
 ## 3. Anchors and profile
 
 - [x] 3.1 Ship `recall` in `packs/core/traversal-profiles.yaml` and set the activation neighbourhood profile to it. Check: recall traverses `derived_from` and `links_to` and excludes `implements`; a vault overlay can extend it.
-- [x] 3.2 Ship the `connections` role (lane `graph`, every anchor kind) and rewrite `_graph_lane` to serve up to four ranked connections per resolved anchor as `pointers[]` with why. Check: the anchor scenario; a withheld page never takes a pointer slot.
+- [x] 3.2 Ship the `connections` role (lane `graph`, every anchor kind) and rewrite `_graph_lane` to serve up to four ranked connections per resolved anchor as `pointers[]` with why. Check: the anchor scenario; a withheld page never takes a pointer slot; the `graph` lane runs beside the six lenses and never displaces one.
 
 ## 4. Reconcile overlapping changes
 

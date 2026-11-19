@@ -65,7 +65,7 @@ assembly, not traversal.
    and the task section 400 to 750, about one lead with its reason. On a vault copy with 60 recorded
    query turns, lead-first allocation alone served 72 leads and 10 connections (main: 93 and 8). A
    half share at 4,000 served 181 and 88 but cut the map from 16 lines to 6. A half share at 6,000
-   served 307 leads and 216 connections and kept the map at 17 lines, at similar latency. The share
+   served 307 leads and 216 connections and kept the map at 17 lines, at 1.2 s more per activation (paired on 29 turns, 95% interval 0.6 to 1.9 s, on an 18 s median under host load). The share
    becomes 0.5 and the default `max_chars` and hook render ceiling become 6,000. The cost is about 500
    more tokens per recall; the ceiling stays 8,000.
 9. **Measurement.** `served_context` records each offered connection's relation, target ref and

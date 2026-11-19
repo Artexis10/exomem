@@ -4365,9 +4365,11 @@ def _carried_material(
         (role for role in candidates.values() if role["id"] not in used_roles),
         key=lambda role: (role["source"] != "turn_cue", registry.roles[role["id"]].priority),
     )
-    slots = max(0, context_roles.MAX_SELECTED_ROLES - len(used_roles))
-    used_roles.update((role["id"], role) for role in remaining[:slots])
-    missing.extend({"role": role["id"], "reason": "role_limit"} for role in remaining[slots:])
+    slots = max(0, context_roles.MAX_SELECTED_ROLES - sum(map(context_roles.takes_lens_slot, used_roles.values())))
+    lenses = [role for role in remaining if context_roles.takes_lens_slot(role)]
+    used_roles.update((role["id"], role) for role in remaining if not context_roles.takes_lens_slot(role))
+    used_roles.update((role["id"], role) for role in lenses[:slots])
+    missing.extend({"role": role["id"], "reason": "role_limit"} for role in lenses[slots:])
     # A retrieval-carried page the turn names by its own title has name
     # contact, exactly as an anchor would (`title_names`): `lexical_overlap`
     # beside `retrieval`, which the soundness rule resolves. Owner ruling of

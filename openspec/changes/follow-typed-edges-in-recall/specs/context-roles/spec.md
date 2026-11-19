@@ -26,3 +26,9 @@ to load SHALL fall back to the shipped registry and report the failure in the pa
 - **WHEN** a vault has no override
 - **THEN** the effective registry contains `connections` with lane `graph`, and a resolved anchor
   of any kind selects it
+
+#### Scenario: The connections role takes no lens slot
+- **WHEN** a resolved anchor's defaults and a carried page's `material` together fill the six
+  lenses that spend the unit allowance
+- **THEN** `connections` is still selected beside them, because it serves only bounded pointers,
+  and no lens is reported as `role_limit` on its account

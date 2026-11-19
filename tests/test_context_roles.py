@@ -274,7 +274,8 @@ def test_selection_is_bounded_to_six_roles() -> None:
         analysis=analysis,
     )
 
-    assert len(selected) <= context_roles.MAX_SELECTED_ROLES == 6
+    assert sum(map(context_roles.takes_lens_slot, selected)) == context_roles.MAX_SELECTED_ROLES == 6
+    assert "connections" in [role["id"] for role in selected]
 
 
 def test_same_turn_same_roles() -> None:
