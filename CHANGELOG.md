@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.190.0](https://github.com/Artexis10/exomem/compare/v0.189.0...v0.190.0) (2026-11-19)
+
+
+### Features
+
+* **activation:** serve the graph's typed connections with reasons in recall ([#2924](https://github.com/Artexis10/exomem/issues/2924)) ([154f6fd](https://github.com/Artexis10/exomem/commit/154f6fdd190b4aefc214984e34a1005b6c22dcec))
+
 ## [0.189.0](https://github.com/Artexis10/exomem/compare/v0.188.0...v0.189.0) (2026-11-19)
 
 
