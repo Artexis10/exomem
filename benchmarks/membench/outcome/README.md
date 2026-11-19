@@ -164,9 +164,11 @@ a neutral unit id, and the arms run interleaved. A unit passes, fails or is unkn
 a seeding error or a judge error is unknown, never a failure.
 
 A `seed` may also be a list of notes, each with `title`, `note_type` and `content`, for a case that
-needs a vault of linked pages. The writer can refuse a page that links no related page, so a page after
-the first links an earlier one, and a refused seed makes the unit unknown. A list `seed` refuses
-`seed_corrected`, which reads one note.
+needs a vault of linked pages. The writer can refuse a page that links no related page. A page after
+the first then links an earlier one, or its note carries `relation_disposition` (`reviewed_none`) and
+`relation_review_reason`, both passed to the writer as the reviewed outcome for a page with no truthful
+relation. A refused seed makes the unit unknown. A list `seed` refuses `seed_corrected`, which reads one
+note.
 
 A case that tests where a note is filed seeds Records collections before the session. The seed runs
 through the product's own commands, so a collection, its method page and its rows are what the arm

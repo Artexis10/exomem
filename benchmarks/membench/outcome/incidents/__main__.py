@@ -214,20 +214,32 @@ def validate_case(case: dict) -> None:
 
 
 def validate_seed(case: dict) -> None:
-    """Refuse a list seed that would write nothing, or a page the arm's writer cannot take, before any session starts."""
+    """Refuse a seed that would write nothing, or that the arm's writer could not take, before any session starts."""
     seed = case.get("seed")
-    if not isinstance(seed, list):
-        return
-    # `seed_corrected` compares one note before and after; with several seeded there is no one it could mean.
-    if "seed_corrected" in case["pass"]:
-        raise SystemExit(f"case {case['id']}: `seed_corrected` reads one note, not a list `seed`")
-    if not seed or any(
-        not isinstance(note, dict) or not {"title", "note_type", "content"} <= set(note)
-        for note in seed
+    notes = seed if isinstance(seed, list) else [seed]
+    if isinstance(seed, list):
+        # `seed_corrected` compares one note before and after; with several seeded there is no one it could mean.
+        if "seed_corrected" in case["pass"]:
+            raise SystemExit(
+                f"case {case['id']}: `seed_corrected` reads one note, not a list `seed`"
+            )
+        if not seed or any(
+            not isinstance(note, dict) or not {"title", "note_type", "content"} <= set(note)
+            for note in seed
+        ):
+            raise SystemExit(
+                f"case {case['id']}: a list `seed` is non-empty and each item is an object with a title, "
+                "a note_type and content"
+            )
+    # The writer takes the two as one reviewed decision. Its own refusal names an unsupported disposition, and
+    # it keeps no list the runner could import, so the value is passed on as given.
+    if any(
+        isinstance(note, dict)
+        and ("relation_disposition" in note) != ("relation_review_reason" in note)
+        for note in notes
     ):
         raise SystemExit(
-            f"case {case['id']}: a list `seed` is non-empty and each item is an object with a title, "
-            "a note_type and content"
+            f"case {case['id']}: a seed note carries `relation_disposition` and `relation_review_reason` together"
         )
 
 

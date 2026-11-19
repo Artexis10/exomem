@@ -51,7 +51,9 @@ def probe(vault: Path, relative: str) -> dict:
 def seed(vault: Path, work: Path, notes: dict | list[dict] | None) -> dict | list[dict] | None:
     """Write the arm's learning instruction into ``work/CLAUDE.md`` and the case's notes, if any, into the vault.
 
-    One note object gives its probe; a list gives the probe of each note, written in order.
+    One note object gives its probe; a list gives the probe of each note, written in order. A note may carry
+    ``relation_disposition`` and ``relation_review_reason``, which go to the writer as given: the reviewed
+    outcome for a page that has no truthful relation to the others.
     """
     from exomem import commands
     from exomem.client_config import place_learning_instruction
@@ -64,8 +66,17 @@ def seed(vault: Path, work: Path, notes: dict | list[dict] | None) -> dict | lis
     paths = []
     with request_scope(owner_principal(surface="mcp")):
         for note in notes if isinstance(notes, list) else [notes]:
+            review = {
+                key: note[key]
+                for key in ("relation_disposition", "relation_review_reason")
+                if key in note
+            }
             written = commands.op_note(
-                vault, title=note["title"], note_type=note["note_type"], content=note["content"]
+                vault,
+                title=note["title"],
+                note_type=note["note_type"],
+                content=note["content"],
+                **review,
             )
             paths.append(written["path"])
     probes = [probe(vault, path) for path in paths]

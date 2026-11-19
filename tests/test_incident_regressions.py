@@ -101,22 +101,28 @@ def test_each_arm_writes_its_own_learning_instruction(tmp_path):
 
 def test_a_list_seed_writes_every_page_the_case_names(tmp_path):
     """A case that needs a vault of linked pages must find each of them there, not only the first or last."""
-    # The writer asks a later page for a qualifying link, so each page after the first links back.
+    # The writer asks a later page for a qualifying link, so each page after the first links back, or
+    # carries the reviewed outcome that no truthful relation exists (a distractor that links nothing).
     findings = {
         "Hub page": "A hub.",
         "Spoke page": "See [[Hub page]].",
         "Other spoke": "See [[Spoke page]].",
+        "Unrelated page": "Nothing here relates to the others.",
     }
     pages = [
         {"title": title, "note_type": "insight", "content": f"## Findings\n\n- [finding] {line}\n"}
         for title, line in findings.items()
     ]
+    pages[-1] |= {
+        "relation_disposition": "reviewed_none",
+        "relation_review_reason": "The page is a distractor with no truthful relation to the others.",
+    }
     vault, work = fresh_vault(tmp_path, REPO_ROOT), tmp_path / "work"
     work.mkdir()
     seeded = incidents.run_arm_side(
         REPO_ROOT, tmp_path, "seed", str(vault), str(work), stdin=json.dumps(pages)
     )
-    assert [page["exists"] for page in seeded] == [True, True, True]
+    assert [page["exists"] for page in seeded] == [True] * len(findings)
     assert [Path(page["path"]).stem for page in seeded] == list(findings)
 
 
@@ -160,9 +166,16 @@ def test_an_arm_env_that_would_leave_an_arm_unswitched_or_unisolated_is_refused(
         [],
         [{"title": "Only", "note_type": "insight"}],
         ["not a note"],
+        {
+            "title": "T",
+            "note_type": "insight",
+            "content": "c",
+            "relation_disposition": "reviewed_none",
+        },
+        [{"title": "T", "note_type": "insight", "content": "c", "relation_review_reason": "why"}],
     ],
 )
-def test_a_list_seed_that_would_write_nothing_is_refused(seed):
+def test_a_seed_the_arm_could_not_write_is_refused_before_a_session_starts(seed):
     case = {"id": "bad-seed", "seed": seed, "pass": {"called_any": ["recall_context"]}}
     with pytest.raises(SystemExit, match="bad-seed"):
         incidents.validate_case(case)
