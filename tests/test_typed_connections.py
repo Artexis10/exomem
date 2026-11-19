@@ -156,6 +156,29 @@ def test_a_lede_reason_shows_link_names_and_never_a_withheld_one(vault: Path, mo
     assert whys[sealed] == "derived_from (outbound)"
 
 
+@pytest.mark.parametrize(
+    ("lede", "why"),
+    [
+        pytest.param("Run `[[No Such Page]]` before the visit.", "derived_from (outbound)", id="a link in a code span"),
+        pytest.param(
+            "See [[" + "Restricted reference with a very long working title " * 5 + "]] for the schedule.",
+            "derived_from (outbound)", id="a link the lede cut leaves open",
+        ),
+    ],
+)
+def test_a_lede_never_quotes_a_link_the_display_pass_cannot_read(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, lede: str, why: str
+) -> None:
+    """A code-span link, or a long link that the lede's 240-character cut leaves open, keeps its raw name; the bare relation stands."""
+    _warm_resolver(monkeypatch)
+    source = _page(vault, "survey-summary", body=f"{lede}\n")
+    lead = _page(vault, "alignment-visit", body=(
+        f"{LEAD_BODY}\n## Relations\n\n- derived_from [[{source.removesuffix('.md')}]]\n"
+    ))
+    links = _lead(_discover(vault, monkeypatch), lead)["links"]
+    assert [link["why"] for link in links if link["target_ref"] == source] == [why]
+
+
 def test_a_lead_admitted_alone_counts_the_connections_it_lost(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """When only the lead fits, it serves without connections and counts every one it omitted."""
     targets = [_linked(vault, f"reference-{index}") for index in range(3)]

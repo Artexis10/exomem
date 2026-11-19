@@ -1914,12 +1914,16 @@ def _connection_why(
         )
         # A lede link is shown by its display name only when it names a page the caller sees;
         # otherwise the bare relation stands, so no path or withheld name reaches the reason.
-        if context and context != egress.without_wikilinks(context):
+        # The wikilink opener is a fixed syntax token: the display pass renders only the links the
+        # body grammar reads, so a code-span link, or one the lede's cut left open, still holds it.
+        if "[[" in context:
             context = (
                 " ".join(_link_display_prose(vault_root, context, resolver=resolver).split())
                 if _links_released(vault_root, context, resolver=resolver, seen=seen)
                 else ""
             )
+            if "[[" in context:
+                context = ""
     if not context:
         return f"{relation} ({direction})"
     prefix = f"{relation} ({direction}): "
