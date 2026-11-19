@@ -1,7 +1,7 @@
 """Replay product incidents on real models, one fresh session per run, and compare code versions.
 
-Each file under ``cases/`` holds one incident's cases. A case seeds one note through the arm's own
-writer, sends one user turn to Claude Code in print mode (or to the OpenAI actor), and checks the outcome:
+Each file under ``cases/`` holds one incident's cases. A case seeds one note, or a list of notes, through the
+arm's own writer, sends one user turn to Claude Code in print mode (or to the OpenAI actor), and checks the outcome:
 
 - ``seed_corrected``: the seeded note's body changed, or the arm's own status registry reports it
   superseded (a correction through either route counts);
@@ -43,7 +43,9 @@ A case that seeds collections then has the arm build its indexes (the unit recor
 as a long-lived vault has them built.
 
 An arm is a checkout: its ``src`` runs the MCP server, its ``plugins/claude-code`` supplies the skill
-and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Every
+and hooks, and its own docs and code supply the guidance text, in native MCP activation mode. Two arms may
+be the same checkout: ``--arm-env NAME=KEY=VALUE`` sets one Exomem setting for arm NAME only, in the arm-side
+helper, the server, the ``exomem`` command and the hooks, and the manifest records it. Every
 session gets its own vault, state and hook home under a neutral unit id; the arms run interleaved in
 one window, and the arm of a unit is recorded only in ``results.jsonl``.
 
@@ -77,7 +79,9 @@ import sys
 import time
 import uuid
 from collections import Counter
+from collections.abc import Mapping
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
@@ -107,6 +111,7 @@ from ..isolation import (
     lay_instruction_block,
     mcp_server,
     plugin_read_allow,
+    server_pins,
 )
 from ..judging import Judge, JudgeSpec, grade_item
 from ..record import checkout_state
@@ -180,6 +185,7 @@ def validate_case(case: dict) -> None:
         raise SystemExit(f"case {case['id']}: `remote_owner` is a boolean of an http case")
     if "seed" not in case and "seed_corrected" in rule:
         raise SystemExit(f"case {case['id']}: `seed_corrected` needs a `seed` note")
+    validate_seed(case)
     if {file["kind"] for file in files.values()} - KINDS:
         raise SystemExit(f"case {case['id']}: file kinds must be among {sorted(KINDS)}")
     seeded = [source["file"] for source in case.get("seed_sources", ()) if "file" in source]
@@ -205,6 +211,24 @@ def validate_case(case: dict) -> None:
     if "source_count" in rule and type(rule["source_count"].get("equals")) is not int:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
     validate_collections(case)
+
+
+def validate_seed(case: dict) -> None:
+    """Refuse a list seed that would write nothing, or a page the arm's writer cannot take, before any session starts."""
+    seed = case.get("seed")
+    if not isinstance(seed, list):
+        return
+    # `seed_corrected` compares one note before and after; with several seeded there is no one it could mean.
+    if "seed_corrected" in case["pass"]:
+        raise SystemExit(f"case {case['id']}: `seed_corrected` reads one note, not a list `seed`")
+    if not seed or any(
+        not isinstance(note, dict) or not {"title", "note_type", "content"} <= set(note)
+        for note in seed
+    ):
+        raise SystemExit(
+            f"case {case['id']}: a list `seed` is non-empty and each item is an object with a title, "
+            "a note_type and content"
+        )
 
 
 def validate_collections(case: dict) -> None:
@@ -276,12 +300,18 @@ def load_cases(selected: list[str] | None, cases_dir: Path | None = None) -> lis
     return [case for case in cases if not selected or case["id"] in selected]
 
 
-def run_arm_side(arm: Path, root: Path, *args: str, stdin: str | None = None) -> dict:
-    """Run ``arm_side.py`` as the arm's own product code under the session's pins; its one JSON line."""
+def run_arm_side(
+    arm: Path,
+    root: Path,
+    *args: str,
+    stdin: str | None = None,
+    arm_env: Mapping[str, str] | None = None,
+) -> dict:
+    """Run ``arm_side.py`` as the arm's own product code under the session's pins and the arm's ``arm_env``; its one JSON line."""
     done = subprocess.run(  # noqa: S603 - fixed argv
         [sys.executable, str(ARM_SIDE), *args],
         input=stdin,
-        env=child_env(root, arm),
+        env=child_env(root, arm, arm_env),
         capture_output=True,
         text=True,
         timeout=ARM_SIDE_TIMEOUT_SECONDS,
@@ -509,13 +539,16 @@ def collection_paths(rule: dict) -> list[str]:
     return [spec["collection"], *spec.get("absent_in", ())] if spec else []
 
 
-def seed_unit(case: dict, arm: Path, root: Path) -> tuple[dict | None, dict, Path]:
-    """Seed the arm's vault, whoever plays the session. Returns (seeded note, unit record, work directory).
+def seed_unit(
+    case: dict, arm: Path, root: Path, arm_env: Mapping[str, str] | None = None
+) -> tuple[dict | list[dict] | None, dict, Path]:
+    """Seed the arm's vault, whoever plays the session. Returns (seeded note or notes, unit record, work directory).
 
     The record keeps what a check compares the session's result with: the Sources and the Records rows that
     exist before the session, which are the seed's and not the session's to be judged on.
     """
-    work, vault = root / "work", fresh_vault(root, arm)
+    work, vault = root / "work", fresh_vault(root, arm, arm_env)
+    arm_side = partial(run_arm_side, arm, root, arm_env=arm_env)
     work.mkdir(parents=True)
     http = case.get("transport", "stdio") == "http"
     record = {
@@ -524,27 +557,23 @@ def seed_unit(case: dict, arm: Path, root: Path) -> tuple[dict | None, dict, Pat
     }
     if "prominence" in case:
         # The arm's own preference path: its server and its hooks read the same pinned config file.
-        record["capture_prominence"] = run_arm_side(arm, root, "prominence", case["prominence"])
-    seeded = run_arm_side(
-        arm, root, "seed", str(vault), str(work), stdin=json.dumps(case.get("seed"))
-    )
+        record["capture_prominence"] = arm_side("prominence", case["prominence"])
+    seeded = arm_side("seed", str(vault), str(work), stdin=json.dumps(case.get("seed")))
     if case.get("seed_sources"):
-        run_arm_side(
-            arm, root, "seed_sources", str(vault), str(work), stdin=json.dumps(case["seed_sources"])
-        )
+        arm_side("seed_sources", str(vault), str(work), stdin=json.dumps(case["seed_sources"]))
     if case.get("seed_collections"):
-        record["collections"] = run_arm_side(
-            arm, root, "seed_collections", str(vault), stdin=json.dumps(case["seed_collections"])
+        record["collections"] = arm_side(
+            "seed_collections", str(vault), stdin=json.dumps(case["seed_collections"])
         )
         # One property of the arm, read once by its own code: whether its manifest carries `capture`.
         record["capture_supported"] = record["collections"][0]["capture_supported"]
         # A real vault has its indexes built; the arm's own classes build them, the same way for every arm.
-        record["index_build_seconds"] = run_arm_side(arm, root, "build_indexes", str(vault))["seconds"]
+        record["index_build_seconds"] = arm_side("build_indexes", str(vault))["seconds"]
     if reads_sources(case):
-        before = run_arm_side(arm, root, "sources", str(vault))
+        before = arm_side("sources", str(vault))
         record["sources_before"] = [row["path"] for row in before["sources"]]
     if "collection_row" in case["pass"]:
-        listed = run_arm_side(arm, root, "records", str(vault), *collection_paths(case["pass"]))
+        listed = arm_side("records", str(vault), *collection_paths(case["pass"]))
         # A collection that cannot be listed before the session has no rows to tell the session's from.
         if any("error" in rows for rows in listed.values()):
             raise RuntimeError(
@@ -566,6 +595,7 @@ def play_claude(
     executable: Path,
     model: str,
     max_turns: int,
+    arm_env: Mapping[str, str] | None = None,
 ) -> dict:
     """Run one Claude Code session on the seeded vault.
 
@@ -581,7 +611,13 @@ def play_claude(
     tools = ["Read", "Skill"]
     allowed = ["mcp__exomem", "Skill", "Read(./**)", plugin_read_allow(plugin)]
     # The server's native MCP activation mode: the hooks route through the tools, not inject text.
-    env = {**claude_env()[0], **hook_env(root), "EXOMEM_RETRIEVE_INJECT": "mcp"}
+    env = {
+        **claude_env()[0],
+        **hook_env(root),
+        "EXOMEM_RETRIEVE_INJECT": "mcp",
+        # The hooks inherit this environment and run the arm's code, so its switch settings reach them here.
+        **(arm_env or {}),
+    }
     if case.get("files"):
         # What the documented handoff needs from a client: a digest, a descriptor file, and a send. The upload
         # reply names a multipart POST as the send, so `curl` is allowed beside `exomem attach`; the server is
@@ -589,7 +625,7 @@ def play_claude(
         tools += ["Bash", "Write"]
         # An `Edit` rule covers the Write tool, and the descriptor goes into the work directory.
         allowed += ["Bash(exomem attach:*)", "Bash(sha256sum:*)", "Bash(curl:*)", "Edit(./**)"]
-        env["PATH"] = f"{lay_exomem_command(root, arm)}{os.pathsep}{env['PATH']}"
+        env["PATH"] = f"{lay_exomem_command(root, arm, arm_env)}{os.pathsep}{env['PATH']}"
     actor = Arm(
         arm_id="incident",
         prominence=level,
@@ -601,12 +637,12 @@ def play_claude(
     )
 
     def mint(session: dict) -> str:
-        return run_arm_side(arm, root, "mint", stdin=json.dumps(session))["token"]
+        return run_arm_side(arm, root, "mint", stdin=json.dumps(session), arm_env=arm_env)["token"]
 
     serving = (
-        loopback_mcp(root, arm, mint, remote_owner=case.get("remote_owner", False))
+        loopback_mcp(root, arm, mint, remote_owner=case.get("remote_owner", False), arm_env=arm_env)
         if http
-        else nullcontext(mcp_server(root, arm))
+        else nullcontext(mcp_server(root, arm, arm_env))
     )
     with serving as server:
         if http:
@@ -703,18 +739,26 @@ def judge_answer(
 
 
 def run_unit(
-    case: dict, arm: Path, root: Path, *, judge: Judge, actor: str = "claude", **session
+    case: dict,
+    arm: Path,
+    root: Path,
+    *,
+    judge: Judge,
+    actor: str = "claude",
+    arm_env: Mapping[str, str] | None = None,
+    **session,
 ) -> dict:
     """One fresh session. `passed` is true, false or null; null always comes with a `reason`."""
-    seeded, record, work = seed_unit(case, arm, root)
+    seeded, record, work = seed_unit(case, arm, root, arm_env)
     record["actor"] = actor
-    played = PLAYERS[actor](case, arm, root, work, record, **session)
+    played = PLAYERS[actor](case, arm, root, work, record, arm_env=arm_env, **session)
     if played["fault"]:
         return {**record, "passed": None, "reason": f"harness fault: {played['fault']}"}
     vault = str(root / "vault")
     rule, checks, reasons, extra = case["pass"], {}, [], dict(played.get("extra", {}))
-    if seeded:
-        after = run_arm_side(arm, root, "probe", vault, seeded["path"])
+    # `seed_corrected` reads one note, so a list seed (which refuses it) has no single note to read back.
+    if isinstance(seeded, dict):
+        after = run_arm_side(arm, root, "probe", vault, seeded["path"], arm_env=arm_env)
         extra["seed_after"] = {
             "exists": after["exists"],
             "lifecycle_class": after["lifecycle_class"],
@@ -729,7 +773,7 @@ def run_unit(
     if "called_any" in rule:
         checks["called_any"] = bool(set(played["tools"]) & set(rule["called_any"]))
     if "collection_row" in rule:
-        listed = run_arm_side(arm, root, "records", vault, *collection_paths(rule))
+        listed = run_arm_side(arm, root, "records", vault, *collection_paths(rule), arm_env=arm_env)
         extra["rows_after"] = {
             name: [row["record_id"] for row in rows.get("rows", ())]
             for name, rows in listed.items()
@@ -754,7 +798,7 @@ def run_unit(
         else None
     )
     if "sources_before" in record:
-        facts = run_arm_side(arm, root, "sources", vault)
+        facts = run_arm_side(arm, root, "sources", vault, arm_env=arm_env)
         saved = session_sources(facts, record["sources_before"])
         extra["session_sources"] = saved
         for name in SOURCE_CHECKS:
@@ -781,7 +825,15 @@ def run_unit(
 
 
 def play_openai(
-    case: dict, arm: Path, root: Path, work: Path, record: dict, *, model: str, max_turns: int
+    case: dict,
+    arm: Path,
+    root: Path,
+    work: Path,
+    record: dict,
+    *,
+    model: str,
+    max_turns: int,
+    arm_env: Mapping[str, str] | None = None,
 ) -> dict:
     """Run one OpenAI Agents SDK session on the seeded vault (``openai_actor.py``), as `play_claude` returns it."""
     return openai_actor.play(
@@ -789,10 +841,11 @@ def play_openai(
         arm,
         root,
         record,
-        server_instructions=run_arm_side(arm, root, "instructions")["server"],
+        server_instructions=run_arm_side(arm, root, "instructions", arm_env=arm_env)["server"],
         model=model,
         max_turns=max_turns,
         timeout=SESSION_TIMEOUT_SECONDS,
+        arm_env=arm_env,
     )
 
 
@@ -800,9 +853,44 @@ def play_openai(
 PLAYERS = {"claude": play_claude, "openai": play_openai}
 
 
+def parse_arm_env(items: list[str], arms: dict[str, Path]) -> dict[str, dict[str, str]]:
+    """Each arm's own settings from ``NAME=KEY=VALUE`` items; an arm with none gets an empty mapping.
+
+    Refuses a name that is no arm, a repeated key, and a key that is not an Exomem setting or that the
+    unit's isolation already pins. The flag switches an arm's product behaviour (the typed graph, say). It
+    never changes credentials, billing or PATH, and never points an arm at another vault or state root.
+    """
+    # The keys the runner sets for every arm, read from the code that sets them so no second list can drift.
+    pinned = set(server_pins(Path())) | set(hook_env(Path()))
+    settings: dict[str, dict[str, str]] = {name: {} for name in arms}
+    for item in items:
+        name, _, setting = item.partition("=")
+        key, equals, value = setting.partition("=")
+        if name not in arms:
+            raise SystemExit(f"--arm-env {item}: no arm {name!r}; the arms are {sorted(arms)}")
+        if not equals or not key.startswith("EXOMEM_"):
+            raise SystemExit(
+                f"--arm-env {item}: write NAME=KEY=VALUE, with a KEY that starts with EXOMEM_"
+            )
+        if key in pinned:
+            raise SystemExit(
+                f"--arm-env {item}: the runner's isolation already sets {key} for every arm"
+            )
+        if key in settings[name]:
+            raise SystemExit(f"--arm-env {item}: {key} is already set for arm {name!r}")
+        settings[name][key] = value
+    return settings
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m membench.outcome.incidents")
     parser.add_argument("--arm", action="append", required=True, help="NAME=CHECKOUT, repeatable")
+    parser.add_argument(
+        "--arm-env",
+        action="append",
+        default=[],
+        help="NAME=KEY=VALUE: set the Exomem setting KEY for arm NAME only, repeatable",
+    )
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--case", action="append", help="case id to run; default all")
     parser.add_argument("--actor", choices=ACTORS, default="claude", help="who plays the session")
@@ -834,6 +922,7 @@ def main(argv: list[str] | None = None) -> None:
             or not (path / "plugins" / "claude-code").is_dir()
         ):
             raise SystemExit(f"--arm {name}: {path} holds no src/exomem and plugins/claude-code")
+    arm_envs = parse_arm_env(args.arm_env, arms)
     cases = load_cases(args.case, args.cases_dir)
     # Refuses a credits declaration without a key before the run directory or any session exists.
     billing.require_billing_env(os.environ)
@@ -855,7 +944,8 @@ def main(argv: list[str] | None = None) -> None:
         "cases": [case["id"] for case in cases],
         "repeats": args.repeats,
         "arms": {
-            name: {"checkout": str(path), **checkout_state(path)} for name, path in arms.items()
+            name: {"checkout": str(path), **checkout_state(path), "env": arm_envs[name]}
+            for name, path in arms.items()
         },
     }
     (run_root / "manifest.json").write_text(json.dumps(manifest, indent=2))
@@ -875,6 +965,7 @@ def main(argv: list[str] | None = None) -> None:
                         run_root / "units" / unit,
                         judge=judge,
                         actor=args.actor,
+                        arm_env=arm_envs[name],
                         **session,
                     )
                 except Exception as error:  # noqa: BLE001 - a runner or seeding error is unknown, never a product failure

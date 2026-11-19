@@ -20,7 +20,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -36,11 +36,13 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def lay_exomem_command(root: Path, arm: Path) -> Path:
+def lay_exomem_command(root: Path, arm: Path, arm_env: Mapping[str, str] | None = None) -> Path:
     """A directory to put first on the actor's PATH: its ``exomem`` runs the arm's own CLI under the unit's pins."""
     directory = root / "bin"
     directory.mkdir()
-    pins = " ".join(f"{key}={shlex.quote(value)}" for key, value in server_pins(root, arm).items())
+    pins = " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in server_pins(root, arm, arm_env).items()
+    )
     command = directory / "exomem"
     command.write_text(f'#!/bin/sh\nexec env {pins} {shlex.quote(sys.executable)} -m exomem "$@"\n')
     command.chmod(0o755)
@@ -83,7 +85,12 @@ def _stop(server: subprocess.Popen) -> None:
 
 @contextmanager
 def loopback_mcp(
-    root: Path, arm: Path, mint: Callable[[dict], str], *, remote_owner: bool = False
+    root: Path,
+    arm: Path,
+    mint: Callable[[dict], str],
+    *,
+    remote_owner: bool = False,
+    arm_env: Mapping[str, str] | None = None,
 ) -> Iterator[dict]:
     """Serve the arm's product on 127.0.0.1 and yield the session's ``--mcp-config`` entry.
 
@@ -100,7 +107,7 @@ def loopback_mcp(
     # session authority issues the token below.
     login, user_id = "incident-owner", 1
     env = {
-        **child_env(root, arm),
+        **child_env(root, arm, arm_env),
         "FASTMCP_HOME": str(home),
         "EXOMEM_BASE_URL": base_url,
         "GITHUB_CLIENT_ID": "incident-loopback",

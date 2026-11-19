@@ -163,6 +163,11 @@ and hooks, and its own docs and code supply the guidance text. Each session gets
 a neutral unit id, and the arms run interleaved. A unit passes, fails or is unknown: a harness fault,
 a seeding error or a judge error is unknown, never a failure.
 
+A `seed` may also be a list of notes, each with `title`, `note_type` and `content`, for a case that
+needs a vault of linked pages. The writer can refuse a page that links no related page, so a page after
+the first links an earlier one, and a refused seed makes the unit unknown. A list `seed` refuses
+`seed_corrected`, which reads one note.
+
 A case that tests where a note is filed seeds Records collections before the session. The seed runs
 through the product's own commands, so a collection, its method page and its rows are what the arm
 writes:
@@ -213,6 +218,16 @@ PYTHONPATH=benchmarks:src bwsx-secret run --bindings ~/.config/bws/openai-agents
 
 ```
 PYTHONPATH=benchmarks:src python -m membench.outcome.incidents --arm base=../exomem-base --arm changed=. --repeats 3 --run-root /var/tmp/exomem-outcome-evals/runs/incidents-<id>
+```
+
+`--arm-env NAME=KEY=VALUE` (repeatable) sets one Exomem setting for arm NAME only, so one checkout can
+play two arms. Every other `EXOMEM_*` setting is stripped from an arm. The setting reaches the arm's
+seeding helper, its server, its `exomem` command and its hooks, and the manifest records it under the arm.
+The flag refuses an unknown arm, a KEY outside `EXOMEM_*` and a KEY that the runner's isolation pins.
+For example, the changed checkout with the typed graph off:
+
+```
+--arm base=/path/main --arm changed=. --arm graph_off=. --arm-env graph_off=EXOMEM_DISABLE_GRAPH_INDEX=1
 ```
 
 The run prints each case's passed, failed and unknown counts per arm. The run root holds
