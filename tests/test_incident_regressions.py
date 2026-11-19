@@ -126,6 +126,17 @@ def test_a_list_seed_writes_every_page_the_case_names(tmp_path):
     assert [Path(page["path"]).stem for page in seeded] == list(findings)
 
 
+def test_a_seeded_unit_has_its_graph_before_the_session(tmp_path):
+    """Without the typed graph, recall serves no connections, so every arm would measure the graph off."""
+    case = {"id": "linked", "pass": {}, "seed": [
+        {"title": "Hub page", "note_type": "insight", "content": "## Findings\n\n- [finding] A hub.\n"},
+        {"title": "Spoke page", "note_type": "insight", "content": "## Findings\n\n- [finding] See [[Hub page]].\n"},
+    ]}
+    _seeded, record, _work = incidents.seed_unit(case, REPO_ROOT, tmp_path)
+    assert "index_build_seconds" in record
+    assert list(tmp_path.rglob(".graph.sqlite"))
+
+
 def test_an_arm_env_setting_reaches_its_own_arm_and_no_other(tmp_path, monkeypatch):
     """Two arms may share a checkout. The setting belongs to one of them, whatever the runner itself inherited."""
     arm = arm_checkout(tmp_path, 'os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "unset")')
