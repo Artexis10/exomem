@@ -1922,6 +1922,10 @@ def _connection_why(
                     for mark in ".,;:!?":
                         prose = prose.replace(f" {mark}", mark)
                     context = egress.prose_for_caller(vault_root, prose, owner_path=authoring_rel)
+                    # As for the lede below: a code-span link keeps its raw name through the display pass,
+                    # so the line is not quoted and the lede stands in.
+                    if "[[" in context:
+                        context = ""
     if not context and target_body:
         context = working_set_index.lede(
             egress.prose_for_caller(vault_root, target_body, owner_path=target_rel)
