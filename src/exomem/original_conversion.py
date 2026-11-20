@@ -192,7 +192,7 @@ def _read_inventory(vault: Path) -> _Inventory:
         else:
             if size != binary.size:
                 inventory.unreadable.append({"path": binary.path, "reason": "the original's size differs from its page"})
-            else:
+            elif originals.may_share_bytes(binary.path):  # A suffix-less file stays an ordinary file, as new filings do.
                 inventory.convert.append(filing)
             continue
         try:

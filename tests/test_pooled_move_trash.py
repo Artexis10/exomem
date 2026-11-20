@@ -100,6 +100,44 @@ def test_a_file_mode_move_leaves_the_binding_projection_complete_and_exact(vault
     assert not {row for row in rows if page in row or binary in row}
 
 
+def test_a_move_of_a_pooled_filing_to_a_suffixless_name_is_refused_before_anything_changes(
+    vault, monkeypatch
+):
+    """Catches a rename that strands the census: pooled, the filing exists solely as a companion the
+    census tells from a note by its suffix, so a suffix-less destination must be refused up front."""
+    binary, page = _filing(vault)
+    shared = _pool(vault, monkeypatch, binary)
+    target = f"{FOLDER}/Archive/ledger"
+
+    with pytest.raises(move_file.MoveFileError) as caught:
+        move_file.move_file(vault, old_path=binary, new_path=target)
+    assert caught.value.code == "SHARED_ORIGINAL_NEEDS_EXTENSION"
+
+    assert not (vault / target).exists() and not (vault / f"{target}.md").exists()
+    assert _bound(vault, page) == binary
+    assert shared.read_bytes() == DATA
+    assert media_store.read_original_bytes(vault, binary).data == DATA
+
+
+def test_a_pooled_filing_still_moves_to_a_suffixed_name_and_an_ordinary_suffixless_file_renames(
+    vault, monkeypatch
+):
+    """The refusal guards only a digest-addressed filing: suffixed destinations and ordinary files move."""
+    binary, page = _filing(vault)
+    _pool(vault, monkeypatch, binary)
+    target = f"{FOLDER}/Archive/ledger.dat"
+
+    move_file.move_file(vault, old_path=binary, new_path=target)
+    assert _bound(vault, f"{target}.md") == target
+    assert media_store.read_original_bytes(vault, target).data == DATA
+
+    plain = vault / FOLDER / "LICENSE"
+    plain.write_bytes(b"license terms")
+    moved = f"{FOLDER}/Archive/LICENSE"
+    move_file.move_file(vault, old_path=f"{FOLDER}/LICENSE", new_path=moved)
+    assert (vault / moved).read_bytes() == b"license terms"
+
+
 def test_an_evicted_pooled_filing_moves_without_fetching_its_bytes(vault, tmp_path, monkeypatch):
     """Catches a move that downloads a stored version only to rename a file the archive never keeps."""
     binary, page = _filing(vault)
