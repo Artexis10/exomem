@@ -9845,6 +9845,9 @@ def writer_link_visibility(vault_root: Path) -> Callable[[str], bool] | None:
     """
     from .governance import egress
 
+    # A bound store hands every caller a release filter, the owner's too; "restricted" is the question this answers.
+    if not egress.caller_restricted(vault_root):
+        return None
     return egress.visible_page_filter(vault_root)
 
 

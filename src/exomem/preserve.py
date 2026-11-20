@@ -72,6 +72,7 @@ from .vault import (
     parse_frontmatter,
     prepend_log_entry,
     read_guarded_text,
+    relative_posix,
     respell_new_path,
     with_newline,
     yaml_scalar,
@@ -888,6 +889,7 @@ def preserve(
             log_body += f" Description: {desc_one_line}"
 
         from .governance import connector_boundary
+        from .vault_store import read as store_read
 
         effect_admitted = connector_boundary.effect_admission(vault_root)
         top_index = kb / "index.md"
@@ -920,7 +922,9 @@ def preserve(
             warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
-        if log_file.exists() and not raw_protection and effect_admitted(log_file):
+        # A store-mode log is a stored page that may have no file yet; the disk alone would call it missing.
+        log_held = store_read.holds_file(vault_root, relative_posix(log_file, vault_root))
+        if log_held and not raw_protection and effect_admitted(log_file):
             current_log, _guard = read_guarded_text(vault_root, log_file)
             new_log = _prepend_log_entry(
                 current_log,
@@ -935,7 +939,7 @@ def preserve(
                     expected_hash=content_hash(current_log),
                 )
             )
-        elif not raw_protection and not log_file.exists():
+        elif not raw_protection and not log_held:
             warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer

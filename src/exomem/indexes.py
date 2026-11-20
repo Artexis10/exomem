@@ -127,12 +127,12 @@ def compute_updates(
     top_index = kb / "index.md"
     log_file = kb / "log.md"
 
-    if not sources_index.exists():
-        raise FileNotFoundError(f"Sources/index.md missing: {sources_index}")
-    if not top_index.exists():
-        raise FileNotFoundError(f"top index.md missing: {top_index}")
-    if not log_file.exists():
-        raise FileNotFoundError(f"log.md missing: {log_file}")
+    from .vault_store import read as store_read
+
+    # A page that the store holds exists whether or not its projection has caught up with the commit.
+    for page, label in ((sources_index, "Sources/index.md"), (top_index, "top index.md"), (log_file, "log.md")):
+        if not store_read.page_exists(vault_root, page.relative_to(vault_root).as_posix()):
+            raise FileNotFoundError(f"{label} missing: {page}")
 
     counts = _count_sources(sources_dir) if source_counts is None else dict(source_counts)
     sources_index_text, sources_index_guard = read_guarded_universal_text(vault_root, sources_index)

@@ -8,10 +8,12 @@ through ``write.commit``, as the store thread commits them.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +35,7 @@ from test_vault_store_write_path import served  # noqa: F401
 from exomem import __main__ as cli
 from exomem import (
     activation_conventions,
+    attention,
     bm25,
     capabilities,
     commands,
@@ -53,11 +56,13 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.audit import AuditFinding, AuditReport
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
+from exomem.kbdir import managed_join
 from exomem.vault_store import availability, importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
@@ -1191,19 +1196,8 @@ PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
 )
 
 
-class LinkShownByStoredPath(AssertionError):
-    """The store-mode read showed the link by its stored path where file mode showed its title."""
-
-
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("resolver", [
-    "evicted",
-    pytest.param("resident", marks=pytest.mark.xfail(
-        strict=True, raises=LinkShownByStoredPath,
-        reason="find.borrow_query_resolver compares the file registry's triple with a resolver "
-        "that store mode keys on the snapshot's revision, so a resident resolver never counts as current",
-    )),
-])
+@pytest.mark.parametrize("resolver", ["evicted", "resident"])
 def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
     vault, resolver  # noqa: F811
 ):
@@ -1224,15 +1218,66 @@ def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolve
 
     file_mode = body()
     shown = "[[Beta]]" if resolver == "resident" else "[[Knowledge Base/Notes/Beta]]"
-    if shown not in file_mode:
-        # Not an assertion: the xfail above names only the store-mode difference.
-        pytest.fail(f"file mode no longer shows {shown}: {file_mode!r}")
+    assert shown in file_mode, f"file mode no longer shows {shown}: {file_mode!r}"
     assert migrate_apply(vault) == 0
 
-    store_mode = body()
-    if store_mode != file_mode and store_mode == file_mode.replace("[[Beta]]", "[[Knowledge Base/Notes/Beta]]"):
-        raise LinkShownByStoredPath(store_mode)
-    assert store_mode == file_mode
+    assert body() == file_mode
+
+
+@pytest.mark.timeout(300)
+def test_a_resolver_built_across_a_commit_shows_a_pinned_restricted_reader_no_withheld_title(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A resolver is keyed at the revision whose key it read. Built from a later revision under that
+    key, it lets a reader still pinned at the key's revision borrow it, and the reader's filter,
+    which asks its own revision whether a path is a page, then shows a page that a policy withholds
+    from it as a title."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+    linker = "Knowledge Base/Notes/Linker.md"
+    secret = "Knowledge Base/Notes/Secret/Plan.md"
+    write.commit(
+        writer,
+        put(
+            linker,
+            b"---\ntitle: Linker\ntype: note\n---\n# Linker\n\n"
+            b"See [[Knowledge Base/Notes/Beta]] and [[Knowledge Base/Notes/Secret/Plan]] soon.\n",
+        ),
+    )
+    find_module.evict_resolver_caches(stored)
+    keyed, committed, errors = threading.Event(), threading.Event(), []
+    real_vault_key = find_module.FreshnessSnapshot.vault
+
+    def vault_key(self):
+        key = real_vault_key(self)
+        if threading.current_thread().name == "resolver-builder":
+            keyed.set()
+            assert committed.wait(60)
+        return key
+
+    def build():
+        try:
+            find_module._get_query_resolver(stored)
+        except BaseException as error:  # noqa: BLE001 - the test thread reports it.
+            errors.append(error)
+            keyed.set()
+
+    monkeypatch.setattr(find_module.FreshnessSnapshot, "vault", vault_key)
+    with read.request_snapshot(stored):  # the reader's revision, before the commit below
+        builder = threading.Thread(target=build, name="resolver-builder")
+        builder.start()
+        assert keyed.wait(60)
+        write.commit(
+            writer,
+            put(secret, b"---\ntitle: Merger Plan Codename\ntype: note\n---\n# Plan\n\nThe plan.\n"),
+        )
+        committed.set()
+        builder.join(60)
+        assert not errors, errors
+        with request_scope(EXTERNAL), capabilities.active_surface(PUBLIC_SHAPE):
+            body = commands.op_read_memory(stored, path=linker)["body"]
+
+    assert "[[Beta]]" in body, f"the read never borrowed the resolver: {body!r}"
+    assert "Merger Plan Codename" not in body
 
 
 #: Who asks, and whether an active policy withholds a page from the external audience. A caller
@@ -1304,6 +1349,42 @@ def test_a_bound_store_decides_whether_a_caller_is_restricted_as_file_mode_does(
 
     assert in_a_bound_store == in_file_mode
     assert read.holds_file(store_root, f"{folders['store']}/One.md") is restricted
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("reads", ["the store", "the files"])
+def test_attention_counts_the_capped_contradiction_pairs_for_the_owner_of_a_bound_store(
+    served, monkeypatch, reads  # noqa: F811
+):
+    """A bound store filters every caller's walk, the owner's too, so a summary dropped because a filter
+    exists loses the owner the count of pairs that the contradiction queue capped. Another caller still
+    loses it: the cap counted pairs before any page was decided for that caller."""
+    capped = AuditFinding(
+        category="corpus_contradictions", severity="info", path=managed_join(""),
+        detail="3 more pairs not shown", proposed_fix="raise the cap",
+        meta={"truncated": 3, "shown": 1, "total": 4},
+    )
+    pair = AuditFinding(
+        category="corpus_contradictions", severity="info", path=ALPHA, paths=[ALPHA, BETA],
+        detail="Alpha overlaps Beta", proposed_fix="read both",
+        meta={"cosine": 0.9, "priority": 0.9, "dormancy": 1.0, "same_family": False},
+    )
+    monkeypatch.setattr(
+        attention.audit_module, "audit",
+        lambda *_args, **_kwargs: AuditReport(findings=[pair, capped], summary={"corpus_contradictions": 2}),
+    )
+    if reads == "the files":  # a vault whose collection store is enrolled and whose pages are still files
+        monkeypatch.setattr(vault_store_mode, "store_mode_for_reads", lambda _root: False)
+
+    def upstream_truncated(who):
+        with request_scope(who):
+            return attention.attention(
+                served, categories=["corpus_contradictions"], today=dt.date(2026, 1, 1),
+                record_surfacing=False,
+            ).upstream_truncated
+
+    assert upstream_truncated(owner_principal(surface="mcp")) == 3
+    assert upstream_truncated(EXTERNAL) == 0
 
 
 @pytest.mark.timeout(300)

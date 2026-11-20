@@ -8264,27 +8264,31 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     """
     from . import freshness as freshness_module
     from .vault import WikilinkResolver
+    from .vault_store import read as store_read
 
     root = Path(vault_root)
-    if freshness is None:
-        freshness = FreshnessSnapshot(root).vault()
-    checkpoint = freshness_module.consumer_checkpoint(root, "vault")
-    if checkpoint.triple != freshness:
-        checkpoint = None
-    cached = _RESOLVER_CACHE.get(root)
-    if cached and cached[0] == freshness:
-        return cached[1]
-    with _RESOLVER_LOCK:
+    # A store-mode key is the revision that it read, so the key and the build read one revision: a resolver
+    # keyed at R1 that listed the pages of R1+1 would show a reader still pinned at R1 a page it cannot see.
+    with store_read.request_snapshot(root):
+        if freshness is None:
+            freshness = FreshnessSnapshot(root).vault()
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        if checkpoint.triple != freshness:
+            checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == freshness:
             return cached[1]
-        resolver = WikilinkResolver(root)
-        _RESOLVER_CACHE[root] = (freshness, resolver)
-        if checkpoint is not None:
-            _RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RESOLVER_CHECKPOINTS.pop(root, None)
-    return resolver
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached and cached[0] == freshness:
+                return cached[1]
+            resolver = WikilinkResolver(root)
+            _RESOLVER_CACHE[root] = (freshness, resolver)
+            if checkpoint is not None:
+                _RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RESOLVER_CHECKPOINTS.pop(root, None)
+        return resolver
 
 
 def borrow_query_resolver(
@@ -8305,8 +8309,17 @@ def borrow_query_resolver(
     Set `schedule_rebuild=False` for an advisory read that must not start a rebuild.
     Writers and explicit operations keep `_get_query_resolver`.
     """
+    from . import lexstore
+
     root = Path(vault_root)
-    triple = freshness.consumer_checkpoint(root, "vault").triple
+    # A store-mode resolver is keyed on the snapshot's revision (`FreshnessSnapshot._scope_key`), which no
+    # file registry holds; the revision moves with every commit, so a resolver that a commit passed is a miss.
+    if lexstore.store_rows_serve(root):
+        from .vault_store import read as store_read
+
+        triple = store_read.scope_triple(root, "vault")
+    else:
+        triple = freshness.consumer_checkpoint(root, "vault").triple
     cached = _RESOLVER_CACHE.get(root)
     if triple is not None and cached is not None and cached[0] == triple:
         return cached[1]
@@ -8534,6 +8547,8 @@ def recall_resolver_snapshot_at_checkpoint(
 ):
     """Borrow a read-only resolver only when exact event lineage is resident.
 
+    The resolver alone; `recall_resolver_publication_at_checkpoint` also returns its token.
+
     Incremental graph maintenance must not rebuild a resolver from current disk
     and label it with an older live checkpoint: that loses the pre-delta
     topology needed to prove bounded edge repair. A cache miss is therefore an
@@ -8545,6 +8560,20 @@ def recall_resolver_snapshot_at_checkpoint(
     body-only path stay O(delta) without copying every resolver map. A caller
     that needs to mutate or reconstruct topology must fork explicitly.
     """
+    borrowed = recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
+    return borrowed[0] if borrowed is not None else None
+
+
+def recall_resolver_publication_at_checkpoint(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+) -> tuple[WikilinkResolver, object] | None:
+    """`recall_resolver_snapshot_at_checkpoint` with the token of the maps it borrowed.
+
+    The token is read under the lock that a publisher patches the maps under, so a caller that
+    compares it later learns whether a patch landed after this borrow; read from the resolver
+    after the lock, it could already name patched maps.
+    """
     root = Path(vault_root)
     identity = _recall_checkpoint_identity(checkpoint)
     with _RESOLVER_LOCK:
@@ -8555,7 +8584,7 @@ def recall_resolver_snapshot_at_checkpoint(
             or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
         ):
             return None
-        return cached[1]
+        return cached[1], cached[2]
 
 
 def borrow_recall_resolver(

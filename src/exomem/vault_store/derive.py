@@ -125,6 +125,8 @@ class _Derivation:
         self._relayout: object | None = None
         #: The prior paths whose claimants this commit changes; links naming them re-resolve.
         self.prior_changed: set[str] = set()
+        # One basis for the commit, so that the registry loads once and not once per page parse.
+        self.type_basis = epistemic_graph.producer_type_basis(root)
 
     def relayout(self) -> object:
         """The relayout record as this transaction sees it, read once per commit."""
@@ -190,7 +192,7 @@ class _Derivation:
         graph = _GraphInputs(
             resolver=resolver,
             stamps=epistemic_graph.graph_registry_stamps(self.root),
-            type_basis=epistemic_graph.producer_type_basis(self.root),
+            type_basis=self.type_basis,
             landing=epistemic_graph.landing_from_bytes(self.root, self.page_bytes),
         )
         for rel in self.removed:
@@ -282,7 +284,7 @@ class _Derivation:
             return None, None
         try:
             state = semantic_index.current_parent_index_state(
-                self.root, rel, source=raw.decode("utf-8")
+                self.root, rel, source=raw.decode("utf-8"), owner_type_basis=self.type_basis
             )
         except (OSError, UnicodeError, ValueError):
             # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.

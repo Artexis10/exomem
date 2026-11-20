@@ -712,9 +712,11 @@ class _Lend:
     ``close`` ends only what lends opened: when the last open lend of the snapshot closes, it clears
     the progress handler and releases each SQL function registered through any of them (SQLite
     keeps the name, and a later call fails), and outside a request it ends the pooled snapshot. A lend that a reader opens while another is open (a nested
-    read) leaves the outer reader's handler and functions in place. ``commit`` and ``rollback``
-    raise, because either would end the snapshot that the rest of the request reads. Everything
-    else delegates.
+    read) leaves the outer reader's functions in place, and its own progress handler stands only
+    while its lend is open: ``set_progress_handler`` stacks it over the outer reader's, and closing
+    the lend puts the outer reader's back, so the outer reader never runs under the inner one's
+    deadline. ``commit`` and ``rollback`` raise, because either would end the snapshot that the
+    rest of the request reads. Everything else delegates.
     """
 
     __slots__ = ("_view", "_scope")
@@ -737,6 +739,19 @@ class _Lend:
         self._view.connection.create_function(name, narg, func, **options)
         self._view.memo.setdefault("lent_functions", set()).add((name, narg))
 
+    def set_progress_handler(self, handler, n: int) -> None:
+        """Install this lend's handler (None withdraws it); the connection runs the newest lend's."""
+        stack = self._view.memo.setdefault("progress_handlers", [])
+        stack[:] = [entry for entry in stack if entry[0] is not self]
+        if handler is not None:
+            stack.append((self, handler, n))
+        self._run_newest_handler(stack)
+
+    def _run_newest_handler(self, stack: list) -> None:
+        """Leave the connection with the newest open lend's handler, or none."""
+        _owner, handler, n = stack[-1] if stack else (None, None, 0)
+        self._view.connection.set_progress_handler(handler, n)
+
     def commit(self) -> None:
         raise sqlite3.ProgrammingError("a lent store snapshot cannot commit; it is read-only")
 
@@ -750,7 +765,11 @@ class _Lend:
         with scope:
             memo = self._view.memo
             memo["lends"] -= 1
+            stack = memo.get("progress_handlers", [])
+            stack[:] = [entry for entry in stack if entry[0] is not self]
             if memo["lends"]:
+                # A nested read ends: the outer reader's own deadline takes the connection back.
+                self._run_newest_handler(stack)
                 return
             # A deadline handler or a function left on a shared or pooled connection would outlive
             # the read: it aborts the request's later reads and holds the reader's objects.

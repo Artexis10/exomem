@@ -19,11 +19,13 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import selected_store as selected_store
 from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
+from test_workflow_contracts import _proposal as workflow_contract_proposal
 
-from exomem import bm25, commands, deferred_index, lexstore, mode
+from exomem import bm25, commands, deferred_index, lexstore, mode, note, workflow_contracts
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview, runtime
+from exomem.governance import artifact_census
 from exomem.vault_store import availability, projection, read, verify, write
 
 GAMMA = "Knowledge Base/Notes/Gamma.md"
@@ -207,6 +209,66 @@ def test_create_note_is_searchable_and_linked_when_it_returns_and_writes_no_mark
     assert tree(served) == before, "a store-mode write must change no Markdown byte on disk"
     assert not (served / created).exists()
     assert deferred_index.snapshot(served) == receipts, "the drain follows audit rows, not receipts"
+
+
+def test_a_batch_that_fails_after_its_commit_point_reports_each_stored_note_as_written(
+    served, monkeypatch
+):
+    """The commit holds the pages and no file does yet. A failure after it that reads as a refusal
+    sends the caller to create each note again, which finds its page taken."""
+
+    def prepared(title, finding):
+        arguments = {
+            "title": title,
+            "note_type": "insight",
+            "status": "draft",
+            "content": f"## Observations\n\n- [finding] {finding}\n",
+            "summary": "A census finding for the test rig.",
+        }
+        draft = note.note(served, validate_only=True, **arguments)
+        return note.note(
+            served,
+            draft_id=draft.draft_id,
+            draft_hash=draft.draft_hash,
+            draft_token=draft.draft_token,
+            _return_prepared=True,
+            _defer_navigation=True,
+            **arguments,
+        )
+
+    notes = [
+        prepared("Reef census", "The reef census counted more terns."),
+        prepared("Marsh census", "The marsh census counted fewer herons."),
+    ]
+
+    def census_fails(_root, _replaced):
+        raise RuntimeError("injected failure after the commit point")
+
+    monkeypatch.setattr(artifact_census, "note_created", census_fails)
+
+    outcomes = note.commit_prepared_notes(served, notes)
+
+    assert [str(outcome) for outcome in outcomes] == ["injected failure after the commit point"] * 2
+    for item in notes:
+        assert store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", item.destination)
+        assert not (served / item.destination).exists()
+
+
+def test_a_saved_workflow_contract_is_inventoried_while_its_file_is_unwritten(served):
+    """A contract page that the commit stores has no file until the projector writes it. An inventory
+    that lists the contract folder's files reports no contract, and a save of the same title would
+    miss the page it replaces."""
+    saved = workflow_contracts.save_contract(
+        served, workflow_contracts.parse_proposal(workflow_contract_proposal()), why="reviewed"
+    )
+    assert not (served / saved["path"]).exists()
+
+    inventory = workflow_contracts.inventory_contracts(served)
+
+    assert inventory["valid"] is True
+    assert [item["key"] for item in inventory["summaries"]] == ["software-delivery"]
+    inspected = workflow_contracts.inspect_contract(served, "software-delivery")
+    assert inspected["content_hash"] == saved["content_hash"]
 
 
 def test_a_new_page_resolves_the_links_that_wait_for_its_title_and_a_delete_unresolves_them(

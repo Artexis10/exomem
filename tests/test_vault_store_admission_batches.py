@@ -184,17 +184,7 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
     mixed_fence = corpus.mixed_fence
 
     def answers(keep):
-        result = {}
-        for path in paths:
-            if ".." in path:
-                continue
-            try:
-                result[path] = keep(path)
-            except AttributeError as error:
-                # Existing store companion snapshots lack filesystem identities; retain the same failed outcome.
-                assert store_mode and path == child and str(error) == "'NoneType' object has no attribute 'device'"
-                result[path] = str(error)
-        return result
+        return {path: keep(path) for path in paths if ".." not in path}
 
     for selector in corpus.selectors:
         for purpose, granted in ((None, False), ("audit", False), ("audit", True)):
@@ -213,16 +203,10 @@ def test_batch_and_scalar_admission_keep_policy_and_container_answers(vault, mon
                 actual = answers(keep)
                 offered = published_admission.admission_of(keep)
                 assert offered is not None
-                safe_paths = [path for path in paths if ".." not in path and path != child]
+                safe_paths = [path for path in paths if ".." not in path]
                 assert {path: verdict[0] for path, verdict in offered.decide_many(safe_paths).items()} == {
                     path: actual[path] for path in safe_paths
                 }
-                if isinstance(actual[child], str):
-                    with pytest.raises(AttributeError) as refused:
-                        offered.decide_many([child])
-                    assert str(refused.value) == actual[child]
-                else:
-                    assert offered.decide_many([child])[child][0] == actual[child]
                 # Disable only the new set proof; the existing per-page policy is the oracle.
                 with monkeypatch.context() as patch:
                     patch.setattr(document_containers, "_stored_unclaimed", lambda *args: False)
@@ -251,24 +235,13 @@ def test_a_bound_writers_sweep_decides_a_set_of_pages_as_it_decides_each_page(va
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     paths = [path for path in corpus.paths if ".." not in path]
-    # The companion child raises on either route, which fails a whole sweep; it is its own set here.
-    others = [path for path in paths if path != corpus.child]
-
-    def outcome(decide, *arguments):
-        try:
-            return decide(*arguments)
-        except AttributeError as error:  # a stored companion snapshot has no file identity
-            return str(error)
 
     def one_by_one(keep):
-        return {path: outcome(keep, path) for path in paths}
+        return {path: keep(path) for path in paths}
 
     def as_one_set(keep):
-        admitted = egress.admitted(keep, others)
-        answers = {path: path in admitted for path in others}
-        child = corpus.child
-        answers[child] = outcome(lambda: child in egress.admitted(keep, [child]))
-        return answers
+        admitted = egress.admitted(keep, paths)
+        return {path: path in admitted for path in paths}
 
     def compare(sweep, case):
         expected = one_by_one(sweep(vault))
@@ -355,8 +328,7 @@ def test_a_warm_scope_memo_answers_what_the_scalar_chain_answers_after_each_even
     apply_case(corpus, 'tags: [secret]\npaths: ["Restricted/**"]\nexclude:\n  tags: [public]', False)
     for rel in (RETAGGED, MOVER):
         (vault / rel).write_text(note("calm"))
-    # The container child fails alike in both rules in store mode (its companion snapshot has no filesystem identity), so it stays out.
-    asked = [path for path in [*corpus.paths, RETAGGED, MOVER, MOVED] if ".." not in path and path != corpus.child]
+    asked = [path for path in [*corpus.paths, RETAGGED, MOVER, MOVED] if ".." not in path]
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     who = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp")
