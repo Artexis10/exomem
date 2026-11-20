@@ -29,11 +29,11 @@ The full rule is one sentence in the activation `capture_policy` block, after th
 
 ### The block has a hard budget
 
-The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 177 characters and brings the longest to 1,598, so 2 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 178 characters and brings the longest to 1,599, so 1 character remains. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
 
 ### An open question is not doubt about an event
 
-A real-model probe showed the open-question class absorbing tentative events: a person unsure which day they posted a parcel had the doubt saved as an open question. Doubt about whether something happened is a tentative event, and the existing lifecycle rule keeps it unwritten unless a collection offers a note field for it. The served sentence and the scaffold say so.
+A real-model probe showed the open-question class absorbing tentative events: a person unsure which day they posted a parcel had the doubt saved as an open question. A person's unsure report of an event or its details is a tentative event, and the existing lifecycle rule keeps it unwritten unless a collection offers a note field for it. A question the work itself leaves open, including whether something happened, stays an open question. The served sentence says "an open question the work left, not a tentative event"; the scaffold states both halves.
 
 ### The copyable instruction blocks stay within their caps
 

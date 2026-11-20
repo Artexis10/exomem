@@ -241,13 +241,13 @@ _BASELINE_CAPTURE = (
 
 #: What a stepping stone saves beyond a personal baseline. "Tentative" quiets only a baseline's casual
 #: events; served unscoped it taught agents to drop a held view, an open question and the values a task
-#: settled, and to save a pointer to the working file instead. Doubt about whether something happened
-#: is a tentative event, not an open question: a real-model probe saw the class absorb it. Short by budget: above
+#: settled, and to save a pointer to the working file instead. A person's unsure report of an event is
+#: a tentative event, not an open question: a real-model probe saw the class absorb it. Short by budget: above
 #: `_CAPTURE_POLICY_MAX_CHARS` the hook keeps only the block's lead sentence, so a longer text here
 #: silences every capture rule.
 _EPISTEMIC_CAPTURE = (
-    "At a stepping stone save: a held view, attributed, with its uncertainty, not as fact; a question "
-    "the work left open, not a tentative event; settled values in full, not pointers."
+    "At a stepping stone save: a held view, attributed, with its uncertainty, not as fact; an open question "
+    "the work left, not a tentative event; settled values in full, not pointers."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
