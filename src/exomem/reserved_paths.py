@@ -168,6 +168,11 @@ class InternalStateDescriptor:
     #: Whether store mode owns the files of this family as pages (`vault_store.ownership`). Every other
     #: reserved family stays outside the store: governance and replica state have their own owners.
     vault_store: bool = False
+    #: Whether the product can rebuild this family's files from the vault or by recomputation. False for a
+    #: family whose files hold information that nothing else records: the vault backup stages exactly the
+    #: external families that say so (`non_rebuildable_state_descriptors`). The default keeps a new family
+    #: out of a backup until its owner declares that losing it loses information, not work.
+    rebuildable: bool = True
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -599,6 +604,7 @@ _REGISTRY = (
             ".media-worker.lock",
         ),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "maintenance-jobs-store",
@@ -623,6 +629,7 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".voice_profiles.json",),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "graph-handoff",
@@ -653,6 +660,7 @@ _REGISTRY = (
         exact=(".review-state.json",),
         patterns=(_REVIEW_TEMP_RE,),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "due-state",
@@ -673,6 +681,7 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".ownership-asked.jsonl", ".ownership-rotation.json"),
         patterns=(_OWNERSHIP_TEMP_RE,),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "lexical-rebuild",
@@ -739,6 +748,7 @@ _REGISTRY = (
         exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
         # A reverse export keeps the retired store as evidence that no host adopts.
         patterns=(_COLLECTION_EXPORTED_RE,),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "collection-archive",
@@ -748,6 +758,7 @@ _REGISTRY = (
         # beside the store that now holds their rows, and the collections cutover's run records
         # under ``cutover/``. Canonical evidence: no reset touches it.
         trees=(".collection-archive",),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "collection-replica",
@@ -772,6 +783,7 @@ _REGISTRY = (
         # outside the vault, so a copied vault carries entries that fail their MAC
         # and nothing that resets, wipes or migrates machine-local state may touch it.
         exact=("procedure-approval.key",),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "batch-workspace",
@@ -1006,6 +1018,21 @@ def external_canonical_descriptors() -> tuple[InternalStateDescriptor, ...]:
         descriptor
         for descriptor in _REGISTRY
         if descriptor.placement is StatePlacement.EXTERNAL_CANONICAL
+    )
+
+
+def non_rebuildable_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
+    """The external families whose files hold information that nothing else records.
+
+    A backup of the machine-local state stages exactly these. Every other external family is an index, a cache
+    or a queue that the product rebuilds, so a backup that carried it would only cost space.
+    """
+
+    return tuple(
+        descriptor
+        for descriptor in _REGISTRY
+        if descriptor.placement in (StatePlacement.EXTERNAL_STATE, StatePlacement.EXTERNAL_CANONICAL)
+        and not descriptor.rebuildable
     )
 
 
@@ -3181,7 +3208,7 @@ class _Prefilter:
     FILTERED_FIELDS = frozenset({"exact", "trees", "patterns", "tree_patterns", "leaf_patterns",
                                  "component_tree_patterns"})
     UNMATCHED_FIELDS = frozenset({"id", "owner", "placement", "owning_command", "authority_enabled",
-                                  "migrates_from_vault", "vault_store"})
+                                  "migrates_from_vault", "vault_store", "rebuildable"})
 
     @classmethod
     def of(cls, descriptors: tuple[InternalStateDescriptor, ...]) -> _Prefilter:
@@ -5084,6 +5111,11 @@ def _validate_registry() -> None:
         len(ids) != len(set(ids))
         or any(not descriptor.owner for descriptor in _REGISTRY)
         or any(type(descriptor.placement) is not StatePlacement for descriptor in _REGISTRY)
+        # Canonical data is by definition not rebuildable: a family that is both would drop out of a backup.
+        or any(
+            descriptor.placement is StatePlacement.EXTERNAL_CANONICAL and descriptor.rebuildable
+            for descriptor in _REGISTRY
+        )
     ):
         raise RuntimeError("internal-state registry is invalid")
 

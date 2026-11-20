@@ -339,6 +339,24 @@ def test_every_descriptor_has_exactly_one_explicit_placement() -> None:
     )
 
 
+def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable() -> None:
+    from exomem import reserved_paths
+
+    declared = {d.id for d in reserved_paths.non_rebuildable_state_descriptors()}
+
+    # Dropping a family from this set drops its owner decisions out of every backup, so the set is pinned.
+    assert declared == {
+        "media-jobs-store",
+        "voice-profile-store",
+        "review-state",
+        "ownership-review",
+        "collection-store",
+        "collection-archive",
+        "procedure-approval-key",
+    }
+    assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
+
+
 def test_the_seam_resolves_env_override_then_platform_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
