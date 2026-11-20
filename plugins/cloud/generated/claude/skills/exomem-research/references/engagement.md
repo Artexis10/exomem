@@ -141,7 +141,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   its details ("I think I posted it Tuesday") is not a question left open: it is a
   tentative event, so the tentative-claim rule above applies and it stays unwritten
   unless the manifest offers a note field for it. Mid-thought exploration still
-  stays quiet.
+  stays quiet. A write never mentions what stays quiet, not even to say it was left out.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
