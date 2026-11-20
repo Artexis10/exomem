@@ -2,16 +2,15 @@
 
 # Exomem Cloud security model
 
-Exomem Cloud is the managed Exomem service that Substrate Systems OÜ operates. Each account gets one
-isolated cell that runs this repository's open-source server. Each section states one claim, the public
-code that enforces it, a check you can do, and its limits today.
+Exomem Cloud is the managed Exomem service of Substrate Systems OÜ. Each account gets one cell that runs
+this repository's server. Each section states a claim, mostly from the
+[privacy page](https://substratesystems.io/exomem/privacy), the public code behind it, a check and its
+limits. The control plane is in the public [substrate repository](https://github.com/substrate-systems/substrate).
+Deployment values are not public, so this page marks each control that is off by default.
 
-The control plane is in the public
-[substrate repository](https://github.com/substrate-systems/substrate). The live deployment's values are
-not public, so this page names each setting that is off by default.
-
-Terms: _cellctl_ creates and reconciles cells. The _gateway_ routes authenticated requests to cells. The
-_edge_ terminates public TLS.
+Terms: _Substrate_ is the control-plane web app on Vercel, which issues access tokens. _Home_ is its
+signed-in account page. _cellctl_ creates and reconciles cells. The _gateway_ routes authenticated
+requests to cells. The _edge_ terminates public TLS.
 
 ## Isolation between accounts
 
@@ -23,69 +22,80 @@ _edge_ terminates public TLS.
   Pod Security `restricted` profile and default-deny networking. Only gateway pods reach the cell port.
 - `handleCloudMcpRequest` in
   [cloud-handler.ts](https://github.com/substrate-systems/substrate/blob/main/src/exomem-gateway/cloud-handler.ts)
-  takes the cell from the authenticated token, and refuses a request that names a tenant or cell.
+  takes the cell from the access token, and refuses a request that names a tenant or cell.
 - [exomem-cloud-grants.sql](https://github.com/substrate-systems/substrate/blob/main/scripts/exomem-cloud-grants.sql)
   lets the gateway read only the cell ID, tenant ID and desired state of a cell.
 
-**Check.** Send a request that names a cell in a header. The gateway answers `400 HOSTED_SELECTOR_REJECTED`.
+**Check.** POST a request that names a cell in a header. The gateway answers `400 HOSTED_SELECTOR_REJECTED`.
 
-**Limits.** All cells share one cluster, and most share nodes and kernels. Cell Jobs, such as
-backups, can reach any public HTTPS address. One fleet-wide gateway key derives every cell's bearer, so
-a gateway compromise reaches every cell.
+**Limits.** All cells share one cluster, and most share nodes and kernels. Cell Jobs, such as backups,
+can reach any public HTTPS address. One fleet-wide bearer key, which the gateway holds, derives every
+cell's bearer. Substrate issues every token that the gateway accepts, and mints Home's own
+(`mintHomeAccessToken` in
+[cloud-home-mcp.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/cloud-home-mcp.ts)).
+Its database role can write every table in the schema. A compromise of Substrate or of that credential
+reaches every cell.
 
-**Changing.** `contain-cloud-controller-compromise` replaces the shared bearer with signed gateway proofs.
+**Changing.** [`contain-cloud-controller-compromise`](../openspec/changes/contain-cloud-controller-compromise/)
+replaces the shared bearer with signed gateway proofs.
 
 ## Encryption at rest and in transit
 
-**Claim.** The knowledge store and its backups are encrypted at rest. Connections to the service are
-encrypted in transit.
+**Claim.** The knowledge store and its backups are encrypted at rest. Connections from your client are
+encrypted in transit. The hop from the gateway to your cell is not yet encrypted.
 
 **Enforced.**
 - `render_secret` in [manifests.py](../infra/cellctl/src/cellctl/manifests.py) refuses an empty volume
-  passphrase. `derive_volume_passphrase` in [secrets.py](../infra/cellctl/src/cellctl/secrets.py) derives
-  it from the cell's root key. Dedicated hosts encrypt their disk array with LUKS2
+  passphrase, except for the shared legacy class and local volumes.
+- Dedicated hosts encrypt their disk array with LUKS2
   ([dedicated_host](../infra/ansible/roles/dedicated_host/tasks/main.yml)).
-- The cell encrypts media before upload. The [media edge](../src/exomem/media_edge.py) moves only
-  ciphertext.
+- The cell encrypts media before upload ([media_store.py](../src/exomem/media_store.py)). The media
+  edge moves only ciphertext, and `mediaEdge.enabled` is off by default.
 - [config.yaml.j2](../infra/ansible/roles/k3s/templates/config.yaml.j2#L15) encrypts cluster Secrets.
 - The edge terminates TLS on the cluster
-  ([cloud-ingress.yaml](../infra/helm/platform/templates/cloud-ingress.yaml)). The public DNS record is
-  not proxied ([cloudflare.tf](../infra/terraform/foundation/cloudflare.tf)).
+  ([cloud-ingress.yaml](../infra/helm/platform/templates/cloud-ingress.yaml)). Its optional record
+  `cloudflare_dns_record.gateway` is not proxied, and `gateway_hostname` defaults to empty
+  ([cloudflare.tf](../infra/terraform/foundation/cloudflare.tf#L44-L74)). The control and transfer
+  records use a proxied Cloudflare Tunnel.
 
 **Check.** Inspect the TLS certificate of the Cloud MCP endpoint.
 
 **Limits.**
-- Transit encryption covers the client-to-edge hop only. `defaultCellOrigin` in `cloud-handler.ts`
-  forwards to the cell over plain HTTP. Pod traffic between nodes uses unencrypted
-  [VXLAN](../infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2). Only a node outside the
-  provider's private network joins over WireGuard.
+- `defaultCellOrigin` in `cloud-handler.ts` forwards to the cell over plain HTTP. Pod traffic between
+  nodes uses unencrypted [VXLAN](../infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2). Only a
+  node outside the provider's private network joins over WireGuard.
 - Older cells share one volume passphrase
   ([storage-class.yaml](../infra/helm/platform/templates/storage-class.yaml)). Dedicated-host cells have
-  no per-cell volume key, and a network key server unlocks their disks unattended.
+  no per-cell volume key. A Tang key server on a K3s server node unlocks their disks unattended
+  ([L8-L12](../infra/ansible/roles/dedicated_host/tasks/main.yml#L8-L12)).
 - Exports and export staging have only the storage provider's encryption.
 
-**Changing.** `move-cloud-cells-to-local-storage` gives each local cell volume its own cell-derived key
-before cells move.
+**Changing.** [`move-cloud-cells-to-local-storage`](../openspec/changes/move-cloud-cells-to-local-storage/)
+gives each local cell volume its own cell-derived key before cells move.
 
 ## Who holds which keys
 
-**Claim.** Substrate Systems holds the keys for each cell's storage and backups on the server that runs
-the cell. The internet-facing edge cannot read the keys that protect your stored data.
+**Claim.** Substrate Systems holds each cell's storage and backup keys on the server that runs the cell,
+and in an encrypted offline copy for recovery. The internet-facing edge cannot read them.
 
 **Enforced.**
 - `_resolve_secret_material` in [reconcile.py](../infra/cellctl/src/cellctl/reconcile.py) wraps each
-  cell's root key under a master key that cellctl holds. The volume, backup and media keys come from
-  that root key. The control database receives wrapped keys only.
-- The [key custodian](../infra/helm/platform/templates/key-custodian.yaml) alone creates each cell's
-  object-storage key, limited to that cell's prefix.
+  cell's root key under a master key that cellctl holds. The volume passphrase derives from that root
+  key ([secrets.py](../infra/cellctl/src/cellctl/secrets.py)), which also wraps the backup password and
+  media keys. The control database receives wrapped keys
+  only.
+- The master key, the fleet-wide bearer key and the shared volume passphrase are also SOPS/age ciphertext
+  under `infra/secrets/cloud/`. Their age key stays outside the cluster
+  ([cloud-platform-operations](../openspec/specs/cloud-platform-operations/spec.md)).
+- The [key custodian](../infra/helm/platform/templates/key-custodian.yaml), off by default, alone
+  creates each cell's object-storage key, limited to that cell's prefix.
 - The edge has namespaced RBAC and watches only its own namespace (`traefik` in
   [values.yaml](../infra/helm/platform/values.yaml)).
 
-**Check.** Read the admission policy `exomem-key-custodian-scope`.
+**Check.** Run `helm template` on `infra/helm/platform`. The edge gets a Role, not a ClusterRole.
 
 **Limits.** cellctl can unwrap every cell's keys. It can also render a Job that reads a cell's
-object-storage key ([cloud-key-custody](runbooks/cloud-key-custody.md)). The key custodian is off by
-default.
+object-storage key ([key-custodian.yaml](../infra/helm/platform/templates/key-custodian.yaml#L8-L10)).
 
 **Changing.** `contain-cloud-controller-compromise` closes the pod template and moves the backup password
 into the cell.
@@ -103,26 +113,28 @@ cell namespaces outside the break-glass group.
 
 **Check.** Run `helm template` on `infra/helm/platform` and read both objects.
 
-**Limits.** The everyday role reads every pod's logs, so this claim depends on content-free logging. Its
-certificate lasts 30 days. A cluster administrator can delete the admission policy, so the policy stops
-accidents, not intent.
+**Limits.** The everyday role reads every pod's logs, so this claim depends on content-free logging. A
+cluster administrator can delete the admission policy, so the policy stops accidents, not intent.
 
-**Changing.** `make-cloud-cells-operator-resistant` adds an opt-in tenant lock under the owner's own key.
+**Changing.** [`make-cloud-cells-operator-resistant`](../openspec/changes/make-cloud-cells-operator-resistant/)
+adds an opt-in tenant lock under the owner's own key.
 
 ## Break-glass
 
-**Claim.** Reaching your content needs an emergency credential that expires within an hour, or
-administrator access to the server.
+**Claim.** Reaching your content needs an emergency credential that the procedure issues for at most an
+hour, or administrator access to the server. The cluster does not yet enforce that limit.
 
 **Enforced.** The group `exomem:break-glass` maps to `cluster-admin`
-([L48-L62](../infra/helm/platform/templates/operator-access.yaml#L48-L62)), and no standing credential
-carries it. [cloud-operator-access](runbooks/cloud-operator-access.md) issues a one-hour certificate and
-checks its expiry.
+([L51-L62](../infra/helm/platform/templates/operator-access.yaml#L51-L62)), and no standing credential
+carries it. The issue procedure, not the cluster, sets certificate lifetimes: one hour for break-glass
+([L48-L50](../infra/helm/platform/templates/operator-access.yaml#L48-L50)) and 30 days for everyday
+access ([design](../openspec/changes/archive/2026-09-28-harden-exomem-cloud-operator-access/design.md)).
 
-**Check.** Read the binding and the procedure.
+**Check.** Read the binding.
 
-**Limits.** The procedure sets the one-hour limit; the cluster does not enforce it. An administrator can
-issue a longer certificate.
+**Limits.** An administrator can issue a longer certificate. Substrate's database credential can mint a
+token for any account, and Substrate's admin token can set a cell image. The cluster audit log records
+neither request.
 
 **Changing.** `make-cloud-cells-operator-resistant` adds presence-gated administrator credentials.
 
@@ -132,49 +144,72 @@ issue a longer certificate.
 emergency credential. The record is not tamper-proof evidence.
 
 **Enforced.** [audit-policy.yaml](../infra/ansible/roles/k3s/files/audit-policy.yaml) records metadata
-for every request, and full bodies for namespace, volume claim and StatefulSet changes.
+for every request except system lease renewals
+([L19-L46](../infra/ansible/roles/k3s/files/audit-policy.yaml#L19-L46)). It records full bodies for
+namespace, volume claim and StatefulSet changes.
 [config.yaml.j2](../infra/ansible/roles/k3s/templates/config.yaml.j2#L30-L33) sets the retention.
-[privacy_log.py](../src/exomem/privacy_log.py) keeps content out of the cell's own logs.
+[privacy_log.py](../src/exomem/privacy_log.py) keeps content out of the cell's logs.
 
-**Check.** Run `pytest tests/test_cloud_cell.py -k content_private`.
+**Check.** Run `pytest tests/test_privacy_structured_redaction.py` and the `never_carry` tests in
+`tests/test_cloud_cell.py`.
 
 **Limits.** The log stays on the node for at most 7 days, in at most four 100 MB files. A node
-administrator can rewrite it. Actions on the node outside the cluster API leave no entry. The off-node
-[access record](../infra/cellctl/src/cellctl/access_record.py) is off by default.
+administrator can rewrite it. Actions outside the cluster API leave no entry. The off-node
+[access record](../infra/cellctl/src/cellctl/access_record.py) is off by default. After each change to
+the cell, cellctl or the gateway, a canary procedure searches their logs. It does not scan the edge or
+Substrate, and its results are not published.
 
 **Changing.** `make-cloud-cells-operator-resistant` turns on the off-node access record and a tenant
 access log.
 
 ## Export
 
-**Claim.** An export is a plain ZIP, not encrypted to a key of your own. Object storage keeps it for a
-stated number of hours, and then the service deletes it. You download it only from Home, through a link
-that works for 5 minutes.
+**Claim.** An export is a plain ZIP, not encrypted to your own key. Home links to it for 5 minutes, and
+the service deletes it after a stated number of hours.
 
-**Enforced.** [exports.py](../infra/cellctl/src/cellctl/exports.py) stores the ZIP, signs short links,
-and deletes every version at expiry. [decide.py](../infra/cellctl/src/cellctl/decide.py) sets the
-defaults: `export_ttl` is 24 hours and `export_link_ttl` is 300 seconds.
+**Enforced.** [exports.py](../infra/cellctl/src/cellctl/exports.py) stores the ZIP, signs short links
+and deletes every version at expiry. [decide.py](../infra/cellctl/src/cellctl/decide.py) defaults
+`export_ttl` to 24 hours and `export_link_ttl` to 300 seconds.
 
 **Check.** Open an export link after 5 minutes. It fails.
 
-**Limits.** Substrate and cellctl read the retention time in separate deployments, so they can
-disagree. If cellctl misses the deletion, a [bucket rule](../infra/terraform/cell-data/storage.tf)
-removes the export after about 8 days.
+**Limits.** `cloudExportsEnabled` in
+[cloud-exports.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/cloud-exports.ts)
+is off by default, so Home offers no export. Substrate and cellctl read the retention time separately, so
+they can disagree. A [bucket rule](../infra/terraform/cell-data/storage.tf) removes a missed export after
+about 8 days by default.
 
 **Changing.** `contain-cloud-controller-compromise` encrypts owner exports to a recipient in your browser.
+
+## Operator-run export
+
+**Claim.** While Home's export is off, an operator runs exports. The archive is encrypted to age
+recipients that you supply.
+
+**Enforced.** [cloud_restore_manifests.py](../infra/scripts/cloud_restore_manifests.py) restores a
+backup into a scratch namespace. [cloud_operator_portability.py](../src/exomem/cloud_operator_portability.py)
+builds the archive from it. The connect guard covers scratch namespaces, so a session there needs
+break-glass ([L64-L66](../infra/helm/platform/templates/operator-access.yaml#L64-L66)).
+
+**Check.** Read the namespace pattern in the guard's expression.
+
+**Limits.** The procedure, not code, encrypts the archive and refuses any recipient that the operator or
+escrow holds a key for. Root on the node can read the plaintext restore, so keeping it from the operator
+rests on the procedure.
 
 ## Deletion and what it proves
 
 **Claim.** Deletion revokes sessions and client access, closes routing, and destroys the cell's compute,
-storage and keys.
+storage and keys. Encrypted copies expire on a fixed schedule.
 
 **Enforced.**
-- [cloud-deletion-finish.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/cloud-deletion-finish.ts)
-  marks the cell deleted, revokes client consent and scrubs the account.
+- Once every cell row reads deleted,
+  [cloud-deletion-finish.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/cloud-deletion-finish.ts)
+  marks the account deleted, cancels billing, revokes consent, deletes sessions and scrubs the account.
 - `retire_content_keys` in [db.py](../infra/cellctl/src/cellctl/db.py) clears the wrapped keys first.
   `_decide_deletion` in [decide.py](../infra/cellctl/src/cellctl/decide.py) then removes the namespace,
   volume and staging objects, in order.
-- The custodian purges backups only on a signed
+- The key custodian purges backups only on a signed
   [deletion grant](../infra/contracts/cell-deletion-grants-v1.json), after a 7-day grace.
 
 **What it proves.** The cell row records when its live keys were retired and destroyed. Its
@@ -185,17 +220,20 @@ retention sources (`_retention_expiry` in `reconcile.py`). The chart declares no
 
 **Limits.**
 - etcd snapshots keep encrypted copies of cell Secrets in object storage for up to 31 days
-  ([config.yaml.j2](../infra/ansible/roles/k3s/templates/config.yaml.j2#L54-L63)).
+  ([storage.tf](../infra/terraform/durability/storage.tf#L169-L187)).
 - Control-database backups keep the wrapped keys until their own retention ends.
 - Locked backups stay about 38 days by default, plus the provider's delay.
+- With the key custodian off, no component purges backups. An old cell's backups in the legacy bucket
+  wait for an operator to empty them (`storage_cleanup_pending` in `decide.py`).
 
-**Changing.** `automate-cell-storage-deletion` still needs its final live verification.
+**Changing.** [`automate-cell-storage-deletion`](../openspec/changes/automate-cell-storage-deletion/)
+still needs its final live verification.
 
 ## Backups
 
 **Claim.** Backups are encrypted. Backblaze holds them in its EU region.
 
-**Enforced.** Each cell has its own restic password, wrapped under its root key.
+**Enforced.** Each cell's restic repository has its own backup password, wrapped under the root key.
 [storage.tf](../infra/terraform/cell-data/storage.tf) adds provider encryption and a compliance Object
 Lock of 30 days by default.
 
@@ -216,25 +254,25 @@ image. The admission policy `exomem-cellctl-scope` in
 [cellctl.yaml](../infra/helm/platform/templates/cellctl.yaml) admits only digest-pinned images from the
 configured repository.
 
-**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/exomem@sha256:<digest> --owner artexis10
---source-ref refs/tags/v<version>`.
+**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/exomem:<version>-cloud --repo
+Artexis10/exomem --signer-workflow Artexis10/exomem/.github/workflows/release-please.yml --source-ref
+refs/tags/v<version>`.
 
 **Limits.** Admission checks no signatures, because the signature policy in
-[operator-deploy.yaml](../infra/helm/platform/templates/operator-deploy.yaml) is off by default. Substrate's
-admin token can set an image without the deploy check.
+[operator-deploy.yaml](../infra/helm/platform/templates/operator-deploy.yaml) is off by default.
+Substrate's admin token can set an image without the deploy check.
 
 **Changing.** `make-cloud-cells-operator-resistant` makes admission verify each image's attestation.
 
 ## Secret-key leak detection
 
-**Claim.** The service detects object-storage keys it did not create. CI scans infrastructure
-changes for secrets.
+**Claim.** The service detects object-storage keys it did not create.
 
 **Enforced.** [b2-key-watcher.yml](../.github/workflows/b2-key-watcher.yml) compares the storage
-account's keys and buckets with a pinned set every hour, and alerts outside the cluster. When a change
-touches `infra/`, CI runs [validate.sh](../infra/scripts/validate.sh), which includes a secret scan.
+account's keys and buckets with a pinned set every hour, and alerts outside the cluster. CI runs a
+secret scan ([validate.sh](../infra/scripts/validate.sh)) on changes under `infra/`.
 
-**Check.** Read the watcher's public run history in the Actions tab.
+**Check.** Read the watcher's run history in the Actions tab.
 
 **Limits.** The watcher finds new or changed keys, not misuse of a known key. Its pinned set is not
 public.
@@ -242,17 +280,19 @@ public.
 ## What the service is not
 
 Exomem Cloud is not zero-knowledge or end-to-end encrypted. The edge and gateway see requests and
-responses. Substrate Systems holds the keys, so it could deliberately read your content. The
-`cloud-operator-access` specification requires this disclosure.
+responses. Substrate Systems holds the keys, so it could deliberately read your content. When Home and
+its viewer are on, Substrate on Vercel sees what they show (`callCloudViewerTool` in `cloud-home-mcp.ts`).
+`cloudHomeChannelEnabled` and `cloudViewerEnabled` are off by default. Home's own grants do not appear
+in your app list (`listOwnerApps` in
+[owner-apps.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/owner-apps.ts)).
 
-## Claims we could not trace to code
+## Claims that rest on deployment values or third parties
 
-- "Hetzner for the servers in Germany": `server_location` in
-  [variables.tf](../infra/terraform/foundation/variables.tf) defaults to a German location, but it also
+No code here proves these claims from the privacy page
+([source](https://github.com/substrate-systems/substrate/blob/main/src/app/exomem/privacy/page.tsx)).
+
+- "Hetzner for the servers in Germany" rests on a deployment value. `server_location` in
+  [variables.tf](../infra/terraform/foundation/variables.tf) defaults to a German location, but also
   accepts one in Finland.
-- "Backblaze for encrypted backups in its EU region": the bucket region is a deployment value.
-- "Paddle handles payment-card details": no code here can show that.
-- "Minimal billing, security, deletion-proof, and legal records may be retained": no code defines that
-  set.
-- "We test that they do", for content-free logs: CI tests the cell's logging. The live check of every
-  service is manual and unpublished.
+- "Backblaze for encrypted backups in its EU region" rests on a deployment value: the bucket region.
+- "Paddle handles payment-card details" rests on a third party, Paddle.
