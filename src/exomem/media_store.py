@@ -1,8 +1,8 @@
 """Encrypted, version-pinned originals; the volume is a verified local cache.
 
 A store is selected only by explicit configuration: the media edge for Cloud cells,
-and a filesystem adapter for tests. No store is selected by default. Jobs share the
-media ledger; protection records outlive those jobs.
+and a filesystem adapter for a local disk or a mounted NAS. No store is selected by default.
+Jobs share the media ledger; protection records outlive those jobs.
 """
 
 from __future__ import annotations
@@ -143,12 +143,62 @@ def _declared_chunks(stream: BinaryIO, size: int, sha256: str):
         raise MediaStoreError("MEDIA_UPLOAD_MISMATCH", "the uploaded bytes differ from the declared size or digest")
 
 
-class FilesystemStore:
-    """Versioned ciphertext store for isolated tests, with no deletion API."""
+#: The adapter name of a local disk or a mounted NAS, and its earlier name, which stays accepted.
+FILESYSTEM_ADAPTER = "filesystem"
+FILESYSTEM_ADAPTER_ALIAS = "filesystem-test"
+#: The file in a filesystem store's root that names the store that the root is. Only `declare_store` writes it.
+STORE_MARKER = ".exomem-store"
+_MARKER_SCHEMA = 1
+_MARKER_MAX_BYTES = 4096
 
-    def __init__(self, root: Path, *, max_object_bytes: int | None = None):
+
+def read_store_marker(root: Path) -> str | None:
+    """The store name that `root`'s marker declares; None when the root, the marker or its content is absent or unreadable."""
+    try:
+        descriptor = os.open(root / STORE_MARKER, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    with os.fdopen(descriptor, "rb") as marker:
+        if not stat.S_ISREG(os.fstat(marker.fileno()).st_mode):
+            return None
+        raw = marker.read(_MARKER_MAX_BYTES + 1)
+    try:
+        value = json.loads(raw) if len(raw) <= _MARKER_MAX_BYTES else None
+    except ValueError:
+        return None
+    if isinstance(value, dict) and value.get("schema") == _MARKER_SCHEMA and isinstance(value.get("store"), str):
+        return value["store"]
+    return None
+
+
+def write_store_marker(root: Path, name: str) -> None:
+    """Create the marker that names `root` as store `name`; refuses to replace one. `declare_store` is the owner's door to it."""
+    descriptor = os.open(root / STORE_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as marker:
+        marker.write(json.dumps({"schema": _MARKER_SCHEMA, "store": name}, separators=(",", ":")).encode("utf-8"))
+        marker.flush()
+        os.fsync(marker.fileno())
+    held_fs.flush_directory_path(root).require()
+
+
+class FilesystemStore:
+    """Versioned ciphertext store for a local disk or a mounted NAS, with no deletion API.
+
+    It never creates its root, and it serves only a root whose marker names this store. Without that, a NAS that is
+    not mounted would read as an empty store: `head` would answer absent, and the upload would land on the local disk.
+    """
+
+    def __init__(self, root: Path, *, name: str, max_object_bytes: int | None = None):
         self.root = root
+        self.name = name
         self.max_object_bytes = max_object_bytes
+
+    def _require_identity(self) -> None:
+        if read_store_marker(self.root) != self.name:
+            # Unavailable is never proof that a version is gone: the caller keeps what it recorded.
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE",
+                                  "the store root is missing, or its marker does not name this store")
 
     def _path(self, name: str, version: str) -> str:
         if not originals.is_sha256(name) or not version or Path(version).name != version or version in {".", ".."}:
@@ -162,7 +212,7 @@ class FilesystemStore:
             raise ValueError("invalid upload declaration")
         if self.max_object_bytes is not None and size > self.max_object_bytes:
             raise ObjectTooLarge(size, self.max_object_bytes)
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             with filesystem.parent(name, create=True, access="mutate").require() as parent:
                 held_fs.publish_bytes(filesystem, parent, version,
@@ -173,6 +223,7 @@ class FilesystemStore:
     @contextmanager
     def open(self, name: str, version: str):
         relative = self._path(name, version)
+        self._require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             with filesystem.parent(name).require() as parent:
                 with filesystem.file(parent, Path(relative).name).require() as file:
@@ -181,7 +232,7 @@ class FilesystemStore:
 
     def head(self, name: str, version: str) -> ObjectHead | None:
         self._path(name, version)
-        # A missing store root is unavailable, not proof that a version is gone.
+        self._require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             parent_result = filesystem.parent(name)
             if parent_result.error is not None and parent_result.error.code == "MISSING":
@@ -202,16 +253,59 @@ def _settings(vault: Path) -> dict[str, object]:
     return value
 
 
-def store_for(vault: Path) -> Store:
-    config = _settings(vault)
-    if config.get("adapter") == "media-edge":
+def _adapter(connection: dict[str, object], name: str) -> Store:
+    """Build a store from its connection fields. The adapter names are the closed set of adapters this code implements."""
+    adapter = connection.get("adapter")
+    if adapter == "media-edge":
         from .media_edge_store import EdgeStore
 
-        return EdgeStore.from_configuration(config)
-    if config.get("adapter") != "filesystem-test":
+        return EdgeStore.from_configuration(connection)
+    if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(connection.get("root"), str):
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
-    bound = config.get("max_object_bytes")
-    return FilesystemStore(Path(str(config["root"])), max_object_bytes=None if bound is None else int(bound))
+    bound = connection.get("max_object_bytes")
+    return FilesystemStore(Path(str(connection["root"])), name=name, max_object_bytes=None if bound is None else int(bound))
+
+
+def store_for(vault: Path, name: str | None = None) -> Store:
+    """The store that serves eviction, or the declared store `name`; a declared store with an incomplete descriptor is unavailable."""
+    config = _settings(vault)
+    entry = originals.store_entry(config, name)
+    if entry is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "no media store of that name is configured")
+    if not entry.serves_eviction and not entry.available:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store's descriptor is incomplete")
+    return _adapter(entry.connection, entry.name)
+
+
+def declare_store(vault: Path, name: str) -> Path:
+    """The owner's declaration that the directory in store `name`'s `root` is that store; it writes the root's marker.
+
+    Only this writes a marker. It refuses a root on the vault's own device, because a NAS that is not mounted leaves
+    its mount point there, and a marker written into that empty directory would defeat the marker's purpose. It
+    never creates the root. It names the same store again without change and refuses a root that names another.
+    """
+    config = _settings(vault)
+    entry = originals.store_entry(config, name)
+    root = entry.connection.get("root") if entry is not None else None
+    if entry is None or entry.connection.get("adapter") not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS):
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "that store is not a configured filesystem store")
+    if not isinstance(root, str) or not Path(root).is_absolute() or not Path(root).is_dir():
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                              "the store's root must be an existing absolute directory: mount or create it first")
+    folder = Path(root)
+    if os.stat(folder).st_dev == os.stat(Path(vault)).st_dev:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                              "the store's root is on the vault's own device, so it would not survive that device's loss")
+    declared = read_store_marker(folder)
+    if declared == name:
+        return folder
+    if declared is not None:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root already names another store")
+    try:
+        write_store_marker(folder, name)
+    except FileExistsError:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root holds a marker that cannot be read") from None
+    return folder
 
 
 @contextmanager

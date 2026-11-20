@@ -31,6 +31,10 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     assert generated.returncode == 0
     name_key = tmp_path / "name-key"
     name_key.write_bytes(b"k" * 32)
+    from exomem import media_store
+
+    (tmp_path / "objects").mkdir()
+    media_store.write_store_marker(tmp_path / "objects", "test-store")
     values = {"store": "test-store", "adapter": "filesystem-test", "root": str(tmp_path / "objects"),
               "key_version": "1", "recipient": recipient, "identity_path": str(identity),
               "name_key_path": str(name_key), "enabled": True, "eviction_enabled": True,
@@ -471,7 +475,7 @@ def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, 
     assert originals.original_state(vault, path).state == "local"
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
     assert media_store.enqueue_offloads(vault) == 0
-    assert not list((Path(values["root"])).rglob("*"))
+    assert [entry.name for entry in Path(values["root"]).rglob("*") if entry.name != media_store.STORE_MARKER] == []
     updated = values if new_bound is None else {**values, "max_object_bytes": new_bound}
     config.write_text(json.dumps({"vaults": {str(vault): updated}}))
     assert media_jobs.tool_status(vault)["offload_refusals"] == []
@@ -3099,7 +3103,7 @@ def test_a_corrupt_stored_object_fails_its_job_as_unverified(vault: Path, select
     path = _stored(vault, "recording", 300)
     assert media_store.evict(vault, path)
     for stored in Path(selected_store[0]["root"]).rglob("*"):
-        if stored.is_file():
+        if stored.is_file() and stored.name != media_store.STORE_MARKER:
             stored.write_bytes(b"x" * stored.stat().st_size)
     ledger = media_jobs.MediaJobStore(vault)
     job_id = ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
