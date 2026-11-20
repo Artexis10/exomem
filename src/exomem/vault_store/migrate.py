@@ -106,6 +106,7 @@ def create_owner_schema(
     """Create the lexical, graph, references, then inbound-link tables with their owners' DDL; return what each created."""
     before = schema_objects(conn)
     lexstore.create_catalogue_schema(conn)
+    lexstore.create_browse_index(conn)  # store-only: a sidecar shares the catalogue DDL above
     middle = schema_objects(conn)
     # The store publishes nothing to independent readers, so it takes no capture tables or triggers.
     epistemic_graph.create_row_schema(conn, publication=False)
