@@ -5255,13 +5255,21 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     LexicalStore._ensure_fts_schema(conn)
 
 
-def catalogue_schema_stamped(conn: sqlite3.Connection) -> bool:
-    """Whether ``conn``'s catalogue carries this build's schema stamp: the read of ``stamp_catalogue_schema``."""
+def catalogue_schema_current(conn: sqlite3.Connection, *, raise_errors: bool = False) -> bool:
+    """Whether ``conn``'s catalogue carries this build's stamp and the page shape that goes with it.
+
+    The one rule that the lexical readers (`LexicalStore._schema_is_current`) and store mode's owner state
+    ask: a stamp over an older shape answers nothing, so it must not read as current. It emits no DDL.
+    """
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     except sqlite3.OperationalError:
+        if raise_errors:
+            raise
         return False  # no catalogue tables yet
-    return row is not None and row[0] == str(SCHEMA_VERSION)
+    if not (row and row[0] == str(SCHEMA_VERSION)):
+        return False
+    return LexicalStore._pages_has_current_columns(conn, raise_errors=raise_errors)
 
 
 def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
@@ -6641,17 +6649,7 @@ class LexicalStore:
         ever creating, altering, or dropping anything. A missing `meta`/`pages`
         table or a legacy `pages` shape reads as not-current — the caller then
         defers to the atomic rebuild rather than mutating the old shape here."""
-        try:
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            if raise_errors:
-                raise
-            return False  # no `meta` table yet
-        if not (row and row[0] == str(SCHEMA_VERSION)):
-            return False
-        return self._pages_has_current_columns(conn, raise_errors=raise_errors)
+        return catalogue_schema_current(conn, raise_errors=raise_errors)
 
     @staticmethod
     def _create_catalog_tables(conn: sqlite3.Connection) -> None:

@@ -209,12 +209,16 @@ def test_a_store_migrated_under_an_older_lexical_schema_answers_the_duplicate_in
     assert lookup.available and lookup.hit is not None and lookup.hit.path == rel
 
 
-@pytest.mark.parametrize("schema_16_shape", [False, True], ids=["stamp-only", "without-schema-17-columns"])
-def test_a_store_with_a_current_owner_version_and_an_old_lexical_stamp_answers_once_the_pass_settles(
-    vault, schema_16_shape  # noqa: F811
+@pytest.mark.parametrize(
+    ("old_stamp", "schema_16_shape"),
+    [(True, False), (True, True), (False, True)],
+    ids=["stamp-only", "without-schema-17-columns", "current-stamp-over-schema-16-shape"],
+)
+def test_a_store_with_a_current_owner_version_and_an_old_lexical_catalogue_answers_once_the_pass_settles(
+    vault, old_stamp, schema_16_shape  # noqa: F811
 ):
-    """A store that a lexical-16 build migrated and a later build only settled keeps its stamp, so its
-    lexical readers answer None for good unless the stamp itself makes the owner state behind."""
+    """A store that a lexical-16 build migrated and a later build only settled keeps its stamp or its page
+    shape, so its lexical readers answer None for good unless either one makes the owner state behind."""
     from duplicate_fixtures import legacy_evidence_filing
     from test_vault_store_migration import build_indexes
 
@@ -228,7 +232,10 @@ def test_a_store_with_a_current_owner_version_and_an_old_lexical_stamp_answers_o
     build_indexes(vault)
     assert migrate_apply(vault) == 0
     with store_writer(vault) as bound, bound.handle.transaction() as tx:
-        tx.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(lexstore.SCHEMA_VERSION - 1),))
+        if old_stamp:
+            tx.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(lexstore.SCHEMA_VERSION - 1),)
+            )
         if schema_16_shape:
             # Schema 17 added these two columns; their indexes go first, as SQLite refuses to drop an indexed column.
             for index in ("pages_payload_hash", "pages_source_url"):

@@ -43,7 +43,7 @@ OWNER_SCHEMA = "vault_store_owner_schema"
 LINK_ROWS_VERSION = 1
 #: The generation of the owners' derivation. Version 3 rederives payload hashes that older builds omitted
 #: from legacy Evidence pages. Version 4 derives the prior-path rows of every page's lineage. A lexical schema
-#: bump needs no number here: it leaves the store's lexical stamp behind this build's, and ``read`` and
+#: bump needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
 #: ``owner_schema_behind`` count that as behind too.
 OWNER_SCHEMA_VERSION = 4
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
@@ -167,7 +167,7 @@ def read(conn: Connection) -> Registry:
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
-    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_stamped(conn)
+    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
     if reflected is None or changed is None or behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
@@ -195,14 +195,15 @@ def owner_schema_behind(conn: Connection, *, required_version: int | None = None
     build reads may not exist yet. The pass creates the objects in its first batch and fills them
     batch by batch, so only the version that its last batch records says the rows are whole.
 
-    A store whose lexical stamp is not this build's is behind too, whatever version it records: the
-    lexical readers answer from the stamp. A caller that names ``required_version`` asks about the
+    A store whose lexical catalogue is not this build's is behind too, whatever version it records: the
+    stamp and the page shape must both be current (``lexstore.catalogue_schema_current``, the readers'
+    own test), or the lexical readers answer nothing. A caller that names ``required_version`` asks about the
     rows of that version only, which a lexical schema does not change.
     """
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
     if _owners_behind(None if row is None else row[0], required_version=required_version):
         return True
-    return required_version is None and not lexstore.catalogue_schema_stamped(conn)
+    return required_version is None and not lexstore.catalogue_schema_current(conn)
 
 
 def _owners_behind(value: str | None, *, required_version: int | None = None) -> bool:
