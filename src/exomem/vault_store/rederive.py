@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, registry_history, semantic_index, vault
+from .. import access, lexstore, registry_history, semantic_index, vault
 from ..kbdir import managed_join
 from . import derive, mode
 
@@ -45,9 +45,11 @@ OWNER_SCHEMA = "vault_store_owner_schema"
 INBOUND_LINKS_OWNER_VERSION = 1
 # Duplicate lookup needs only the payload hashes, which version 3 completed.
 PAYLOAD_HASHES_OWNER_VERSION = 3
-# Version 3 shipped payload-hash rederivation for legacy Evidence pages, so stores at 3 lack the unit-row keys
-# and title-contact projections that version 4 introduces and need another pass.
-UNIT_ROW_KEYS_OWNER_VERSION = 4
+# Version 4 derives the prior-path rows of every page's lineage. Version 5 introduces the unit-row keys and
+# the title-contact projections, so a store at 4 lacks them and needs another pass. A lexical schema bump
+# needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
+# ``owner_schema_behind`` count that as behind too.
+UNIT_ROW_KEYS_OWNER_VERSION = 5
 TITLE_CONTACT_OWNER_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
 OWNER_SCHEMA_VERSION = UNIT_ROW_KEYS_OWNER_VERSION
 # A parser input change needs new rows, but no owner DDL or collection-schema barrier.
@@ -178,7 +180,7 @@ def read(conn: Connection) -> Registry:
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
     owner = _revision(meta.get(OWNER_SCHEMA))
-    behind = _owners_behind(meta.get(OWNER_SCHEMA))
+    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
     parser = _revision(meta.get(PARSER_VERSION))
     parser_behind = parser != semantic_index.PARSER_VERSION
     if reflected is None or changed is None or behind or parser_behind:
@@ -204,12 +206,19 @@ def recorded_revisions(conn: Connection) -> dict[str, str | None]:
 
 
 def owner_schema_behind(conn: Connection, *, required_version: int | None = None) -> bool:
-    """Whether the store lacks the required projection generation, defaulting to this build's.
+    """Whether the store's owner objects are older than this build's, so some of the rows that this
+    build reads may not exist yet. The pass creates the objects in its first batch and fills them
+    batch by batch, so only the version that its last batch records says the rows are whole.
 
-    The pass creates the objects in its first batch and fills them
-    batch by batch, so only the version that its last batch records says the rows are whole."""
+    A store whose lexical catalogue is not this build's is behind too, whatever version it records: the
+    stamp and the page shape must both be current (``lexstore.catalogue_schema_current``, the readers'
+    own test), or the lexical readers answer nothing. A caller that names ``required_version`` asks about the
+    rows of that version only, which a lexical schema does not change.
+    """
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
-    return _owners_behind(None if row is None else row[0], required_version=required_version)
+    if _owners_behind(None if row is None else row[0], required_version=required_version):
+        return True
+    return required_version is None and not lexstore.catalogue_schema_current(conn)
 
 
 def _owners_behind(value: str | None, *, required_version: int | None = None) -> bool:
@@ -286,14 +295,13 @@ def settle(root: Path, writer) -> str:
                 # Every page reflects the overlay at ``target``, so it replaces the damaged record.
                 _set(tx, OVERLAY_REVISION, str(target))
             if registry.owner_schema_behind:
+                # The pass has derived every page under this generation, so the lexical stamp may say so.
+                lexstore.stamp_catalogue_schema(tx)
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             _set(tx, PARSER_VERSION, str(semantic_index.PARSER_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
-        _set(tx, PASS, json.dumps({
-            "target": target, "after": paths[-1], "owner_schema": OWNER_SCHEMA_VERSION,
-            "parser_version": semantic_index.PARSER_VERSION,
-        }))
+        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], **_generation()}))
         return ADVANCED
 
 
@@ -311,8 +319,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     tx.executemany(
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
-    if "page_admission" in created:
-        # Earlier batches wrote no page facts, so an older cursor cannot skip those pages.
+    if "page_admission" in created or "prior_paths" in created:
+        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
@@ -342,18 +350,23 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
         try:
             recorded = json.loads(row[0])
             pinned = int(recorded["target"])
-            # Only this derivation version can attest pages before a saved cursor.
-            if (
-                type(recorded.get("owner_schema")) is int
-                and recorded["owner_schema"] == OWNER_SCHEMA_VERSION
-                and type(recorded.get("parser_version")) is int
-                and recorded["parser_version"] == semantic_index.PARSER_VERSION
-                and (pinned == target or state == mode.UNKNOWN)
+            # Only this derivation generation can attest pages before a saved cursor.
+            if all(recorded.get(key) == value for key, value in _generation().items()) and (
+                pinned == target or state == mode.UNKNOWN
             ):
                 return pinned, str(recorded["after"])
         except (ValueError, KeyError, TypeError):
             pass  # an unreadable cursor starts the pass over: it costs time, never correctness
     return target, ""
+
+
+def _generation() -> dict[str, int]:
+    """What a pass derives under: the owners' version, the lexical schema its rows and stamp follow, and the parser."""
+    return {
+        "owner_schema": OWNER_SCHEMA_VERSION,
+        "lexical_schema": lexstore.SCHEMA_VERSION,
+        "parser_version": semantic_index.PARSER_VERSION,
+    }
 
 
 def _revision(value: str | None) -> int | None:

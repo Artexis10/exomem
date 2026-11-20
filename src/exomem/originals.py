@@ -62,6 +62,11 @@ class OriginalSnapshot:
     reference: StoredObject | None = None
     sidecar_hash: str | None = None
     offloadable: bool = False
+    #: Physical pool storage, when the ordinary logical binary path has been retired.
+    local_path: Path | None = None
+    #: The replicas that the sidecar lists beside the eviction store's `reference`, earliest first. They never
+    #: change `state`: only the `reference` in the selected store decides local, cached or evicted.
+    replicas: tuple[StoredObject, ...] = ()
 
     @property
     def present(self) -> bool:
@@ -94,6 +99,21 @@ def stored_reference(value: object) -> StoredObject | None:
     return StoredObject(**value)
 
 
+#: The sibling frontmatter key that lists the replicas beyond `stored_object`, the pointer of the store that serves
+#: eviction. An older release ignores it, so a downgrade reads the pointer alone.
+REPLICAS = "replicas"
+
+
+def replica_references(value: object) -> tuple[StoredObject, ...]:
+    """The well-formed entries of a sidecar's `replicas` list, in written order. Any other value lists none.
+
+    An entry that does not parse is unknown, never a replica: this read skips it, and a writer keeps it as written.
+    """
+    if not isinstance(value, list):
+        return ()
+    return tuple(found for entry in value if (found := stored_reference(entry)) is not None)
+
+
 def bound_path(fields: dict[str, object]) -> str | None:
     """The media, dataset and generic companion schemas name one original."""
     descriptor = fields.get(GOVERNANCE_COMPANION)
@@ -117,6 +137,17 @@ def binary_binding(fields: dict[str, object]) -> BinaryBinding | None:
     path = bound_path(fields)
     digest = fields.get("binary_sha256")
     size = fields.get("binary_size")
+    descriptor = fields.get("governance_companion")
+    if isinstance(descriptor, dict):
+        # Existing companion schemas carry either legacy binary fields or the bound artifact fields.
+        if "binary_sha256" not in fields:
+            digest = descriptor.get("artifact_sha256")
+        elif "artifact_sha256" in descriptor and descriptor["artifact_sha256"] != digest:
+            return None
+        if "binary_size" not in fields:
+            size = descriptor.get("artifact_size")
+        elif "artifact_size" in descriptor and descriptor["artifact_size"] != size:
+            return None
     if path is None or not is_sha256(digest) or type(size) is not int or size < 0:
         return None
     return BinaryBinding(path, digest, size)
@@ -135,6 +166,22 @@ def is_reference_only_companion(fields: dict[str, object], body: str) -> bool:
     return binary is not None and reference is not None and not body.strip() and fields == reference_companion_fields(binary, reference)
 
 
+class RetirementUnconfirmed(ValueError):
+    """A companion whose Trash retirement witness names it, but no longer confirms it.
+
+    Its original is neither live nor absent, so each read refuses (`trash_metadata.retired_companion`). A tool
+    refuses with `code` and `reason`, which name what the owner changes.
+    """
+
+    code = "ORIGINAL_RETIREMENT_UNCONFIRMED"
+
+    def __init__(self, companion: str) -> None:
+        self.companion = companion
+        self.reason = (f"the Trash retirement of the original that {companion} names could not be confirmed; "
+                       "empty or restore that Trash entry first")
+        super().__init__(self.reason)
+
+
 class DisplacedReference(ValueError):
     """A well-formed reference in a page that is not at its original's companion path.
 
@@ -149,30 +196,25 @@ class DisplacedReference(ValueError):
         self.reference = reference
 
 
-def referenced_binding(
-    fields: dict[str, object], *, sidecar_path: str, store: StoreBinding,
-) -> tuple[BinaryBinding, StoredObject] | None:
-    """Read a canonical reference without requiring the original's physical presence.
+def companion_binding(fields: dict[str, object], *, sidecar_path: str) -> BinaryBinding | None:
+    """Validate the binding at its permitted ordinary, protected or legacy Source companion.
 
-    A caller supplies the companion's authoritative path before any Trash relocation.
-    Missing or foreign references count as none; malformed selected-store custody raises, and a
-    well-formed one away from its companion path raises `DisplacedReference`.
+    A well-formed reference away from those paths raises `DisplacedReference`, which a census confirms
+    from the media ledger; any other binding away from them raises a plain `ValueError`.
     """
     from . import reserved_paths
 
-    if "stored_object" not in fields:
-        return None
-    reference = stored_reference(fields["stored_object"])
-    if reference is None:
-        raise ValueError("stored reference is malformed")
-    if reference.store != store.store:
-        return None
     binary = binary_binding(fields)
-    if binary is None or reserved_paths.classify_logical(binary.path).blocked:
-        raise ValueError("stored reference has no valid binary binding")
+    if binary is None:
+        return None
+    if reserved_paths.classify_logical(binary.path).blocked:
+        raise ValueError("original has an unsafe binary binding")
     if sidecar_path not in companion_paths(binary.path):
-        raise DisplacedReference(binary, reference)
-    return binary, reference
+        reference = stored_reference(fields.get("stored_object"))
+        if reference is not None:
+            raise DisplacedReference(binary, reference)
+        raise ValueError("original is not at its bound companion path")
+    return binary
 
 
 def configuration(vault: Path) -> dict[str, object] | None:
@@ -195,6 +237,131 @@ def configuration(vault: Path) -> dict[str, object] | None:
     return selected
 
 
+# The retrieval classes of a store's capability descriptor: a protocol value that the descriptor schema fixes, never
+# a vocabulary that a vault defines. Only `immediate` lets repair read a replica without the owner.
+IMMEDIATE = "immediate"
+# nosemgrep: ep-word-set -- the descriptor schema's closed enum of retrieval classes.
+RETRIEVAL_CLASSES: tuple[str, ...] = (IMMEDIATE, "minutes", "hours")
+#: The configuration key that lists the declared stores beside the kept `store` key.
+STORES = "stores"
+#: The optional configuration key that states who holds the decryption identity, and its one value: a platform that
+#: wraps it. Without the key, the owner's confirmed export of the identity is the only evidence of custody.
+KEY_CUSTODY = "key_custody"
+PLATFORM_CUSTODY = "platform"
+
+
+@dataclass(frozen=True, slots=True)
+class StoreEntry:
+    """One configured store and its capability descriptor; a None field is unknown, never refused.
+
+    `connection` holds the fields that its adapter reads. An entry whose descriptor omits a field (`missing`)
+    or gives it a value that the schema refuses (`invalid`) is unavailable: no replica is made in it and repair
+    does not read it, and the status names those fields. Nothing branches on `name`.
+    """
+
+    name: str
+    connection: dict[str, object]
+    failure_domain: str | None = None
+    retrieval_class: str | None = None
+    head_recomputes: bool | None = None
+    missing: tuple[str, ...] = ()
+    invalid: tuple[str, ...] = ()
+    #: Whether this is the store that serves eviction: the one that the per-vault `store` key names.
+    serves_eviction: bool = False
+    #: Whether the entry came from the `stores` list (a declared store) and not from the legacy top-level fields.
+    declared: bool = False
+
+    @property
+    def available(self) -> bool:
+        return not self.missing and not self.invalid
+
+
+def _descriptor(entry: dict[str, object], *, require_adapter: bool) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
+    """The descriptor values that an entry gives, with the fields it omits and the fields it gives wrongly."""
+    given: dict[str, object] = {}
+    missing: list[str] = []
+    invalid: list[str] = []
+    checks = (
+        ("failure_domain", lambda v: isinstance(v, str) and bool(v.strip()) and len(v) <= 1024),
+        ("retrieval_class", lambda v: isinstance(v, str) and v in RETRIEVAL_CLASSES),
+        ("head_recomputes", lambda v: type(v) is bool),
+    )
+    for field, valid in checks:
+        if field not in entry:
+            missing.append(field)
+        elif valid(entry[field]):
+            given[field] = entry[field]
+        else:
+            invalid.append(field)
+    if require_adapter:
+        if "adapter" not in entry:
+            missing.append("adapter")
+        elif not isinstance(entry["adapter"], str) or not entry["adapter"]:
+            invalid.append("adapter")
+    return given, tuple(missing), tuple(invalid)
+
+
+def store_entries(config: dict[str, object]) -> dict[str, StoreEntry]:
+    """Every store that a vault's configuration declares, the one that serves eviction first.
+
+    The kept `store` key names the store that serves eviction, and the top-level fields of the entry (`adapter`,
+    `root` and the rest) are its connection, as they were before declared stores: an older release reads the file
+    the same way, so the two can never disagree. With no `stores` list, that is the only store, `immediate`, with
+    its other descriptor fields unknown. A declared entry of that name supplies only its descriptor. Any other
+    entry names a further store with its own connection. A malformed entry makes only itself unavailable.
+    """
+    primary = str(config["store"])
+    declared = config.get(STORES)
+    listed: list[tuple[str, dict[str, object]]] = []
+    if isinstance(declared, list):
+        for index, item in enumerate(declared):
+            name = item.get("name") if isinstance(item, dict) else None
+            listed.append((name if isinstance(name, str) and name else f"#{index}", item if isinstance(item, dict) else {}))
+    found: dict[str, StoreEntry] = {}
+    selected = next((entry for name, entry in listed if name == primary), None)
+    if selected is None:
+        found[primary] = StoreEntry(primary, config, retrieval_class=IMMEDIATE, serves_eviction=True)
+    else:
+        given, missing, invalid = _descriptor(selected, require_adapter=False)
+        found[primary] = StoreEntry(primary, config, given.get("failure_domain"), given.get("retrieval_class"),
+                                    given.get("head_recomputes"), missing, invalid, True, True)
+    seen: set[str] = set()
+    for name, item in listed:
+        if name in seen:
+            # A repeated name cannot be addressed, so it makes the later entry unavailable, not the first.
+            found[f"{name}#repeat"] = StoreEntry(f"{name}#repeat", item, invalid=("name",), declared=True)
+            continue
+        seen.add(name)
+        if name == primary:
+            continue
+        given, missing, invalid = _descriptor(item, require_adapter=True)
+        if "name" not in item:
+            missing = ("name", *missing)
+        found[name] = StoreEntry(name, item, given.get("failure_domain"), given.get("retrieval_class"),
+                                 given.get("head_recomputes"), missing, invalid, False, True)
+    return found
+
+
+def with_replica(value: object, replica: StoredObject) -> list[object]:
+    """A sidecar's `replicas` list with `replica` in place of the entry for its store, or after the last entry.
+
+    Every other entry stays as written and in its place, one that does not parse included, so a writer never drops
+    what it did not change and the earliest entry stays first.
+    """
+    entries = list(value) if isinstance(value, list) else []
+    for index, entry in enumerate(entries):
+        held = stored_reference(entry)
+        if held is not None and held.store == replica.store:
+            entries[index] = replica.fields()
+            return entries
+    return [*entries, replica.fields()]
+
+
+def store_entry(config: dict[str, object], name: str | None = None) -> StoreEntry | None:
+    """The entry for `name`, or for the store that serves eviction when `name` is None; None when none is declared."""
+    return store_entries(config).get(str(config["store"]) if name is None else name)
+
+
 def binding_for(vault: Path) -> StoreBinding | None:
     value = configuration(vault)
     return StoreBinding(str(value["store"])) if value is not None else None
@@ -211,9 +378,27 @@ def resolve_original_relative(vault: Path, value: str) -> str:
         if error.code != "MISSING":
             raise
         relative = canonical_vault_rel(vault, value)
-        if original_state(vault, relative).state != "evicted":
+        snapshot = original_state(vault, relative)
+        if snapshot.state != "evicted" and snapshot.local_path is None:
             raise
         return relative
+
+
+def resolve_original_path(vault: Path, value: str) -> tuple[Path, str]:
+    """Resolve an ordinary path or a canonically bound original whose bytes live elsewhere."""
+    from . import reserved_paths
+    from .vault import VaultPathError, resolve_under_vault
+
+    try:
+        return resolve_under_vault(vault, value, must_exist=True, must_be_file=True)
+    except VaultPathError as missing:
+        if missing.code != "NOT_FOUND":
+            raise
+        try:
+            relative = resolve_original_relative(vault, value)
+            return resolve_under_vault(vault, relative, must_be_file=True)
+        except (ValueError, VaultPathError, reserved_paths.ReservedPathLeafError):
+            raise missing from None
 
 
 def sidecar_path(path: Path) -> Path:
@@ -221,6 +406,93 @@ def sidecar_path(path: Path) -> Path:
     from .preserve import _sidecar_path
 
     return _sidecar_path(path, protected=marked(path.as_posix()))
+
+
+def available(vault: Path, path: str | Path) -> bool:
+    """Whether the archive holds this original's bytes: an ordinary file, a shared pool object or a stored version.
+
+    A sweep that asks whether an original is gone asks this, never whether its logical path is a file:
+    a pooled filing has no file there.
+    """
+    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
+    if target.is_file():
+        return True
+    # nosemgrep: ep-word-membership -- the closed `OriginalState.state` literal; every state but "missing" holds bytes.
+    return original_state(vault, target).state in {"local", "cached", "evicted"}
+
+
+def may_pool(bound: str) -> bool:
+    """Whether a binding whose companion names ``bound`` may keep its bytes as a shared pool object.
+
+    Only a filing's bytes are shared. A Trash entry is no filing: its companion names its own Trash path,
+    while a trashed filing's page keeps naming its original path. So a binding that names a Trash path is
+    an entry, which keeps an ordinary file there even in a pooled archive.
+    """
+    from .trash_metadata import is_trash_path
+
+    return not is_trash_path(bound)
+
+
+def may_share_bytes(relative: str) -> bool:
+    """Whether an original at `relative` may keep its bytes only in the shared pool.
+
+    A pool-only filing exists on disk solely as its companion page `<name>.md`, which the egress
+    artifact census tells from a note by `<name>` carrying a suffix of its own. A name without a
+    suffix (`LICENSE`, or a dotfile like `.blob`) gives a companion indistinguishable from a note,
+    so such an original keeps an ordinary file at its logical path instead, like a dataset.
+    """
+    # A trailing dot reads as a suffix of "." on newer Python and as none on older, so both count as none.
+    return PurePosixPath(relative).suffix not in ("", ".")
+
+
+def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
+    """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
+
+    `local_path` is that immutable object: read its identity or stat from it. A decoder that needs the
+    filename takes `media_store.logical_view`. A damaged object is still pooled, and each read of it raises
+    `original_pool.ObjectMismatch` or hashes to other bytes. Any other path, a missing or unsafe one included,
+    is not pooled.
+    """
+    from . import original_pool
+
+    # Pool objects exist only once the pool's marker is published, so an ordinary archive answers from the marker
+    # alone and never opens its identity catalogue for this question.
+    if not original_pool.enabled(vault):
+        return None
+    shared = digest_addressed(vault, path)
+    return shared if shared is not None and shared.local_path is not None else None
+
+
+def digest_addressed(vault: Path, path: str | Path, *, snapshot: OriginalSnapshot | None = None) -> OriginalSnapshot | None:
+    """The filing, in a pooled archive, of an original that no ordinary file holds at its logical path.
+
+    Its bytes are addressed by digest: a shared pool object, or a stored version once evicted. Moving or
+    trashing it moves only its companion and repoints the binding; nothing renames or downloads bytes.
+    A caller that already resolved the path passes its `snapshot`. Any other path, a missing or unsafe
+    one included, is None.
+    """
+    from . import original_pool, reserved_paths
+
+    target = Path(path) if Path(path).is_absolute() else Path(vault) / path
+    if is_note_path(target.as_posix()):
+        return None
+    if snapshot is None:
+        if target.is_file():
+            return None
+        try:
+            snapshot = original_state(vault, target)
+        except reserved_paths.ReservedPathLeafError:
+            return None
+        except RetirementUnconfirmed:
+            raise  # Neither a filing nor absent: the caller refuses.
+        except ValueError:
+            original_pool.enabled(vault)  # An unreadable format marker raises: the layout is unknown, not ordinary.
+            return None
+    # `local_path` is set only when no ordinary file exists and the pool holds the object; an evicted original has
+    # no local bytes at all, and only the pool's format marker tells a pooled archive's from a legacy one.
+    if snapshot.local_path is not None:
+        return snapshot
+    return snapshot if snapshot.state == "evicted" and original_pool.enabled(vault) else None
 
 
 def evicted(vault: Path, path: str | Path) -> bool:
@@ -285,15 +557,39 @@ def bound_companion(
     return None
 
 
+class ArchiveReads:
+    """Archive-level state that one walk over many bindings reads once, as each binding first needs it."""
+
+    def __init__(self, vault: Path) -> None:
+        self.vault = vault
+        self._binding: tuple[StoreBinding | None] | None = None
+        self._pooled = False
+
+    def binding(self) -> StoreBinding | None:
+        if self._binding is None:
+            self._binding = (binding_for(self.vault),)
+        return self._binding[0]
+
+    def pooled(self) -> bool:
+        from . import original_pool
+
+        # A published pool marker is never removed, so a True read is kept. A missing marker is read again, so a
+        # walk sees a conversion that starts while it runs.
+        if not self._pooled:
+            self._pooled = original_pool.enabled(self.vault)
+        return self._pooled
+
+
 def original_state(
     vault: Path, path: str | Path, *, binding: StoreBinding | None = None,
-    companions: Mapping[str, bytes] | None = None,
+    companions: Mapping[str, bytes] | None = None, archive: ArchiveReads | None = None,
 ) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
     This reader never constructs a store client or opens the job database.
     Foreign references deliberately confer no presence in the selected vault.
-    ``companions`` is ``companion_candidates``'s: pages that the caller has already read.
+    ``companions`` is ``companion_candidates``'s: pages that the caller has already read. A walk passes one
+    ``archive`` for all its bindings, so it reads the store binding and the pool marker once.
     """
     from . import reserved_paths
     from .vault import FrontmatterError
@@ -336,17 +632,50 @@ def original_state(
     binary_binding_value = binary_binding(fields)
     if binary_binding_value is None:
         return OriginalSnapshot("local" if physical else "missing", binary, sidecar)
+    local_path = None
+    if not physical and not store_read.serves(vault, relative) and may_pool(relative):
+        from . import original_pool
+
+        try:
+            pooled = archive.pooled() if archive is not None else original_pool.enabled(vault)
+            present = pooled and original_pool.locally_present(
+                vault, binary_binding_value.sha256, binary_binding_value.size)
+        except original_pool.ObjectMismatch:
+            present = True  # A damaged object still holds the filing's place; each read of it refuses.
+        if present:
+            from .trash_metadata import retired_companion
+
+            # A companion retired to Trash stays at its path, but it files nothing: equal bytes that another
+            # filing pools are not its own.
+            present = not retired_companion(vault, companion, fields, hashlib.sha256(data).hexdigest())
+        if present:
+            physical = True
+            local_path = original_pool.object_path(vault, binary_binding_value.sha256)
     reference = stored_reference(fields.get("stored_object"))
-    selected = binding if binding is not None else binding_for(vault)
+    selected = binding if binding is not None else archive.binding() if archive is not None else binding_for(vault)
     if selected is None or (reference is not None and reference.store != selected.store):
         reference = None
     state = ("cached" if physical else "evicted") if reference is not None else ("local" if physical else "missing")
     return OriginalSnapshot(
         state, binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
         reference, hashlib.sha256(data).hexdigest(),
-        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
-        offloadable=not is_note_path(relative) and "data_file" not in fields,
+        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field. So does a
+        # suffix-less original of a pooled archive, whose evicted bytes could otherwise turn pool-only (`may_share_bytes`).
+        offloadable=not is_note_path(relative) and "data_file" not in fields
+        and not resident_suffixless(vault, relative, archive),
+        local_path=local_path,
+        replicas=replica_references(fields.get(REPLICAS)),
     )
+
+
+def resident_suffixless(vault: Path, relative: str, archive: ArchiveReads | None = None) -> bool:
+    """Whether an original named `relative` stays on the volume, never offloaded, because a pooled archive
+    keeps a suffix-less one resident (`may_share_bytes`). The one rule that offload and upload admission share."""
+    if may_share_bytes(relative):
+        return False
+    from . import original_pool
+
+    return archive.pooled() if archive is not None else original_pool.enabled(vault)
 
 
 def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:
@@ -358,7 +687,6 @@ def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, Origina
     if binding_for(vault) is None:
         return None
     from . import reserved_paths
-    from .governance import egress
     from .vault import VaultPathError, resolve_under_vault
 
     try:
@@ -366,9 +694,20 @@ def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, Origina
         stored = original_state(vault, abs_path)
     except (VaultPathError, reserved_paths.ReservedPathLeafError):
         return None
-    # A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
-    # from the owner, as `egress.write_target_withheld` decides.
-    visible = egress.restricted_release_filter(vault) if egress.caller_restricted(vault) else None
-    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+    if stored.state != "evicted" or not caller_may_see(vault, rel_path):
         return None
     return abs_path, rel_path, stored
+
+
+def caller_may_see(vault: Path, relative: str) -> bool:
+    """Whether a door that moves an original with no file at its path may show it to this caller.
+
+    A bound store filters the owner's walk too (it leaves out the trash); a door withholds nothing
+    from the owner, as `egress.write_target_withheld` decides.
+    """
+    from .governance import egress
+
+    if not egress.caller_restricted(vault):
+        return True
+    visible = egress.restricted_release_filter(vault)
+    return visible is None or visible(relative)

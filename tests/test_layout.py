@@ -316,6 +316,23 @@ def test_a_part_page_keeps_its_name_and_holds_no_name_of_its_own(registry):
     assert placed.stem + placed.extension == "part-02.md"
 
 
+def test_a_page_named_after_an_existing_file_beside_it_keeps_its_name(registry):
+    """The page `<file>.md` is bound to the file by that name; the same page without the file takes its title."""
+    media = f"{KB}/Sources/Media/talk.mp4.md"
+    kept = layout.place(
+        media,
+        type_value="source",
+        title="Talk",
+        registry=registry,
+        files={f"{KB}/Sources/Media/talk.mp4", media},
+    )
+    alone = layout.place(media, type_value="source", title="Talk", registry=registry, files={media})
+
+    assert (kept.name_class, kept.fixed_because) == (NameClass.FIXED, FixedBecause.FILE_SIDECAR)
+    assert kept.stem + kept.extension == "talk.mp4.md"
+    assert alone.name_class is NameClass.DERIVED
+
+
 def test_trashed_and_non_markdown_files_hold_no_name_but_evidence_markdown_does(registry):
     """Name uniqueness counts owned Markdown outside the machinery folders, so a trashed page never holds a name."""
     assert _place(registry, f"{KB}/_trash/Notes/Insights/gone.md").holds_name is False

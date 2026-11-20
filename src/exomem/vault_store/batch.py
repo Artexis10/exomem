@@ -91,6 +91,7 @@ def commit_batch(
     validate_prepared_bindings: Callable[[], None] | None = None,
     prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
     lifecycle: Lifecycle | None = None,
+    publish_originals: Callable[[], None] | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
 
@@ -129,6 +130,9 @@ def commit_batch(
             )
     if not caller_writes and lifecycle is None:
         return []
+    from .. import trash_metadata
+
+    caller_writes = trash_metadata.prepare_binding_changes(root, caller_writes)
     # A lifecycle commit with no page to write carries no curation witness: nothing to witness.
     augmented, witness = (
         curation_witness.augment_batch(
@@ -148,7 +152,7 @@ def commit_batch(
             vocabulary_auxiliaries,
             validate_prepared_bindings,
             commit_point,
-            curation_witness.publication_hook(witness),
+            vault._owner_writes(publish_originals, curation_witness.publication_hook(witness)),
             lifecycle,
         )
     except BaseException:

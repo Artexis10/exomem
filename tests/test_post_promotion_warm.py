@@ -36,6 +36,8 @@ def test_the_request_path_warms_after_admission_and_the_matrix_after_the_drain(
     matrix_warmed = threading.Event()
 
     class Watcher:
+        seeds_recall_projections = True
+
         def wait_until_seeded(self, timeout=None) -> bool:
             return True
 

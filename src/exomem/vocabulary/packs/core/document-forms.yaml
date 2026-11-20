@@ -1,0 +1,25 @@
+schema_version: 1
+registry: document-forms
+# What a captured document IS as a record of a work, so a reader can tell the full text
+# from a record of the work. The set is a useful default, never the permitted set: a
+# vault adds forms in `_Schema/document-forms.yaml` and a new key registers on first use.
+entries:
+  full-text:
+    label: Full text
+    description: the complete text of the work
+  abstract:
+    label: Abstract
+    description: the abstract or summary page of a work, not its full text
+    aliases: [abstract-only]
+  citation-record:
+    label: Citation record
+    description: a bibliographic record of a work, with no text of the work itself
+    aliases: [citation, bibliographic-record]
+  excerpt:
+    label: Excerpt
+    description: selected passages of a work
+    aliases: [excerpts, extract]
+  secondary-work:
+    label: Secondary work
+    description: a work that discusses another work, such as a review, summary or thesis chapter
+    aliases: [secondary-source]

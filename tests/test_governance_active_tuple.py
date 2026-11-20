@@ -31,6 +31,7 @@ from exomem import (
     graph_sync,
     media_jobs,
     media_processing,
+    page_lineage,
     preserve,
     recall_space,
     reserved_paths,
@@ -6599,7 +6600,9 @@ def test_v4_move_replaces_membership_and_publishes_auxiliaries_once(
     assert moved.wikilinks_updated == 1
     assert graph_providers and callable(graph_providers[-1])
     assert not (vault / old_relative).exists()
-    assert (vault / new_relative).read_text(encoding="utf-8") == source
+    assert (vault / new_relative).read_text(encoding="utf-8") == page_lineage.append_entry(
+        source, old_relative
+    )
     assert "renamed-private" in (vault / inbound_relative).read_text(encoding="utf-8")
     custody = authorization_custody.load_authorization_custody(vault, now=now + 1)
     assert custody.control.activation_epoch == 2
@@ -6869,7 +6872,9 @@ def test_v4_move_does_not_undo_bytes_after_catalog_outcome_becomes_uncertain(
 
     assert uncertain.value.code == "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN"
     assert not (vault / old_relative).exists()
-    assert (vault / new_relative).read_text(encoding="utf-8") == source
+    assert (vault / new_relative).read_text(encoding="utf-8") == page_lineage.append_entry(
+        source, old_relative
+    )
 
 
 def test_open_vault_skips_v4_only_auxiliary_predecessor_validation(

@@ -187,6 +187,8 @@ class Definition:
     replaced_by: str | None = None
     builtin: bool = False
     requires_url: bool = False
+    #: The domain this one sits under (domains only): its profile is served after this domain's own.
+    parent: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         out: dict[str, object] = {
@@ -197,6 +199,8 @@ class Definition:
         }
         if self.description:
             out["description"] = self.description
+        if self.parent:
+            out["parent"] = self.parent
         if self.aliases:
             out["aliases"] = sorted(self.aliases)
         if self.replaced_by:
@@ -267,6 +271,7 @@ def _pack_definitions(name: str) -> tuple[Definition, ...]:
             status=entry.status,
             builtin=True,
             requires_url=bool(entry.attributes.get("requires_url", False)),
+            parent=entry.parent,
         )
         for entry in vocabulary_registry.pack_entries(name)
     )
@@ -443,6 +448,26 @@ class SourceTaxonomy:
                 )
         return resolution
 
+    def domain_ancestors(self, key: str) -> tuple[str, ...]:
+        """The domains above `key`, nearest first. The one resolver for a domain's parent chain.
+
+        A deprecated parent is replaced by its `replaced_by` when it has one. The walk stops at an
+        unknown key or a repeat, so a registry that was hand-edited into a cycle cannot loop it.
+        """
+        ancestors: list[str] = []
+        current = self.domains.get(key)
+        while current is not None and current.parent is not None:
+            parent = self.domains.get(current.parent)
+            deprecated = parent is not None and parent.status == "deprecated"
+            replacement = parent.replaced_by if deprecated and parent is not None else None
+            if replacement is not None and replacement in self.domains:
+                parent = self.domains[replacement]
+            if parent is None or parent.key == key or parent.key in ancestors:
+                break
+            ancestors.append(parent.key)
+            current = parent
+        return tuple(ancestors)
+
     def _resolve(
         self,
         axis: str,
@@ -586,6 +611,7 @@ def taxonomy_from_data(data: object, *, governed: bool = False) -> SourceTaxonom
     domains = _merge_section(
         "domain", builtin_domains(), data.get(_DOMAIN_SECTION), findings
     )
+    domains = _validate_parents(domains, findings)
     _report_segment_collisions("source_kind", kinds, findings)
     _report_segment_collisions("domain", domains, findings)
     if governed:
@@ -640,6 +666,39 @@ def _merge_section(
     return merged
 
 
+def _validate_parents(
+    domains: Mapping[str, Definition], findings: list[str]
+) -> dict[str, Definition]:
+    """Drop a parent that names no registered domain or that closes a cycle, and say which.
+
+    The read stays lenient: an entry with a bad parent is a root, so no resolver loops or serves a
+    stranger.
+    """
+    valid = dict(domains)
+    for key, definition in sorted(domains.items()):
+        if definition.parent is not None and definition.parent not in domains:
+            findings.append(
+                f"domain {key!r} has parent {definition.parent!r}, which is not a registered "
+                f"domain; register {definition.parent!r} or remove the parent of {key!r}"
+            )
+            valid[key] = replace(definition, parent=None)
+    cycled: set[str] = set()
+    for key in sorted(valid):
+        chain = [key]
+        while (parent := valid[chain[-1]].parent) is not None and parent not in chain:
+            chain.append(parent)
+        if parent == key and key not in cycled:
+            cycled.update(chain)
+            findings.append(
+                f"the parents of domains {', '.join(repr(item) for item in chain)} form a cycle; "
+                f"remove the parent of one of them"
+            )
+    return {
+        key: replace(definition, parent=None) if key in cycled else definition
+        for key, definition in valid.items()
+    }
+
+
 def _definition_from_entry(
     axis: str,
     key: str,
@@ -682,6 +741,12 @@ def _definition_from_entry(
     requires_url = entry.get("requires_url")
     if requires_url is None:
         requires_url = bool(existing.requires_url) if existing else False
+    parent = existing.parent if existing else None
+    if axis == "domain" and entry.get("parent"):
+        try:
+            parent = normalize(entry["parent"], axis="domain")
+        except TaxonomyError as exc:
+            findings.append(f"domain {key!r} parent is ignored: {exc}")
     return Definition(
         key=key,
         label=label,
@@ -694,6 +759,7 @@ def _definition_from_entry(
         else (existing.replaced_by if existing else None),
         builtin=bool(existing.builtin) if existing else False,
         requires_url=bool(requires_url),
+        parent=parent,
     )
 
 
@@ -1103,6 +1169,7 @@ class _Adapter:
                 aliases=definition.aliases,
                 status=definition.status,
                 replaced_by=definition.replaced_by,
+                parent=definition.parent,
                 attributes=MappingProxyType(attributes),
                 origin="pack" if definition.builtin else "vault",
             )
@@ -1158,6 +1225,8 @@ class _Adapter:
         row["status"] = entry.status
         if entry.replaced_by:
             row["replaced_by"] = entry.replaced_by
+        if entry.parent:
+            row["parent"] = entry.parent
         if entry.attributes.get("requires_url"):
             row["requires_url"] = True
         document[self.section][key] = row
@@ -1223,7 +1292,8 @@ DOMAIN_SPEC = vocabulary_registry.RegistrySpec(
     stem="source-taxonomy",
     overlay=registry_path,
     adapter=_Adapter("domain", _DOMAIN_SECTION),
-    fields=_LABEL_FIELDS,
+    # A domain may name its parent: profile serving reads the chain nearest first.
+    fields=_LABEL_FIELDS | {"parent"},
     attributes=frozenset({"path_label"}),
     immutable=frozenset({"attributes.path_label"}),
     promotion="auto-register",

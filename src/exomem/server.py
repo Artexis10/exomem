@@ -26,7 +26,7 @@ from fastmcp.server.transforms import Transform
 from fastmcp.utilities.versions import dedupe_with_versions
 from starlette.middleware import Middleware as ASGIMiddleware
 
-from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
+from . import __version__, capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
@@ -863,6 +863,9 @@ def _find_call_summary(message) -> str:
     return f' query="{query}" mode={mode} scope={scope}'
 
 
+#: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
+SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
+
 #: What every MCP client is told at `initialize`. A host with lifecycle hooks
 #: injects the working set before a turn; a chat app or a generic client has no
 #: such hook and sees only this text and the tool descriptions, so this is the
@@ -909,6 +912,11 @@ def build_server(
         # The writer lease is state ownership. A standby acquires it only at
         # promotion (`seamless-managed-worker-handoff` D7).
         start_server_lifecycle()
+        from . import original_pool
+
+        # After the launcher or standalone claim in `run` and before any
+        # request; a standby runs this at promotion instead.
+        original_pool.activate_at_start(runtime.vault_root)
     # Cloud mode (design D1): EXOMEM_CLOUD_CELL=1 selects a thin seam over
     # this exact standalone path. LocalRuntimeActivation,
     # AuthorizationSessionMiddleware and the local writer lease are the
@@ -956,6 +964,11 @@ def build_server(
     mcp = ExomemFastMCP(
         "exomem",
         instructions=SERVER_INSTRUCTIONS,
+        # AGPL section 13: a client sees the running release and the source repository in the
+        # initialize handshake. The instructions carry a hard 900-character limit, so the offer
+        # does not live there; without `version`, serverInfo would report the framework's own.
+        version=__version__,
+        website_url=SOURCE_REPOSITORY_URL,
         auth=auth,
         icons=server_icons(),
         lifespan=lifespan,
@@ -1087,6 +1100,11 @@ def build_server(
             for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
+    if cloud:
+        from .cell_identity import register_identity_route
+
+        register_identity_route(mcp, cell_id=credentials.cell_id, vault_root=runtime.vault_root,
+                                surface=surface_descriptor)
     for cmd in product_commands:
         if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
             continue
@@ -1435,7 +1453,10 @@ def run(
         # sets a context variable, and FastMCP sets its own again per request.
         uvicorn_config: dict[str, object] = {"reset_contextvars": True}
         if worker_socket is not None:
+            from .service_ingress import WORKER_KEEP_ALIVE_SECONDS
+
             uvicorn_config["uds"] = str(worker_socket)
+            uvicorn_config["timeout_keep_alive"] = WORKER_KEEP_ALIVE_SECONDS
         worker_options = {"uvicorn_config": uvicorn_config}
         # Only this process answers /download, so only the short links it mints can resolve.
         from . import download_links

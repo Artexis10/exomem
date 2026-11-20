@@ -71,6 +71,10 @@
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
         },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
+        },
         "preview": {
           "type": "boolean"
         },
@@ -271,6 +275,10 @@
         "suggest_links": {
           "type": "boolean",
           "description": "Also return pages to link."
+        },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
         },
         "preview": {
           "type": "boolean"
@@ -512,6 +520,10 @@
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
         },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
+        },
         "preview": {
           "type": "boolean"
         },
@@ -665,6 +677,7 @@
             "files.reclassify",
             "files.create",
             "files.append",
+            "files.move",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
@@ -691,6 +704,7 @@
             "maintenance.cutover",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.job",
             "maintenance.structured_files",
@@ -786,6 +800,7 @@
             "media.process",
             "media.retry",
             "media.reprocess",
+            "media.replicate",
             "review.set_family",
             "review.set_envelope",
             "review.decide_vocabulary",
@@ -831,6 +846,7 @@
             "session.close",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.cancel_job",
             "maintenance.held_resolve",
@@ -1040,10 +1056,11 @@
           "enum": [
             "text",
             "history",
-            "units"
+            "units",
+            "brief"
           ],
           "type": "string",
-          "description": "text (default), history, or units: observations with their ids."
+          "description": "text (default), history, units: observations with ids, or brief: a topic's brief."
         },
         "more": {
           "type": "string",
@@ -1071,7 +1088,7 @@
           "type": "string"
         },
         "max_chars": {
-          "default": 4000,
+          "default": 6000,
           "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
           "type": "integer"
         },
@@ -1375,6 +1392,10 @@
         },
         "why": {
           "type": "string"
+        },
+        "document_form": {
+          "type": "string",
+          "description": "The form of this record of the work, as an open slug such as abstract."
         },
         "options": {
           "type": "object",

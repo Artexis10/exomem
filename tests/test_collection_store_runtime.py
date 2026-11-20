@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 
 import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
@@ -279,6 +279,117 @@ def test_warm_operations_reuse_cache_and_retained_bindings_expire(runtime, monke
     with preview_store(runtime.root, runtime):
         assert record_memory(runtime.root, "inspect", collection=CID)
     assert len(created) == 3  # normal cache, lifecycle cache, reopened normal cache
+
+
+def test_source_metadata_departure_ends_borrowing_and_expires_resources_without_closing_cached_handle(runtime):
+    from exomem import memory_refs, source_custody
+    from exomem.collection_store.preview import bound_writer, source_metadata_phase
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime) as writer:
+        handle = runtime._handle
+        saved_connection = writer.connection
+        saved_cursor = saved_connection.execute("SELECT 1")
+        saved_method = writer.inspect_collection
+        saved_context = writer.read_snapshot()
+        phase = source_metadata_phase(runtime.root)
+        with runtime.manager.mutation_guard(runtime.root, operation="source_metadata_test"):
+            with phase.source_metadata():
+                assert runtime.manager._store_borrowers == {}
+                assert not handle.connection.in_transaction and not handle._closed
+                assert bound_writer(runtime.root).handle is handle
+                reference = memory_refs.memory_ref(memory_refs.new_id())
+                source_custody.publish(runtime.root, source_custody.prepare_enrollment(
+                    runtime.root, reference=reference, source_hash="1" * 64))
+                admissions = source_custody.reserve_dependencies(runtime.root, [reference],
+                    producer=source_custody.OwnerLocator(owner="collection_records", locator="test-store", version="2"),
+                    operation_id="test-operation", checkpoint="before:test-operation")
+                source_custody.begin_dependency_effect(runtime.root, admissions)
+                manifest, _ = source_custody.read_manifest(runtime.root, reference)
+                assert manifest.dependency_epochs["collection_records"].revision == 2
+                with pytest.raises(connection.CollectionStoreError, match="CHECKOUT_CLOSED"):
+                    writer.inspect_collection(CID)
+            assert runtime._handle is handle
+            assert writer.inspect_collection(CID)
+            for use in (lambda: saved_connection.execute("SELECT 1"), lambda: saved_cursor.fetchone(),
+                        lambda: saved_method(CID), saved_context.__enter__):
+                with pytest.raises(connection.CollectionStoreError, match="CHECKOUT_CLOSED"):
+                    use()
+
+
+def test_source_metadata_departure_preserves_and_refuses_an_active_read_snapshot(runtime):
+    from exomem.collection_store.preview import source_metadata_phase
+
+    _create(runtime)
+    with preview_store(runtime.root, runtime) as writer:
+        with runtime.manager.mutation_guard(runtime.root, operation="source_metadata_test"):
+            with writer.read_snapshot():
+                borrowers = dict(runtime.manager._store_borrowers)
+                with pytest.raises(connection.CollectionStoreError, match="closed store read"):
+                    with source_metadata_phase(runtime.root).source_metadata():
+                        pytest.fail("canonical metadata ran inside an active caller snapshot")
+                assert writer.connection.in_transaction
+                assert runtime.manager._store_borrowers == borrowers
+            assert writer.inspect_collection(CID)
+
+
+def test_source_record_write_releases_checkout_and_preserves_preview_access(runtime):
+    from test_origin_bindings import _write
+
+    from exomem import provenance, source_custody
+    from exomem.collection_store.preview import source_metadata_phase
+    from exomem.governance.principal import library_scope
+
+    _create(runtime)
+    binding = _write(runtime.root, "Retained observation.\n")
+    with library_scope(), preview_store(runtime.root, runtime) as writer:
+        with runtime.manager.mutation_guard(runtime.root, operation="enroll_test_source"):
+            with source_metadata_phase(runtime.root).source_metadata():
+                source_custody.publish(runtime.root, source_custody.prepare_enrollment(
+                    runtime.root, reference=binding["reference"], source_hash=binding["version"]))
+        handle, old_method, old_cursor = runtime._handle, writer.inspect_collection, writer.connection.execute("SELECT 1")
+        result = writer.append_record(CID, item={"title": "Observation"}, item_key=KEY,
+            body="Interpretation.\n" + provenance.encode_origin({"inputs": {"observation": binding},
+                "assessments": [], "bindings": []}), why="Retain the observation.")
+        assert result["outcome"] == "committed"
+        assert writer.inspect_collection(CID)["coverage"]["committed"] == 1
+        assert runtime._handle is handle and not handle._closed
+        for use in (lambda: old_method(CID), lambda: old_cursor.fetchone()):
+            with pytest.raises(connection.CollectionStoreError, match="CHECKOUT_CLOSED"):
+                use()
+        manifest, _ = source_custody.read_manifest(runtime.root, binding["reference"])
+        assert manifest.dependency.first_publication.owner == "collection_records"
+
+
+@pytest.mark.parametrize("leave_checkout", [False, True])
+def test_retained_dump_cannot_pin_the_next_source_metadata_snapshot(runtime, leave_checkout):
+    from exomem.collection_store.preview import source_metadata_phase
+
+    _create(runtime)
+    marker = os.urandom(16).hex()
+    with runtime.manager.mutation_guard(runtime.root, operation="source_snapshot_test"), ExitStack() as scope:
+        writer = scope.enter_context(preview_store(runtime.root, runtime))
+        with writer.handle.transaction() as conn:
+            conn.executemany("INSERT INTO store_meta(key,value) VALUES(?,?)",
+                [("iterator_marker", marker), ("iterator_tail", "remaining row")])
+        dump = writer.connection.iterdump()
+        # Locate our fixture row by its random payload, without parsing SQL or pinning dump order.
+        for statement in dump:
+            if marker in statement:
+                break
+        else:
+            pytest.fail("the native dump did not emit its fixture row")
+        with closing(sqlite3.connect(runtime.path)) as external:
+            external.execute("INSERT INTO store_meta(key,value) VALUES('source_snapshot_probe','current')")
+            external.commit()
+        if leave_checkout:
+            scope.close()
+            scope.enter_context(preview_store(runtime.root, runtime))
+        with source_metadata_phase(runtime.root).source_metadata():
+            assert runtime._handle.connection.execute(
+                "SELECT value FROM store_meta WHERE key='source_snapshot_probe'").fetchone() == ("current",)
+        with pytest.raises(connection.CollectionStoreError, match="CHECKOUT_CLOSED"):
+            next(dump)
 
 
 def test_coalesced_publication_keeps_warm_release_work_bounded(runtime, monkeypatch):

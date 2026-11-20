@@ -38,6 +38,7 @@ from . import overview as overview_module
 from . import personalize as personalize_module
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
+from .vault_store import cli_fence
 
 _SKILL_NAME_MARKER = "name: exomem"
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
@@ -726,6 +727,7 @@ def run_setup(
             print_fn("setup: a vault path is required.")
             return 2
     vault_path = Path(vault).expanduser()
+    cli_fence.require("setup", vault_path)
     if not vault_path.exists():
         if yes or _ask_yn(input_fn, f"{vault_path} does not exist. Create it?", True):
             vault_path.mkdir(parents=True, exist_ok=True)
@@ -771,8 +773,10 @@ def run_setup(
 
     # 3. init — never forced from the wizard
     try:
-        init_module.init_vault(vault_path)
+        created = init_module.init_vault(vault_path)
         report("init", f"[done] {managed_join('')} scaffold created")
+        if (storage := created.get("original_storage")) is not None and storage["layout"] != "shared":
+            print_fn(f"    {storage['action']}")
     except FileExistsError:
         # The vault already has a Knowledge Base, so init is skipped — but the
         # governance docs inside it are product-owned and were last written by

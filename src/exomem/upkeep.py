@@ -45,6 +45,7 @@ _TRIAGE_ACTIONS = frozenset({"dismiss", "snooze", "reopen"})
 #: then connections, then naming, self-description and conventions.
 FAMILY_ORDER: tuple[str, ...] = (
     dreamer_families.FOLD_FAMILY,
+    dreamer_families.CURATION_FAMILY,
     dreamer_families.HYDRATION_FAMILY,
     dreamer_families.LINK_FAMILY,
     dreamer_families.ALIAS_FAMILY,
@@ -61,6 +62,7 @@ LABELS: dict[str, str] = {
     dreamer_families.CATEGORY_KIND: "A unit label varies from the registered one",
     dreamer_families.FOLD_KIND: "Conversation recaps name this page since it changed",
     dreamer_families.PROFILE_KIND: "A linked page has no summary",
+    dreamer_families.CURATION_KIND: "A profile may be out of date",
 }
 
 _LINK_WHY: dict[str, str] = {
@@ -159,6 +161,13 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
             f"pages from {visible_origins} independent sources link this page, which has no summary"
         )
     measures = row.get("measures") or {}
+    if kind == dreamer_families.CURATION_KIND:
+        new, stale = int(measures.get("new_units") or 0), int(measures.get("stale_lines") or 0)
+        found = [
+            *([f"{new} preference or constraint unit{'' if new == 1 else 's'} newer than its last update"] if new else []),
+            *([f"{stale} line{'' if stale == 1 else 's'} superseded, contradicted or past a date"] if stale else []),
+        ]
+        return f"{'at least ' if measures.get('at_least') else ''}{' and '.join(found)}"
     if kind == dreamer_families.ALIAS_KIND:
         count = int(measures.get("referrers") or 0)
         notes = f"{count} other note{'' if count == 1 else 's'} link"

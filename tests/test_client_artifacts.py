@@ -2867,3 +2867,45 @@ def test_a_cell_keeps_the_broker_cap_and_fixed_deadlines(monkeypatch: pytest.Mon
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert client_artifacts.fetch_budget() == client_artifacts.FetchBudget()
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_a_retried_adoption_of_a_pooled_hand_over_replays_instead_of_refusing_to_verify(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a replay that re-reads the logical path: a pooled original has no file there, so the retry of a
+    stored hand-over is refused ADOPTION_REPLAY_UNVERIFIABLE and the client reports a stored file as lost."""
+    import hashlib
+
+    from exomem import artifact_lifecycle, client_artifacts, media_processing, original_pool
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    payload = b"synthetic hand-over bytes"
+    monkeypatch.setattr(
+        client_artifacts, "stage_artifact", lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], "brief.bin", payload)
+    )
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+
+    def hand_over() -> dict:
+        return client_artifacts.capture_source_artifacts(
+            vault,
+            source_schema=source_schema,
+            title="Reasoning input",
+            source_type="research-report",
+            files=[{"download_url": "https://files.example/brief", "file_id": "offer"}],
+            adoption={"key": "brief:pooled", "trigger": "handed_over", "selected_file_id": "offer"},
+        )
+
+    stored = hand_over()["files"][0]
+    assert not (vault / stored["stored_path"]).exists()
+
+    retried = hand_over()["files"][0]
+
+    assert retried["outcome"] == "replayed", retried
+    assert retried["stored_path"] == stored["stored_path"]
+
+    damaged = original_pool.object_path(vault, hashlib.sha256(payload).hexdigest())
+    damaged.chmod(0o600)
+    damaged.write_bytes(b"synthetic hand-over BYTES")  # the same size, as bit rot leaves it
+    assert hand_over()["files"][0]["code"] == "ADOPTION_REPLAY_UNVERIFIABLE"

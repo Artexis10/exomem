@@ -45,6 +45,7 @@ from . import (
     maintenance_jobs,
     originals,
     relation_review,
+    reserved_paths,
     semantic_index,
     semantic_writes,
 )
@@ -415,8 +416,12 @@ def _against_plan(
 
 
 def _media_present(vault_root: Path, path: Path | str) -> bool:
-    """Whether a media file is on disk or evicted to the originals store, so its derived rows keep an owner."""
-    return (vault_root / path).exists() or originals.evicted(vault_root, path)
+    """Whether the archive still holds a media file's bytes, so its derived rows keep an owner."""
+    try:
+        return originals.available(vault_root, path)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        # A key that names no filing is judged as before: one odd row must not end the whole sweep.
+        return (vault_root / path).exists()
 
 
 def _rel(path: Path, vault_root: Path) -> str:
@@ -591,7 +596,11 @@ def _cleanup_eligible(batch: relation_review.LifecyclePreparedBatch) -> tuple[re
 def _graph_quarantine_members(vault_root: Path) -> tuple[str, ...] | None:
     """The members a graph-lineage quarantine would move aside; `None` when the lineage is not unavailable."""
     from . import epistemic_graph
+    from .vault_store import mode as store_mode
 
+    # A store-mode run skips the graph phase, so it never moves file mode's lineage that a plan would name.
+    if store_mode.store_mode_for_reads(vault_root):
+        return None
     if epistemic_graph.graph_sync.classify_epoch(vault_root).kind != "unavailable":
         return None
     return tuple(

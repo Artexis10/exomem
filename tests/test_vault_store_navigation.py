@@ -74,6 +74,28 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     assert events["snapshots"] == [1]
 
 
+def test_a_source_capture_plans_its_index_and_log_writes_from_pages_with_no_projection(vault):  # noqa: F811
+    """`add` plans against the indexes and the log; a page that the store holds and no file does is no refusal."""
+    assert migrate_apply(vault) == 0
+    damage_every_owned_projection(vault, "deleted")
+
+    update = indexes.compute_updates(
+        vault,
+        source_type="articles",
+        folder_title="Articles",
+        folder_description="captured web/PDF content",
+        rel_source_path="Knowledge Base/Sources/Articles/2026-01-01-tide",
+        date_iso="2026-01-01",
+        activity_summary="Captured a tide table.",
+        log_entry_body="Filed the tide table.",
+        source_counts={"Articles": 1},
+    )
+
+    assert "2026-01-01-tide" in update.sources_index_content
+    assert "Captured a tide table." in update.top_index_content
+    assert "Filed the tide table." in update.log_content
+
+
 def test_store_status_reports_an_unreadable_revision_as_unknown(vault, monkeypatch):  # noqa: F811
     """A failed diagnostic must not report a zero graph generation or a zero store revision."""
     assert migrate_apply(vault) == 0
@@ -84,6 +106,6 @@ def test_store_status_reports_an_unreadable_revision_as_unknown(vault, monkeypat
     monkeypatch.setattr(read, "snapshot", unavailable)
     status = writer_lease.coordination_status(vault)
 
-    assert status["graph_sync"] == {"state": "not_applicable", "generation": None}
+    assert status["graph_sync"] == {"state": "unknown", "generation": None}
     assert status["vault_store"] == {"state": "unavailable", "revision": None}
     assert status["coordinator_healthy"] is True

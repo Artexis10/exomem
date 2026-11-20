@@ -917,7 +917,7 @@ def test_binary_verification_uses_open_handle_identity_on_windows_like_stat_disa
 
     monkeypatch.setattr(Path, "stat", _windows_like_path_stat)
 
-    media_processing._verify_binary_identity(binary, resolved, provenance)
+    media_processing._verify_binary_identity(vault, binary, resolved, provenance)
 
 
 def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
@@ -2783,6 +2783,7 @@ def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) ->
         "gpu_preflight",
         "serving_worker_cuda_hidden",
         "child_crashes",
+        "result_publication",
         "jobs",
         "errors",
         "index_refresh",

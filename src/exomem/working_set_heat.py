@@ -1394,10 +1394,16 @@ def note_session(vault_root: Path, mark: SessionMark) -> bool:
 
 
 def purge(vault_root: Path, paths: Iterable[str]) -> bool:
-    """Drop every event of deleted pages (their tombstones hid them already)."""
+    """Drop every event and session mark of deleted pages (their tombstones hid them already)."""
     gone = sorted({str(path) for path in paths})
     if not gone:
         return True
+    dropped = set(gone)
+    fold = _FOLDS.get(_root_key(vault_root))
+    if fold is not None:
+        # An event folded before the deletion would otherwise write the page back on the next flush.
+        with _LOCK:
+            fold.pending = [event for event in fold.pending if event.path not in dropped]
 
     def work(conn: sqlite3.Connection) -> None:
         for start in range(0, len(gone), 400):
@@ -1405,8 +1411,34 @@ def purge(vault_root: Path, paths: Iterable[str]) -> bool:
             marks = ",".join("?" * len(chunk))
             conn.execute(f"DELETE FROM heat_events WHERE path IN ({marks})", chunk)  # noqa: S608
             conn.execute(f"DELETE FROM attributed WHERE path IN ({marks})", chunk)  # noqa: S608
+        # At most SESSIONS_MAX rows; each keeps its other pages.
+        for session, listed in conn.execute("SELECT session, paths FROM heat_sessions").fetchall():
+            try:
+                kept = [item for item in json.loads(listed) if item not in dropped]
+            except (TypeError, ValueError):
+                kept = []  # `_read` already treats an unreadable list as empty.
+            if json.dumps(sorted(kept)) != listed:
+                conn.execute("UPDATE heat_sessions SET paths = ? WHERE session = ?", (json.dumps(sorted(kept)), session))
 
     return _write(vault_root, work, what="purge")
+
+
+def holds(vault_root: Path, path: str) -> bool | None:
+    """Whether the sidecar still names one page, or None when it cannot be read."""
+    if not sidecar_path(vault_root).exists():
+        return False
+    conn = _connect(vault_root)
+    if conn is None:
+        return None
+    try:
+        if conn.execute("SELECT 1 FROM heat_events WHERE path = ? UNION ALL SELECT 1 FROM attributed WHERE path = ? "
+                        "LIMIT 1", (path, path)).fetchone() is not None:
+            return True
+        return any(path in json.loads(listed) for (listed,) in conn.execute("SELECT paths FROM heat_sessions"))
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        conn.close()
 
 
 def set_meta(vault_root: Path, values: Mapping[str, object]) -> bool:

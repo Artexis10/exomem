@@ -3095,6 +3095,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "status": True,
             "retry": False,
             "reprocess": False,
+            "replicate": False,
         },
         ("observe_memory", "operation"): {
             "add": False,
@@ -3107,6 +3108,8 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "fix": True,
             "reconcile": False,
             "backfill-ids": True,
+            # Preview unless `dry_run=false`, like fix and backfill-ids; only the owner runs either.
+            "convert-originals": True,
             # A job read is a structure read; its cancel flags a job and is a write.
             "maintenance-job": True,
             "maintenance-job-cancel": False,
@@ -3153,7 +3156,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
@@ -3171,6 +3174,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     assert not commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": False}
     )
+    assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
+    assert not commands.invocation_is_read_only(manage, {"operation": "move"})
 
     assert registry[("schema_memory", "operation")] == {
         "infer": "save-conditional",

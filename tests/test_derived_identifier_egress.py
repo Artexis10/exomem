@@ -682,6 +682,63 @@ def test_a_restricted_writer_resolves_links_as_if_the_withheld_page_were_absent(
     assert "[[Knowledge Base/Notes/beta]]" in written["B"]["body"]
 
 
+_TITLE_DOORS: dict[str, tuple[str, dict[str, Any]]] = {
+    "remember": (
+        "remember",
+        {
+            "content": "A page about plans. See [[other]].\n\n## Observations\n\n"
+            "- [operating constraint] Keep retries bounded #reliability\n",
+            "title": "Hidden Plan",
+            "note_type": "insight",
+        },
+    ),
+    "create-entity": (
+        "connect_memory",
+        {
+            "operation": "create-entity",
+            "entity_type": "concept",
+            "name": "Hidden Plan",
+            "summary": "A concept named like a withheld page's title.",
+        },
+    ),
+}
+
+
+def _named(vault: Path, principal: RequestPrincipal | None, door: str) -> dict[str, Any]:
+    command, kwargs = _TITLE_DOORS[door]
+    answer = _call(vault, principal, command, **kwargs)
+    assert "__error__" not in answer, answer
+    return {"path": answer["path"], "warnings": answer.get("warnings")}
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("door", sorted(_TITLE_DOORS))
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_names_its_page_as_if_a_withheld_title_were_absent(
+    tmp_path: Path, audience: str, door: str
+) -> None:
+    base, withheld = _writer_fixture()
+    vaults = {
+        "B": _materialize(tmp_path / "B" / "vault", dict(base), audience),
+        "A": _materialize(tmp_path / "A" / "vault", {**base, **withheld}, audience),
+    }
+
+    named = {variant: _named(vault, _writer(audience), door) for variant, vault in vaults.items()}
+
+    assert _text(named["A"]) == _text(named["B"])
+    assert Path(named["B"]["path"]).name == "Hidden Plan.md"
+
+
+@pytest.mark.parametrize("door", sorted(_TITLE_DOORS))
+def test_the_owner_still_numbers_a_name_against_a_withheld_title(tmp_path: Path, door: str) -> None:
+    base, withheld = _writer_fixture()
+    vault = _materialize(tmp_path / "vault", {**base, **withheld}, "external")
+
+    named = _named(vault, None, door)
+
+    assert Path(named["path"]).name == "Hidden Plan-2.md"
+
+
 _CANDIDATE_NAME = "Zed Corp"
 _CANDIDATE_SCOPE = "Notes/Insights/hidden-*,Entities/Organizations/Zed*,Notes/Withheld/**"
 
@@ -1667,6 +1724,8 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     """The answer carries nothing about a withheld linking page, which the
     confined mover cannot rewrite and leaves as it was: no graph or index
     outcome, no contract result for it, and the same shape on every later move."""
+    from exomem import lexstore, path_mentions
+
     scope = "Notes/Withheld/**, Notes/Insights/Withheld/**"
     base = {
         **_semantic_move_fixture(),
@@ -1688,19 +1747,20 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
 
     moves = (("gamma", "gamma-x"), ("gamma-x", "gamma-y"), ("solo", "solo-x"))
 
-    def moved(vault: Path) -> list[str]:
-        return [
-            _VOLATILE_TEXT.sub(
-                "<v>",
-                _text(
-                    _call(
-                        vault, _writer(audience), "manage_memory_file", operation="move",
-                        old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
-                    )
-                ),
+    def move(vault: Path, old: str, new: str) -> str:
+        # Each move reads a current index: otherwise whether the catalogue repair that the last
+        # move scheduled has finished decides the path-mention warning, not the withheld page.
+        with library_scope():
+            assert lexstore.ensure_fresh(vault)
+        return _text(
+            _call(
+                vault, _writer(audience), "manage_memory_file", operation="move",
+                old_path=f"{INSIGHTS}/{old}.md", new_path=f"{INSIGHTS}/{new}.md", **extra,
             )
-            for old, new in moves
-        ] + [
+        )
+
+    def moved(vault: Path) -> list[str]:
+        return [_VOLATILE_TEXT.sub("<v>", move(vault, old, new)) for old, new in moves] + [
             # The activity log is readable by the mover: its line carries the
             # figures the mover may see.
             _VOLATILE_TEXT.sub(
@@ -1712,6 +1772,7 @@ def test_a_restricted_move_answers_as_if_no_withheld_page_linked_it(
     answers = {variant: moved(vault) for variant, vault in vaults.items()}
 
     assert '"__error__"' not in _text(answers["A"]), answers["A"]
+    assert not any(path_mentions.NOT_CHECKED in answer for answer in answers["B"])
     for step in range(len(moves) + 1):
         assert answers["A"][step] == answers["B"][step], step
         assert answers["C"][step] == answers["B"][step], step
@@ -3362,14 +3423,19 @@ def test_a_restricted_abstention_and_its_token_carry_no_index_generation(
         assert decoded["refs"] == []
 
 
+@pytest.mark.usefixtures("granted_writer")
 @pytest.mark.parametrize("audience", AUDIENCES)
 def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_linked_it(
     tmp_path: Path, audience: str
 ) -> None:
-    """A correction moves the source and rewrites every linking page, including
-    one withheld from the mover. Its answer, and its revert's, carry nothing
-    that rewrite produced, in every response detail: no graph outcome either,
-    since a withheld rewrite can move whether the graph join finishes in time."""
+    """A correction moves the source and rewrites the linking pages its writer may
+    see, never one withheld from it. Its answer, and its revert's, carry nothing
+    that depends on the withheld page, in every response detail: no graph outcome
+    either, since a withheld page can move whether the graph join finishes in time.
+    Each call starts on a current catalogue, so the path-mention check runs in every
+    twin and the comparison never turns on how fast one twin's catalogue caught up."""
+    from exomem import lexstore, path_mentions
+
     source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
     base = {
         source: _page("Tide table", "High water 06:12.", type="source", source_type="other"),
@@ -3399,11 +3465,205 @@ def test_a_restricted_reclassification_and_revert_answer_as_if_no_withheld_page_
                 {"operation": "revert-reclassification", "path": destination,
                  "reason": "keep it in the drain queue"},
             ):
-                answer = _call(vault, _principal(audience), "manage_memory_file", **request, **extra)
+                with library_scope():
+                    assert lexstore.ensure_fresh(vault)
+                answer = _call(vault, _writer(audience), "manage_memory_file", **request, **extra)
+                assert "__error__" not in answer, (variant, detail, answer)
                 answers[variant].append(_VOLATILE_TEXT.sub("<v>", _text(answer)))
 
-    assert '"__error__"' not in _text(answers["B"]), answers["B"]
     assert not any('"graph_sync' in answer for answer in answers["B"]), answers["B"]
+    assert not any(path_mentions.NOT_CHECKED in answer for answer in answers["B"])
     assert answers["A"] == answers["B"]
     assert answers["C"] == answers["B"]
     assert f"[[{source[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_revert_leaves_a_withheld_repointed_page_resolving_and_answers_alike(
+    tmp_path: Path, audience: str
+) -> None:
+    """The owner's correction repoints a captured page withheld from a later reverter. A revert
+    that strands that page's link on the path the source leaves, or whose answer or page bytes
+    differ when such a page exists, so the reverter learns of it."""
+    from exomem.vault import normalize_wikilink
+
+    source = f"{KB}/Sources/Other/2026-01-02-tide-table.md"
+    destination = f"{KB}/Sources/Datasets/Travel/2026-01-02-tide-table.md"
+    base = {
+        source: _page(
+            "Tide table", "High water 06:12.", type="source", source_type="other",
+            exomem_id="0b9f3c52-6a51-4f43-9d0e-2f6f5e1c7a11",
+        ),
+        f"{KB}/log.md": "# Log\n\n",
+    }
+    hidden = f"{KB}/Evidence/Withheld/tide-proof.md"
+    variants = {
+        "B": base,
+        "A": {**base, hidden: _page("Tide proof", f"From [[{source[:-3]}]].", type="evidence")},
+        "C": {**base, hidden: _page("Tide proof", "Unrelated.", type="evidence")},
+    }
+    vaults = {
+        variant: _materialize(
+            tmp_path / variant / "vault", files, audience, scope="Evidence/Withheld/**"
+        )
+        for variant, files in variants.items()
+    }
+    correction = {"path": source, "source_kind": "dataset", "domain": "travel"}
+    answers: dict[str, str] = {}
+    pages: dict[str, str] = {}
+    for variant, vault in vaults.items():
+        proposal = _call(
+            vault, None, "manage_memory_file", operation="propose-reclassification", **correction
+        )
+        moved = _call(
+            vault, None, "manage_memory_file", operation="reclassify",
+            reason="a table of measurements", preview_digest=proposal["preview_digest"],
+            **correction,
+        )
+        assert moved.get("path") == destination, moved
+        answer = _call(
+            vault, _writer(audience), "manage_memory_file", operation="revert-reclassification",
+            path=destination, reason="keep it in the drain queue",
+        )
+        assert "__error__" not in answer, answer
+        answers[variant] = _VOLATILE_TEXT.sub("<v>", _text(answer))
+        pages[variant] = _VOLATILE_TEXT.sub("<v>", page_bytes(vault, source).decode())
+
+    assert answers["A"] == answers["B"] == answers["C"]
+    assert pages["A"] == pages["B"] == pages["C"]
+    # The withheld page keeps the repoint that its pointer record holds, and the link still
+    # finds the source.
+    assert f"[[{destination[:-3]}]]" in page_bytes(vaults["A"], hidden).decode()
+    with library_scope():
+        assert normalize_wikilink(destination[:-3], vaults["A"]) == (source[:-3], None)
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("audience", AUDIENCES)
+def test_a_restricted_writer_cannot_forge_a_lineage_that_takes_a_withheld_pages_links(
+    tmp_path: Path, audience: str
+) -> None:
+    """A writer that names the owner's withheld page in its own note's `moved_from`, by a create
+    or a frontmatter patch, so the owner's links to that page resolve to the writer's note."""
+    from exomem.vault import normalize_wikilink
+
+    withheld = f"{WITHHELD_DIR}/harbour-plan.md"
+    own = f"{INSIGHTS}/claim.md"
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            withheld: _page("Hidden Plan", "Withheld body text.", type="insight"),
+            f"{NOTES}/index.md": _page("Index", f"See [[{withheld[:-3]}]].", type="insight"),
+        },
+        audience,
+    )
+    forged = [{"path": withheld}]
+    reviewed = {"relation_disposition": "reviewed_none", "relation_review_reason": "a stub note"}
+    created = _call(
+        vault, _writer(audience), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active", moved_from=forged),
+        **reviewed,
+    )
+    plain = _call(
+        vault, _writer(audience), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active"), **reviewed,
+    )
+    patched = _call(
+        vault, _writer(audience), "edit_memory", path=own, why="record where it came from",
+        operation={"kind": "patch_frontmatter", "field": "moved_from", "value": forged},
+    )
+
+    assert "LINEAGE_PROTECTED" in _text(created), created
+    assert "__error__" not in plain, plain
+    assert "INVALID_SET: cannot set `moved_from:`" in _text(patched), patched
+    assert "moved_from" not in page_bytes(vault, own).decode()
+    with library_scope():
+        assert normalize_wikilink(withheld[:-3], vault) == (withheld[:-3], None)
+
+
+@pytest.mark.usefixtures("granted_writer")
+@pytest.mark.parametrize("relayout", [False, True], ids=["no-relayout", "relayout"])
+def test_a_lineage_key_spelled_with_a_yaml_escape_is_refused_like_the_plain_key(
+    tmp_path: Path, relayout: bool
+) -> None:
+    """A writer that spells `moved_from` with a double-quoted escape, which a byte test for the
+    key misses but the parse that derives claims reads, so once any relayout row is active the
+    owner's links to a withheld page without an id resolve to the writer's note."""
+    from exomem.vault import normalize_wikilink
+
+    withheld = f"{WITHHELD_DIR}/harbour-plan.md"
+    own = f"{INSIGHTS}/claim.md"
+    record = {
+        f"{KB}/_Schema/relayout-record.yaml": (
+            "schema_version: 1\nrelayouts:\n  layout-1:\n    reverted: false\n    rows:\n"
+            f"      - {{exomem_id: null, old_path: '{NOTES}/orchard-old.md', "
+            f"new_path: '{NOTES}/filler-orchard.md'}}\n"
+        )
+    }
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            **(record if relayout else {}),
+            withheld: _page("Hidden Plan", "Withheld body text.", type="insight"),
+            f"{NOTES}/index.md": _page("Index", f"See [[{withheld[:-3]}]].", type="insight"),
+        },
+        "external",
+    )
+    escaped = {'"moved\\x5ffrom"': [{"path": withheld}]}
+    reviewed = {"relation_disposition": "reviewed_none", "relation_review_reason": "a stub note"}
+    created = _call(
+        vault, _writer("external"), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active", **escaped),
+        **reviewed,
+    )
+    plain = _call(
+        vault, _writer("external"), "manage_memory_file", operation="create", path=own,
+        content=_page("Claim", f"A note.{_UNIT}", type="insight", status="active"), **reviewed,
+    )
+
+    assert "LINEAGE_PROTECTED" in _text(created), created
+    assert "__error__" not in plain, plain
+    assert "x5ffrom" not in page_bytes(vault, own).decode()
+    with library_scope():
+        assert normalize_wikilink(withheld[:-3], vault) == (withheld[:-3], None)
+
+
+def test_the_owner_audit_names_an_identified_page_at_a_prior_path_on_each_backend(
+    tmp_path: Path,
+) -> None:
+    """An audit that reads restriction from the release filter, which a bound store gives the
+    owner too, so the store's owner never learns that a page with its own identity took a moved
+    page's old links."""
+    from exomem import memory_refs
+
+    old = f"{NOTES}/harbour-ledger.md"
+    moved = f"{NOTES}/Archive/harbour-ledger.md"
+    vault = _materialize(
+        tmp_path / "vault",
+        {
+            **_filler(),
+            moved: _page(
+                "Harbour Ledger", "Moved once.", type="insight",
+                exomem_id="5b0f6a52-2f4e-4c1e-9a43-0d8e1c7b2a61", moved_from=[{"path": old}],
+            ),
+            old: _page(
+                "Tide Table", "A page of its own.", type="insight",
+                exomem_id="9c3d1e7f-6a2b-4d58-8e10-4f7a2b9c0d33",
+            ),
+        },
+        "external",
+    )
+    with library_scope():
+        memory_refs.ReferenceIndex(vault).rebuild_all()
+
+    # The service binds its store writer for every call, a read included.
+    _reset()
+    with backend_writer(vault):
+        answer = _call_bound(
+            vault, None, "review_memory", mode="audit", categories=["reference_identity"]
+        )
+
+    assert "reserved_path_identified" in _text(answer), answer

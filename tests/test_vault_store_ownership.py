@@ -5,18 +5,23 @@ Each test names the realistic failure that only it catches. They use real files 
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
+from exomem import collection_profiles, reserved_paths
 from exomem.collection_store import replica
+from exomem.vault_store import ownership as ownership_module
 from exomem.vault_store.ownership import (
     OwnedFile,
     Ownership,
     Skipped,
     SkipReason,
     classify,
+    classify_by_rule,
     classify_many,
     iter_owned,
 )
@@ -142,6 +147,49 @@ def test_a_markdown_file_is_a_page_in_any_letter_case(rel):
 def test_every_other_file_is_a_binary(rel):
     """Defect: the store loads a PDF as a page, so its bytes enter the database and its hash covers the wrong rows."""
     assert classify(rel) is Ownership.BINARY
+
+
+def _rename_the_folder(monkeypatch):
+    monkeypatch.setenv("EXOMEM_KB_DIRNAME", "Notebook")
+
+
+def _add_a_collection_layer(monkeypatch):
+    layer = dataclasses.replace(collection_profiles.RECORDS_PROFILE, name="ledgers", placement_layer="Ledgers")
+    profiles = MappingProxyType({**collection_profiles.PROFILES, "ledgers": layer})
+    monkeypatch.setattr(collection_profiles, "PROFILES", profiles)
+
+
+def _add_a_reserved_family(monkeypatch):
+    family = reserved_paths.InternalStateDescriptor(
+        "ledger-state", "ledger_state", reserved_paths.StatePlacement.VAULT_CANONICAL, trees=("_ledger",),
+    )
+    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths._REGISTRY, family))
+
+
+#: Each input of the memo: a path, its owner before and after the input changes, and the change.
+MEMO_INPUTS = {
+    "folder name": ("Notebook/idea.md", Ownership.NONE, Ownership.PAGE, _rename_the_folder),
+    "collection layers": (f"{KB}/Ledgers/idea.md", Ownership.PAGE, Ownership.NONE, _add_a_collection_layer),
+    "reserved registry": (f"{KB}/_ledger/idea.md", Ownership.PAGE, Ownership.NONE, _add_a_reserved_family),
+}
+
+
+@pytest.mark.parametrize("name", MEMO_INPUTS)
+def test_a_remembered_classification_follows_each_input_it_is_keyed_on(monkeypatch, name):
+    """Defect: the process-wide memo outlives its folder name, collection layers or reserved registry, so a
+    request owns, or skips, a path under the rule that held before the change.
+
+    The path is classified under the old input first, so the memo is warm when the input changes.
+    """
+    rel, before, after, change = MEMO_INPUTS[name]
+    try:
+        assert classify(rel) is before
+        change(monkeypatch)
+        assert classify(rel) is after is classify_by_rule(rel)
+        assert classify_many([rel]) == {rel: after}
+    finally:
+        # A freed replacement could lend its identity to the next test's, which is how the key names an input.
+        ownership_module._classified.cache_clear()
 
 
 @pytest.mark.parametrize("folder", [KB, "Notebook"])

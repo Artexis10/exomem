@@ -434,10 +434,8 @@ def _fused_item(vault: Path, category: str, path: str) -> attention_module.Atten
     """The item as a user meets it: the default union, plus this category if opt-in.
 
     `_item` above pins one predicate in isolation, which is the right shape for
-    the predicate tests. It is the WRONG shape for a triage test: a single-category
-    call is the one configuration in which `attention._rank` folds nothing in, so
-    a dismissal recorded against it exercises no fusion at all. That mistake is
-    what let a dismissed item keep counting on every carrier.
+    the predicate tests. A triage test goes through the listing a user triages from,
+    so the row it takes is the one that carries this category there.
     """
     categories = list(attention_module.DEFAULT_ATTENTION_CATEGORIES)
     if category not in categories:
@@ -445,8 +443,10 @@ def _fused_item(vault: Path, category: str, path: str) -> attention_module.Atten
     report = attention_module.attention(
         vault, categories=categories, limit=0, state="all", today=TODAY
     )
-    matches = [item for item in report.items if item.path == path]
-    assert matches, f"no fused review item for {path}"
+    matches = [
+        item for item in report.items if item.path == path and category in item.categories
+    ]
+    assert matches, f"no {category} review item for {path}"
     return matches[0]
 
 
@@ -506,34 +506,39 @@ def test_dismissal_holds_until_the_page_changes_materially(
     assert changed.state == "open"
 
 
-def test_a_fused_dismissal_reaches_the_single_category_identity(vault: Path) -> None:
-    """Dismissing the fused item must quiet the single-category view of it.
+def test_dismissing_a_supersession_row_quiets_its_single_category_view_and_nothing_else(
+    vault: Path,
+) -> None:
+    """The row a user dismisses is the signal the counter holds, and no other signal.
 
-    The fixture is a page that is genuinely fused: still `active` while carrying a
-    rotted `superseded_by`, so the page-level queues have not parked it out of
-    rotation and `supersession_integrity` rides alongside them. A plain superseded
-    page yields a one-category item, which is the configuration in which the bug
-    is invisible -- so the fusion is asserted, not assumed.
+    The fixture page is still `active` while carrying a rotted `superseded_by`, so the
+    page-level queues have not parked it out of rotation and flag it beside
+    `supersession_integrity`. A partitioned row never absorbs them, so its identity is
+    the single-category one the counter keys on, and the page's other rows stay open.
     """
     from exomem import commands
 
     rel = _superseded_page(
         vault, "s", status="active", superseded_by=f"{RESEARCH}/gone", updated="2024-01-01"
     )
-    fused = _fused_item(vault, "supersession_integrity", rel)
-    assert len(fused.categories) > 1, (
-        "this fixture stopped fusing, so the test no longer crosses the boundary "
-        "it exists for -- restore a page-level signal rather than relaxing this"
-    )
-    single = _item(vault, "supersession_integrity", rel)
-    assert single.fingerprint != fused.fingerprint, (
-        "the two identities genuinely differ; if they coincide this passes for "
-        "the wrong reason"
-    )
+    row = _fused_item(vault, "supersession_integrity", rel)
+    assert row.categories == ["supersession_integrity"]
+    assert row.fingerprint == _item(vault, "supersession_integrity", rel).fingerprint
 
-    commands.op_triage_memory(vault, ref=fused.ref, action="dismiss", why="not now")
+    def other_rows() -> list[attention_module.AttentionItem]:
+        report = attention_module.attention(vault, limit=0, state="all", today=TODAY)
+        return [
+            item
+            for item in report.items
+            if item.path == rel and "supersession_integrity" not in item.categories
+        ]
+
+    assert other_rows(), "the fixture page must also carry a page-level signal"
+
+    commands.op_triage_memory(vault, ref=row.ref, action="dismiss", why="not now")
 
     assert _item(vault, "supersession_integrity", rel).state == "dismissed"
+    assert {item.state for item in other_rows()} == {"open"}
 
 
 def test_an_opt_in_categorys_ref_resolves_for_triage(vault: Path) -> None:

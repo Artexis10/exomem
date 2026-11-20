@@ -76,7 +76,8 @@ BLOB = "blob"
 TEXT = "text"
 
 # Where a matching copy lives, in the order a restore tries them (design D5). Closed protocol tokens.
-MEDIA_STORE = "media_store"
+MEDIA_STORE = "media_store"  # the pointer of the store that serves eviction; REPLICA names every other store's copy
+REPLICA = "replica"
 POOL_BLOB = "pool_blob"
 STORED_ORIGINAL = "stored_original"
 LOCAL_IMPORT = "local_import"
@@ -421,6 +422,14 @@ class _Unreadable(Exception):
 
 
 def _open(vault: Path, row: Row):
+    # A pooled filing keeps no file at its logical path: its bytes are the shared pool object, opened behind the binding.
+    # The hash judges every byte, so an object of the wrong size opens and reads as damaged.
+    if row.kind == FILE:
+        snapshot = originals.pooled(vault, row.path)
+        if snapshot is not None:
+            from . import media_store
+
+            return media_store._open_local_original(vault, row.path, snapshot, check_size=False)
     # A blob or text path came from a walk of the disk, so it opens as spelled there; a sidecar path as bound.
     return reserved_paths.open_generic_binary(vault, row.path, physical=row.kind != FILE)
 
@@ -435,6 +444,9 @@ def _held(vault: Path, row: Row) -> Iterator[reserved_paths.GenericBinarySource]
         if error.code == "MISSING":
             raise _Absent from None
         raise _Unreadable(error.code) from None
+    except ValueError:
+        # An unreadable pool format marker: the row keeps its state until the layout reads again.
+        raise _Unreadable("the shared original pool is unreadable") from None
 
 
 def _parts(row: Row, stream: BinaryIO) -> Iterator[bytes]:
@@ -514,13 +526,14 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
     # a whole page for a text original and the compressed blob for a member.
     changed: list[tuple[Row, int]] = []
     steady: list[tuple[Row, int]] = []
+    shared = _shares_originals(vault)
     for row in foreground_priority.yielding(rows):
         try:
-            info = os.lstat(vault / row.path)
+            info = _stat(vault, row, shared)
         except FileNotFoundError:
             _absent(vault, row, result, reads)
             continue
-        except OSError:
+        except (OSError, _Unreadable):
             result.unreadable += 1
             continue
         if not stat.S_ISREG(info.st_mode):
@@ -552,6 +565,39 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
         _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved,
                   unreadable=result.unreadable, rescheduled=result.rescheduled)
     return result
+
+
+def _shares_originals(vault: Path) -> bool:
+    """Whether the archive pools its originals, read once per pass; an unreadable marker answers yes, so each row names it."""
+    from . import original_pool
+
+    try:
+        return original_pool.enabled(vault)
+    except (ValueError, held_fs.HeldFsError):
+        return True
+
+
+def _stat(vault: Path, row: Row, shared: bool) -> os.stat_result:
+    """The presence check's stat: the row's file, or the shared pool object of a pooled filing that has no file.
+
+    A missing file and a missing pool object both raise `FileNotFoundError`. A pool object whose size differs from
+    its binding is present, and its hash then reads it as damaged. An unreadable pool raises `_Unreadable`, so it
+    reads as neither a missing original nor a retired binding. Only a pooled archive pays for the second look.
+    """
+    try:
+        return os.lstat(vault / row.path)
+    except FileNotFoundError:
+        if row.kind != FILE or not shared:
+            raise
+        try:
+            snapshot = originals.original_state(vault, row.path)
+        except (ValueError, held_fs.HeldFsError):
+            raise _Unreadable("the shared original is not readable as its binding") from None
+        except reserved_paths.ReservedPathLeafError:
+            raise FileNotFoundError(row.path) from None
+        if snapshot.local_path is None:
+            raise
+        return os.lstat(snapshot.local_path)
 
 
 def _marks(values: tuple[str, ...]) -> str:
@@ -642,16 +688,13 @@ class _Changed(Exception):
 
 
 def _copies(vault: Path, row: Row, reads: _Reads) -> list[dict[str, str]]:
-    """The candidate copies that may hold the row's bytes, in the order a restore tries them (D5).
+    """The candidate copies that may hold the row's bytes, in the order a restore tries them (D5, D8).
 
-    This reads no candidate: a restore hashes one before it uses it. A candidate whose recorded size
-    is not the row's cannot hold its bytes, so it is left out.
+    Local copies come first, because they need no download; the replicas that the binding lists follow, the store
+    that serves eviction first. This reads no candidate: a restore hashes one before it uses it. A local candidate
+    whose recorded size is not the row's cannot hold its bytes, so it is left out.
     """
     found: list[dict[str, str]] = []
-    if row.kind == FILE and row.stored:
-        snapshot = originals.original_state(vault, row.path)
-        if snapshot.reference is not None and snapshot.binary_sha256 == row.sha256:
-            found.append({"source": MEDIA_STORE, "path": row.path})
     with closing(_connect(vault)) as connection:
         others = connection.execute(
             f"SELECT kind, path FROM originals WHERE sha256 = ? AND path != ? AND kind IN (?, ?)"
@@ -661,7 +704,46 @@ def _copies(vault: Path, row: Row, reads: _Reads) -> list[dict[str, str]]:
     for outside, sha256, size_then in reads.recorded_files():
         if sha256 == row.sha256 and row.size in (None, size_then) and _outside_size(outside) == size_then:
             found.append({"source": LOCAL_IMPORT, "path": str(outside)})
+    return [*found, *_replica_copies(vault, row)]
+
+
+def _replica_copies(vault: Path, row: Row) -> list[dict[str, str]]:
+    """The replicas that the row's binding lists: the pointer of the store that serves eviction, then the others."""
+    if row.kind != FILE:
+        return []
+    try:
+        snapshot = originals.original_state(vault, row.path)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return []
+    if snapshot.binary_sha256 != row.sha256:
+        return []
+    found = [{"source": MEDIA_STORE, "path": row.path}] if snapshot.reference is not None else []
+    found.extend({"source": REPLICA, "store": replica.store, "object": replica.object, "version": replica.version,
+                  "key_version": replica.key_version} for replica in snapshot.replicas)
     return found
+
+
+def _listed(vault: Path, row: Row, copy: dict[str, str]) -> originals.StoredObject | None:
+    """The replica that a candidate names, as the binding lists it now; None when the binding no longer lists it."""
+    snapshot = originals.original_state(vault, row.path)
+    if copy["source"] == MEDIA_STORE:
+        return snapshot.reference
+    return next((replica for replica in snapshot.replicas
+                 if (replica.store, replica.object, replica.version) == (copy["store"], copy["object"], copy["version"])),
+                None)
+
+
+def _replica_unusable(vault: Path, row: Row, copy: dict[str, str]) -> str | None:
+    """Why a restore does not read this replica: a reason token, or None when it may."""
+    from . import media_store
+
+    try:
+        replica = _listed(vault, row, copy)
+        return "no_longer_listed" if replica is None else media_store.replica_unusable(vault, replica)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return "unreadable"
+    except media_store.MediaStoreError as error:
+        return error.code
 
 
 def _outside_size(path: Path) -> int | None:
@@ -733,19 +815,23 @@ def _copy_parts(vault: Path, copy: dict[str, str]) -> Iterator[Iterable[bytes]]:
         yield _parts(copy_row, source.stream)
 
 
-def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | None:
-    """Write one candidate into private state as the row's file bytes; keep it only if it hashes to the binding."""
+def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | str:
+    """Write one candidate into private state as the row's file bytes; keep it only if it hashes to the binding.
+
+    Returns the staged file, or the token that says why the candidate did not verify.
+    """
     from . import archive_members, media_store
 
     staged = private_state.store(vault, STORE_DIRNAME) / f"{secrets.token_hex(16)}.part"
     try:
         with open(staged, "xb") as sink:
             with archive_members.blob_writer(sink) if row.kind == BLOB else _plain(sink) as target:
-                if copy["source"] == MEDIA_STORE:
-                    snapshot = originals.original_state(vault, row.path)
-                    if snapshot.reference is None:
+                if copy["source"] in (MEDIA_STORE, REPLICA):
+                    reference = _listed(vault, row, copy)
+                    if reference is None:
                         raise _Unreadable("no stored version")
-                    head = media_store.write_stored_original(vault, snapshot.reference, target)
+                    head = media_store.write_stored_original(
+                        vault, reference, target, store=copy["store"] if copy["source"] == REPLICA else None)
                     sha256, size = head.sha256, head.size
                 else:
                     digest, size = hashlib.sha256(), 0
@@ -759,11 +845,13 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | N
             os.fsync(sink.fileno())
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
-    except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
+        failure = "hash_mismatch"
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
+        failure = str(getattr(error, "code", None) or type(error).__name__)
     staged.unlink(missing_ok=True)
-    return None
+    return failure
 
 
 @contextmanager
@@ -774,18 +862,33 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
 def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
             reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
+    copies = _copies(vault, row, reads)
+    install = _install
+    if row.kind == FILE and originals.pooled(vault, row.path) is not None:
+        # The damaged bytes are the shared pool object, which the pool's owner replaces; the logical path keeps no file.
+        # Another pooled filing of these bytes shares the damage, so it is no copy.
+        copies = [copy for copy in copies if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
+        install = _install_pooled
     kept = _kept_trash(vault, row, hashed)
-    for copy in _copies(vault, row, reads):
+    # The replicas this pass named and did not restore from, with why: the route records them (D8).
+    tried: list[dict[str, str]] = []
+    for copy in copies:
+        replica = copy["source"] in (MEDIA_STORE, REPLICA)
+        if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
+            tried.append({**copy, "failed": reason})
+            continue
         staged = _stage(vault, row, copy, pace)
-        if staged is None:
+        if isinstance(staged, str):
+            if replica:
+                tried.append({**copy, "failed": staged})
             continue
         trashed: list[str] = []
         try:
-            identity = _install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
+            identity = install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
         except (_Changed, OpError):
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
-        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
             # The copy verified but could not be put in place. The row keeps its last identity and
             # verification time, so the next pass finds it changed or due, and tries again.
             code = getattr(error, "code", None) or type(error).__name__
@@ -793,17 +896,17 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
             # The entry names the Trash copy of these bytes, so a retry adds no second one.
             trash = trashed[0] if trashed else kept
             _record(vault, row, state=CORRUPT_NO_COPY, identity=row.identity, cause=cause,
-                    route=[{**copy, "code": str(code),
-                            **({"trash": trash, "found_sha256": hashed.sha256} if trash else {})}])
+                    route=[*tried, {**copy, "code": str(code),
+                                    **({"trash": trash, "found_sha256": hashed.sha256} if trash else {})}])
             _count(result, CORRUPT_NO_COPY)
             return
         finally:
             staged.unlink(missing_ok=True)
         _after_restore(vault, row)
-        _record(vault, row, state=RESTORED, identity=identity, cause=cause, route=[copy], verified=True)
+        _record(vault, row, state=RESTORED, identity=identity, cause=cause, route=[*tried, copy], verified=True)
         _count(result, RESTORED)
         return
-    _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, verified=True)
+    _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, route=tried, verified=True)
     _count(result, CORRUPT_NO_COPY)
 
 
@@ -843,11 +946,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
     `trashed` receives the vault path of a new Trash copy.
     """
     from . import media_store
-    from .delete_file import free_trash_path, planned_trash_path
 
     target = PurePosixPath(row.path)
-    now = dt.datetime.now()
-    planned = Path(planned_trash_path(vault, row.path, now))
     damaged_name, restored_name = held_fs.publish_temporary_name(), held_fs.publish_temporary_name()
     noted = [[row.path, damaged_name], [row.path, restored_name]]
     _note_temporaries(vault, noted, [])
@@ -880,19 +980,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                         raise _Changed
                     unchanged()
                     if kept is None:
-                        with filesystem.parent(planned.parent.as_posix(), create=True,
-                                               access="mutate").require() as folder:
-                            leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
-                            metadata = {
-                                "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
-                                "reason": "original_fixity", "cause": cause,
-                                "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
-                            }
-                            held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
-                                                  json.dumps(metadata, indent=2).encode("utf-8")).require()
-                            _rename(filesystem, parent, damaged_name, written, folder, leaf)
-                            filesystem.flush_directory(folder).require()
-                        trashed.append((planned.parent / leaf).as_posix())
+                        trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row, hashed,
+                                                      cause))
                     unchanged()  # A write outside Exomem since the first check keeps its bytes.
                     _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
                     filesystem.flush_directory(parent).require()
@@ -908,6 +997,87 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                                     filesystem.unlink(residue).require()
     finally:
         _note_temporaries(vault, [], noted)
+
+
+def _install_pooled(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *, kept: str | None,
+                    trashed: list[str]) -> Identity:
+    """Put the verified bytes in place of a damaged shared pool object, and the changed bytes in Trash.
+
+    As in `_install`, the changed bytes are copied beside the filing's companion under a noted name, read through
+    the filing's binding. The pool's owner stages the verified bytes inside the pool, outside the vault guard.
+    Under the guard the binding and the object are checked again, the changed bytes move to Trash, and the owner
+    replaces that exact object version. Returns the restored object's stat identity.
+    """
+    from . import media_store, original_pool
+
+    shared = originals.pooled(vault, row.path)
+    if shared is None or shared.binary_size is None:
+        raise _Changed
+    target = PurePosixPath(row.path)
+    damaged_name = held_fs.publish_temporary_name()
+    noted = [[row.path, damaged_name]]
+    _note_temporaries(vault, noted, [])
+    written: dict[str, held_fs.StableIdentity] = {}
+    try:
+        with held_fs.acquire(vault).require() as filesystem, \
+                filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
+            try:
+                if kept is None:
+                    with _held(vault, row) as damaged, filesystem.file(parent, damaged_name, access="write",
+                                                                        create=True, exclusive=True).require() as copy:
+                        written[damaged_name] = copy.identity  # known before the write, so a failed one is removed
+                        if damaged.version != hashed.version:
+                            raise _Changed
+                        filesystem.write(copy, held_fs.Chunks(open=lambda: _stream_parts(damaged.stream))).require()
+                        damaged.require_current()
+                with original_pool.prepare(vault, row.sha256, shared.binary_size,
+                                           held_fs.Chunks(open=lambda: _file_parts(staged)), replacing=True) as fresh:
+                    with media_store._guard(vault, "original_fixity_restore"):
+                        if not _still_bound(vault, row) or _version(vault, row) != hashed.version:
+                            raise _Changed
+                        if kept is None:
+                            trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row,
+                                                          hashed, cause))
+                        fresh.replace(hashed.version)
+                        return Identity.of(os.fstat(fresh.source.stream.fileno()))
+            except (_Absent, _Unreadable, original_pool.PublicationRace):
+                raise _Changed from None  # The object changed or went since the hash; the next pass decides.
+            finally:
+                for name, identity in written.items():
+                    with suppress(held_fs.HeldFsError, OSError):
+                        leftover = filesystem.file(parent, name, access="mutate")
+                        if leftover.ok:
+                            with leftover.require() as residue:
+                                if residue.identity == identity:
+                                    filesystem.unlink(residue).require()
+    finally:
+        _note_temporaries(vault, [], noted)
+
+
+def _trash_changed(vault: Path, filesystem, parent, damaged_name: str, written: dict[str, held_fs.StableIdentity],
+                   row: Row, hashed: _Hashed, cause: str) -> str:
+    """Under the vault guard, move the changed bytes' copy to Trash with its metadata; returns its vault path."""
+    from .delete_file import free_trash_path, planned_trash_path
+
+    now = dt.datetime.now()
+    planned = Path(planned_trash_path(vault, row.path, now))
+    with filesystem.parent(planned.parent.as_posix(), create=True, access="mutate").require() as folder:
+        leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
+        metadata = {
+            "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
+            "reason": "original_fixity", "cause": cause,
+            "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
+        }
+        held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
+                              json.dumps(metadata, indent=2).encode("utf-8")).require()
+        _rename(filesystem, parent, damaged_name, written, folder, leaf)
+        filesystem.flush_directory(folder).require()
+    return (planned.parent / leaf).as_posix()
+
+
+def _stream_parts(stream: BinaryIO) -> Iterator[bytes]:
+    stream.seek(0)
+    return iter(lambda: stream.read(_CHUNK), b"")
 
 
 def _identity_of(filesystem, parent, name: str) -> held_fs.StableIdentity:
@@ -1035,7 +1205,10 @@ def _fix(state: str) -> str:
                 "then copy it back to the path, or restore the file from a backup. Exomem does not restore a "
                 "deleted original itself, because the deletion may be deliberate.")
     return ("Restore the file from a backup, or copy a candidate from the route after checking its SHA-256. "
-            "An entry with a code verified but could not be put in place, and the next pass tries it again. "
+            "A replica entry names an encrypted object in a store: decrypt it with the identity of its key version. "
+            "An entry marked failed says why fixity did not restore from it; owner_restores means its store is not "
+            "immediate, so the owner retrieves it. An entry with a code verified but could not be put in place, "
+            "and the next pass tries it again. "
             "A vault_store entry is the store's own page: settle the held item with keep-store. "
             "The original is as Exomem found it.")
 
@@ -1067,8 +1240,10 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
     restricted = bool(rows) and egress.caller_restricted(Path(vault))
 
     def route(row: Row) -> list[dict[str, str]]:
+        # A replica's store, key version, object and version locate ciphertext in the owner's store: owner only.
         return [copy if copy["source"] in _VAULT_COPIES or not restricted
-                else {key: value for key, value in copy.items() if key != "path"}
+                else {key: value for key, value in copy.items()
+                      if key not in ("path", "store", "key_version", "object", "version")}
                 for copy in row.route]
 
     return [

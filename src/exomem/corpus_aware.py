@@ -914,9 +914,15 @@ def _best_cosine_per_file(
     k: int = 15,
     published_path: str | None = None,
     strict: bool = False,
+    chunks: list[str] | None = None,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
+
+    `chunks`, when given, are the exact texts the index will encode for this
+    draft (a declared-passage capture's cut). The sweep scores and remembers
+    those, so the index takes their vectors instead of encoding each passage
+    a second time.
 
     The shared core of `detect_duplicates` / `detect_contradictions`: one encode
     + search pass, so a single write can partition the same scores into the dup
@@ -964,8 +970,9 @@ def _best_cosine_per_file(
             call_spans.span("advisory.best_cosine", {}) as measured,
             contextlib.ExitStack() as in_space,
         ):
-            _require_complete_advisory_body(body, title=title)
-            chunks = embeddings.chunk_text(title, body)
+            if chunks is None:
+                _require_complete_advisory_body(body, title=title)
+                chunks = embeddings.chunk_text(title, body)
             if not chunks:
                 if measured is not None:
                     measured["texts"] = 0

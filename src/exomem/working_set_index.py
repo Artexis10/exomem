@@ -36,7 +36,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,7 +49,7 @@ from .collection_store.preview import (
     canonical_read,
     selected_writer,
 )
-from .kbdir import managed_root, managed_root_rel
+from .kbdir import managed_root, managed_root_rel, managed_splitter
 from .state_paths import vault_state_dir
 
 log = logging.getLogger(__name__)
@@ -1058,10 +1058,42 @@ def _page_ref(frontmatter: Mapping[str, Any]) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
-def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES):
+def _skipped_name(name: str, skip_folders: frozenset[str]) -> bool:
+    """The walk's one test of an entry's name: a dot-name, or one of `skip_folders`."""
+    return name.startswith(".") or name in skip_folders
+
+
+def _kb_walk_member(skip_folders: frozenset[str]) -> Callable[[str], bool]:
+    """`_walk_kb`'s entry rule for one vault-relative path, judged by the path alone.
+
+    A page that the store holds may have no file yet, so only its path can say whether the walk
+    would list it. The managed root is read once, for a loop over a corpus.
+    """
+    under = managed_splitter()
+
+    def admits(rel: str) -> bool:
+        below = under(rel)
+        return (
+            below is not None
+            and rel.lower().endswith(".md")
+            and not any(_skipped_name(part, skip_folders) for part in below.split("/"))
+        )
+
+    return admits
+
+
+def _walk_kb(
+    vault_root: Path,
+    *,
+    skip_folders: frozenset[str] = _SKIP_DIR_NAMES,
+    skip: Callable[[Path], bool] | None = None,
+):
     """Walk the KB tree, skipping dot-directories and `skip_folders` (the
     vault's effective `anchors.skip_folders` convention — case-sensitive,
-    exactly as this walk always compared its own skip list)."""
+    exactly as this walk always compared its own skip list).
+
+    `skip` is asked about each Markdown-named entry before the walk tests it, as
+    `find_corpus.walk_md`'s is: the store lists the pages it holds, and their files are left alone."""
     root = managed_root(Path(vault_root))
     if not root.is_dir():
         return
@@ -1073,8 +1105,9 @@ def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES
         except OSError:
             continue
         for entry in entries:
-            name = entry.name
-            if name.startswith(".") or name in skip_folders:
+            if _skipped_name(entry.name, skip_folders):
+                continue
+            if skip is not None and entry.suffix.lower() == ".md" and skip(entry):
                 continue
             if entry.is_dir():
                 stack.append(entry)
@@ -1082,7 +1115,11 @@ def _walk_kb(vault_root: Path, *, skip_folders: frozenset[str] = _SKIP_DIR_NAMES
                 yield entry
 
 
-def _source_signature(path: Path) -> str:
+def _source_signature(path: Path, stored: freshness.FileSignature | None = None) -> str:
+    """The page's signature text: its file's mtime and size, or its stored signature when the store
+    holds the page (its file may lag, or be absent)."""
+    if stored is not None:
+        return "store:" + ":".join(str(part) for part in stored)
     try:
         stat = path.stat()
     except OSError:
@@ -1182,9 +1219,17 @@ def _page_key(
 
 
 def _page_entry(
-    path: Path, rel: str, page: Any, *, kb: str, conventions: Any, filler: frozenset[str]
+    path: Path,
+    rel: str,
+    page: Any,
+    *,
+    kb: str,
+    conventions: Any,
+    filler: frozenset[str],
+    stored: freshness.FileSignature | None = None,
 ) -> _PageEntry:
-    """Derive one walked page's `_PageEntry` from its parsed form."""
+    """Derive one walked page's `_PageEntry` from its parsed form; `stored` is the signature of a
+    page that the store holds."""
     from . import provenance
 
     frontmatter = page.frontmatter if isinstance(page.frontmatter, dict) else {}
@@ -1260,7 +1305,7 @@ def _page_entry(
             # The signature, not the body: it is all the build reads of the
             # body, and a reused entry must not hold every anchor's prose.
             "signature": _signature(title, page.body, owner_path=rel),
-            "source_signature": _source_signature(path),
+            "source_signature": _source_signature(path, stored),
             "learned_rejected": len(learned_rejected),
             "entity_type": normalize(frontmatter.get("entity_type") or "")
             if kind == "entity"
@@ -1296,7 +1341,9 @@ def _walk_page_entries(
     changed pages. Every walk, reusing or not, leaves its own entries for the
     next one, except a page that changed within `_RACY_WINDOW_NS` of it. The
     directory walk itself always runs: it decides which pages exist, under
-    exactly the rules a full build applies.
+    exactly the rules a full build applies. In store mode the store lists the
+    pages it holds, so a page is listed once its commit returns, and a stored
+    page's key is its stored signature, not its file's stat.
 
     The name map is one name to MANY paths: `normalize()` folds case and Unicode
     form, so distinct pages can share a spelling, and collapsing them would hide
@@ -1355,14 +1402,30 @@ def _walk_page_entries(
     # page was a third of an unchanged walk's cost.
     folders: dict[Path, str] = {}
     settled_before = time.time_ns() - _RACY_WINDOW_NS
-    for path in _walk_kb(vault_root, skip_folders=conventions.skip_folders):
+    # In store mode the store lists its pages (their files lag a commit, and may be absent), and the
+    # walk finds the files it does not own; in file mode this is the walk alone.
+    corpus = find_corpus.corpus_paths(
+        Path(vault_root),
+        "kb",
+        lambda **walk: _walk_kb(vault_root, skip_folders=conventions.skip_folders, **walk),
+        member=_kb_walk_member(conventions.skip_folders),
+    )
+    stored_signatures = find_corpus.stored_signatures(corpus)
+    for path in corpus:
         foreground_priority.check_cancelled()
         folder = folders.get(path.parent)
         if folder is None:
             folder = folders[path.parent] = path.parent.relative_to(vault_root).as_posix()
         rel = f"{folder}/{path.name}"
-        # Taken before the read: a change after it moves the key the next walk sees.
-        key = _page_key(path, kb_root, directories, settled_before=settled_before)
+        stored = stored_signatures.get(rel)
+        # Taken before the read: a change after it moves the key the next walk sees. A stored page
+        # keys on its stored signature, which a commit moves whatever its file shows (a revision has
+        # no coarse tick, so it needs no racy window).
+        key = (
+            ("store", *stored)
+            if stored is not None
+            else _page_key(path, kb_root, directories, settled_before=settled_before)
+        )
         held_entry = previous.get(rel)
         if key is not None and held_entry is not None and held_entry[0] == key:
             entry = held_entry[1]
@@ -1372,7 +1435,9 @@ def _walk_page_entries(
             page = find_corpus.CACHE.get(path, Path(vault_root))
             if page is None:
                 continue
-            entry = _page_entry(path, rel, page, kb=kb, conventions=conventions, filler=filler)
+            entry = _page_entry(
+                path, rel, page, kb=kb, conventions=conventions, filler=filler, stored=stored
+            )
         if key is not None:
             current[rel] = (key, entry)
         for spelling in entry.spellings:

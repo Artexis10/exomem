@@ -36,6 +36,7 @@ SHIPPED_VOCABULARY = (
     "baseline",
     "evidence",
     "open_questions",
+    "connections",
 )
 
 
@@ -60,7 +61,7 @@ def test_shipped_registry_loads_with_the_declared_vocabulary() -> None:
     assert registry.source == "shipped"
     assert registry.findings == ()
     assert tuple(registry.roles) == SHIPPED_VOCABULARY
-    assert len(registry.roles) == 16
+    assert len(registry.roles) == 17
     for role in registry.roles.values():
         assert role.description
         assert role.lane in context_roles.LANES
@@ -273,7 +274,26 @@ def test_selection_is_bounded_to_six_roles() -> None:
         analysis=analysis,
     )
 
-    assert len(selected) <= context_roles.MAX_SELECTED_ROLES == 6
+    assert len(context_roles.lenses(selected)) == context_roles.MAX_SELECTED_ROLES == 6
+    assert "connections" in [role["id"] for role in selected]
+
+
+def test_only_one_graph_lane_runs_beside_the_six(vault: Path) -> None:
+    """A second graph role an override adds is an ordinary lens, so a packet holds seven roles at most."""
+    from exomem import working_set_resolve
+
+    _override(vault, {"schema_version": 1, "roles": {"neighbours": {
+        "description": "More typed neighbours.", "lane": "graph",
+        "anchor_defaults": ["resource", "entity", "hub", "plan", "collection", "project"],
+    }}})
+    selected = context_roles.select_roles(
+        context_roles.load_roles(vault),
+        anchor_kinds=("resource", "entity", "hub", "plan", "collection", "project"),
+        analysis=working_set_resolve.analyze_turn("I'm planning to, how do I, currently, prefer, last time"),
+    )
+
+    assert len(selected) == context_roles.MAX_SELECTED_ROLES + 1
+    assert len(context_roles.lenses(selected)) == context_roles.MAX_SELECTED_ROLES
 
 
 def test_same_turn_same_roles() -> None:

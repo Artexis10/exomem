@@ -847,13 +847,11 @@ def test_removing_the_egress_filter_fails_this_module(
 
 
 def _review_surface_item(vault: Path, rel: str, *, today: dt.date = TODAY):
-    """The item exactly as the REVIEW SURFACE composes it: the default union, fused.
+    """The item exactly as the REVIEW SURFACE composes it: the default union.
 
-    Deliberately not `categories=[one]`. `attention._rank` folds each page's
-    unpartitioned page-level signals (relation_debt, stale_review, ...) into the
-    partitioned item, so a single-category call is the ONE configuration in which
-    no fusion happens -- and a dismissal test written against it proves nothing
-    about the surface a user actually triages through.
+    Deliberately not `categories=[one]`: a dismissal test must go through the listing a
+    user triages from. A partitioned item stands alone in it, beside the page's own
+    page-level rows, so the row of a due prediction is that prediction's signal.
     """
     from exomem import attention as attention_module
 
@@ -863,15 +861,9 @@ def _review_surface_item(vault: Path, rel: str, *, today: dt.date = TODAY):
     return matches[0]
 
 
-def _assert_fused(item) -> None:
-    """The fixture must actually exercise the fusion boundary, or it covers nothing."""
-    assert "prediction_window" in item.categories
-    assert len(item.categories) > 1, (
-        "this page no longer picks up a second, page-level signal, so the item is "
-        "no longer FUSED and these tests have stopped crossing the boundary they "
-        "exist for -- give the fixture a page-level signal again (a page with no "
-        "wikilinks earns relation_debt) rather than relaxing this assertion"
-    )
+def _assert_own_row(item) -> None:
+    """The prediction's row carries that prediction alone, though the page has other signals."""
+    assert item.categories == ["prediction_window"]
 
 
 def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
@@ -879,12 +871,12 @@ def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
 ) -> None:
     """The bug this pins shipped: dismissal never reached the counters.
 
-    `due_state` keys on ONE finding's identity; the review surface hands the user
-    a FUSED item whose fingerprint covers every queue that flagged the page. Same
-    `item_id`, different fingerprint -- so `effective_state` read the recorded
-    dismissal as "the signal materially changed" and kept counting the item on
-    every carrier, forever. The fix is one shared composer plus recording the
-    decision for each component at decision time.
+    `due_state` keys on ONE finding's identity. The review surface once handed the user
+    a row whose fingerprint covered every queue that flagged the page: same `item_id`,
+    different fingerprint, so `effective_state` read the recorded dismissal as "the
+    signal materially changed" and kept counting the item on every carrier, forever. A
+    partitioned row now carries its own signal alone, so the surface and the counter
+    share one identity, which the shared composer builds.
     """
     from exomem import commands
 
@@ -893,13 +885,10 @@ def test_a_dismissal_through_the_review_surface_stops_every_carrier_counting(
     assert _served(vault)["total"] == 1
 
     item = _review_surface_item(vault, rel)
-    _assert_fused(item)
+    _assert_own_row(item)
     entry = due_state_module.served_entries(vault, today=TODAY)[0]
     assert entry["ref"] == item.ref, "same review identity"
-    assert entry["fingerprint"] != item.fingerprint, (
-        "the two fingerprints genuinely differ -- if they ever coincide this test "
-        "passes for the wrong reason"
-    )
+    assert entry["fingerprint"] == item.fingerprint, "the surface row is the counted signal"
 
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
 
@@ -916,7 +905,7 @@ def test_a_snooze_through_the_review_surface_is_quiet_only_until_it_lapses(
     rel = _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     item = _review_surface_item(vault, rel)
-    _assert_fused(item)
+    _assert_own_row(item)
 
     commands.op_triage_memory(
         vault, ref=item.ref, action="snooze", until="2026-08-20", why="after the demo"
@@ -934,7 +923,7 @@ def test_a_reopen_through_the_review_surface_makes_it_count_again(vault: Path) -
     rel = _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     item = _review_surface_item(vault, rel)
-    _assert_fused(item)
+    _assert_own_row(item)
 
     commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
     assert _served(vault)["total"] == 0
@@ -1107,7 +1096,7 @@ def test_the_fallback_does_not_move_a_default_union_items_identity(
 
     rel = _prediction(vault, "one", check_by="2026-08-01")
     item = _review_surface_item(vault, rel)
-    _assert_fused(item)
+    _assert_own_row(item)
 
     with_fallback = attention_module.item_by_ref(vault, item.ref, today=TODAY)
 
@@ -1129,11 +1118,10 @@ def _published(vault: Path, category: str) -> dict:
 
 
 def test_a_bare_due_ref_is_the_item_the_review_surface_lists(vault: Path) -> None:
-    """A ref with no fingerprint resolves the fused item the review surface lists.
+    """A ref with no fingerprint resolves the item the review surface lists.
 
-    `exomem review dismiss <ref>` and the TUI send no fingerprint. When the due
-    signal alone answered a bare ref, the item view dropped the page's other
-    reasons, and the dismissal left the fused item open on the review surface.
+    `exomem review dismiss <ref>` and the TUI send no fingerprint. A bare ref must give
+    the same item the surface lists, so that a dismissal by it leaves that item settled.
     """
     from exomem import attention as attention_module
     from exomem import commands
@@ -1141,7 +1129,7 @@ def test_a_bare_due_ref_is_the_item_the_review_surface_lists(vault: Path) -> Non
     rel = _prediction(vault, "one", check_by="2026-08-01")
     due_state_module.reconcile(vault, today=TODAY)
     item = _review_surface_item(vault, rel)
-    _assert_fused(item)
+    _assert_own_row(item)
     ref = _published(vault, "prediction_window")["ref"]
     assert ref == item.ref
 
@@ -1151,9 +1139,9 @@ def test_a_bare_due_ref_is_the_item_the_review_surface_lists(vault: Path) -> Non
     assert viewed["categories"] == item.categories
     assert viewed["fingerprint"] == item.fingerprint
     still_open = attention_module.attention(vault, limit=0, today=TODAY).items
-    assert rel not in [entry.path for entry in still_open], (
-        "a dismissal by the bare ref left the fused item open on the review surface"
-    )
+    assert not [
+        entry for entry in still_open if entry.path == rel and "prediction_window" in entry.categories
+    ], "a dismissal by the bare ref left the item open on the review surface"
 
 
 BOUNDED_CASES = [
@@ -1266,32 +1254,6 @@ def test_the_fallback_never_widens_to_every_audit_category(vault: Path) -> None:
     assert set(due_state_module.PROJECTION_CATEGORIES) <= triageable, (
         "every category the block can publish a ref for must be resolvable"
     )
-
-
-def test_removing_the_component_fanout_fails_this_module(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Mechanism removal for the fix above.
-
-    If `apply_for_item` stops recording the component identities, the dismissal
-    the user made through the review surface stops reaching the counter -- which
-    is precisely the shipped bug. A green suite with this monkeypatch in place
-    would mean the cross-boundary tests are tautologies again.
-    """
-    from exomem import commands
-    from exomem import review_state as review_state_module
-
-    monkeypatch.setattr(
-        review_state_module, "component_fingerprints", lambda *a, **k: []
-    )
-
-    rel = _prediction(vault, "one", check_by="2026-08-01")
-    due_state_module.reconcile(vault, today=TODAY)
-    item = _review_surface_item(vault, rel)
-    commands.op_triage_memory(vault, ref=item.ref, action="dismiss", why="known")
-
-    still_counted = _served(vault)
-    assert still_counted is not None and still_counted["total"] == 1
 
 
 def test_the_maintain_memory_reconcile_path_heals_the_projection(vault: Path) -> None:

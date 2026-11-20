@@ -689,7 +689,9 @@ def test_descriptor_exhaustion_keeps_exact_opaque_original(vault, tmp_path, requ
     previous = resource.getrlimit(resource.RLIMIT_NOFILE)
     descriptor_count = len(list(Path("/proc/self/fd").iterdir()))
     try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(previous[0], descriptor_count + 32), previous[1]))
+        # 64 payloads exhaust 40 spare descriptors; the original's publish needs 33 at its peak, because
+        # it retains the temporary and the replaced destination until cleanup.
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(previous[0], descriptor_count + 40), previous[1]))
         result = _capture(vault, data)
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, previous)

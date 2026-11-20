@@ -27,7 +27,17 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import held_fs, media_types, originals, reserved_paths, semantic_contract, trash_metadata
+from . import (
+    held_fs,
+    media_bindings,
+    media_types,
+    original_pool,
+    originals,
+    reserved_paths,
+    semantic_contract,
+    source_custody,
+    trash_metadata,
+)
 from .delete_file import planned_trash_path
 from .governance import catalog_publication, graph_producer, lifecycle
 from .kbdir import managed_join, managed_split
@@ -280,7 +290,10 @@ def delete_directory(
     now: dt.datetime | None = None,
 ) -> DeleteDirectoryResult:
     with ExitStack() as originals_context:
-        return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
+        try:
+            return _delete_directory_local(vault_root, path=path, confirm=confirm, recursive=recursive, force_orphan=force_orphan, allow_curated=allow_curated, today=today, now=now, originals_context=originals_context)
+        except originals.RetirementUnconfirmed as error:
+            raise DeleteDirectoryError(code=error.code, reason=error.reason) from error
 
 
 def _delete_directory_local(
@@ -331,9 +344,14 @@ def _delete_directory_local(
     tree = _read_tree(vault_root, rel_path)
     from .media_store import bound_originals, local_originals
 
-    evicted = (tuple(item for item in bound_originals(vault_root, root=abs_path) if item.state == "evicted")
-               if originals.binding_for(vault_root) is not None else ())
-    files = sorted({*(abs_path / item.relative_path for item in tree), *(item.path for item in evicted)})
+    pooled = original_pool.enabled(vault_root)
+    members = (tuple(bound_originals(vault_root, root=abs_path))
+               if pooled or originals.binding_for(vault_root) is not None else ())
+    # A digest-addressed member goes to Trash with its page alone and keeps naming its bytes; an archive
+    # without shared storage still fetches an evicted member first, so its bytes move with the folder.
+    addressed = tuple(item for item in members if originals.digest_addressed(vault_root, item.path, snapshot=item))
+    evicted = () if pooled else tuple(item for item in members if item.state == "evicted")
+    files = sorted({*(abs_path / item.relative_path for item in tree), *(item.path for item in (*evicted, *addressed))})
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(
@@ -343,6 +361,14 @@ def _delete_directory_local(
     )
     if files and not recursive:
         raise _not_empty(rel_path, len(files))
+    for item in tree:
+        if item.relative_path.lower().endswith(".md"):
+            try:
+                markdown = item.snapshot.data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if (held := source_custody.erase_refusal(vault_root, markdown)) is not None:
+                raise DeleteDirectoryError(*held)
 
     # Inbound-wikilink scan: any .md file inside the tree could have
     # external referents. Aggregate the count across all .md children.
@@ -441,7 +467,11 @@ def _delete_directory_local(
                 reason=str(error),
             ) from error
 
-    originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+    if not pooled:
+        originals_context.enter_context(local_originals(vault_root, (rel_path,)))
+    elif held := tuple(item.path for item in members if item not in addressed and item.reference is not None):
+        # Only the ordinary files whose bytes move are pinned; nothing is fetched for a shared one.
+        originals_context.enter_context(local_originals(vault_root, held))
     if evicted:
         tree = _read_tree(vault_root, rel_path)
         if tuple(sorted((f"{rel_path.rstrip('/')}/{item.relative_path}", hashlib.sha256(item.snapshot.data).hexdigest())
@@ -539,8 +569,14 @@ def _delete_directory_local(
         curated=bool(curated and allow_curated),
     )
     # Retained directory companions need their historical placement even after a crash.
-    placement_required = originals.binding_for(vault_root) is not None
+    placement_required = pooled or originals.binding_for(vault_root) is not None
     placement_files = [(meta_rel, metadata_bytes)] if placement_required else []
+    # The placement and the rename change bindings before any batch; one projection delta covers them.
+    moved = [f"{rel_path.rstrip('/')}/{item.relative_path}" for item in tree]
+    moved += [item.path.relative_to(vault_root.resolve()).as_posix() for item in addressed]
+    originals_context.enter_context(media_bindings.operation(vault_root, (
+        *moved, *(f"{trash_rel}{path[len(rel_path.rstrip('/')):]}" for path in moved),
+    )))
     try:
         with trash_metadata.preserve_placement(vault_root, transition, placement_files):
             try:

@@ -1193,9 +1193,22 @@ async def preserve_export(journey: Journey, service: Session) -> None:
         {"receipt": receipt, "expected_hash": digest, "expected_size": len(journey.export)},
     )
     expect(
-        hashlib.sha256((journey.vault / journey.export_path).read_bytes()).hexdigest() == digest,
+        hashlib.sha256(preserved_export(journey)).hexdigest() == digest,
         "the preserved Evidence file is not the export's exact bytes",
     )
+
+
+def preserved_export(journey: Journey) -> bytes:
+    """The preserved export's bytes as the archive keeps them.
+
+    A new archive keeps them once, in the shared copy that their digest names (docs/deployment.md, "Layout and
+    copies"); an archive in ordinary storage keeps them at the filing's own path.
+    """
+    logical = journey.vault / journey.export_path
+    if logical.exists():
+        return logical.read_bytes()
+    digest = hashlib.sha256(journey.export).hexdigest()
+    return (journey.vault / "Knowledge Base" / "_Originals" / "sha256" / digest[:2] / f"{digest}.blob").read_bytes()
 
 
 async def refuse_unenrolled(journey: Journey, service: Session) -> None:
@@ -1405,8 +1418,7 @@ async def resume_import(journey: Journey, continuation: str, imported_at_stop: i
         with journey.step("7. file collections A and B unchanged"):
             await file_collections_unchanged(journey, service, "after the journey")
     expect(
-        hashlib.sha256((journey.vault / journey.export_path).read_bytes()).hexdigest()
-        == hashlib.sha256(journey.export).hexdigest(),
+        hashlib.sha256(preserved_export(journey)).hexdigest() == hashlib.sha256(journey.export).hexdigest(),
         "the preserved export changed during the import",
     )
 
@@ -1747,7 +1759,7 @@ async def narrowing_rollback(journey: Journey) -> None:
         expect(after == before, "rollback or disabled ticks changed canonical rows, history or import checkpoints",
                {"before": before, "after": after})
         expect((journey.vault / STORE_FILES[1]).read_bytes() == marker, "rollback changed the routing marker")
-        expect((journey.vault / journey.export_path).read_bytes() == journey.export, "rollback changed preserved raw bytes")
+        expect(preserved_export(journey) == journey.export, "rollback changed preserved raw bytes")
         expect((journey.vault / STORE_FILES[0]).is_file(), "rollback removed the published replica")
 
 

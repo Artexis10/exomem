@@ -21,12 +21,20 @@ from relayout_fixture import (
     KB,
     MEMBER_ARTIFACT,
     MEMO,
+    RATE_LINKER,
+    RATE_ORIGINAL,
+    RATE_PAGE,
+    REEL,
+    REEL_FRAMES,
     add_attachment_links,
     add_container_member_and_companion,
+    add_markdown_original_with_links,
+    add_video_with_titled_pages,
     build_nested_vault,
 )
 
 from exomem import __main__ as cli
+from exomem import obsidian_links
 
 LINK_LAB = f"{KB}/Notes/Procedures/link-lab.md"
 SCAN_A = f"{KB}/Evidence/Pricing/a/Scan.md"
@@ -264,6 +272,27 @@ def test_a_part_page_follows_its_source_pages_new_name_and_keeps_its_own(vault, 
     assert (move["name_class"], move["fixed_because"]) == ("fixed", "extraction_part")
 
 
+def test_a_page_named_after_the_file_beside_it_keeps_its_name_whatever_its_title(vault, capsys):
+    add_video_with_titled_pages(vault)
+    report = full_report(capsys, vault)
+
+    folder = "Sources/Media/reel.mp4.frames"
+    # The video, its page, the frames folder and the frame pages keep their names; only the prefix drops.
+    page = move_of(report, f"{REEL}.md")
+    assert (page["new_path"], page["fixed_because"]) == (
+        "Sources/Media/reel.mp4.md",
+        "sidecar_of_a_file",
+    )
+    assert move_of(report, REEL)["new_path"] == "Sources/Media/reel.mp4"
+    for name in REEL_FRAMES:
+        sidecar = move_of(report, f"{REEL}.frames/{name}.md")
+        assert (sidecar["new_path"], sidecar["fixed_because"]) == (
+            f"{folder}/{name}.md",
+            "sidecar_of_a_file",
+        )
+        assert move_of(report, f"{REEL}.frames/{name}")["new_path"] == f"{folder}/{name}"
+
+
 def test_a_page_in_a_notes_folder_that_no_type_owns_keeps_its_path_and_is_reported(vault, capsys):
     report = full_report(capsys, vault)
 
@@ -320,6 +349,57 @@ def test_each_link_to_a_moved_page_gets_the_shortest_text_that_stays_unique(vaul
         (LINK_LAB, f"{KB}/Scratch", "Scratch", True),
     ]
     assert report["counts"]["links_with_full_path_text"] == 4
+
+
+def test_links_to_a_markdown_original_and_to_its_md_md_page_each_keep_naming_their_own_file(
+    vault, capsys
+):
+    add_markdown_original_with_links(vault)
+    report = full_report(capsys, vault)
+
+    edits = {
+        edit["old"]: edit["new"]
+        for edit in items(report["link_edits"])
+        if edit["page"] == RATE_LINKER
+    }
+
+    # `[[rate-notes.md.md]]` already names the page after the move, so it has no edit.
+    assert edits == {
+        RATE_ORIGINAL: "rate-notes",
+        RATE_PAGE: "rate-notes.md.md",
+        "Evidence/Pricing/a/rate-notes": "rate-notes",
+    }
+    assert report["diagnostics"]["link_self_check_failures"] == []
+    assert "planned links that failed the self-check" not in report["outcome"]
+
+
+def test_a_planned_link_text_that_misses_its_page_is_reported_with_what_the_rule_made_of_it(
+    vault, capsys, monkeypatch
+):
+    """The self-check must say which text failed, for which page, and what Obsidian would open instead."""
+    real_forms = obsidian_links.link_forms
+
+    def forms_with_an_unpinned_name(index):
+        forms = real_forms(index)
+        # A short form that two files satisfy: the writer's guarantee is broken for this page only.
+        forms["Insights/Why churn rose.md"] = obsidian_links.LinkForm("Why churn rose")
+        return forms
+
+    monkeypatch.setattr(obsidian_links, "link_forms", forms_with_an_unpinned_name)
+    report = full_report(capsys, vault)
+
+    failures = report["diagnostics"]["link_self_check_failures"]
+    assert len(failures) == 2
+    assert failures[0] == {
+        "page": SCAN_A,
+        "text": LIVE_PAGE,
+        "target": f"{LIVE_PAGE}.md",
+        "new_target": "Insights/Why churn rose.md",
+        "planned_text": "Why churn rose",
+        "rule_result": "ambiguous",
+        "matches": ["Insights/Why churn rose.md", "_trash/Notes/Insights/Why churn rose.md"],
+    }
+    assert "planned links that failed the self-check: 2" in report["outcome"]
 
 
 def test_embeds_of_a_moved_image_are_resolved_and_the_path_form_is_rewritten(vault, capsys):

@@ -473,6 +473,34 @@ class StableIdentityCensus:
             (*filter(other, self.entries), replacement), self.reference_only_entries
         )
 
+    def with_pages(
+        self,
+        pages: Mapping[str, SemanticPageState | None],
+        *,
+        casefold_paths: bool = False,
+    ) -> StableIdentityCensus:
+        """`with_page` for each page in `pages` at once, dropping the entry where it is None.
+
+        One census for the batch: a census per page re-sorts every entry once per page.
+        """
+        def key(path: str) -> str:
+            return path.casefold() if casefold_paths else path
+
+        replaced = {key(path) for path in pages}
+        entries = [entry for entry in self.entries if key(entry.path) not in replaced]
+        reference_only = [
+            entry for entry in self.reference_only_entries if key(entry.path) not in replaced
+        ]
+        for page in pages.values():
+            if page is None:
+                continue
+            replacement = StableIdentityEntry(
+                page.path,
+                page.identity if page.identity_kind == "exomem_id" else None,
+            )
+            (reference_only if _is_reference_only_path(page.path) else entries).append(replacement)
+        return StableIdentityCensus(tuple(entries), tuple(reference_only))
+
     @classmethod
     def from_states(
         cls,
@@ -1214,6 +1242,10 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    #: The prior-path claims its links resolved against when those are not the index's current
+    #: ones: a move's after corpus binds the claims its commit leaves (`PriorClaims.with_pages`).
+    prior_claims: Any = field(default=None, repr=False, compare=False)
+    capture_inventory: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1264,6 +1296,7 @@ class SemanticCorpusContext:
         *,
         registry: relation_registry.RelationRegistry,
         identity_census: StableIdentityCensus,
+        prior_claims: Any = None,
     ) -> SemanticCorpusContext:
         by_path: dict[str, SemanticPageState] = {}
         for state in states:
@@ -1278,6 +1311,23 @@ class SemanticCorpusContext:
                 tuple(identity_census.entries), identity_census.reference_only_entries
             ),
             writer_visibility=vault.writer_link_visibility(Path(vault_root)),
+            prior_claims=prior_claims,
+        )
+
+    def link_resolver(self) -> Any:
+        """The resolver that every page judged over this corpus shares, built from no entries.
+
+        The corpus already holds the maps of the resolver it was built from, and a link to a path
+        some page left resolves by the claims the corpus holds. Typed `Any`: link resolution reads
+        only these attributes of a `vault.WikilinkResolver`.
+        """
+        return _WikilinkResolverView(
+            full_paths=self.resolver_full_paths,
+            kb_stripped=self.resolver_kb_stripped,
+            stems=self.resolver_stems,
+            titles=self.resolver_titles,
+            candidates_by_key=self.resolver_candidates_by_key,
+            bound_claims=self.prior_claims,
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
@@ -1302,6 +1352,43 @@ class SemanticCorpusContext:
                 state, casefold_paths=vault.vault_casefolds(self.vault_root)
             ),
             writer_visibility=self.writer_visibility,
+        )
+
+    def with_pages(
+        self, pages: Mapping[str, SemanticPageState | None], *, prior_claims: Any
+    ) -> SemanticCorpusContext:
+        """This corpus once each page in `pages` holds its state, or is gone where it is None.
+
+        Its links resolve prior paths by `prior_claims`, the claims those pages leave. Only what
+        the change reaches is derived again where that is provable, else the whole corpus is.
+        """
+        states = dict(self.pages)
+        for path, state in pages.items():
+            if state is None:
+                states.pop(path, None)
+            else:
+                states[path] = state
+        census = self.identity_census.with_pages(
+            pages, casefold_paths=vault.vault_casefolds(self.vault_root)
+        )
+        patched = _context_with_page_delta(
+            self,
+            states,
+            tuple(pages),
+            registry=self.registry,
+            identity_census=census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
+        )
+        if patched is not None:
+            return patched
+        return _context_from_state_map(
+            self.vault_root,
+            states,
+            self.registry,
+            census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
         )
 
     def registry_for(self, path: str) -> relation_registry.RelationRegistry:
@@ -1410,6 +1497,15 @@ def build_page_state(
 
 #: The registry subjects whose instance definitions reinterpret a page's units.
 _PAGE_DEFINITION_SUBJECTS = ("relations", "categories")
+
+
+def page_definitions_dependency(root: Path) -> tuple:
+    """What interpreting a page's units reads besides the page: the relations and categories of every instance.
+
+    A result kept per page must be dropped when this changes, since a private instance can reinterpret a page
+    that no edit touched.
+    """
+    return instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
 
 
 def enrich_page_state(
@@ -1531,8 +1627,13 @@ def _parse_page_state(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
+    owner_type_basis: note_types.Basis | None = None,
 ) -> SemanticPageState:
-    """Build detached semantic state from one already-read Markdown string."""
+    """Build detached semantic state from one already-read Markdown string.
+
+    ``owner_type_basis`` is the owner-local note-type basis that the caller shares across the pages
+    it parses, so that each page does not load the registry again.
+    """
     request_budget.checkpoint()
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
@@ -1626,7 +1727,9 @@ def _parse_page_state(
     writable_placed = (
         connectable_placed and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
     )
-    compiled = writable_placed and note_types.Basis(root, owner_local=True).selects(
+    if owner_type_basis is None:
+        owner_type_basis = note_types.Basis(root, owner_local=True)
+    compiled = writable_placed and owner_type_basis.selects(
         activation.normalized_page_type(parsed.page_type), note_types.compiled
     )
     return SemanticPageState(
@@ -2136,6 +2239,185 @@ class LinkSnapshot:
 
     resolver: _WikilinkResolverView
     reference_owners: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedCorpusSnapshot:
+    """Proved resident pages; a store revision covers only store-owned paths."""
+
+    _corpus: SemanticCorpusContext = field(repr=False)
+    census: tuple
+    checkpoint: freshness.FreshnessCheckpoint | None
+    _owns: Callable[[str], bool] | None = field(default=None, repr=False)
+
+    def pages(self) -> Iterator[tuple[str, SemanticPageState]]:
+        """Expose only pages covered by this publication's proof."""
+        for path, page in self._corpus.pages.items():
+            if self._owns is None or self._owns(path):
+                yield path, page
+
+
+def _resident_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple[tuple, SemanticCorpusContext], freshness.FreshnessCheckpoint | None] | None:
+    """Share configuration, store revision and registry proofs without a corpus walk."""
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+        language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+    if (
+        entry is not None
+        and language_hash == f"{language.schema_version}:{language.content_hash}"
+        and _config_census(root) == _stored_config_census(entry[0])
+        and (entry[1].registry.core_version, entry[1].registry.extension_hash)
+        == (registry.core_version, registry.extension_hash)
+    ):
+        return entry, caption
+    return None
+
+
+def _published_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """An ordinary event hit also requires its exact publication caption."""
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    return resident[0] if resident is not None and resident[1] == checkpoint else None
+
+
+def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
+    """Borrow an immutable generation without serializing readers behind its publisher."""
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    owned = _store_census_owns(root)
+    checkpoint = None
+    if owned is None:
+        if not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None:
+            return None
+
+    cache_key = _corpus_cache_key(root)
+    language = semantic_language_registry.core_registry()
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), language)
+    if resident is None:
+        return None
+    entry, caption = resident
+    if owned is None and caption != checkpoint:
+        return None
+    # Publishers replace immutable entries. Readers need only revalidate their selected generation.
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if (
+            _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+            or _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            != f"{language.schema_version}:{language.content_hash}"
+            or owned is None and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) != caption
+        ):
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    # Check after the cache identity: a publisher can advance events before replacing its entry.
+    if owned is None:
+        if (
+            not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return None
+    return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint, owned)
+
+
+def borrow_capture_inventory(vault_root: Path):
+    """Borrow complete raw metadata with an O(1) publisher-witness recheck."""
+    from . import capture_inventory
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    cache_key = _corpus_cache_key(root)
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), semantic_language_registry.core_registry())
+    if resident is None:
+        return None
+    entry, _caption = resident
+    inventory = entry[1].capture_inventory
+    if (inventory is None or inventory.type_dependency is None or inventory.type_dependency[0] == "unavailable"
+            or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
+        return None
+    if inventory.store_identity is not None:
+        with read.snapshot(root) as view:
+            identity = store_identity(view.connection)
+            witness = (identity["store_id"], identity["instance_id"], view.revision)
+            if inventory.store_identity != witness:
+                return None
+            generation = hashlib.sha256(repr(witness).encode()).hexdigest()
+    else:
+        witness = capture_inventory.raw_witness(root)
+        if witness is None or not witness.current(inventory.raw_stamp):
+            return None
+        generation = hashlib.sha256(repr(inventory.raw_stamp).encode()).hexdigest()
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    if inventory.store_identity is None and not witness.current(inventory.raw_stamp):
+        return None
+    return inventory, generation
+
+
+def publish_capture_inventory(root: Path, witness, *, census: bool = False, excluded=frozenset()) -> bool:
+    """Publish raw-only deltas without admitting excluded pages to semantic fan-out."""
+    from . import capture_inventory
+
+    if capture_inventory.raw_witness(root) is not witness or not witness.live:
+        return False
+    if census:
+        # A strict reconciliation is a new raw observation, including previously missed events.
+        witness.withdraw()
+    epoch, pending, seeded = witness.snapshot()
+    try:
+        cache_key = _corpus_cache_key(root)
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        if entry is None or _config_census(root) != _stored_config_census(entry[0]):
+            witness.withdraw()
+            return False  # The existing corpus warm owns cold work after lexical publication.
+        if not census and not pending and seeded:
+            if entry[1].capture_inventory is not None and witness.current(entry[1].capture_inventory.raw_stamp):
+                return True
+            witness.withdraw()
+            epoch, pending, seeded = witness.snapshot()
+            census = True
+        with _CORPUS_CONTEXT_UPDATE_LOCK:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if entry is None or entry[1].capture_inventory is None:
+                witness.withdraw()
+                return False
+            inventory, covered = capture_inventory.refreshed(root, entry[1].capture_inventory, pending,
+                                                            census=census or not seeded, excluded=excluded)
+            inventory = replace(inventory, raw_stamp=(witness.instance, epoch))
+            context = replace(entry[1], capture_inventory=inventory)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if (_CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+                        or capture_inventory.raw_witness(root) is not witness or not witness.live):
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (entry[0], context)
+                witness.acknowledge(epoch, covered, seeded=census or not seeded)
+        return True
+    except Exception:  # noqa: BLE001 - raw proof failure never withdraws ordinary recall.
+        witness.withdraw()
+        log.warning("canonical raw inventory publication is incomplete")
+        return False
 
 
 def borrow_link_snapshot(
@@ -2912,6 +3194,9 @@ def _reconcile_markdown_delta(
     it, and judged by the cold build's rules for a stored page, its strict
     frontmatter parse included.
     """
+    from . import capture_inventory
+
+    raw_changes = {}
     request_budget.checkpoint()
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
@@ -2974,6 +3259,9 @@ def _reconcile_markdown_delta(
                     source = _read_corpus_source(root, source_path)
                 except FileNotFoundError:
                     source = None
+        if capture_inventory.raw_path(root, rel_path):
+            raw_changes[rel_path] = (capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
+                                     if source is not None else None)
         if source is None:
             states.pop(rel_path, None)
             identities.pop(rel_path, None)
@@ -3013,15 +3301,25 @@ def _reconcile_markdown_delta(
         identity_census=identity_census,
         writer_visibility=context.writer_visibility,
     )
-    if candidate is not None:
-        return candidate
-
-    return _context_from_state_map(
+    if candidate is None:
+        candidate = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
+
+    inventory = context.capture_inventory
+    if inventory is not None:
+        inventory = inventory.with_delta(raw_changes)
+        if inventory.store_identity is not None:
+            from .collection_store.views import store_identity
+            from .vault_store import read
+
+            with read.snapshot(root) as view:
+                identity = store_identity(view.connection)
+                inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
+    return replace(candidate, capture_inventory=inventory)
 
 
 def on_corpus_files_changed(
@@ -3556,6 +3854,12 @@ def warm_corpus_context(vault_root: Path) -> None:
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
 
+    from . import capture_inventory
+
+    witness = capture_inventory.raw_witness(root)
+    if witness is not None and witness.live:
+        publish_capture_inventory(root, witness, census=not witness.seeded)
+
 
 def build_corpus_context_with_census(
     vault_root: Path,
@@ -3597,7 +3901,7 @@ def build_corpus_context_with_census(
     writer_visibility = vault.writer_link_visibility(root)
     selection = instances.DefinitionsSelection(root, _PAGE_DEFINITION_SUBJECTS)
     definitions = None
-    with egress.disclosure_boundary(root, "semantic_corpus_admission"):
+    with egress.disclosure_boundary(root, "semantic_corpus_admission", sink=True):
         visible = egress.restricted_release_filter(root)
         if visible is not None or writer_visibility is not None:
             memo_key = None
@@ -3784,24 +4088,10 @@ def _build_corpus_context_with_census(
         cache_key = _corpus_cache_key(root)
         event_checkpoint = freshness.consumer_checkpoint(root, "vault")
         if event_checkpoint.triple is not None:
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-                cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if (
-                event_entry is not None
-                and cached_checkpoint == event_checkpoint
-                and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
-                and _config_census(root) == _stored_config_census(event_entry[0])
-                and (
-                    event_entry[1].registry.core_version,
-                    event_entry[1].registry.extension_hash,
-                )
-                == (
-                    relation_definitions.core_version,
-                    relation_definitions.extension_hash,
-                )
-            ):
+            event_entry = _published_corpus_entry(
+                root, cache_key, event_checkpoint, relation_definitions, language
+            )
+            if event_entry is not None:
                 log.info(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),
@@ -4103,6 +4393,9 @@ def _build_corpus_context_uncached(
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
+    from . import capture_inventory
+
+    raw_inputs = {}
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
@@ -4125,6 +4418,8 @@ def _build_corpus_context_uncached(
             eligible[rel_path] = disk_path
 
     def consume(rel_path: str, source: str) -> None:
+        if capture_inventory.raw_path(root, rel_path):
+            raw_inputs[rel_path] = capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
         if rel_path in eligible:
             states[rel_path] = _parse_page_state(
                 root,
@@ -4158,13 +4453,15 @@ def _build_corpus_context_uncached(
         identity_census = identity_census.with_page(
             candidate, casefold_paths=vault.vault_casefolds(root)
         )
-    return _context_from_state_map(
+    context = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
 
+
+    return replace(context, capture_inventory=capture_inventory.collect(root, raw_inputs))
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:
@@ -4382,11 +4679,13 @@ def _context_from_state_map(
     identity_census: StableIdentityCensus,
     *,
     writer_visibility: Any = _DECIDE,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
+    resolver.bound_claims = prior_claims
     facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
     return _context_from_resolved_state(
         root,
@@ -4397,6 +4696,7 @@ def _context_from_state_map(
         resolver=resolver,
         facts=facts,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -4498,13 +4798,15 @@ def _context_with_page_delta(
     writer_visibility: Any,
     resolver_source: SemanticCorpusContext | None = None,
     activation_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext | None:
     """The corpus of `pages` from `base` by re-deriving only what `delta` reaches.
 
     `delta` lists the paths whose state was added, replaced or removed.
     `resolver_source` is a context that already holds the resolver of `pages`;
-    without it the resolver is patched from `base`. Returns None, and the
-    caller derives the whole corpus, whenever locality is not provable.
+    without it the resolver is patched from `base`. `prior_claims`, when given,
+    are the claims the links of `pages` resolve prior paths by. Returns None, and
+    the caller derives the whole corpus, whenever locality is not provable.
     """
     old = base.pages
     delta = tuple(path for path in delta if old.get(path) is not pages.get(path))
@@ -4533,6 +4835,7 @@ def _context_with_page_delta(
             stems=resolver_source.resolver_stems,
             titles=resolver_source.resolver_titles,
             candidates_by_key=resolver_source.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
     elif any(
         path not in old or path not in pages or old[path].title != pages[path].title
@@ -4551,6 +4854,7 @@ def _context_with_page_delta(
             candidates_by_key=base.resolver_candidates_by_key,
         )
         resolver.on_entries_changed(updated.items(), removed)
+        resolver.bound_claims = prior_claims
     else:
         entries = base.resolver_entries
         resolver = _WikilinkResolverView(
@@ -4559,6 +4863,7 @@ def _context_with_page_delta(
             stems=base.resolver_stems,
             titles=base.resolver_titles,
             candidates_by_key=base.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
 
     # A link resolves differently only through a key one of these pages held or
@@ -4568,6 +4873,19 @@ def _context_with_page_delta(
         for page in (old.get(path), pages.get(path)):
             if page is not None:
                 keys |= _resolver_dependency_keys(base.vault_root, page.path, page.title)
+    if prior_claims is not None:
+        from . import prior_claims as claims_module
+
+        # A link names a prior path by the claims, so each one whose claimants change, or that
+        # a changed page claims, reaches the links that name it.
+        before = (
+            base.prior_claims if base.prior_claims is not None
+            else claims_module.current(base.vault_root)
+        )
+        for prior in claims_module.changed_priors(before, prior_claims, delta):
+            keys |= _resolver_dependency_keys(
+                base.vault_root, prior.removesuffix(".md") + ".md", ""
+            )
     dependent = {
         identity
         for key in keys
@@ -4633,6 +4951,7 @@ def _context_with_page_delta(
         facts=facts,
         writer_visibility=writer_visibility,
         validated_census=census,
+        prior_claims=prior_claims,
     )
 
 
@@ -4647,6 +4966,7 @@ def _context_from_resolved_state(
     facts: tuple[RelationFact, ...],
     writer_visibility: Any = _DECIDE,
     validated_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -4704,6 +5024,7 @@ def _context_from_resolved_state(
         identity_census=identity_census,
         registry=registry,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -5194,6 +5515,8 @@ class _WikilinkResolverView:
     stems: Mapping[str, tuple[str, ...]]
     titles: Mapping[str, tuple[str, ...]]
     candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
+    #: The corpus's own prior-path claims, when it binds any (`SemanticCorpusContext.prior_claims`).
+    bound_claims: Any = None
 
 
 def _qualifying_body_wikilink_targets(
@@ -5202,13 +5525,7 @@ def _qualifying_body_wikilink_targets(
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Resolve body links by normalized set membership without relation facts."""
-    resolver = _WikilinkResolverView(
-        full_paths=corpus.resolver_full_paths,
-        kb_stripped=corpus.resolver_kb_stripped,
-        stems=corpus.resolver_stems,
-        titles=corpus.resolver_titles,
-        candidates_by_key=corpus.resolver_candidates_by_key,
-    )
+    resolver = corpus.link_resolver()
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
         status, resolved, _anchor, _alias = _resolve_target(
@@ -5279,8 +5596,8 @@ def writer_view_relations(
     also feeds the published graph, keeps every fact.
 
     A caller judging many pages of one corpus passes the writer's `visible`
-    (from `vault.writer_link_visibility`) and a `resolver` built from the
-    corpus once, rather than deciding them per page.
+    (from `vault.writer_link_visibility`) rather than deciding it per page. The
+    `resolver` defaults to the maps the corpus already holds, so no page builds one.
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())
@@ -5291,7 +5608,7 @@ def writer_view_relations(
     if visible is None or not callable(visible) or not visible(page.path):
         return outbound, inbound, None
     if resolver is None:
-        resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+        resolver = corpus.link_resolver()
     own = _derive_relation_facts(
         corpus.vault_root,
         {page.path: page},
@@ -5347,7 +5664,7 @@ def writer_authored_facts(
         visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not visible(page.path):
         return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
-    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    resolver = corpus.link_resolver()
     return tuple(
         sorted(
             _derive_relation_facts(
@@ -6195,6 +6512,46 @@ def _finding_sort_key(finding: ContractFinding) -> tuple[Any, ...]:
     )
 
 
+def _profile_topic_findings(page: SemanticPageState, vault_root: Path) -> list[ContractFinding]:
+    """A profile page covers one domain or all of them: two domains is an error, an unregistered one a warning.
+
+    A page that names two domains would serve one profile for both. A topic the registry does not know yet is only
+    a warning, because a governed write registers a new topic; until then the page supplies nothing and is not global.
+    """
+    if not _type_basis(page).selects(normalized_compiled_type(page.page_type), note_types.profile):
+        return []
+    # Imported here: the taxonomy reads the vault's registry files, which a pure page judgement otherwise never needs.
+    from . import source_taxonomy, vocabulary_resolution
+
+    scope = vocabulary_resolution.profile_scope(
+        source_taxonomy.load_taxonomy(vault_root), page.frontmatter.get("topics"),
+    )
+    named = ", ".join(scope.topics)
+    if scope.kind == vocabulary_resolution.SCOPE_MULTIPLE:
+        return [ContractFinding(
+            code="INVALID_PROFILE_TOPICS", severity="error", path=page.path, span=None,
+            detail=f"a profile covers one domain, and this page names several: {named}",
+            remediation=(
+                "Keep one topic on this page and write each other domain its own profile page, "
+                "or remove the topics to make it the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "one_domain"),
+        )]
+    if scope.kind == vocabulary_resolution.SCOPE_UNRESOLVED:
+        return [ContractFinding(
+            code="UNRESOLVED_PROFILE_TOPIC", severity="warning", path=page.path, span=None,
+            detail=f"the topic {named} is not a registered domain, so this profile is served for no turn",
+            remediation=(
+                "Register the domain in the domains registry, or name a registered domain; "
+                "remove the topics only to make this the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "registered_domain"),
+        )]
+    return []
+
+
 def _raw_findings(
     page: SemanticPageState,
     contracts: memory_schema.ResolvedMemoryContracts,
@@ -6233,6 +6590,7 @@ def _raw_findings(
             governed_element_identity=("frontmatter", "stance"),
             resolved_rule=("semantic_contract", "stance", "boolean"),
         ))
+    findings.extend(_profile_topic_findings(page, corpus.vault_root))
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:

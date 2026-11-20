@@ -20,7 +20,6 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress
 from functools import wraps
 from pathlib import Path
-from types import SimpleNamespace
 from typing import NamedTuple
 
 from .. import call_spans, foreground_priority, mutation_lock, request_budget, state_paths
@@ -203,6 +202,31 @@ class _Scope:
     def __init__(self):
         self.active = True
         self.thread = threading.get_ident()
+        self.entered = 0
+        self.cursors = weakref.WeakSet()
+        self.iterators = weakref.WeakSet()
+
+    def require_departure(self, writer):
+        self.check()
+        # Departing with live SQL would let canonical metadata escape its caller's snapshot or rollback.
+        if self.entered or writer.connection.in_transaction or writer._operation is not None:
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_BUSY", "Source metadata requires closed store read and operation scopes")
+
+    def close(self):
+        try:
+            for borrowed in tuple(self.iterators):
+                # SQL-bearing iterators expose close; materialized iterators own no SQL resources.
+                close = getattr(borrowed._value, "close", None)
+                if close is not None:
+                    close()
+        finally:
+            self.active = False
+            for cursor in self.cursors:
+                with suppress(sqlite3.Error):
+                    cursor.close()
+            self.cursors.clear()
+            self.iterators.clear()
 
     def check(self):
         if not self.active:
@@ -224,13 +248,18 @@ class _Scope:
         # they are ordinary values, not resources borrowed from this checkout.
         if isinstance(value, Path):
             return value
+        if isinstance(value, sqlite3.Cursor):
+            self.cursors.add(value)
         if isinstance(value, (
             sqlite3.Connection, sqlite3.Cursor, connection.WriterConnection,
             CollectionWriter, OperationAuthorization, ReleaseCache, InspectionCache,
             Census,
             AbstractContextManager, Iterator,
         )):
-            return _Borrowed(value, self)
+            borrowed = _Borrowed(value, self)
+            if isinstance(value, Iterator) and not isinstance(value, sqlite3.Cursor):
+                self.iterators.add(borrowed)
+            return borrowed
         return value
 
 
@@ -250,14 +279,20 @@ class _Borrowed:
 
         @wraps(value)
         def call(*args, **kwargs):
+            from .preview import _WriterAccess
+
             self._scope.check()
             # Internal evidence uses handle identity, not proxy identity.
-            for arg in (*args, *kwargs.values()):
+            def unwrap(arg):
+                if isinstance(arg, _WriterAccess):
+                    arg = arg._phase.writer()
                 if isinstance(arg, _Borrowed):
                     arg._scope.check()
-            args = tuple(arg._value if isinstance(arg, _Borrowed) else arg for arg in args)
-            kwargs = {key: arg._value if isinstance(arg, _Borrowed) else arg
-                      for key, arg in kwargs.items()}
+                    return arg._value
+                return arg
+
+            args = tuple(unwrap(arg) for arg in args)
+            kwargs = {key: unwrap(arg) for key, arg in kwargs.items()}
             return self._scope.wrap(value(*args, **kwargs))
         return call
 
@@ -275,11 +310,16 @@ class _Borrowed:
 
     def __enter__(self):
         self._scope.check()
-        return self._scope.wrap(self._value.__enter__())
+        value = self._value.__enter__()
+        self._scope.entered += 1
+        return self._scope.wrap(value)
 
     def __exit__(self, *args):
         self._scope.check()
-        return self._value.__exit__(*args)
+        try:
+            return self._value.__exit__(*args)
+        finally:
+            self._scope.entered -= 1
 
 
 @contextmanager
@@ -295,7 +335,7 @@ def borrowed_writer(root, handle, manager):
         try:
             yield scope.wrap(CollectionWriter(root, handle))
         finally:
-            scope.active = False
+            scope.close()
             _ACTIVE_LEASE_MANAGER.reset(manager_context)
 
 
@@ -550,6 +590,31 @@ class CollectionStoreRuntime:
             self.manager._renew_collection_store(token, due_only=True)
         self._admit(token, reads=reads)
         return self.manager._mutation_coordinator_for(self.root).current_thread_holds_boundary()
+
+    @contextmanager
+    def source_metadata_writer(self, handle):
+        """Keep canonical metadata authority and commit accounting outside request checkouts."""
+        from .writer import CollectionWriter
+
+        boundary = self.manager._mutation_coordinator_for(self.root)
+        if not boundary.current_thread_holds_boundary() or boundary.current_thread_borrows_boundary():
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
+        if handle.connection.in_transaction:
+            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "Source metadata requires idle SQL")
+        with self.manager._lock:
+            if (self._handle is not handle or self._writer_token != self.manager._fencing_token
+                    or self.manager._store_borrowers):
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_BUSY", "Source metadata requires the current unborrowed writer")
+        handle.require_write_authority()
+        before = handle.connection.total_changes
+        try:
+            yield CollectionWriter(self.root, handle)
+        finally:
+            if (not handle._closed and handle.connection.total_changes != before
+                    and self._publisher is not None):
+                self._publisher.note_commit()
 
     @contextmanager
     def checkout(self):
@@ -1175,7 +1240,7 @@ def _call_site(frame):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None, execution="store"):
         import contextvars
 
         self.context = contextvars.copy_context()
@@ -1184,6 +1249,8 @@ class _Call:
         self.read_only = read_only
         self.checkpoint = request_budget.current_checkpoint() if read_only else None
         self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
+        self.execution = execution
+        self.client = None
         self.thread = threading.get_ident()  # the caller, which keeps any boundary it holds while it waits here
         self.taken = False
         self.done = threading.Event()
@@ -1251,12 +1318,15 @@ class StoreServer:
         self._references_seeded = None  # the writer handle whose reference build states were last seeded
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
         self._requests = deque()
+        self._record_requests = set()
+        self._record_workers = set()
         self._closed = False
         self._condition = threading.Condition()
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None,
+             _execution="store"):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
@@ -1281,22 +1351,39 @@ class StoreServer:
             try:
                 return self._call(
                     work, wake_maintenance=wake_maintenance, read_only=read_only,
-                    extend=extend, on_refusal=on_refusal, initial=initial,
+                    extend=extend, on_refusal=on_refusal, initial=initial, execution=_execution,
                 )
             except BaseException:
                 fields["refused"] = 1
                 raise
 
-    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial):
+    def call_record_request(self, work, *, wake_maintenance=True, extend=None, on_refusal=None):
+        """Accept one bounded acquisition envelope; its short SQL units still use ordinary store calls."""
+        return self.call(work, wake_maintenance=wake_maintenance, extend=extend, on_refusal=on_refusal,
+                         _execution="record")
+
+    def call_store_unit(self, work, *, wake_maintenance=True):
+        """Return one unit's result, failure and commit observation after checkout cleanup finishes."""
+        return self.call(work, wake_maintenance=wake_maintenance, _execution="unit")
+
+    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial, execution="store"):
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
+        from .source_dependencies import request_server
+
+        # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
+        if execution not in ("store", "record", "unit"):
+            raise ValueError("unknown collection request execution mode")
+        record_request = execution == "record"
 
         checkpoint = request_budget.current_checkpoint() if read_only else None
         if checkpoint is not None:
             checkpoint()
         entry = time.monotonic()
         # The explicit read allowance already reserves delivery; mutation acknowledgements reserve it separately.
-        completion_deadline = (
+        # The outer accepted envelope owns its acknowledgement; an internal accepted unit keeps its inputs until done.
+        accepted_unit = not record_request and request_server() is self
+        completion_deadline = entry + self.manager._mutation_timeout_seconds if accepted_unit else (
             entry + checkpoint.remaining() if checkpoint is not None else acknowledgement_budget_deadline(entry)
         )
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
@@ -1318,11 +1405,29 @@ class StoreServer:
                 on_refusal(error, time.monotonic() - entry)
             return error
 
-        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial)
+        refusal = None
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial,
+                        execution=execution)
+        if record_request:
+            from .. import runtime_resources
+            from ..governance.principal import effective_principal
+
+            who = effective_principal()
+            request.client = (who.issuer_family, who.audience_id, who.client_binding)
+            maximum = max(1, runtime_resources.resolve_policy().sync_workers // 2)
         with self._condition:
+            if record_request and (len(self._record_requests) >= maximum
+                    or any(active.client == request.client for active in self._record_requests)):
+                # One client cannot occupy every acquisition worker; plain reads and writes bypass this pool.
+                refusal = self._busy_refusal("original input acquisition is busy; retry this request shortly")
             if not self._closed:
-                self._requests.append(request)
-                self._condition.notify_all()
+                if refusal is None:
+                    if record_request:
+                        self._record_requests.add(request)
+                    self._requests.append(request)
+                    self._condition.notify_all()
+        if refusal is not None:
+            raise refuse(refusal)
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
         refusal = None
@@ -1338,6 +1443,7 @@ class StoreServer:
                         # A caller that sees an error must leave nothing queued to run later.
                         if request in self._requests:
                             self._requests.remove(request)
+                            self._record_requests.discard(request)
                         raise
                     if later is not None and later > deadline:
                         deadline = later
@@ -1345,6 +1451,7 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
+                        self._record_requests.discard(request)
                     # Built here, where the queue is stable; journaled below, off the lock the store thread takes.
                     refusal = self._busy_refusal(
                         "the collection store did not take this request within the mutation timeout")
@@ -1359,6 +1466,9 @@ class StoreServer:
                    else foreground_priority.outside_foreground)
         with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+            if not completed and accepted_unit:
+                request.done.wait()
+                completed = True
         if not completed and checkpoint is not None:
             # Accepted audited reads stop at their next unit; retain ownership until they unwind.
             with waiting():
@@ -1481,6 +1591,9 @@ class StoreServer:
                 name = self._next_tick(now)
                 request = self._take(self._idle_wait(name, now))
                 if request is not None:
+                    if request.execution == "record":
+                        self._start_record_request(request)
+                        continue
                     self._serve(request)
                     served = self._served_at = time.monotonic()
                     if request.wake_maintenance:
@@ -1501,6 +1614,51 @@ class StoreServer:
                         self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
         finally:
             self._close()
+
+    def _start_record_request(self, request):
+        """Accepted execution owns its slot and inputs after a caller's acknowledgement deadline."""
+        from .source_dependencies import request_execution
+
+        if self.runtime is None:
+            with self._condition:
+                self._record_requests.discard(request)
+                request.error = self.unserved()
+                request.done.set()
+                self._condition.notify_all()
+            return
+
+        def unbound():
+            with request_budget.checking(None), request_execution(self):
+                return request.work()
+
+        def execute():
+            try:
+                request.result = request.context.run(unbound)
+            except BaseException as error:  # noqa: BLE001 - the original failure returns through the existing request
+                request.error = error
+            finally:
+                with self._condition:
+                    self._record_requests.discard(request)
+                    self._record_workers.discard(threading.current_thread())
+                    if request.wake_maintenance:
+                        now = time.monotonic()
+                        self._ticks = {tick: min(due, now) for tick, due in self._ticks.items()}
+                        self._views_after, self._views_passes, self._views_owed = None, 0, True
+                    request.done.set()
+                    self._condition.notify_all()
+
+        worker = threading.Thread(target=execute, name="exomem-record-acquisition", daemon=True)
+        with self._condition:
+            self._record_workers.add(worker)
+        try:
+            worker.start()
+        except BaseException as error:  # noqa: BLE001 - an accepted request must receive its thread-start failure
+            with self._condition:
+                self._record_workers.discard(worker)
+                self._record_requests.discard(request)
+                request.error = error
+                request.done.set()
+                self._condition.notify_all()
 
     @contextmanager
     def _maintaining(self, name):
@@ -1724,6 +1882,13 @@ class StoreServer:
                 error = connection.busy(str(error).removeprefix("COLLECTION_STORE_BUSY: "))
             request.error = error
         finally:
+            if request.execution == "unit":
+                from ..writer_lease import active_mutation_committed
+                from .source_dependencies import StoreUnitOutcome
+
+                committed = request.context.run(active_mutation_committed)
+                request.result = StoreUnitOutcome(request.result, request.error, committed)
+                request.error = None
             request.done.set()
 
     @contextmanager
@@ -1734,27 +1899,13 @@ class StoreServer:
         the rest of the request is bound to a fresh checkout. Its mutation boundary and
         active mutation stay held throughout, so no release or publication runs meanwhile.
         """
-        from .preview import preview_store, unbound
+        from .preview import source_metadata_phase
 
-        manager, thread = self.manager, threading.get_ident()
-        with manager._lock:
-            held = manager._store_borrowers.pop(thread, 0)
-        # The producer clears ``resume`` when it leaves the store to a pending create, which
-        # no fresh checkout can enter; the rest of the request then runs unbound.
-        lend = SimpleNamespace(resume=True)
-
-        def resume():
-            with manager._lock:
-                manager._store_borrowers[thread] = manager._store_borrowers.get(thread, 0) + held
-            self._scope.enter_context(preview_store(self.root, self.runtime) if lend.resume else unbound())
-
-        try:
+        phase = source_metadata_phase(self.root)
+        if phase is None:
+            raise connection.CollectionStoreError("COLLECTION_STORE_CHECKOUT_CLOSED", "producer lending requires the request checkout")
+        with phase.lent() as lend:
             yield lend
-        except BaseException:
-            with suppress(Exception):
-                resume()
-            raise
-        resume()
 
     def _create_tick(self):
         """Finish a create whose replica publication did not complete; returns the seconds until the next tick.
@@ -2266,6 +2417,7 @@ class StoreServer:
                 request.taken = True
                 request.error = connection.busy("the collection store is shutting down")
                 request.done.set()
+                self._record_requests.discard(request)
             self._requests.clear()
             self._condition.notify_all()
         with _SERVERS_LOCK:

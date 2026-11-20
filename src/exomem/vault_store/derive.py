@@ -121,6 +121,39 @@ class _Derivation:
         self.admission = tx.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_admission'"
         ).fetchone() is not None
+        # Likewise the prior-path index: the registry pass creates it and derives every page's rows.
+        self.priors = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prior_paths'"
+        ).fetchone() is not None
+        self._relayout: object | None = None
+        #: The prior paths whose claimants this commit changes; links naming them re-resolve.
+        self.prior_changed: set[str] = set()
+        # One basis for the commit, so that the registry loads once and not once per page parse.
+        self.type_basis = epistemic_graph.producer_type_basis(root)
+
+    def relayout(self) -> object:
+        """The relayout record as this transaction sees it, read once per commit."""
+        if self._relayout is None:
+            from .. import relayout_record
+
+            def record_bytes(rel: str) -> bytes | None:
+                found = self.source(rel)
+                return None if found is None else found[0]
+
+            self._relayout = relayout_record.load(self.root, read_bytes=record_bytes)
+        return self._relayout
+
+    def _replace_priors(self, rel: str, raw: bytes | None) -> None:
+        if self.priors:
+            before = {
+                row[0]
+                for row in self.tx.execute(
+                    "SELECT prior_path FROM prior_paths WHERE path = ?", (rel,)
+                ).fetchall()
+            }
+            rows = () if raw is None else memory_refs.prior_path_rows(rel, raw, self.relayout())
+            memory_refs.replace_prior_rows(self.tx, rel, rows)
+            self.prior_changed |= before ^ {row[0] for row in rows}
 
     # ------------------------------------------------------------------ sources
 
@@ -154,10 +187,15 @@ class _Derivation:
         resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
         before_resolver = resolver.fork()
         resolver.on_entries_changed(delta.entries, delta.deleted)
+        if self.priors:
+            from .. import prior_claims
+
+            # The graph resolves prior paths by the claims this commit leaves, as a cold build does.
+            resolver.bound_claims = prior_claims.from_connection(self.root, self.tx)
         graph = _GraphInputs(
             resolver=resolver,
             stamps=epistemic_graph.graph_registry_stamps(self.root),
-            type_basis=epistemic_graph.producer_type_basis(self.root),
+            type_basis=self.type_basis,
             landing=epistemic_graph.landing_from_bytes(self.root, self.page_bytes),
         )
         for rel in self.removed:
@@ -187,6 +225,7 @@ class _Derivation:
         for rel in self.removed:
             lexstore.delete_page_rows(self.tx, rel, projections=self.projections)
             memory_refs.replace_identity_row(self.tx, rel, None)
+            self._replace_priors(rel, None)
             if self.admission:
                 page_admission.replace_row(self.tx, rel, None)
         derived: dict[str, tuple[str | None, bool]] = {}
@@ -195,6 +234,7 @@ class _Derivation:
             lexstore.delete_page_rows(self.tx, rel, projections=self.projections)
             if found is None:
                 memory_refs.replace_identity_row(self.tx, rel, None)
+                self._replace_priors(rel, None)
                 if self.admission:
                     page_admission.replace_row(self.tx, rel, None)
                 derived[rel] = (None, False)
@@ -219,6 +259,7 @@ class _Derivation:
                 page_admission.replace_row(self.tx, rel, raw, page)
             identity = memory_refs.identity_row(self.root, rel, raw)
             memory_refs.replace_identity_row(self.tx, rel, identity)
+            self._replace_priors(rel, raw if identity is not None else None)
             derived[rel] = (
                 None if rows is None else rows.columns["title"],
                 rows is not None and in_vault,
@@ -246,7 +287,7 @@ class _Derivation:
             return None, None
         try:
             state = semantic_index.current_parent_index_state(
-                self.root, rel, source=raw.decode("utf-8")
+                self.root, rel, source=raw.decode("utf-8"), owner_type_basis=self.type_basis
             )
         except (OSError, UnicodeError, ValueError):
             # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
@@ -298,7 +339,8 @@ class _Derivation:
         links that start resolving to it and the links that stop. Any other edit moves only the
         links that name a unit of the page with a ``#`` fragment, as file mode re-derives them.
         """
-        moved: set[str] = set(self.removed)
+        # A prior path that gains or loses a claimant moves the links that name it.
+        moved: set[str] = set(self.removed) | self.prior_changed
         edited: set[str] = set()
         for rel in (*self.written, *self.refreshed):
             if rel not in self.existing and rel not in before:

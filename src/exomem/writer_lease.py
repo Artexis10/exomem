@@ -34,7 +34,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
-from functools import partial, wraps
+from functools import cached_property, partial, wraps
 from pathlib import Path
 from typing import Any, get_args
 
@@ -220,6 +220,8 @@ _ACTIVE_DIRECT_MUTATION_GUARDS: ContextVar[tuple[tuple[str, Path], ...]] = Conte
 )
 # True only inside ``progress_check``: a check that need not ask the coordinator itself.
 _PROGRESS_CHECK: ContextVar[bool] = ContextVar("exomem_progress_check", default=False)
+# True only while `invoke_command` runs a command its declared access classifies as a read.
+_INVOCATION_READS: ContextVar[bool] = ContextVar("exomem_invocation_reads", default=False)
 
 
 @contextmanager
@@ -427,6 +429,27 @@ def _drain_post_terminal_housekeeping(queue: list[Callable[[], None]]) -> None:
             work()
         except Exception:  # noqa: BLE001 - the canonical terminal is already durable
             logger.warning("post-terminal housekeeping failed", exc_info=True)
+
+
+def _moved_planned_write(error: BaseException) -> bool:
+    """Whether a planned-write-moved race lies anywhere in the cause chain.
+
+    Tool layers wrap the raw signal (`AuxiliaryGuardMoved`,
+    `RawEnumerationMoved`) in their own error types (`NoteError`,
+    `SemanticWriteError`) before it reaches the lease; the chain still carries
+    it, and only these two markers ever name the absorbable pre-commit race —
+    never a guard on the write's own basis."""
+    from .relation_review import AuxiliaryGuardMoved
+    from .source_capture import RawEnumerationMoved
+
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (AuxiliaryGuardMoved, RawEnumerationMoved)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _with_post_terminal_fanout_acknowledgement(
@@ -1883,7 +1906,9 @@ def _committed_failure_payload(error: Exception) -> dict[str, Any] | None:
     if not callable(public_dict):
         return None
     try:
-        return _validate_committed_failure_payload(public_dict())
+        from .source_result_custody import attribute_failure
+
+        return attribute_failure(_validate_committed_failure_payload(public_dict()))
     except Exception:  # noqa: BLE001 - arbitrary exception payloads are not cacheable
         return None
 
@@ -3148,6 +3173,20 @@ class _ClosingConnection(sqlite3.Connection):
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
+    @cached_property
+    def capture_attempts(self):
+        """Separate capture admission rows under this database's existing runtime protections."""
+        from .capture_attempts import CaptureAttemptLedger
+
+        return CaptureAttemptLedger(self)
+
+    @cached_property
+    def source_results(self):
+        """Source-only publication witnesses share the protected runtime database."""
+        from .source_result_custody import Journal
+
+        return Journal(self)
+
     def __init__(
         self,
         path: Path,
@@ -3573,6 +3612,8 @@ class IdempotencyStore:
         legacy_graph_pending_proof=None,  # noqa: ANN001
         reconcile_abandoned: bool = False,
     ) -> Any:
+        from . import source_result_custody
+
         if not key:
             with operation_guard() if operation_guard is not None else nullcontext():
                 result = operation()
@@ -3613,10 +3654,15 @@ class IdempotencyStore:
                     # The waiter already acquired the new attempt under the SQLite transaction.
                     break
                 disposition, stored = waited
+            source_result = source_result_custody.current(self)
+            if source_result is not None and disposition in {"completed", "canonical_resume"}:
+                stored = source_result.decode(stored)
+            elif source_result is not None and disposition == "committed_failure":
+                stored = _CachedCommittedFailure(source_result.decode(stored.as_public_dict()))
             if disposition == "canonical_resume":
                 if resume_canonically_committed is None:
                     raise _mutation_outcome_unknown_error()
-                terminal_result = resume_canonically_committed(stored)
+                terminal_result = source_result_custody.carry_result(stored, resume_canonically_committed(stored))
                 if terminal_result == _OUTCOME_UNKNOWN_TERMINAL:
                     # A v2 receipt can prove the canonical write happened,
                     # yet deliberately retains no cleanup target paths.  Do
@@ -3704,18 +3750,21 @@ class IdempotencyStore:
                             attempt,
                             "committed_failure" if committed_handoff else "success",
                         )
-                        result = prepared
+                        result = source_result_custody.carry_result(result, prepared)
                     canonical_result = result
                     if committed_handoff:
                         assert committed_failure is not None
                         canonical_result = _CanonicalCommittedFailure(result, committed_failure)
                     try:
-                        self._persist_canonically_committed(
+                        published_result = self._persist_canonically_committed(
                             key,
                             digest,
                             canonical_result,
                             attempt,
                         )
+                        if published_result is not None:
+                            canonical_result = published_result
+                            result = canonical_result.result if committed_handoff else canonical_result
                     except Exception as storage_error:
                         if self._exact_evidence(commit_evidence, digest, attempt):
                             raise _PostCommitOutcomeUncertain() from storage_error
@@ -3734,7 +3783,9 @@ class IdempotencyStore:
             if after_operation_guard is None:
                 terminal_result = result
             else:
-                terminal_result = after_operation_guard(result)
+                from .source_result_custody import carry_result
+
+                terminal_result = carry_result(result, after_operation_guard(result))
             if committed_handoff:
                 # A committed *failure* has no success terminal to protect, so
                 # its derived work still runs before the failure terminal
@@ -3763,7 +3814,9 @@ class IdempotencyStore:
             # chance to register a batch. A commit that registers none owes
             # nothing and must not be stamped pending forever.
             if acknowledgement_expected is not None and acknowledgement_expected():
-                terminal_result = _awaiting_derived_acknowledgement(terminal_result)
+                from .source_result_custody import carry_result
+
+                terminal_result = carry_result(terminal_result, _awaiting_derived_acknowledgement(terminal_result))
             try:
                 terminal_result = self._persist_completed_from_canonical(
                     key, digest, terminal_result
@@ -3781,7 +3834,9 @@ class IdempotencyStore:
             # to the fail-closed outcome-unknown. Committed-uncertain is now
             # reached only when persisting the terminal itself fails.
             try:
-                acknowledged = after_terminal_acknowledgement(terminal_result)
+                from .source_result_custody import carry_result
+
+                acknowledged = carry_result(terminal_result, after_terminal_acknowledgement(terminal_result))
             except _PostCommitOutcomeUncertain as acknowledgement_error:
                 acknowledged = _derived_acknowledgement_pending(
                     terminal_result, acknowledgement_error
@@ -3831,6 +3886,9 @@ class IdempotencyStore:
                 (key,),
             ).fetchone()
             if row and self._expired_row(row, now, expires_after):
+                from .source_result_custody import close_rows
+
+                close_rows(conn, kind="mutation", keys=(key,))
                 conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
                 row = None
             if row is not None:
@@ -3843,6 +3901,11 @@ class IdempotencyStore:
                     legacy_graph_pending_proof=legacy_graph_pending_proof,
                 )
                 if row is not None:
+                    from . import source_result_custody
+
+                    source_result = source_result_custody.current(self)
+                    if source_result is not None and row[5] and row[6]:
+                        source_result.pin(conn, source_result_custody.mutation_pointer(key, row), row[1])
                     disposition = self._decode_disposition(row, digest, commit_evidence=commit_evidence)
                     if disposition[0] != "outcome_unknown" or not reconcile_abandoned:
                         return disposition
@@ -4067,7 +4130,10 @@ class IdempotencyStore:
         expires_after: float | None,
         key: str,
     ) -> None:
+        from .source_result_custody import close_rows
+
         key_pattern = f"{key.partition(':')[0]}:%"
+        closed_source_keys: list[str] = []
         if expires_after is not None:
             cutoff = now - expires_after
             expired_completed = conn.execute(
@@ -4088,6 +4154,11 @@ class IdempotencyStore:
                 else:
                     if completed == _OUTCOME_UNKNOWN_TERMINAL:
                         continue
+                closed_source_keys.append(expired_key)
+                # Bound the added witness work; generic expiry's existing admission policy stays unchanged.
+                if len(closed_source_keys) >= 128:
+                    close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
+                    closed_source_keys.clear()
                 conn.execute(
                     "DELETE FROM mutations WHERE key = ? AND state = 'completed'", (expired_key,)
                 )
@@ -4103,10 +4174,15 @@ class IdempotencyStore:
                     _deserialize_committed_failure_payload(expired_payload)
                 except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
                     continue
+                closed_source_keys.append(expired_key)
+                if len(closed_source_keys) >= 128:
+                    close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
+                    closed_source_keys.clear()
                 conn.execute(
                     "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
                     (expired_key,),
                 )
+            close_rows(conn, kind="mutation", keys=tuple(closed_source_keys))
         # `outcome_unknown` deliberately remains retained: expiry would turn
         # an unprovable canonical cut into permission to replay the leaf.
 
@@ -4269,6 +4345,14 @@ class IdempotencyStore:
         raise self._reconciliation_error("cached mutation state")
 
     def _persist_completed(self, key: str, digest: str, result: Any) -> None:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, result, state="completed", allowed=("pending", "executing", "canonically_committed"),
+            attempt=self._attempts.get(key),
+        ) is not None:
+            return
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4282,7 +4366,7 @@ class IdempotencyStore:
 
     def _persist_canonically_committed(
         self, key: str, digest: str, result: Any, attempt: _ExecutionAttempt
-    ) -> None:
+    ) -> Any:
         # Closes the span opened when canonical bytes landed. Everything between
         # the two is derived fan-out and terminal bookkeeping, and the 0.83.1
         # deploy could not attribute ~32 s of it per write.
@@ -4297,6 +4381,14 @@ class IdempotencyStore:
         # 0.4 s per write on 0.84.1, against 46 s inside the umbrella that had
         # no span at all, so the split is what says which half to look in.
         call_spans.record_span_since("derived.terminal_persist", "derived_fanout_complete")
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None:
+            published = source_result.persist_mutation(key, digest, result, state="canonically_committed",
+                                                       allowed=("executing",), attempt=attempt)
+            if published is not None:
+                return published
         with self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE mutations SET state = 'canonically_committed', result = ?, owner = NULL, "
@@ -4314,8 +4406,17 @@ class IdempotencyStore:
             if cursor.rowcount != 1:
                 raise self._reconciliation_error("canonical mutation state")
         _log_mutation_event("canonically_committed", receipt=_receipt_tag(key))
+        return result
 
     def _persist_completed_from_canonical(self, key: str, digest: str, result: Any) -> Any:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None:
+            published = source_result.persist_mutation(key, digest, result, state="completed",
+                                                       allowed=("canonically_committed",))
+            if published is not None:
+                return published
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4353,6 +4454,13 @@ class IdempotencyStore:
 
     def _replace_completed(self, key: str, digest: str, result: Any) -> None:
         """Advance a durably committed canonical terminal with derived progress."""
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, result, state="completed", allowed=("completed",)
+        ) is not None:
+            return
         payload = pickle.dumps(result)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4367,6 +4475,15 @@ class IdempotencyStore:
     def _persist_committed_failure(
         self, key: str, digest: str, committed_failure: dict[str, Any]
     ) -> None:
+        from .source_result_custody import current
+
+        source_result = current(self)
+        if source_result is not None and source_result.persist_mutation(
+            key, digest, committed_failure, state="completed", allowed=("executing", "canonically_committed"),
+            encode=_serialize_committed_failure_payload, attempt=self._attempts.get(key),
+            encoding="failure-json",
+        ) is not None:
+            return
         payload = _serialize_committed_failure_payload(committed_failure)
         with self._connect() as conn:
             cursor = conn.execute(
@@ -4629,6 +4746,11 @@ _CAPTURE_WAIT_EXHAUSTED_REMEDIATION = (
     "retry after retry_after_ms, with the same idempotency key if the write carried one."
 )
 
+#: How long one unit of batch work waits for a queued keyed write before it
+#: takes the boundary anyway (`LeaseManager.yield_to_waiting_writes`). A batch
+#: slows for a writer; it never waits one out forever.
+_BATCH_YIELD_MAX_SECONDS = 30.0
+
 
 def _writes_absorb_contention() -> bool:
     return os.environ.get("EXOMEM_CAPTURE_CONTENTION_ABSORB", "1").strip().lower() not in {
@@ -4881,6 +5003,9 @@ class _ContentionWait:
         self.slot_counted = False
         self.absorbed = 0
         self.last_attempt_seconds = 0.0
+        # `release_turn` can run on the store thread that took the boundary on
+        # this write's behalf while `close` runs here, so both take this lock.
+        self._release_lock = threading.Lock()
 
     def take_slot(self) -> bool:
         if not self.holds_slot:
@@ -4918,13 +5043,30 @@ class _ContentionWait:
     def waited_ms(self) -> int:
         return round((time.monotonic() - self.started) * 1000)
 
-    def close(self) -> None:
+    def release_turn(self) -> None:
+        """End this write's place in line: its attempt now holds the boundary.
+
+        Called from `mutation_lock.on_boundary_acquired` when the attempt's
+        first boundary acquisition lands, which may be on a store thread
+        running the write in a copied context. The write stays in its command,
+        but it no longer waits, so its ticket and its waiter slot belong to
+        the writers behind it. A busy refusal later in the same attempt joins
+        the line again, at the back, through `take_slot`/`join_line`.
+        """
+        with self._release_lock:
+            self._release_locked()
+
+    def _release_locked(self) -> None:
         if self.slot_counted:
             _release_capture_waiter_slot()
         self.holds_slot = self.slot_counted = False
         if self.ticket is not None:
             self.queue.leave(self.ticket)
             self.ticket = None
+
+    def close(self) -> None:
+        with self._release_lock:
+            self._release_locked()
 
 
 class LeaseManager:
@@ -5362,6 +5504,35 @@ class LeaseManager:
         """
         return self._mutation_coordinator_for(vault_root).waiter_count()
 
+    def yield_to_waiting_writes(
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        max_wait: float = _BATCH_YIELD_MAX_SECONDS,
+    ) -> float:
+        """Between two units of batch work, wait while a keyed write waits; return the wait.
+
+        A multi-path media request and the background media worker re-take the
+        boundary per unit. Between units this gives a write that waits in the
+        capture line or at the boundary itself the room to take it first, so
+        batch work slows but never starves a foreground write. The wait never
+        runs under a boundary this thread holds -- pausing there would make
+        every queued writer wait it out too -- and `waiter_count` already sees
+        the writes queued outside `hold()` (`queued_writers`). A ticket this
+        thread's own wait still holds changes nothing: a ticket of ours in the
+        line means another write is its head or behind it, and either way a
+        waiter exists, and a head ticket alone counts nobody.
+        """
+        if mutation_lock.current_thread_holds_boundary():
+            return 0.0
+        from . import foreground_priority
+
+        mutation = self._mutation_coordinator_for(vault_root)
+        with call_spans.span("batch.yield_to_writes"):
+            return foreground_priority.wait_while(
+                lambda: mutation.waiter_count() > 0, max_wait=max_wait
+            )
+
     def lend_boundary(
         self,
         vault_root: os.PathLike[str] | str,
@@ -5618,17 +5789,27 @@ class LeaseManager:
 
     @contextmanager
     def projection_guard(
-        self, vault_root: os.PathLike[str] | str, *, operation: str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        operation: str,
+        request_id: str | None = None,
+        holder_kind: str = "background",
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the vault mutation boundary, with writer authority, to write a projection file.
 
         Only for a file that a canonical source rebuilds and no canonical read depends
-        on, such as the collection store's derived rows. The holder is background work,
-        and the commit generation does not move, so every captured validity stamp stays
-        current. A writer of canonical content takes `mutation_guard`.
+        on, such as the collection store's derived rows, or for machine-local job rows. The
+        holder is background work unless the caller names its own, and the commit generation
+        does not move, so every captured validity stamp stays current. A writer of canonical
+        content takes `mutation_guard`.
         """
         with self._mutation_boundary(
-            vault_root, operation=operation, holder_kind="background", advance_generation=False
+            vault_root,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+            advance_generation=False,
         ) as mutation:
             yield mutation
 
@@ -5907,10 +6088,26 @@ class LeaseManager:
             and kwargs.get("operation") == "session"
             and kwargs.get("session_action") == "open"
         )
-        if authorization_issuance:
-            # The generic mutation store pickles its terminal for replay. An
-            # credential issuance terminal contains a raw bearer, so it must never enter
-            # that durable cache (or be emitted a second time by replay).
+        # Closed protocol operations own their terminals; reservation and settlement must stay fresh.
+        capture_attempt_control = command.name in {"reserve_source_capture", "settle_source_capture"}
+        capture_attempt_operation = capture_attempt_control or (
+            command.name == "capture_source" and kwargs.get("capture_reservation") is not None
+        )
+        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
+        bypass_generic_replay = (authorization_issuance or capture_attempt_operation
+                                 or command.name == "erase_captured_source")
+        capture_attempt_wire = None
+        if capture_attempt_operation:
+            from . import capture_attempts
+            from .source_capture import require_authority
+
+            require_authority(injected[0])
+            if not capture_attempt_control:
+                capture_attempt_wire = capture_attempts.wire_from_arguments(kwargs)
+                # Freeze the exact authored tree before preparation can transform input.
+                kwargs = {**kwargs, **capture_attempt_wire.model_dump(mode="json")}
+        if bypass_generic_replay:
+            # Credential issuance cannot retain bearers. Capture attempts own admission and terminals.
             idempotency_key = None
             implicit_idempotency_scope = None
             effective_public_idempotency_key = None
@@ -5931,15 +6128,18 @@ class LeaseManager:
         mutation_subject = self._mutation_subject(injected)
         receipt_vault_root = self._receipt_vault_root(injected)
         digest = _command_digest(command, kwargs)
-        key, expires_after, on_replay = _effective_idempotency_key(
-            self,
-            command=command,
-            mutation_subject=mutation_subject,
-            digest=digest,
-            idempotency_key=idempotency_key,
-            principal_scope=idempotency_principal_scope,
-            implicit_idempotency_scope=implicit_idempotency_scope,
-        )
+        if bypass_generic_replay:
+            key, expires_after, on_replay = None, None, None
+        else:
+            key, expires_after, on_replay = _effective_idempotency_key(
+                self,
+                command=command,
+                mutation_subject=mutation_subject,
+                digest=digest,
+                idempotency_key=idempotency_key,
+                principal_scope=idempotency_principal_scope,
+                implicit_idempotency_scope=implicit_idempotency_scope,
+            )
         # The receipt hooks below are reached only through the idempotent
         # state-machine path; unkeyed writes bypass `IdempotencyStore.run`'s
         # durable receipt protocol.
@@ -5950,12 +6150,12 @@ class LeaseManager:
         request_id = mutation_request_id or str(uuid.uuid4())
         receipt = _receipt_tag(key) if key else None
         vocabulary_binding = None
-        vocabulary_replay_terminal = self.idempotency.completed_terminal(key, digest)
+        vocabulary_replay_terminal = None if bypass_generic_replay else self.idempotency.completed_terminal(key, digest)
         # The private-identity inventory is a whole-vault walk. Build it here,
         # after the replay check (a durable terminal replays without paying for
         # it) and before any boundary is taken, so a write that meets it cold
         # does not hold every other writer stopped while it walks.
-        if receipt_vault_root is not None and vocabulary_replay_terminal is None:
+        if receipt_vault_root is not None and vocabulary_replay_terminal is None and not capture_attempt_control:
             from . import reserved_paths
 
             reserved_paths.warm_identity_catalogue_before_boundary(receipt_vault_root)
@@ -6100,7 +6300,12 @@ class LeaseManager:
             commit_token = _ACTIVE_MUTATION_COMMITTED.set(False)
             manager_token = _ACTIVE_LEASE_MANAGER.set(self)
             from .governance.principal import effective_principal
-            from .vocabulary_gate import attach_evidence, operation_context
+            from .source_result_custody import carry_result
+            from .vocabulary_gate import attach_evidence as attach_vocabulary_evidence
+            from .vocabulary_gate import operation_context
+
+            def attach_evidence(terminal, context):
+                return carry_result(terminal, attach_vocabulary_evidence(terminal, context))
 
             gate_context = None
             post_terminal_token = _ACTIVE_POST_TERMINAL_FANOUT.set(post_terminal_fanout)
@@ -6822,14 +7027,16 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal prepares read-only, then seals; `seal_proposal` takes
-        # the mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and compensation
-        # write step by step and keep the wide boundary.
+        # A curation proposal, forward or compensating, prepares read-only, then
+        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
+        # mutation boundary itself and re-checks every binding under it, so
+        # preparation can run without the lock. Apply, resume and applying a
+        # compensation write step by step and keep the wide boundary. The two
+        # actions are members of the closed curation action enum.
         narrow_curation_proposal = (
             command.name == "maintain_memory"
             and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") == "propose"
+            and kwargs.get("curation_action") in ("propose", "propose-compensation")
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -6948,33 +7155,67 @@ class LeaseManager:
                 finally:
                     _ACTIVE_FAST_ACK_SESSION.reset(token)
 
+            def invoke_protocol_leaf() -> Any:
+                if not capture_attempt_operation:
+                    return invoke_leaf()
+                from . import capture_attempts
+
+                try:
+                    return capture_attempts.invoke(
+                        self, mutation_subject, command.name, kwargs, invoke_leaf,
+                        wire=capture_attempt_wire,
+                        replay=lambda leaf: replayed_terminal(
+                            _CanonicalRequestReplay(leaf), request_id=request_id,
+                            receipt_id=None, idempotency_key=None,
+                        ),
+                    )
+                except Exception as error:
+                    if commit_state["observed"] and getattr(error, "committed", None) is not True:
+                        raise _PostCommitOutcomeUncertain() from error
+                    raise
+
             def run_idempotent() -> Any:
+                from .source_result_custody import Invocation
+
+                try:
+                    with Invocation(self, mutation_subject) if command.name in {
+                        "capture_source", "settle_source_capture"
+                    } else nullcontext():
+                        return run_source_idempotent()
+                except OpError as error:
+                    if command.name != "settle_source_capture" or error.code != "MUTATION_BUSY" or commit_state["leaf_started"]:
+                        raise
+                    from . import capture_attempts
+
+                    return capture_attempts.pending(self, mutation_subject, kwargs["reservation"])
+
+            def run_source_idempotent() -> Any:
                 return self.idempotency.run(
-                    key,
-                    digest,
-                    invoke_leaf,
-                    expires_after=expires_after,
-                    on_replay=on_replay,
-                    operation_guard=operation_guard,
-                    commit_observed=lambda: commit_state["observed"],
-                    after_canonical_persisted=persist_graph_sync_progress,
-                    after_operation_guard=finish_before_terminal_persistence,
-                    after_terminal_acknowledgement=finish_after_terminal_persistence,
-                    # Whether derived work is *owed*, not whether a hook is bound
-                    # and not whether a session exists: the session is built before
-                    # the leaf runs, from a feature flag and a vault root, so it
-                    # cannot know whether a batch will be registered. A commit that
-                    # registers none owes no component and must not be stamped
-                    # pending. Evaluated after the leaf, where the batches are known.
-                    acknowledgement_expected=lambda: (
-                        bool(post_terminal_fanout)
-                        or fast_ack_session is not None
-                        and bool(fast_ack_session.batches)
-                    ),
-                    resume_canonically_committed=resume_graph_sync,
-                    commit_evidence=exact_commit_evidence,
-                    legacy_graph_pending_proof=legacy_graph_pending_proof,
-                    reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
+                        key,
+                        digest,
+                        invoke_protocol_leaf,
+                        expires_after=expires_after,
+                        on_replay=on_replay,
+                        operation_guard=operation_guard,
+                        commit_observed=lambda: commit_state["observed"],
+                        after_canonical_persisted=persist_graph_sync_progress,
+                        after_operation_guard=finish_before_terminal_persistence,
+                        after_terminal_acknowledgement=finish_after_terminal_persistence,
+                        # Whether derived work is *owed*, not whether a hook is bound
+                        # and not whether a session exists: the session is built before
+                        # the leaf runs, from a feature flag and a vault root, so it
+                        # cannot know whether a batch will be registered. A commit that
+                        # registers none owes no component and must not be stamped
+                        # pending. Evaluated after the leaf, where the batches are known.
+                        acknowledgement_expected=lambda: (
+                            bool(post_terminal_fanout)
+                            or fast_ack_session is not None
+                            and bool(fast_ack_session.batches)
+                        ),
+                        resume_canonically_committed=resume_graph_sync,
+                        commit_evidence=exact_commit_evidence,
+                        legacy_graph_pending_proof=legacy_graph_pending_proof,
+                        reconcile_abandoned=command.name == "adoption_studio" and kwargs.get("action") in ("apply", "file"),
                 )
 
             from .command_surface import OPEN_WORLD_OPS
@@ -7248,6 +7489,23 @@ class LeaseManager:
             finally:
                 _ACTIVE_CAPTURE_PREPARATION_RETRY.reset(token)
 
+        def absorbing_guard_race() -> Any:
+            # The write's turn now ends at boundary acquisition, so its
+            # pre-boundary planning can run beside an earlier write's commit:
+            # a server-planned auxiliary that moved (AuxiliaryGuardMoved) or a
+            # staged source that vanished mid-enumeration (RawEnumerationMoved)
+            # is what the in-boundary commit already calls a moved planned
+            # write. Report it the same way and the loop re-plans it behind
+            # the line. A guard on the write's own basis, and anything after a
+            # commit, still propagates.
+            try:
+                return attempt()
+            except Exception as error:
+                # Tool layers may wrap the marker before it reaches here.
+                if commit_state["observed"] or not _moved_planned_write(error):
+                    raise
+                raise mutation_lock.planned_write_moved_busy() from error
+
         def absorbable(error: OpError) -> bool:
             if error.code != "MUTATION_BUSY":
                 return False
@@ -7257,7 +7515,12 @@ class LeaseManager:
             return True
 
         return self._absorb_contention(
-            command.name, wait, attempt, absorbable=absorbable, request_id=request_id, join_on_arrival=True
+            command.name,
+            wait,
+            absorbing_guard_race,
+            absorbable=absorbable,
+            request_id=request_id,
+            join_on_arrival=True,
         )
 
     def _absorb_contention(
@@ -7334,7 +7597,14 @@ class LeaseManager:
                     )
                 attempt_started = time.monotonic()
                 try:
-                    result = attempt()
+                    # The write's turn ends the moment its attempt holds the
+                    # boundary, not when its command returns: a long batch
+                    # command must not park every later keyed write for its
+                    # whole run. On the store route the boundary lands on the
+                    # store thread in a copy of this context, so the same
+                    # observer still fires.
+                    with mutation_lock.on_boundary_acquired(wait.release_turn):
+                        result = attempt()
                 except OpError as error:
                     if not absorbable(error):
                         raise
@@ -7410,7 +7680,16 @@ class LeaseManager:
         )
         try:
             with mutation_lock.absorbing_busy() if eligible else nullcontext():
-                return run()
+                try:
+                    return run()
+                except Exception as error:
+                    # A planned file a queued writer committed while this
+                    # attempt waited: the request thread's next attempt
+                    # re-plans it, as the in-line route already does. Tool
+                    # layers may wrap the marker before it reaches here.
+                    if commit_state["observed"] or not _moved_planned_write(error):
+                        raise
+                    raise mutation_lock.planned_write_moved_busy() from error
         except OpError as error:
             before_commit = not commit_state["observed"]
             if error.code == "MUTATION_BUSY":
@@ -7447,6 +7726,7 @@ class LeaseManager:
         `routed` is the first routing's store server.
         """
         from .collection_store import runtime as store_runtime
+        from .collection_store.source_dependencies import needs_acquisition_request
 
         # Every attempt is one request: one id in the logs and in the one journal row.
         request_id = kwargs.get("mutation_request_id") or str(uuid.uuid4())
@@ -7485,10 +7765,11 @@ class LeaseManager:
             try:
                 if server is None:
                     return run()
-                return server.call(
+                call = (server.call_record_request if needs_acquisition_request(command.name, kwargs)
+                        else partial(server.call, read_only=False))
+                return call(
                     run,
                     wake_maintenance=True,
-                    read_only=False,
                     extend=extend,
                     # The queue refuses a write it never took, or still holds, before `invoke` can journal it.
                     on_refusal=partial(_record_store_queue_refusal, command, call_kwargs, server.root),
@@ -7648,18 +7929,23 @@ class LeaseManager:
             store_mode = False
             try:
                 from . import epistemic_graph, graph_sync
-                from .vault_store import mode, read
+                from .vault_store import graph_state, mode, read
 
                 vault_root = Path(vault_or_cell)
                 store_mode = mode.store_mode_for_reads(vault_root)
                 if store_mode:
-                    # Store commits derive graph rows atomically; sidecar sync has no generation here.
-                    graph_status = {"state": "not_applicable", "generation": None}
+                    # Store commits derive graph rows atomically; sidecar sync has no generation here. The graph
+                    # reports the state that doctor reports: the registry pass's, or why it serves nothing.
+                    store_graph = graph_state.read(vault_root)
+                    graph_status = {
+                        "state": mode.UNKNOWN if store_graph is None else store_graph.state,
+                        "generation": None,
+                    }
                     with read.snapshot(vault_root) as view:
                         diagnostics["vault_store"] = {"state": "available", "revision": view.revision}
                 else:
                     graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current":
+                if not store_mode and graph_status["state"] == "current":
                     # A status probe reports; it never pays the O(corpus)
                     # source-bytes proof. It reads the remembered verdict, or
                     # says that nothing has proved the sidecar yet (#1454).
@@ -7675,7 +7961,7 @@ class LeaseManager:
                 diagnostics["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
                 if store_mode:
-                    diagnostics["graph_sync"] = {"state": "not_applicable", "generation": None}
+                    diagnostics["graph_sync"] = {"state": mode.UNKNOWN, "generation": None}
                     diagnostics["vault_store"] = {"state": "unavailable", "revision": None}
                 else:
                     diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}
@@ -8361,6 +8647,15 @@ def record_caller_refusal(
         pass
 
 
+def invocation_reads() -> bool:
+    """Whether the dispatched command now running is declared read-only (`Command.read_only`).
+
+    False inside a write and outside a dispatched command (a CLI helper, the watcher, a direct
+    call), so a step that only a read may take stays off wherever the access is not known.
+    """
+    return _INVOCATION_READS.get()
+
+
 def active_mutation_request_id() -> str | None:
     """Return the current content-free request identity for commit attribution."""
     trace = _ACTIVE_MUTATION_TRACE.get()
@@ -8644,6 +8939,14 @@ def _collection_store_thread(func):
         if injected and isinstance(injected[0], (str, os.PathLike)):
             from . import foreground_priority
             from .collection_store import runtime as store_runtime
+            from .collection_store.source_dependencies import (
+                needs_acquisition_request,
+                request_server,
+            )
+
+            current = request_server()
+            if current is not None and current.root == Path(injected[0]).resolve():
+                return func(command, *injected, **kwargs)
 
             import_request = kwargs.get("import_request")
             # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
@@ -8667,6 +8970,11 @@ def _collection_store_thread(func):
                     return server.read_beside(lambda: func(command, *injected, **kwargs), initial=routing.proof,
                                               collection=kwargs.get("collection"))
                 if server is not None:
+                    if needs_acquisition_request(command.name, kwargs):
+                        return server.call_record_request(
+                            lambda: func(command, *injected, **kwargs),
+                            on_refusal=partial(_record_store_queue_refusal, command, kwargs, server.root),
+                        )
                     return server.call(
                         lambda: func(command, *injected, **kwargs),
                         # A read hands the proof that routed it to the store thread, which skips its own.
@@ -8880,6 +9188,16 @@ def invoke_command(
         dispatch_command = replace(command, leaf=reject_uncovered_selector)
 
     def _invoke() -> Any:
+        # Only a command declared read-only reads by a page's prior path. A write-capable command
+        # keeps its target literal in every mode, so a preview (validate_only, dry_run) names the
+        # page its commit acts on, and a write outside the writer stays a write.
+        reads = _INVOCATION_READS.set(command.read_only)
+        try:
+            return _invoke_leaf()
+        finally:
+            _INVOCATION_READS.reset(reads)
+
+    def _invoke_leaf() -> Any:
         with _owner_authority_scope(command.name):
             # This fixed capture field gates cached terminals and key mismatch, too.
             if command.name == "capture_source" and kwargs.get("source_identity") is not None:

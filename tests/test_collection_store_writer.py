@@ -308,7 +308,7 @@ def test_one_immediate_transaction_txns_last_and_atomic_rollback(store, monkeypa
     def fail(*_args, **_kwargs):
         raise RuntimeError("fail before txn insert")
 
-    monkeypatch.setattr(store, "_insert_txn", fail)
+    monkeypatch.setattr(type(store), "_insert_txn", fail)
     with pytest.raises(RuntimeError, match="fail before txn insert"):
         store.append_record(CID, item={"title": "Two"}, why="observe")
     assert chain.recorded_head(store.connection) == before
@@ -504,13 +504,13 @@ def test_provenance_is_rechecked_at_precommit(store, monkeypatch):
     (store.root / source).parent.mkdir(parents=True)
     (store.root / source).write_text("Sample\n")
 
-    original_precommit = store._precommit
+    original_precommit = type(store)._precommit
 
-    def change_source(*args):
-        original_precommit(*args)
+    def change_source(writer, *args):
+        original_precommit(writer, *args)
         (store.root / source).write_text("Changed\n")
 
-    monkeypatch.setattr(store, "_precommit", change_source)
+    monkeypatch.setattr(type(store), "_precommit", change_source)
     with pytest.raises(vault.PathGuardError):
         store.append_record(CID, item={"title": "One"}, why="capture", sources=(source,))
     assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0

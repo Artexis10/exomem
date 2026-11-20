@@ -19,6 +19,7 @@ from starlette.requests import Request
 from starlette.testclient import TestClient
 
 from exomem import commands, server, server_transfer, upload_tokens
+from exomem import vault as vault_module
 from exomem.governance import egress, membership, policy, scrubber
 from exomem.governance import principal as principal_module
 
@@ -531,7 +532,7 @@ def test_withheld_refusal_does_not_reveal_the_on_disk_spelling(
     EXISTING path to its on-disk casing but leaves a missing one as typed. A
     refusal that echoed the resolver's spelling would answer "does this exist,
     and what is it really called?" for a file the caller may not see."""
-    real = server_transfer.resolve_under_vault
+    real = vault_module.resolve_under_vault
 
     def case_folding(vault_root: Path, path: str, **kwargs):
         wanted = str(path).strip().replace("\\", "/").lstrip("/").casefold()
@@ -541,7 +542,8 @@ def test_withheld_refusal_does_not_reveal_the_on_disk_spelling(
                 return real(vault_root, spelled, **kwargs)
         return real(vault_root, path, **kwargs)
 
-    monkeypatch.setattr(server_transfer, "resolve_under_vault", case_folding)
+    # The download route resolves through `originals.resolve_original_path`, which reads the vault resolver.
+    monkeypatch.setattr(vault_module, "resolve_under_vault", case_folding)
     _withhold(vault, audience=principal_module.OWNER_AUDIENCE)
     client = _client()
     typed = WITHHELD.lower()

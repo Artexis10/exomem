@@ -16,6 +16,7 @@ from exomem import memory_schema, relation_registry, semantic_contract, vault
 
 _ID_A = "00000000-0000-0000-0000-000000000001"
 _ID_B = "00000000-0000-0000-0000-000000000002"
+_ID_C = "00000000-0000-0000-0000-000000000003"
 
 
 def _source(*, exomem_id: str | None = None) -> str:
@@ -232,6 +233,30 @@ def test_with_page_exact_duplicate_path_replaced_regardless_of_folding(
 
     folded = census.with_page(page, casefold_paths=True)
     assert folded.paths_by_identity == {_ID_B: (page.path,)}
+
+
+def test_with_pages_gives_the_census_that_replacing_the_pages_one_by_one_gives(tmp_path: Path) -> None:
+    """A folder of recovered pages replaces its census entries in one build, as each page replacing its own would."""
+    census = semantic_contract.StableIdentityCensus(
+        (
+            semantic_contract.StableIdentityEntry("Knowledge Base/Notes/Insights/a.md", _ID_A),
+            semantic_contract.StableIdentityEntry("Knowledge Base/Notes/Insights/b.md", _ID_B),
+        )
+    )
+    pages = [
+        _state(tmp_path, "Knowledge Base/Notes/Insights/A.md", _source(exomem_id=_ID_C)),
+        _state(tmp_path, "Knowledge Base/Notes/Insights/b.md", _source(exomem_id=_ID_A)),
+        _state(tmp_path, "Knowledge Base/Notes/Insights/c.md", _source(exomem_id=_ID_C)),
+    ]
+
+    for folds in (False, True):
+        one_by_one = census
+        for page in pages:
+            one_by_one = one_by_one.with_page(page, casefold_paths=folds)
+
+        batch = census.with_pages({page.path: page for page in pages}, casefold_paths=folds)
+
+        assert batch == one_by_one
 
 
 # ---------------- vault_casefolds probe: cache + override ----------------

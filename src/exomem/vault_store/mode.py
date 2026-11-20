@@ -139,6 +139,19 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     return current == STORE_MODE
 
 
+def store_mode_or_unreadable(vault_root: Path) -> tuple[bool, str | None]:
+    """``store_mode_for_reads`` for a report: (in store mode, why the records could not be read).
+
+    A report on an unreadable store says ``unknown`` with the error's code, as ``status`` does: a crash is
+    no report, and a guess of file mode would describe a vault that the store may own. The first value is
+    False when the second is set.
+    """
+    try:
+        return store_mode_for_reads(vault_root), None
+    except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never a mode
+        return False, _reason(error)
+
+
 def forget_read_mode(vault_root: Path) -> None:
     """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)

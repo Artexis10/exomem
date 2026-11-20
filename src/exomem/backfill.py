@@ -23,13 +23,16 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass
+from itertools import chain
 from pathlib import Path
 
 from . import (
     embeddings,
     extract,
     index_sync,
+    media_store,
     preserve,
+    prior_claims,
     recall_policy,
     rename_journal,
     scene_frames,
@@ -67,10 +70,13 @@ def iter_kb_files(root: Path):
                 yield child
 
 
-def _iter_media_files(root: Path):
-    """Yield media files under `root` (pruned walk). `.md` sidecars and other
-    non-media files are filtered out by `extract.media_type_for`."""
-    for f in iter_kb_files(root):
+def _iter_media_files(vault_root: Path, root: Path):
+    """Yield media files under `root` (pruned walk), then the shared originals that no file holds.
+    `.md` sidecars and other non-media files are filtered out by `extract.media_type_for`."""
+    from . import media_processing
+
+    shared = (item.path for item in media_processing.unplaced_originals(vault_root) if item.local_path is not None)
+    for f in chain(iter_kb_files(root), shared):
         if extract.media_type_for(f):
             yield f
 
@@ -296,7 +302,7 @@ def backfill_media(
     _order = {"image": 0, "pdf": 1, "audio": 2, "video": 3}
     files: list[Path] = []
     suppressed_sidecars: list[str] = []
-    for media in _iter_media_files(kb):
+    for media in _iter_media_files(vault_root, kb):
         sidecar = _sidecar_for(media)
         if not _is_automatic_media_candidate(vault_root, media):
             try:
@@ -387,14 +393,20 @@ def backfill_media(
             if not _is_automatic_media_candidate(vault_root, f):
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
-            sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
+            try:
+                sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
+            except prior_claims.ReservedPathError as error:
+                log_fn(f"  [{i}/{len(files)}] {rel} -> no sidecar: {error.reason}")
+                stats.skipped += 1
+                continue
             stats.sidecars_created += int(created)
         if need_ocr or need_rediarize or need_retime:
             if not _is_automatic_media_candidate(vault_root, f):
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
             try:
-                res = extract.extract_text(f, media_type=media_type, vault_root=vault_root)
+                with media_store.logical_view(vault_root, f) as view:
+                    res = extract.extract_text(view, media_type=media_type, vault_root=vault_root)
                 if not _is_automatic_media_candidate(vault_root, f):
                     _purge_suppressed_clip(clip_store, vault_root, f)
                     continue
@@ -428,7 +440,9 @@ def backfill_media(
                         text=res.sidecar_text, engine=res.engine,
                         speakers=res.speakers, ocr=res.ocr,
                         # A page stored with its original holds null hints; it records these.
-                        binary_hints=media_processing.read_timestamp_hints(f),
+                        binary_hints=media_processing.read_timestamp_hints(
+                            media_processing.held_path(vault_root, f)
+                        ),
                     )
                     if need_ocr:
                         stats.extracted += 1
@@ -447,9 +461,12 @@ def backfill_media(
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
             try:
-                mtime = f.stat().st_mtime
+                from . import media_processing
+
+                mtime = media_processing.held_path(vault_root, f).stat().st_mtime
                 if media_type == "video" and need_scenes:
-                    vectors, pairs = embeddings.embed_video_scenes(f)
+                    with media_store.logical_view(vault_root, f) as view:
+                        vectors, pairs = embeddings.embed_video_scenes(view)
                     parent_clip_samples = scene_frames.projection_clip_samples(vectors)
                     if not _is_automatic_media_candidate(vault_root, f):
                         _purge_suppressed_clip(clip_store, vault_root, f)
@@ -478,14 +495,16 @@ def backfill_media(
                         # semantic segments (mirrors the worker's trailing re-embed).
                         index_sync.upsert_after_write(vault_root, [sidecar])
                 elif media_type == "video":
-                    vectors = embeddings.embed_video_frames(f)
+                    with media_store.logical_view(vault_root, f) as view:
+                        vectors = embeddings.embed_video_frames(view)
                     if not _is_automatic_media_candidate(vault_root, f):
                         _purge_suppressed_clip(clip_store, vault_root, f)
                         continue
                     clip_index.upsert_frames(rel, vectors, mtime)
                     stats.clip_indexed += 1
                 else:
-                    vector = embeddings.embed_image(f)
+                    with media_store.logical_view(vault_root, f) as view:
+                        vector = embeddings.embed_image(view)
                     if not _is_automatic_media_candidate(vault_root, f):
                         _purge_suppressed_clip(clip_store, vault_root, f)
                         continue

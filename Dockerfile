@@ -193,7 +193,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_CONTAINER_VARIANT=ml
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (ml: hybrid embeddings + CLIP search, CPU-only torch, no GPU)"
 
 # No HEALTHCHECK here by design (design.md D5) — a Dockerfile-level HEALTHCHECK
@@ -225,7 +225,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
 
 # No HEALTHCHECK here by design — a Dockerfile-level HEALTHCHECK would run
@@ -426,7 +426,7 @@ print('image load verified', MODEL_NAME, v.shape)" \
  && find /tmp -mindepth 1 -delete
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — Exomem Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment
@@ -454,7 +454,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_CONTAINER_VARIANT=lean
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (lean: keyword/BM25 search, no torch, no model download)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment

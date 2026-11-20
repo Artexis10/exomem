@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import embeddings, index_sync, semantic_contract
+from . import embeddings, index_sync, prior_claims, semantic_contract
 from .governance import projected_retrieval
 from .preserve import _render_sidecar
 from .vault import (
@@ -36,6 +36,7 @@ from .vault import (
     PreparedBinaryContent,
     batch_atomic_write,
     content_hash,
+    read_guarded_bytes,
     read_guarded_text,
 )
 
@@ -300,6 +301,16 @@ def _content_guard(
     relative: str,
 ) -> tuple[str, PathGuard, PathGuard]:
     """Hash one parent and return cheap identity plus completion guards."""
+    from . import originals
+
+    shared = originals.pooled(vault_root, vault_root / relative)
+    if shared is not None:
+        # A shared original has no file at its path. Its identity is the immutable pool object
+        # that its filing binds, and the exact bytes of that filing guard the binding.
+        raw, guard = read_guarded_bytes(vault_root, shared.sidecar_path)
+        if shared.binary_sha256 is None or hashlib.sha256(raw).hexdigest() != shared.sidecar_hash:
+            raise ValueError("the filing of a shared original changed while it was read")
+        return shared.binary_sha256, guard, guard
     stable = PathGuard.capture(vault_root, relative, leaf_policy="stable")
     digest = hashlib.sha256()
     size = 0
@@ -454,6 +465,9 @@ def write_scene_frames(
         sidecar = jpg.with_name(name + ".md")
         artifact_rel = jpg.relative_to(root).as_posix()
         try:
+            # A frame pair that moved away still claims these names, so its old links never
+            # reach a re-extracted frame; that one frame is skipped.
+            prior_claims.require_unreserved(root, sidecar.relative_to(root).as_posix())
             md = _render_sidecar(
                 artifact_name=name,
                 scope=scope,

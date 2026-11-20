@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 import yaml
 
-from exomem import lexstore, working_set, working_set_index, working_set_runtime
+from exomem import context_roles, lexstore, working_set, working_set_index, working_set_runtime
 from exomem import working_set_resolve as resolver
 from test_working_set_material import _note, _write
 from test_working_set_resolve import _facts, _row
@@ -51,8 +51,8 @@ def test_each_evidenced_named_request_survives_in_both_orders(capacity_vault, co
         assert not packet["abstained"]
         assert {unit["provenance"]["path"] for unit in packet["units"]
             if unit["role"] == "material"} == {paths[key] for key, _property, _value in topics}
-        assert packet["budget"]["used_chars"] <= 4000
-        assert len(packet["roles"]) <= 6
+        assert packet["budget"]["used_chars"] <= working_set.DEFAULT_BUDGET_CHARS
+        assert len(context_roles.lenses(packet["roles"])) <= context_roles.MAX_SELECTED_ROLES
 
 
 @pytest.mark.parametrize("connected", [6, 24])

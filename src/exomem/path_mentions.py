@@ -83,16 +83,11 @@ def find_pages(vault_root: Path, paths: Sequence[str]) -> Lookup:
     """
     from . import lexstore
 
-    found: set[str] = set()
-    complete = True
-    for rel in paths:
-        query = managed_relative(rel).lower()
-        answer = lexstore.search_substring_result(vault_root, query, scope="kb")
-        if not answer.readiness.complete or answer.value is None:
-            complete = False
-            continue
-        found.update(answer.value)
-    return Lookup(tuple(sorted(found)), complete)
+    queries = [managed_relative(rel).lower() for rel in paths]
+    answer = lexstore.search_substrings_result(vault_root, queries, scope="kb")
+    if not answer.readiness.complete or answer.value is None:
+        return Lookup((), False)
+    return Lookup(tuple(sorted({rel for found in answer.value.values() for rel in found})), True)
 
 
 def _pattern(old_rel: str) -> re.Pattern[str]:

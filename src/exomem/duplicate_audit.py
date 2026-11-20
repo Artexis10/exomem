@@ -30,6 +30,7 @@ from . import (
     evidence_reuse,
     fold_leaf,
     lexstore,
+    originals,
     request_budget,
     vault,
 )
@@ -52,6 +53,8 @@ class Member:
     payload: duplicates.PagePayload
     captured: str
     size: int | None
+    #: Whether the original lives in shared storage, so the bytes are already stored once.
+    shared: bool = False
 
     @property
     def filing_order(self) -> tuple[bool, str, str]:
@@ -88,14 +91,18 @@ def _member(vault_root: Path, path: str) -> Member | str:
     payload = duplicates.stored_payload(vault_root, path)
     if payload is None or payload.ref is None:
         return _STALE
-    size = None
+    size, shared = None, False
     if payload.artifact_path is not None:
         if duplicates.binding_unproven(vault_root, path, payload):
             return _UNPROVEN
         size = duplicates.original_size(vault_root, path, payload)
+        # A pooled original keeps no file at its logical path, so its shared object is re-hashed in its place.
+        shared = size is None and originals.pooled(vault_root, payload.artifact_path) is not None
+        if shared:
+            size = duplicates.original_size(vault_root, path, payload, bound=True)
         if size is None:
             return _STALE
-    return Member(path, payload, str(payload.frontmatter.get("captured") or ""), size)
+    return Member(path, payload, str(payload.frontmatter.get("captured") or ""), size, shared)
 
 
 def _no_fold_reason(members: Sequence[Member]) -> str | None:
@@ -104,7 +111,9 @@ def _no_fold_reason(members: Sequence[Member]) -> str | None:
         return "the identical bytes sit in both lanes, and a fold never crosses lanes"
     if members[0].payload.protected:
         return "the pages are raw-protected, a release grant binds to each page's content hash, and a fold never rewrites a protected page"
-    return None
+    return duplicate_fold.shared_storage_refusal(
+        [member.path for member in members], [member.path for member in members if member.shared]
+    )
 
 
 def _pinned_members(vault_root: Path, members: Sequence[Member]) -> set[str]:
@@ -145,7 +154,8 @@ def _content_finding(
     # The oldest filing, unless exactly one cited page can only be kept: then that page is the canonical one.
     canonical = pinned[0] if len(pinned) == 1 else ordered[0]
     copies = [member for member in ordered if member is not canonical]
-    freed = sum(member.size or 0 for member in copies)
+    # A copy whose original is shared holds no bytes of its own.
+    freed = sum(member.size or 0 for member in copies if not member.shared)
     if why is None:
         for copy in copies:
             refusal = duplicate_fold.pair_refusal(

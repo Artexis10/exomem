@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import sqlite3
@@ -546,9 +547,12 @@ def test_proved_inherited_snapshot_uses_current_resident_topology(
     assert sentinel.count == 0, sentinel.report()
 
 
+@pytest.mark.parametrize("pinned", [False, True], ids=["unpinned", "pinned_request"])
 def test_topology_change_during_reduction_withholds_edges_and_exact_totals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm_managed_cell, pinned: bool,
 ) -> None:
+    # A served request pins one store revision, so its checkpoint cannot name the change; the
+    # shared resolver that a commit patches in place is what the reduction must notice.
     root = tmp_path / "vault"
     _small(root)
     write_scope(root)
@@ -569,7 +573,9 @@ def test_topology_change_during_reduction_withholds_edges_and_exact_totals(
         return served
 
     monkeypatch.setattr(epistemic_graph.GraphView, "edge", advance_topology)
-    with request_scope(_external()):
+    with request_scope(_external()), (
+        store_read.request_snapshot(root) if pinned else contextlib.nullcontext()
+    ):
         result = commands.op_viewer_map(root)
     assert result["state"] == "partial", result
     assert result["counts"]["eligible_nodes"] is None

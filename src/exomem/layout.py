@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
@@ -348,6 +349,8 @@ class FixedBecause(StrEnum):
     NO_TITLE = "no_frontmatter_title"
     NO_USABLE_NAME = "no_usable_name"
     EXTRACTION_PART = "extraction_part"
+    # The writer, the access kernel and the backfills bind a page named `<file>.md` to the file beside it by that name.
+    FILE_SIDECAR = "sidecar_of_a_file"
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +396,7 @@ def place(
     type_value: object,
     title: object,
     registry: Registry,
+    files: AbstractSet[str] = frozenset(),
 ) -> Placement | None:
     """Where the page at `current_path` goes in `root`, or None when it is outside the managed root.
 
@@ -400,7 +404,8 @@ def place(
     frontmatter. The folder follows a prefix rewrite: the managed root drops, and `Notes/`
     drops before a registered area. A `Notes/<X>` folder with no registered area keeps its
     level and is named in `unregistered_folder`. The name class follows the page's note type,
-    and the first rule that keeps a name wins.
+    and the first rule that keeps a name wins. `files` holds the path of every file the plan
+    lists, so that a page named after the file beside it is found by that file's existence.
     """
     from . import semantic_contract
     from .vault_store import ownership
@@ -436,6 +441,8 @@ def place(
         return keep(FixedBecause.MACHINERY)
     if extraction_parts.source_page_for(PurePosixPath(current_path)) is not None:
         return keep(FixedBecause.EXTRACTION_PART)
+    if current_path[: -len(extension)] in files:
+        return keep(FixedBecause.FILE_SIDECAR)
     # The write gate's own list of generated navigation names; a bare Markdown name matches no folder.
     if semantic_contract.compiled_route_exempt(filename):
         return keep(FixedBecause.NAVIGATION)

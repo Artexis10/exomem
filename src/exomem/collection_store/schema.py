@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
@@ -104,6 +104,7 @@ TABLES = (
     "items",
     "item_versions",
     "item_sources",
+    "version_source_bindings",
     "txns",
     "audit_effects",
     "held_candidates",
@@ -133,7 +134,7 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_type_versions",
 )
 APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats",
-                      "store_audit")
+                      "store_audit", "version_source_bindings")
 
 #: The declared-reference inverse index (schema 17). It derives from items, so the replica
 #: leaves it empty and warms a rebuilt state instead of trusting a copied one.
@@ -323,6 +324,7 @@ _CONFLICT_KEYS = {
     "audit_effects": (("txn_id", "ordinal"),),
     "item_versions": (("row_id", "row_version"),),
     "item_sources": (("row_id", "row_version", "ordinal"),),
+    "version_source_bindings": (("row_id", "row_version", "canonical_ref"),),
     "collection_manifests": (("collection_id", "manifest_version"),),
     "collection_type_versions": (("name", "version"),),
     "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
@@ -1179,6 +1181,45 @@ def _migrate_to_17(conn: sqlite3.Connection) -> None:
                 (collection_id, declaration.dotted, declaration.collection))
 
 
+def _migrate_to_18(conn: sqlite3.Connection) -> None:
+    """Retain authenticated Source incarnations without changing v1 citation material."""
+    # Event versions and completeness flags belong to this persistence protocol.
+    conn.execute("ALTER TABLE txns ADD COLUMN event_version INTEGER NOT NULL DEFAULT 1 "
+                 "CHECK(event_version IN (1,2))")
+    for payload in ("current", "prior"):
+        conn.execute(f"ALTER TABLE audit_effects ADD COLUMN dependency_{payload}_complete INTEGER "
+                     f"CHECK(dependency_{payload}_complete IN (0,1))")
+    conn.execute("""CREATE TABLE version_source_bindings(
+      row_id INTEGER NOT NULL,
+      row_version INTEGER NOT NULL,
+      canonical_ref TEXT NOT NULL,
+      dep_epoch TEXT,
+      dep_operation TEXT NOT NULL,
+      auth_txn_id INTEGER NOT NULL,
+      auth_effect_ordinal INTEGER NOT NULL,
+      PRIMARY KEY(row_id,row_version,canonical_ref),
+      FOREIGN KEY(row_id,row_version) REFERENCES version_identity(row_id,row_version),
+      FOREIGN KEY(auth_txn_id,auth_effect_ordinal) REFERENCES audit_effects(txn_id,ordinal)
+        DEFERRABLE INITIALLY DEFERRED
+    ) STRICT, WITHOUT ROWID""")
+    # A known incarnation survives ordinary unenrolled writes; NULL means no custody admission.
+    conn.execute("CREATE INDEX version_source_bindings_by_source "
+                 "ON version_source_bindings(canonical_ref,row_id,row_version)")
+    conn.execute("CREATE INDEX version_source_bindings_by_auth "
+                 "ON version_source_bindings(auth_txn_id,auth_effect_ordinal)")
+    conn.execute("ALTER TABLE held_candidates ADD COLUMN dependency_json TEXT "
+                 "CHECK(dependency_json IS NULL OR json_valid(dependency_json))")
+    conn.execute("CREATE UNIQUE INDEX held_candidates_by_publication "
+                 "ON held_candidates(json_extract(dependency_json,'$.publication_id')) "
+                 "WHERE dependency_json IS NOT NULL")
+    conn.execute("CREATE INDEX projection_state_by_dependency_window ON projection_state(collection_id,kind,path)")
+    for statement in _TRIGGERS_V18:
+        conn.execute(statement)
+
+
+_TRIGGERS_V18 = _append_only_triggers("version_source_bindings")
+
+
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
     """The state compatibility ids that a store at ``version`` requires of a release that opens it.
 
@@ -1267,7 +1308,8 @@ def ensure_schema(conn: Connection) -> int:
             for statement in (*_TRIGGERS_V1, *encoding_triggers,
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
                               *(_TRIGGERS_V14 if target >= 14 else ()),
-                              *(_TRIGGERS_V15 if target >= 15 else ())):
+                              *(_TRIGGERS_V15 if target >= 15 else ()),
+                              *(_TRIGGERS_V18 if target >= 18 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

@@ -7,8 +7,8 @@ names a file by its full name, so it resolves against the files that are not Mar
 same rule, and its new text comes from the same link-form rule over those files after the move.
 A link that it leaves unresolved or ambiguous keeps its bytes and is counted. Each planned text
 is then resolved again under Obsidian's rule over the vault as it will be, and a text that does
-not reach its page is reported as a plan failure. Pages are scanned singly: a body is read,
-scanned and dropped.
+not reach its page is reported as a plan failure with what the rule made of it. Pages are
+scanned singly: a body is read, scanned and dropped.
 """
 
 from __future__ import annotations
@@ -69,6 +69,26 @@ class LinkNote:
 
 
 @dataclass(frozen=True, slots=True)
+class LinkMiss:
+    """A link whose planned text does not reach its page, with what an owner needs to act on it.
+
+    `text` is the link text as written and `target` the page it resolves to today; `new_target`
+    is that page's new path and `planned_text` the text the plan gives it. `rule_result` is what
+    Obsidian's rule makes of `planned_text` and `matches` the files it names: none for an
+    unresolved text, several for an ambiguous text, and another page for a text that resolves
+    to the wrong page.
+    """
+
+    page: str
+    text: str
+    target: str
+    new_target: str
+    planned_text: str
+    rule_result: obsidian_links.Resolution
+    matches: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class OutsideLink:
     """A link from a page outside the managed root to a page inside it, and whether it breaks."""
 
@@ -119,7 +139,7 @@ class LinkScan:
     retired_collection: list[LinkNote] = field(default_factory=list)
     outside: list[OutsideLink] = field(default_factory=list)
     outside_pages_scanned: int = 0
-    failures: list[LinkNote] = field(default_factory=list)
+    failures: list[LinkMiss] = field(default_factory=list)
 
 
 def _names_collection_path(inner: str) -> bool:
@@ -165,7 +185,7 @@ class LinkRewriter:
         self._post_attachments = obsidian_links.IndexResolver(attachments_after)
         self._path_of_key = path_of_key
         self._targets: dict[str, Target] = {}
-        self._checked: dict[tuple[str, str, bool], bool] = {}
+        self._checked: dict[tuple[str, bool], obsidian_links.LinkMatch] = {}
 
     def target(self, inner: str) -> Target:
         """What today's resolver makes of the link text `inner`, answered once per page part."""
@@ -210,15 +230,19 @@ class LinkRewriter:
             return None
         return obsidian_links.link_text(inner, form.text), form.full_path
 
+    def _match(self, text: str, *, attachment: bool) -> obsidian_links.LinkMatch:
+        """What Obsidian's rule over the post-relayout vault makes of the link text, answered once per page part."""
+        page, _anchor = vault.split_wikilink_target(text)
+        key = (page, attachment)
+        found = self._checked.get(key)
+        if found is None:
+            resolver = self._post_attachments if attachment else self._post_resolver
+            found = self._checked[key] = resolver.resolve(page)
+        return found
+
     def reaches(self, text: str, new_path: str, *, attachment: bool = False) -> bool:
         """Whether Obsidian's rule over the post-relayout vault resolves the link text to `new_path`."""
-        page, _anchor = vault.split_wikilink_target(text)
-        key = (page, new_path, attachment)
-        known = self._checked.get(key)
-        if known is None:
-            resolver = self._post_attachments if attachment else self._post_resolver
-            known = self._checked[key] = resolver.resolve(page).path == new_path
-        return known
+        return self._match(text, attachment=attachment).path == new_path
 
     def _entries(
         self, text: str, *, skip: frozenset[str] = frozenset(), body: bool
@@ -307,8 +331,17 @@ class LinkRewriter:
             counts.full_path_forms += full_path
             counts.attachment_edits += target.attachment
             scan.edits.append(LinkEdit(page, region, inner, new, full_path, target.attachment))
-            if not self.reaches(new, self._moved[target.path or ""], attachment=target.attachment):
-                scan.failures.append(note)
+            self._self_check(scan, page, inner, target, new)
+
+    def _self_check(self, scan: LinkScan, page: str, inner: str, target: Target, new: str) -> None:
+        """Resolve a planned text again over the vault as it will be, and record it when it misses its page."""
+        new_path = self._moved[target.path or ""]
+        match = self._match(new, attachment=target.attachment)
+        if match.path == new_path:
+            return
+        scan.failures.append(
+            LinkMiss(page, inner, target.path or "", new_path, new, match.outcome, match.paths)
+        )
 
     def scan_outside(self, scan: LinkScan, page: str, data: bytes) -> None:
         """List the links of a page outside the managed root that resolve into it, and which of them break."""

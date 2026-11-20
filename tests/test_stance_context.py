@@ -479,14 +479,15 @@ def test_served_task_routes_keep_identities_without_retrieved_prose(stance_vault
     packet = {**_packet(), "task_context": {
         "state": "ready", "candidates": [{
             **route, "title": "Private source title", "reason": "Private task details",
-            "links": [{"relation": "evidenced_by", "target_ref": "report.md", "title": "Private report title"}],
+            "links": [{"relation": "evidenced_by", "target_ref": "report.md", "tier": 1,
+                       "title": "Private report title", "why": "Private link reason"}],
             "links_omitted": 2,
         }],
         "methods": {"reset": False, "items": [{**route, "content": "Private method text"}]},
     }}
     identifier = served_context.append(stance_vault, packet)
     record = served_context.read(stance_vault, served_context_id=identifier)
-    offered = {**route, "links": [{"relation": "evidenced_by", "target_ref": "report.md"}], "links_omitted": 2}
+    offered = {**route, "links": [{"relation": "evidenced_by", "target_ref": "report.md", "tier": 1}], "links_omitted": 2}
     assert record["record"]["task_context"] == {
         "state": "ready", "candidates": [offered], "methods": {"reset": False, "items": [route]},
     }

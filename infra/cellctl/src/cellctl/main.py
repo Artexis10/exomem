@@ -343,6 +343,9 @@ def build_cluster_config() -> ClusterConfig:
     media_default_raw = json.loads(os.environ.get("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", "[]"))
     if not isinstance(media_default_raw, list):
         raise ValueError("media engine fleet default must be a JSON array of engine names")
+    erasure_raw = json.loads(os.environ.get("CELLCTL_SOURCE_ERASURE_CELL_IDS", "{}"))
+    if not isinstance(erasure_raw, dict) or not all(isinstance(ids, list) for ids in erasure_raw.values()):
+        raise ValueError("Source erasure cell IDs must be a JSON object of identity system to cell ID array")
     shared_raw = json.loads(os.environ.get("CELLCTL_SHARED_WORKER", '{"mode":"off"}'))
     if not isinstance(shared_raw, dict):
         raise ValueError("shared worker policy must be a JSON object")
@@ -387,6 +390,7 @@ def build_cluster_config() -> ClusterConfig:
         grant_public_key=os.environ.get("CELLCTL_GRANT_PUBLIC_KEY", ""),
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
+        source_erasure_cell_ids={system: tuple(ids) for system, ids in erasure_raw.items()},
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),

@@ -33,12 +33,14 @@ from test_working_set_withheld_twins import _withhold
 
 from exomem import (
     commands,
+    context_roles,
     file_watcher,
     freshness,
     lexstore,
     pending_recall,
     readiness,
     working_set,
+    working_set_resolve,
 )
 from exomem import context_catalogue as cc
 from exomem import context_views as cv
@@ -172,6 +174,38 @@ def test_profiles_page_to_exhaustion_without_leaking_a_withheld_member_or_mentio
         print(json.dumps({"workflow": "restricted profile read", "ref": ref,
                           "pages": len(pages), "items": len(_items(pages)),
                           "withheld_path_present": THREAD_W in encoded or SECRET in encoded, "twins_equal": True, "mention": mention}))
+
+
+def test_a_profile_runs_no_graph_lane_even_when_an_override_adds_a_second_one(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A profile serves its declared members: no graph role runs, neither the shipped one nor an owner's second."""
+    _seed_profile(vault)
+    crane = _page(vault, "quay-crane", "topics: [harbour]\nupdated: 2026-10-12\nstate: 'Parked at the inner quay'\n",
+                  folder=f"{KB}/Products")
+    _write(
+        vault, f"{KB}/_Schema/context-roles.yaml",
+        "roles:\n  neighbours:\n    description: More typed neighbours.\n    lane: graph\n    anchor_defaults: [resource]\n",
+    )
+    context_roles.clear_cache()
+    selected = context_roles.select_roles(
+        context_roles.load_roles(vault), anchor_kinds=("resource",),
+        analysis=working_set_resolve.analyze_turn(""),
+    )
+    assert {"connections", "neighbours"} <= {role["id"] for role in selected}
+    _built(vault)
+    lexstore.ensure_fresh(vault)
+    _cold()
+    run: list[list[dict]] = []
+    real = working_set.run_lanes
+
+    def spy(*args, **kwargs):
+        run.append(list(kwargs["roles"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(working_set, "run_lanes", spy)
+    assert _ask(vault, cv.anchor_profile_ref(crane))["items"]
+    assert run and not [role["id"] for role in run[0] if role["lane"] == "graph"]
 
 
 def test_profile_units_keep_their_own_dates_supersession_and_whole_claims(
