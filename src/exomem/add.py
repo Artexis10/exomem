@@ -636,8 +636,11 @@ def add(
             # active compiled conclusions). Restricting contradiction candidates
             # to conclusions is what makes an `add`-time flag meaningful ("this
             # capture challenges conclusion [[Y]]") rather than source-vs-source.
+            from .passage_evidence import chunk_texts
+
             cosines = corpus_aware._best_cosine_per_file(
-                vault_root, title=title, body=content
+                vault_root, title=title, body=content,
+                chunks=chunk_texts(passage["text"] for passage in passages) if passages is not None else None,
             )
             duplicate_candidates = corpus_aware.detect_duplicates(
                 vault_root, title=title, body=content,

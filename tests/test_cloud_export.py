@@ -78,7 +78,7 @@ class PartStore(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def storage(tmp_path):
+def storage(tmp_path, monkeypatch):
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Disposable export storage")])
     now = datetime.datetime.now(datetime.UTC)
@@ -92,6 +92,11 @@ def storage(tmp_path):
     cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
     key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                            serialization.NoEncryption()))
+    # aiohttp builds its verified TLS context once, at import, from the SSL_CERT_FILE of that moment. A cell verifies
+    # one export per process; a test process verifies many, each against its own CA, so each storage rebuilds it.
+    from aiohttp import connector
+    monkeypatch.setenv("SSL_CERT_FILE", str(cert_path))
+    monkeypatch.setattr(connector, "_SSL_CONTEXT_VERIFIED", ssl.create_default_context())
     PartStore.parts = {}
     PartStore.objects = {}
     PartStore.ranges = []

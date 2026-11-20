@@ -94,49 +94,6 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
     return tuple(introduced)
 
 
-# Subcommands `_dispatch_main` routes explicitly, before falling through to
-# `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
-# command gets its own log file; `serve` configures server-role logging
-# itself from `server.run()`, so it is deliberately excluded here.
-# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
-_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "setup",
-        "init",
-        "reclaim-schema",
-        "install-skill",
-        "package-skills",
-        "personalize",
-        "install-hook",
-        "demo",
-        "studio",
-        "tui",
-        "doctor",
-        "install-info",
-        "auth",
-        "attach",
-        "status",
-        "warm",
-        "mode",
-        "dreamer",
-        "prominence",
-        "backfill-media",
-        "index",
-        "enroll-speaker",
-        "list-speakers",
-        "remove-speaker",
-        "trace",
-        "logs",
-        "lease",
-        "governance-schema",
-        "relations",
-        "collections",
-        "store-mode",
-        "import",
-    }
-)
-
-
 def _is_cli_only_invocation(raw: list[str]) -> bool:
     """Whether `raw` routes to a one-shot CLI command rather than `serve`."""
     if not raw or raw[0].startswith("-"):
@@ -5327,6 +5284,25 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     # `exomem activate_context` keeps working.
     "activate": _activate_main,
 }
+
+# The table entries that never configured the one-shot CLI log file: the cloud client, the cell jobs and the
+# `activate` alias. Every other entry gets `process="cli"` logging, and `serve` configures its own from `server.run()`.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_WITHOUT_CLI_LOG: frozenset[str] = frozenset(
+    {
+        "cloud",
+        "cell-import",
+        "cell-export",
+        "cell-init",
+        "cell-media-census",
+        "cell-media-manifest",
+        "cell-media-collect",
+        "activate",
+    }
+)
+# Subcommands `_dispatch_main` routes explicitly, before falling through to `_serve_main`: all of `_COMMANDS`
+# but those. `_is_cli_only_invocation` reads it at call time.
+_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(_COMMANDS) - _WITHOUT_CLI_LOG
 
 
 def _run_command(name: str, argv: list[str]) -> int:

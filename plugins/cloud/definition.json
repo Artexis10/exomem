@@ -24,7 +24,7 @@
   "terms": "https://substratesystems.io/exomem/terms",
   "support": "https://substratesystems.io/exomem/support",
   "documentation": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
-  "license": "AGPL-3.0-or-later",
+  "license": "Apache-2.0",
   "keywords": [
     "memory",
     "knowledge-base",

@@ -129,3 +129,18 @@ The maintainer derives a personal claude.ai `.skill` zip via
 their vault. There is no private canonical or marker system — the scaffold is the
 single source. That path is maintainer-only and unrelated to the public scaffold
 above; contributors can ignore it.
+
+## Contributor licence agreement
+
+Every contributor signs the [CLA](CLA.md) once, in the first pull request. The CLA bot
+(`.github/workflows/cla.yml`) comments with the sentence to reply with, and its `cla` job fails
+until every commit author has signed. It stores signatures in `signatures/v1/cla.json` on the
+unprotected `cla-signatures` branch, which must exist with that file before the first run
+(`{"signedContributors": []}`). The repository owner, the release bot and Dependabot are
+allowlisted by exact login.
+
+Your Contribution keeps its path's licence: AGPL-3.0-or-later by default, and Apache-2.0
+under `plugins/` and `src/exomem/_scaffold/` (the map is in the README). The CLA lets the
+maintainer relicense and promises that released versions stay open source.
+
+A contributor who will not sign cannot have a pull request merged once `cla` is a required check.

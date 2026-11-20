@@ -14,7 +14,7 @@
   "documentationUrl": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
   "termsOfServiceUrl": "https://substratesystems.io/exomem/terms",
   "icon": "./assets/icon.png",
-  "license": "AGPL-3.0-or-later",
+  "license": "Apache-2.0",
   "keywords": [
     "memory",
     "knowledge-base",

@@ -325,6 +325,11 @@ class LocalRuntimeActivation:
         watcher = self.file_watcher
         if watcher is None or not freshness.event_indexes_enabled():
             return
+        if not watcher.seeds_recall_projections:
+            # A store-mode watcher's first pass is the importer's whole-vault sweep, which outlasts the
+            # wait on a large vault. A downgrade would then stop the importer for the life of the
+            # process, and readers answer from the store whether or not it has seeded.
+            return
         try:
             seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
         except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
