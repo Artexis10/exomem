@@ -908,7 +908,7 @@ class DerivedDrain:
             else retire_visibility
         )
         self.resource_limit = resource_limit
-        self._stop = threading.Event()
+        self._stop = foreground_priority.StopEvent()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._owner = f"derived-{secrets.token_hex(12)}"
@@ -1014,7 +1014,6 @@ class DerivedDrain:
     def stop(self, timeout: float = HOSTED_STOP_DEADLINE_SECONDS) -> None:
         """Prove the pass thread is dead within ``timeout`` or fail closed."""
         self._stop.set()
-        foreground_priority.wake_parked()
         self._wake.set()
         thread = self._thread
         if thread is threading.current_thread():

@@ -3740,9 +3740,12 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             vault_key, _build_baseline_identity_catalogue(vault_root)
         )
 
-    # A follower's budget is one deadline across its waits, set when it first follows: it may wait
-    # on a leader that its own stop ended, then claim the build or follow the next leader.
+    # A follower's budget is one deadline across its waits, set when it first follows. When the leader's
+    # own stop ended the build, a follower with no request budget (a background caller) claims the
+    # build. One with a request budget never walks past its deadline, as on base: it follows the next
+    # leader, or takes the unavailable outcome when there is none.
     deadline: float | None = None
+    may_lead = True
     while True:
         # Registration happens inside the `try`, and `leading` is set before the
         # entry is published, so every exit -- including an interruption landing
@@ -3757,6 +3760,8 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                     return cached
                 running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
                 if running is None:
+                    if not may_lead:
+                        raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
                     leading = True
                     _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
                 else:
@@ -3768,6 +3773,7 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
                 followed = _await_baseline_flight(flight, max(0.0, deadline - time.monotonic()))
                 if followed is not None:
                     return followed
+                may_lead = request_budget.current() is None
                 continue
 
             flight.catalogue = _install_baseline_identity_catalogue(

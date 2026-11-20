@@ -120,7 +120,7 @@ class _Live:
 
     run_id: str
     vault_root: Path
-    stop: threading.Event = field(default_factory=threading.Event)
+    stop: threading.Event = field(default_factory=foreground_priority.StopEvent)
     #: Why ``stop`` was set: ``CANCEL_CODE`` or ``SHUTDOWN_CODE``.
     reason: str | None = None
     thread: threading.Thread | None = None
@@ -558,7 +558,6 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
                 if live is not None and row["state"] == RUNNING:
                     live.reason = live.reason or CANCEL_CODE
                     live.stop.set()
-                    foreground_priority.wake_parked()
                 row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
                 return _job_view(conn, row, full=True)
         except FileNotFoundError:
@@ -848,7 +847,6 @@ def stop_all(vault_root: Path, *, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
     for live in jobs:
         live.reason = live.reason or SHUTDOWN_CODE
         live.stop.set()
-    foreground_priority.wake_parked()
     deadline = time.monotonic() + wait
     for live in jobs:
         if live.thread is not None:

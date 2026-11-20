@@ -133,7 +133,7 @@
 - [ ] 3.20 Run the working-set warm, graph drain, vocabulary recovery, freshness reconcile, watcher flush, identity catalogue warm and matrix load in `foreground_priority.bulk()`, with a yield between natural units (design decision 10).
   - Verify: one test per pass holds a request in flight and shows the pass makes no progress until it ends, then makes all of it; a request that joins a pass's single flight does not wait out the progress floor.
   - Verify: no yield runs under a lock, boundary, single-flight build or connection that a request waits on; a site with no safe point stays unchanged and the design names why.
-  - Verify: a follower of a stopped identity-build leader gets the built inventory, not its cancellation or a refusal; stopping the graph drain beside a request ends it inside the join.
+  - Verify: a background follower of a stopped identity-build leader gets the built inventory, and a request-budgeted one gets the unavailable outcome without walking; stopping the graph drain beside a request ends it inside the join.
   - Verify: the pass spans and the matrix background-load log line carry the wait inside them as `waited_ms`.
 - [ ] 3.21 End a derived-drain turn when a request is in flight, as for a waiting writer, and wait for it between turns outside the boundary.
   - Verify: `tests/test_derived_drain_turns.py` ends a turn beside a request and keeps a loan to one unit.

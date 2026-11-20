@@ -428,14 +428,17 @@ def test_c5_a_failed_build_releases_the_flight_and_never_hangs_a_follower(
     assert reserved_paths.identity_catalogue_ready(vault_root) is True
 
 
+@pytest.mark.parametrize("budgeted", [False, True], ids=["background-follower", "request-follower"])
 def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    budgeted: bool,
 ) -> None:
     """A stoppable pass can lead the cold build, and its stop ends only that pass. A follower
-    that is not stoppable, or is another pass with its own stop, gets the built catalogue it
-    got before the walk had cancellation points: neither the leader's cancellation nor a
-    refusal."""
+    with no request budget, that is not stoppable or is another pass with its own stop, builds
+    in the leader's place and gets the catalogue it got before the walk had cancellation points:
+    neither the leader's cancellation nor a refusal. A follower on a request budget never walks
+    past its deadline; it gets the typed unavailable outcome it gets when its wait runs out."""
 
     vault_root = _vault(tmp_path)
     _manager(tmp_path, monkeypatch)
@@ -444,11 +447,14 @@ def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
     build_entered = threading.Event()
     follower_parked = threading.Event()
     release_build = threading.Event()
+    walks = 0
     original_from_vault = reserved_paths.IdentityCatalogue.from_vault.__func__
 
     def held_from_vault(
         cls: type[reserved_paths.IdentityCatalogue], root: Path
     ) -> reserved_paths.IdentityCatalogue:
+        nonlocal walks
+        walks += 1
         build_entered.set()
         assert release_build.wait(20)
         return original_from_vault(cls, root)
@@ -476,11 +482,16 @@ def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
             leader_outcome.append(error)
 
     def follow() -> None:
+        # Long enough that the follower is still inside its wait when the leader ends.
+        seconds = request_budget.DELIVERY_RESERVE_SECONDS + reserved_paths._FOLLOWER_GUARD_RESERVE_SECONDS + 5.0
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=seconds) if budgeted else None)
         try:
             with foreground_priority.bulk():
                 follower_built.append(reserved_paths._baseline_identity_catalogue(vault_root))
         except BaseException as error:  # noqa: BLE001 - what a follower is handed is the case under test
             follower_outcome.append(error)
+        finally:
+            request_budget.reset_current(token)
 
     leader = threading.Thread(target=lead, name="catalogue-leader", daemon=True)
     leader.start()
@@ -495,8 +506,15 @@ def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
 
     assert not leader.is_alive() and not follower.is_alive()
     assert [type(error) for error in leader_outcome] == [foreground_priority.BulkCancelled]
+    if budgeted:
+        assert follower_built == []
+        assert [type(error) for error in follower_outcome] == [reserved_paths.ReservedPathLeafError]
+        assert str(follower_outcome[0]) == "CAPABILITY_UNAVAILABLE"
+        assert walks == 1  # the leader's only: a request never walks past its own deadline
+        return
     assert follower_outcome == []
     assert len(follower_built) == 1 and follower_built[0].generation is not None
+    assert walks == 2
     assert reserved_paths._baseline_identity_catalogue(vault_root) is follower_built[0]
 
 

@@ -62,7 +62,6 @@ from typing import Any, NamedTuple, NoReturn
 from . import (
     activation_conventions,
     context_roles,
-    foreground_priority,
     freshness,
     lifecycle_statuses,
     procedure_approval,
@@ -2596,7 +2595,6 @@ def stop_builds(vault_root: Path) -> None:
         stop = _BUILD_SHUTDOWNS.get(Path(vault_root).absolute())
         if stop is not None:
             stop.set()
-            foreground_priority.wake_parked()
 
 
 def join_builds(vault_root: Path) -> None:

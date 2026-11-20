@@ -1266,7 +1266,7 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
 # --- the thread --------------------------------------------------------------------------------
 
 _LOCK = threading.Lock()
-_stop = threading.Event()
+_stop = foreground_priority.StopEvent()
 _thread: threading.Thread | None = None
 
 
@@ -1297,7 +1297,6 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
         if worker is not None and thread is not worker:
             return
         _stop.set()
-    foreground_priority.wake_parked()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _LOCK:

@@ -741,8 +741,8 @@ def test_the_wait_share_is_a_setting_that_keeps_its_default(
 def test_a_parked_pass_ends_when_its_scope_stops_without_waiting_out_the_cap() -> None:
     """A runtime stops its drains with a short join while a request may be in flight. A pass
     parked for that request must end on its stop, not after the grace wait, or the join times
-    out and the drain cannot start again. The owner of a stop wakes the parked passes."""
-    stop = threading.Event()
+    out and the drain cannot start again."""
+    stop = foreground_priority.StopEvent()
     parked = threading.Event()
     outcome: list[tuple[str, float]] = []
 
@@ -762,7 +762,6 @@ def test_a_parked_pass_ends_when_its_scope_stops_without_waiting_out_the_cap() -
         assert parked.wait(5)
         time.sleep(0.1)  # let it park behind the request
         stop.set()
-        foreground_priority.wake_parked()
         worker.join(foreground_priority.MAX_YIELD_SECONDS / 2)
 
     assert not worker.is_alive()

@@ -85,7 +85,7 @@ WHOLE_VAULT_SETTLE_SECONDS = 5.0
 
 _LOCK = threading.Lock()
 _thread: threading.Thread | None = None
-_stop = threading.Event()
+_stop = foreground_priority.StopEvent()
 
 #: Set whenever graph debt is enqueued in this process. Module-level rather than
 #: per-vault: a server serves one vault, and a cross-vault signal costs at worst
@@ -705,8 +705,6 @@ def stall_seconds() -> float:
 
 
 def _run(vault_root: Path) -> None:
-    from . import foreground_priority
-
     try:
         with foreground_priority.cancellable(_stop):
             _run_owned(vault_root)
@@ -721,8 +719,6 @@ def _bulk_pass() -> Iterator[None]:
     Each pass is its own scope, not one for the thread's life: an idle wait inside a long scope
     would earn the pass wait allowance (`foreground_priority.PassBudget`) it never used.
     """
-    from . import foreground_priority
-
     with foreground_priority.bulk(stop=_stop):
         foreground_priority.yield_to_foreground()
         yield
@@ -884,7 +880,6 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
             return
         _stop.set()
         _DEBT.set()
-    foreground_priority.wake_parked()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _LOCK:

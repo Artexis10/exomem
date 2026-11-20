@@ -138,7 +138,7 @@ class LocalRuntimeActivation:
         self.fallback_seconds = fallback_seconds
         self._lock = threading.Lock()
         self._started = False
-        self._shutdown = threading.Event()
+        self._shutdown = foreground_priority.StopEvent()
         self._timer: threading.Timer | None = None
         self._thread: threading.Thread | None = None
         self.media_worker: Any | None = None
@@ -151,7 +151,7 @@ class LocalRuntimeActivation:
         self._catalogue_stop = threading.Event()
         # The recovery watcher runs until told to stop, so it has its own stop
         # event: every path that stops the other workers stops it too.
-        self._vocabulary_stop = threading.Event()
+        self._vocabulary_stop = foreground_priority.StopEvent()
         self.recall_reembed: Any | None = None
         self.retrieval_warmup: threading.Thread | None = None
         self.matrix_warmup: threading.Thread | None = None
@@ -443,7 +443,6 @@ class LocalRuntimeActivation:
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
         self._vocabulary_stop.set()
-        foreground_priority.wake_parked()
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
@@ -646,7 +645,6 @@ class LocalRuntimeActivation:
         """Finish the tracked shutdown before process teardown."""
         with self._lock:
             self._shutdown.set()
-            foreground_priority.wake_parked()
             timer = self._timer
             self._timer = None
             thread = self._thread
@@ -679,7 +677,6 @@ class LocalRuntimeActivation:
         # Activation may have started the watcher after the stop above;
         # it saw the stop event already set, so this join is short.
         self._vocabulary_stop.set()
-        foreground_priority.wake_parked()
         await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
         from . import graph_sync
 

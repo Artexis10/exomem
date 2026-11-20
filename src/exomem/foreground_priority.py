@@ -340,7 +340,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
 
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
     (`wait_share()`, unless its `PassBudget` sets its own). The stop of an owned
-    scope ends the wait and cancels the pass once its owner calls `wake_parked()`.
+    scope ends the wait and cancels the pass at once if it is a `StopEvent`.
     """
     check_cancelled()
     budget: PassBudget | None = getattr(_local, "budget", None)
@@ -366,14 +366,18 @@ def _park(limit: float, stop: threading.Event | None) -> bool:
         return _condition.wait_for(lambda: _bulk_may_run() or stop.is_set(), timeout=limit)
 
 
-def wake_parked() -> None:
-    """Wake every parked yield, so a pass whose stop was just set ends its wait now.
+class StopEvent(threading.Event):
+    """A stop flag that also wakes every yield parked behind a request when it is set.
 
-    A stop is a plain `threading.Event` and cannot notify `_condition`. The owner of a stop calls
-    this right after setting it. A stop site that does not is still bounded by the wait's cap.
+    A pass parked at a yield waits on `_condition`, which a plain `threading.Event` cannot notify.
+    Pass this as the stop of a `bulk(stop=...)` or `cancellable()` scope, so setting it ends the wait
+    now. A stop that is a plain Event is still seen once the wait's cap runs out.
     """
-    with _condition:
-        _condition.notify_all()
+
+    def set(self) -> None:
+        super().set()
+        with _condition:
+            _condition.notify_all()
 
 
 #: How often `wait_while` asks again. The writer it waits for polls the boundary at this rate

@@ -1339,7 +1339,7 @@ class FileWatcher:
         self._pending_moves: dict[str, str] = {}
         self._last_change = 0.0
         self._wake = threading.Event()
-        self._stop = threading.Event()
+        self._stop = foreground_priority.StopEvent()
         self._thread: threading.Thread | None = None
         self._observer = None
         self._reconcile_thread: threading.Thread | None = None
@@ -2943,7 +2943,6 @@ class FileWatcher:
         except Exception as e:  # noqa: BLE001 — watcher must never break the server
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
             self._stop.set()
-            foreground_priority.wake_parked()
             self._wake.set()
             self._thread.join(timeout=2)
             self._thread = None
@@ -2962,7 +2961,6 @@ class FileWatcher:
     def stop(self) -> None:
         self._raw_witness.withdraw(stopped=True)
         self._stop.set()
-        foreground_priority.wake_parked()
         self._wake.set()
         self._seed_published.set()
         self._seed_complete.set()
