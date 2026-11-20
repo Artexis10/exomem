@@ -7448,7 +7448,7 @@ def _find_semantic(
                             continue
                         if frame_page.rel_path not in sources:
                             # It supplied the frame only; the excerpt stays the hit's own if it is withheld.
-                            hit.lent_roles[frame_page.rel_path] = frozenset({LENT_FRAME})
+                            hit.lent_roles[frame_page.rel_path] = (LENT_FRAME,)
                         sources[frame_page.rel_path] = frame_page.snapshot_hash
             hit.evidence_sources = sources
             hits.append(hit)

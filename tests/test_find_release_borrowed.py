@@ -311,7 +311,7 @@ def test_a_page_that_lent_only_its_frame_leaves_the_hits_own_text(vault) -> None
     hit = Hit(
         path=VIDEO_PAGE, type="source", scope=None, title="Clip Two", updated="2026-03-03",
         excerpt="the video's own words", scene_frame=FRAME_MEDIA, scene_frame_ts=1.0, transcript_ts=1.0,
-        evidence_sources={FRAME_PAGE: frame_hash}, lent_roles={FRAME_PAGE: frozenset({LENT_FRAME})},
+        evidence_sources={FRAME_PAGE: frame_hash}, lent_roles={FRAME_PAGE: (LENT_FRAME,)},
     )
 
     released = _released(vault, EXTERNAL, hit)

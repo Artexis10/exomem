@@ -386,8 +386,9 @@ class Hit:
     # Selected excerpts and annotations can disclose separate source snapshots. A producer names here
     # every page it took this hit's content from (`lend`), so the release step decides each of them.
     evidence_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
-    # What each page in `evidence_sources` lent. A page with no entry may have lent anything.
-    lent_roles: dict[str, frozenset[str]] = field(default_factory=dict, repr=False, compare=False)
+    # What each page in `evidence_sources` lent, as sorted role names (plain data, so a copy of the
+    # hit still encodes as JSON). A page with no entry may have lent anything.
+    lent_roles: dict[str, tuple[str, ...]] = field(default_factory=dict, repr=False, compare=False)
     # Release-plane annotation, attached by `governance.egress.annotate_hits`
     # strictly AFTER `find()` returns (design D2). It is per-principal, so it
     # must never be present on a candidate stored in the shared `_FIND_CACHE`
@@ -413,7 +414,8 @@ class Hit:
     def lend_path(self, path: str, *roles: str) -> None:
         """Record a page that supplied some of this hit's content without being read: decided by path alone."""
         if path != self.path:
-            self.lent_roles[path] = self.lent_roles.get(path, frozenset()) | (frozenset(roles) or LENT_ROLES)
+            lent = set(self.lent_roles.get(path, ())) | (set(roles) or LENT_ROLES)
+            self.lent_roles[path] = tuple(sorted(lent))
 
     def borrowed_pages(self) -> dict[str, str | None]:
         """The pages other than its own that its producer named as supplying its content, each with its pin.
