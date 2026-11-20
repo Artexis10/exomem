@@ -105,9 +105,9 @@ ACCESS: dict[str, Declaration] = {
     # Restore and downmigrate rewrite the governance store from its own backup, not from pages.
     "governance-schema restore-migration-backup": _NONE,
     "governance-schema downmigrate": _NONE,
-    # Asks the service first, which answers from the store. Its offline fallback runs the census in this process
-    # and writes its sample under the state root, so a store-mode vault leaves that route to the service.
-    "relations": _pages("Start the service: `exomem relations` asks it first and answers from the store."),
+    # The census asks the service only without `--vault` or `--sample`; the route that this entry fences never
+    # does, so no "ask the service" remedy fits it.
+    "relations": _pages(),
     # `collections` is one parser whose subcommands differ in what they touch, so each declares its own access.
     "collections backup": _NONE,
     "collections adopt-local": _pages(
