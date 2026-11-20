@@ -274,8 +274,9 @@ cellctl:
   # 512Mi/125m: a large owner-sized cell saved and queried the same as at
   # 1Gi/250m on the same host (add-cloud-service-resource-policy task 3.9).
   # passageMatrixBudget is the share of memoryLimit that passage search may hold as a resident
-  # matrix in each cell (EXOMEM_PASSAGE_MATRIX_BYTES). 512Mi is the budget the 2026-11-14
-  # qualification measured at 3Gi; raise or lower it with memoryLimit. 0Mi turns the matrix off.
+  # matrix in each cell (EXOMEM_PASSAGE_MATRIX_BYTES), shared-worker cells included. 512Mi is the
+  # budget the 2026-11-14 qualification measured at 3Gi; raise or lower it with memoryLimit.
+  # 0Mi turns the matrix off.
   cellResources:
     cpuRequest: 125m
     cpuLimit: "2"

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -346,6 +347,15 @@ def build_cluster_config() -> ClusterConfig:
     erasure_raw = json.loads(os.environ.get("CELLCTL_SOURCE_ERASURE_CELL_IDS", "{}"))
     if not isinstance(erasure_raw, dict) or not all(isinstance(ids, list) for ids in erasure_raw.values()):
         raise ValueError("Source erasure cell IDs must be a JSON object of identity system to cell ID array")
+    resources = ResourceSettings(
+        cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
+        cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
+        memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
+        memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
+        passage_matrix_budget=os.environ.get(
+            "CELLCTL_CELL_PASSAGE_MATRIX_BUDGET", DEFAULT_RESOURCES.passage_matrix_budget
+        ),
+    )
     shared_raw = json.loads(os.environ.get("CELLCTL_SHARED_WORKER", '{"mode":"off"}'))
     if not isinstance(shared_raw, dict):
         raise ValueError("shared worker policy must be a JSON object")
@@ -353,7 +363,12 @@ def build_cluster_config() -> ClusterConfig:
     if shared_raw.get("mode") != "off":
         if not isinstance(shared_raw.get("cell_ids", []), list):
             raise ValueError("shared worker cell IDs must be a JSON array")
-        shared_raw["resources"] = ResourceSettings(**shared_raw["resources"])
+        # The chart's shared-worker resources hold no budget; a shared cell has the same 3Gi limit,
+        # so it takes the cell budget.
+        shared_raw["resources"] = dataclasses.replace(
+            ResourceSettings(**shared_raw["resources"]),
+            passage_matrix_budget=resources.passage_matrix_budget,
+        )
         shared_raw["cell_ids"] = tuple(shared_raw.get("cell_ids", []))
         shared = SharedWorkerPolicy(**shared_raw)
     elif set(shared_raw) != {"mode"}:
@@ -369,15 +384,7 @@ def build_cluster_config() -> ClusterConfig:
         cell_data_endpoint=os.environ["CELLCTL_CELL_DATA_ENDPOINT"],
         key_retention_sources=_retention_sources(),
         access_record_enabled=os.environ.get("CELLCTL_ACCESS_RECORD_ENABLED") == "true",
-        resources=ResourceSettings(
-            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
-            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
-            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
-            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
-            passage_matrix_budget=os.environ.get(
-                "CELLCTL_CELL_PASSAGE_MATRIX_BUDGET", DEFAULT_RESOURCES.passage_matrix_budget
-            ),
-        ),
+        resources=resources,
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),
         shared_worker=shared,
