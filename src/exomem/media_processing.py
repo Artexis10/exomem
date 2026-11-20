@@ -124,6 +124,14 @@ class MediaProcessingError(Exception):
         super().__init__(reason)
 
 
+class SidecarCommitRequired(Exception):
+    """A `queue_only` call found that its path needs a sidecar commit, which it must not make.
+
+    It is a control signal for the caller, not a failure: the caller runs the path again with its
+    own boundary hold, so the commit's index and graph fan-out stays outside any shared hold.
+    """
+
+
 @dataclass(frozen=True)
 class ReconcileResult:
     media_type: str
@@ -360,6 +368,7 @@ def reconcile_media(
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     defer_fanout_to_terminal: bool = False,
     request: ExtractionRequest | None = None,
+    queue_only: bool = False,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -377,6 +386,9 @@ def reconcile_media(
 
     A `request` goes into the job row when this call creates or re-queues it, in the same
     store transaction, so the worker never claims the job without it.
+
+    `queue_only` is for a caller that already holds the boundary for several paths: it raises
+    `SidecarCommitRequired` instead of writing a sidecar, so no fan-out runs inside that hold.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -451,7 +463,7 @@ def reconcile_media(
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
                                        commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
-                                       request=request)
+                                       request=request, queue_only=queue_only)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
@@ -523,6 +535,8 @@ def reconcile_media(
             original=original,
         )
     )
+    if queue_only and (repaired is not None or (pending is not None and original != pending)):
+        raise SidecarCommitRequired
 
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
@@ -1440,6 +1454,7 @@ def reprocess_media(
     language: str | None = None,
     multilingual: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    queue_only: bool = False,
 ) -> ReconcileResult:
     """Queue one explicit second extraction of a media file, optionally with a language or mode.
 
@@ -1449,7 +1464,8 @@ def reprocess_media(
     is refused, so the caller asks again when that run ends.
     """
     return _queue_extraction(
-        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
+        queue_only=queue_only,
     )
 
 
@@ -1479,6 +1495,7 @@ def _queue_extraction(
     commit_guard: Callable[[], AbstractContextManager[object]] | None,
     *,
     reprocess: bool,
+    queue_only: bool = False,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -1500,7 +1517,9 @@ def _queue_extraction(
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
     request = ExtractionRequest(hint, mode, reprocess)
-    result = reconcile_media(vault, binary, commit_guard=commit_guard, request=request)
+    result = reconcile_media(
+        vault, binary, commit_guard=commit_guard, request=request, queue_only=queue_only
+    )
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
     if not reprocess and result.state == "completed":

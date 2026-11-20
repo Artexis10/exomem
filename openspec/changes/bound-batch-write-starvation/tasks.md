@@ -29,6 +29,16 @@
 - [x] 5.4 Concurrent keyed `remember` calls all commit once with no busy reaching the client.
 - [ ] 5.5 After the release is live, the personal service's refusal journal shows no `capture_wait_exhausted` while the boundary sat idle and no boundary hold that equals a `commit_tail.self_write` span.
 
-## 6. Closure
+## 6. Media publication containment
 
-- [ ] 6.1 Archive this change with `openspec archive` once tasks 1–5 are merged, and run `openspec validate --all --strict` before and after.
+- [x] 6.1 Pass the checkpoint's created paths to the post-commit fan-out, and publish the graph floor and checkpoint inside the commit's own hold, so a media publication completes the graph incrementally.
+- [x] 6.2 Publish drained media results as one batch (one hold, one commit, one advance, one fan-out) with a size cap and a time cap; a rolled-back batch publishes one result at a time.
+- [x] 6.3 Gate batches on `foreground_activity.idle_seconds`, a minimum spacing and a progress floor; keep every budget in `media_publication.py`.
+- [x] 6.4 Report `result_publication` (pending count, oldest age) in `process_media status`.
+- [x] 6.5 Queue a multi-path `reprocess` request under one hold, bounded by the time cap, with a path that needs a sidecar commit running after the hold.
+- [x] 6.6 Proof: a batch of results takes one hold and one advance and lands whole; a failed batch rolls back and publishes once; the gate defers under foreground activity and publishes at the floor; a reprocess that creates a page completes the graph without a fallback; six completed paths queue with one advance.
+- [ ] 6.7 After the release is live, the personal service's log shows media-originated commit-generation advances at about one a minute or fewer under a media backfill, and no full graph rebuild from a media publication.
+
+## 7. Closure
+
+- [ ] 7.1 Archive this change with `openspec archive` once tasks 1–6 are merged, and run `openspec validate --all --strict` before and after.

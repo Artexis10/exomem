@@ -24,6 +24,7 @@ from exomem import (
     media_processing,
     media_publication,
     media_worker,
+    mutation_lock,
     preserve,
     prior_extraction,
 )
@@ -281,3 +282,35 @@ def test_a_multi_path_reprocess_request_queues_all_paths_under_one_hold(
     assert _advances_by_operation(caplog) == {"process_media_reprocess_commit": 1}
     queued = {job["path"] for job in media_jobs.status(vault)["jobs"]}
     assert queued == set(paths)
+
+
+def test_a_reprocess_path_that_needs_a_sidecar_commits_it_outside_the_shared_hold(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path with no page yet needs a sidecar commit, and its index and graph fan-out must not
+    run inside the hold that queues the other paths."""
+    _speech_engine(monkeypatch)
+    pairs = _preserve_recordings(vault, ["done-a.mp3", "done-b.mp3"])
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    _transcribe_all(vault, [binary for binary, _sidecar in pairs], worker)
+    fresh = vault / "Knowledge Base" / "Evidence" / "Audio" / "fresh.m4a"
+    fresh.parent.mkdir(parents=True, exist_ok=True)
+    fresh.write_bytes(b"\x00\x00\x00\x18ftypM4A fake audio")
+    paths = [pairs[0][0], fresh, pairs[1][0]]
+    rels = [path.relative_to(vault).as_posix() for path in paths]
+    fanout_under_hold: list[bool] = []
+    real_fanout = media_processing.post_commit_batch_fanout
+
+    def fanout(*args, **kwargs):
+        fanout_under_hold.append(mutation_lock.current_thread_holds_boundary())
+        return real_fanout(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, "post_commit_batch_fanout", fanout)
+
+    result = commands.op_process_media(vault, paths=rels, operation="reprocess")
+
+    assert [row["path"] for row in result["results"]] == rels
+    assert {row["outcome"] for row in result["results"]} == {"reprocessed"}
+    assert fanout_under_hold == [False]
+    assert (vault / f"{rels[1]}.md").is_file()
+    assert {job["path"] for job in media_jobs.status(vault)["jobs"]} == set(rels)
