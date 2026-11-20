@@ -473,6 +473,10 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         if code is None:
             _settle(ledger, row, DONE, None)
             settled += 1
+        elif code == media_store.STORE_BUSY_CODE:
+            # Ordinary contention with a foreground write: it spends no attempt, and the round ends so that the
+            # next one finds the boundary free (the uploaded ciphertext keeps its name and is reused).
+            break
         elif code not in media_store.REPLICA_REFUSAL_CODES:
             attempts = row["attempts"] + 1
             if attempts >= _MAX_ATTEMPTS:

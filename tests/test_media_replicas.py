@@ -87,6 +87,28 @@ def test_a_second_store_replica_restores_an_original_that_the_first_store_lost(
     assert "failed" not in used
 
 
+def test_an_original_whose_every_copy_is_damaged_stays_corrupt_and_is_not_overwritten(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    original = _stored(vault, "Recordings")
+    reference = _offload(vault, original)
+    _replicate_all(vault)
+    [replica] = originals.original_state(vault, original).replicas
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+
+    original.write_bytes(DAMAGED)
+    first = Path(selected_store[0]["root"]) / reference.object / reference.version
+    first.write_bytes(os.urandom(first.stat().st_size))
+    second = mirrored / replica.object / replica.version
+    second.write_bytes(os.urandom(second.stat().st_size))
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+
+    assert original.read_bytes() == DAMAGED
+    [finding] = _findings(vault)
+    assert [step["source"] for step in finding.meta["route"]] == ["media_store", "replica"]
+    assert all(step["failed"] for step in finding.meta["route"])
+
+
 def test_a_replica_of_an_evicted_original_is_the_stored_ciphertext_and_needs_no_download(
         vault: Path, selected_store, mirrored: Path) -> None:
     """An evicted original has no bytes on the volume: replicating it must copy the first store's ciphertext, hashed
@@ -347,6 +369,22 @@ def test_one_drain_settles_a_bounded_batch_and_an_unavailable_store_pauses_its_q
     assert media_replicas.drain(vault) == 0
     progress = media_replicas.progress(vault, MIRROR)
     assert (progress["copied"], progress["remaining"]) == (2, 1)
+
+
+def test_a_busy_vault_boundary_ends_the_round_and_spends_no_attempt(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    _offload(vault, _preserved(vault, category="a"))
+    media_replicas.request(vault, MIRROR)
+    media_replicas.work(vault)
+    media_replicas.work(vault)
+
+    def busy(*_args, **_kwargs):
+        raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE, "the vault boundary is busy")
+
+    monkeypatch.setattr(media_store, "replicate", busy)
+    for _ in range(media_replicas._MAX_ATTEMPTS + 1):
+        assert media_replicas.drain(vault) == 0
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 1  # not refused after the attempt limit
 
 
 def test_a_replica_that_the_binding_no_longer_lists_is_not_read_by_repair(vault: Path, selected_store, mirrored: Path) -> None:
