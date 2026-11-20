@@ -108,6 +108,20 @@ EXCLUDED = "Notes/Hidden"
 ACCESS_POLICY = {"Knowledge Base/_access.yaml": f"excluded:\n  - {EXCLUDED}/\n".encode()}
 
 
+def chained_families():
+    """A frame whose own parent is a frame: the middle page is a parent and a child at once."""
+    video_rel, video_body = video(f"{NOTES}/Clip-Six.mp4", "2026-03-06")
+    middle = frame(f"{NOTES}/Clip-Six.mp4", "scene-000-006.000", 6.0, "2026-03-05")
+    inner = frame(
+        f"{NOTES}/Clip-Seven.mp4",
+        "scene-000-007.000",
+        7.0,
+        "2026-03-04",
+        parent_media=middle[0].removesuffix(".md"),
+    )
+    return dict([(video_rel, video_body), middle, inner])
+
+
 def hostile_families():
     """A parent outside the knowledge base and a parent in a tree that the access policy excludes."""
     outside, excluded = "Elsewhere/Clip-Three.mp4", f"Knowledge Base/{EXCLUDED}/Clip-Five.mp4"
@@ -298,10 +312,10 @@ def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, rou
 
 
 def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, routes, monkeypatch):  # noqa: F811
-    """A parent outside the knowledge base, or in a tree that the access policy excludes, is
-    reported where the exhaustive browse reports it, whichever route answers. The owner reads it,
-    so that no withheld parent hides the case."""
-    families = {**clean_families(), **hostile_families(), **ACCESS_POLICY}
+    """A parent outside the knowledge base, in a tree that the access policy excludes, or that is a
+    child itself is reported where the exhaustive browse reports it, whichever route answers. The
+    owner reads them, so that no withheld parent hides the case."""
+    families = {**clean_families(), **hostile_families(), **chained_families(), **ACCESS_POLICY}
     world = build_world(vault, configured_boundary[1], "owner", families)
     windowed = answers(world.root, world.caller)
     declined_window(monkeypatch)
@@ -309,7 +323,7 @@ def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, rout
     assert windowed == exhaustive
     assert all(windowed[(100, name)] for name in CELLS)
     everything = json.dumps(windowed[(100, "no filter")])
-    assert "Clip-Three.mp4" in everything and "Clip-Five.mp4" in everything
+    assert all(clip in everything for clip in ("Clip-Three.mp4", "Clip-Five.mp4", "Clip-Six.mp4"))
 
 
 def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):
