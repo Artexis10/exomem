@@ -89,20 +89,32 @@ def _receipt_path(root: Path, reference: str) -> Path:
     return receipt_root(root) / f"{identity}.json"
 
 
-def correction_route(root: Path, text: str) -> str | None:
-    """The call that corrects the captured Source whose page is `text`, or None when the page is no captured Source.
+def correction_route(root: Path, rel_path: str) -> str | None:
+    """The sentence an in-place edit's refusal adds for the captured Source at `rel_path`, or None for any other page.
 
-    An edit of a Source's frontmatter is refused, because Sources are append-only; this names the governed way.
+    Sources are append-only, so an edit of one is refused; this names the governed correction, or says that this
+    connection cannot record one, as the capture reply does (`can_record`). A page the caller may not read gets None,
+    so the refusal never names its ref.
     """
-    metadata, _body, _marker = vault.parse_frontmatter(text)
-    if not note_types.Basis(root).selects(metadata.get("type"), note_types.captured_source):
+    try:
+        if not _authorizer(root)(rel_path):
+            return None
+        text = (root / rel_path).read_text(encoding="utf-8")
+        metadata, _body, _marker = vault.parse_frontmatter(text)
+        if not note_types.Basis(root).selects(metadata.get("type"), note_types.captured_source):
+            return None
+    except (OSError, UnicodeError, ValueError):
         return None
-    reference = memory_refs.ref_from_markdown(text) or "<the Source's ref from read_page>"
+    reference = memory_refs.ref_from_markdown(text)
+    if reference is not None and not can_record(root, reference):
+        sentence = _NOT_PERMITTED.split(": ", 1)[1]
+        return sentence[0].upper() + sentence[1:] + "."
     return (
         "To correct this Source, call save_source with no files (a text Source passes its text as content again), "
-        f'the corrected title, kind and url, and options.correction = {{"supersedes": "{reference}", "expected_hash": '
-        '"<its content_hash from read_page>", "reason": "<what was wrong>"}. A correction keeps every field it '
-        'leaves out (url "" removes the url) and keeps the stored original.'
+        f'the corrected title, kind and url, and options.correction = {{"supersedes": '
+        f'"{reference or "<the Source ref from read_page>"}", "expected_hash": "<its content_hash from read_page>", '
+        '"reason": "<what was wrong>"}. A correction keeps every field it leaves out (url "" removes the url) and '
+        "keeps the stored original."
     )
 
 
@@ -114,7 +126,10 @@ def _named_path(root: Path, value: str) -> str:
     from . import page_names
 
     try:
-        named = page_names.resolve_page(root, value, field="supersedes")
+        # A Source often shares its title with the note compiled from it; the Source is the one a correction means.
+        named = page_names.resolve_page(
+            root, value, prefer=lambda path: vault.in_append_only_tree(path) is not None, field="supersedes",
+        )
     except ValueError:
         # A name that matches several pages raises `AmbiguousTitle`, an OpError, and keeps its candidate list.
         raise SourceCorrectionUnavailable from None
@@ -339,10 +354,11 @@ class CorrectionPlan:
     def require_authority(self, root: Path) -> None:
         from .governance import connector_boundary, egress
 
-        if (not _authorizer(root)(self.old_path)
-                or access.writable_reason(root, self.old_path) is not None
-                or egress.write_target_withheld(root, self.old_path)):
+        if not _authorizer(root)(self.old_path):
             raise SourceCorrectionUnavailable
+        # The caller has read this Source, so saying it cannot be corrected from here reveals nothing new.
+        if access.writable_reason(root, self.old_path) is not None or egress.write_target_withheld(root, self.old_path):
+            raise ValueError(_NOT_PERMITTED)
         connector_boundary.require_write(root, self.old_path, content=self.old_source.encode("utf-8"))
         if not can_record(root, self.old_ref):
             raise ValueError(_NOT_PERMITTED)

@@ -152,11 +152,7 @@ def set_frontmatter_field(
         else:
             from . import source_corrections
 
-            try:
-                route = source_corrections.correction_route(vault_root, abs_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError):
-                route = None
-            if route:
+            if route := source_corrections.correction_route(vault_root, rel_path):
                 reason += " " + route
         raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
 

@@ -133,6 +133,30 @@
               "value": "10.5555/glx.2015.0112"
             }
           ]
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_source_titled_as_the_2015_article": {
+                "type": "boolean",
+                "description": "True if a saved Source that no correction superseded is titled as Valdoren and Quillfeather's 2015 article rather than as the doctoral thesis summary."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_source_titled_as_the_2015_article",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_source_titled_as_the_2015_article": false
+          },
+          "include_sources": true,
+          "reference": "repository-hit.pdf is the summary of a 2019 doctoral thesis by Ines Okparaeke. It prints no DOI. Its second page discusses and cites the 2015 article by Valdoren and Quillfeather (\"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112). The PDF is not that article."
         }
       }
     },

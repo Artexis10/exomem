@@ -66,12 +66,18 @@ A field that any correction sets to an empty value SHALL be empty in the success
 A correction refused for missing fields SHALL name every missing field in one refusal.
 A refusal for a wrong `expected_hash` SHALL say that it is the Source page's `content_hash` from `read_page`, not the file's SHA-256.
 A refusal for an unknown or withheld Source SHALL say what to pass, in the same words for both.
-A frontmatter edit of a captured Source that no pointer route owns SHALL be refused with the correction call for that Source.
+A Source the caller can read but not write SHALL be refused with `SOURCE_CORRECTION_NOT_PERMITTED`.
+When a title names several pages, `supersedes` SHALL prefer the append-only one.
 
 #### Scenario: A Source is corrected by the id that search showed
 
 - **WHEN** an agent corrects a Source and names it in `supersedes` by its short id or its title
 - **THEN** the correction is written as if the agent had named the Source's ref
+
+### Requirement: An in-place edit of a Source points to its correction
+
+An in-place edit of a captured Source, of its body or of a frontmatter field that no pointer route owns, SHALL be refused with the correction call for that Source.
+A caller that cannot record a correction SHALL be told so instead, and a caller that may not read the Source SHALL get neither.
 
 #### Scenario: An edit of a Source's title points to the correction
 

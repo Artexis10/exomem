@@ -278,16 +278,60 @@ def test_a_correction_names_the_source_by_any_name_read_page_takes(vault, source
     assert _frontmatter(vault, successor["page"])["supersedes"]
 
 
-def test_editing_a_sources_title_is_refused_with_the_correction_that_does_it(vault, source_schema, saved) -> None:
+def _edit_in_place(vault: Path, page: str, door: str) -> str:
+    """The refusal an in-place edit of a Source gets, through the frontmatter door or the body door."""
+    from exomem import edit as edit_module
     from exomem import set_frontmatter_field
 
-    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as caught:
-        set_frontmatter_field.set_frontmatter_field(
-            vault, path=saved["page"], field="title", value="A study of harbour lanterns", why="Fix the title.",
-        )
+    if door == "frontmatter":
+        with pytest.raises(set_frontmatter_field.SetFrontmatterError) as caught:
+            set_frontmatter_field.set_frontmatter_field(
+                vault, path=page, field="title", value="A study of harbour lanterns", why="Fix the title.",
+            )
+        assert caught.value.code == "APPEND_ONLY"
+    else:
+        with pytest.raises(edit_module.EditError) as caught:
+            edit_module.edit(vault, path=page, why="Fix the title.", old_string="Harbour lanterns", new_string="A study")
+    return caught.value.reason
 
-    assert caught.value.code == "APPEND_ONLY"
-    assert "options.correction" in caught.value.reason and saved["ref"] in caught.value.reason
+
+@pytest.mark.parametrize("door", ["frontmatter", "body"])
+def test_editing_a_source_in_place_is_refused_with_the_correction_that_does_it(vault, source_schema, saved, door) -> None:
+    reason = _edit_in_place(vault, saved["page"], door)
+
+    assert "options.correction" in reason and saved["ref"] in reason
+
+
+def test_a_writer_who_cannot_record_a_correction_is_not_sent_to_one(vault, source_schema, saved, tmp_path, monkeypatch) -> None:
+    # Told to correct the Source, a restricted writer would only meet the receipt refusal.
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+
+    from exomem.governance import principal
+
+    initialize_vault_state_offline(vault, source="restricted correction route")
+    writer = grant_writer(vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/writer/**"],
+                          capture_paths=["Knowledge Base/Sources/Inbox/writer"])("external")
+    can_record = source_corrections.can_record
+
+    def as_writer(root, ref):
+        with principal.request_scope(writer):
+            return can_record(root, ref)
+
+    monkeypatch.setattr(source_corrections, "can_record", as_writer)
+
+    reason = _edit_in_place(vault, saved["page"], "frontmatter")
+
+    assert "options.correction" not in reason and "cannot record a Source correction" in reason
+
+
+def test_a_source_in_a_readonly_tree_is_refused_as_not_correctable_here(vault, source_schema, saved) -> None:
+    # The caller named the right Source; telling it to pass another name sent agents in circles.
+    folder = saved["page"].removeprefix("Knowledge Base/").rsplit("/", 1)[0]
+    (vault / "Knowledge Base/_access.yaml").write_text(f"readonly:\n  - {folder}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SOURCE_CORRECTION_NOT_PERMITTED"):
+        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
 
 
 @pytest.mark.usefixtures("owner_scope")
