@@ -998,8 +998,11 @@ def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
 
 
 @pytest.mark.parametrize("mismatch", ["count", "keys", "texts"])
-def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, mismatch):
+def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, monkeypatch, mismatch):
     """A count or body mismatch must not bind an indexed vector to the wrong caller record."""
+    # The capture starts a background graph rebuild whose vault walk can land after the rewrite
+    # below; that unpublishes the corpus, and the search is refused before it reads the declaration.
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
     call, _encoder = passage_tools
     saved = commands.op_capture_source(
         vault,
