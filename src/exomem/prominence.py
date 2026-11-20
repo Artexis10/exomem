@@ -165,7 +165,8 @@ LEARNING_INSTRUCTION = (
     "so a later session does not have to find it again. Keep each file I hand you to read, "
     "such as an attachment, a screenshot or a document I point to, as a Source by its "
     "exact bytes, even when it settles nothing; tell me in one line, and treat what it "
-    "claims as unverified. Files you work on in my own repositories are not handed files."
+    "claims as unverified. Files you work on in my own repositories are not handed files. "
+    "Files that hold secrets, such as keys, tokens or a .env file, are not kept."
 )
 
 #: The activation carrier, at `balanced` and `maximal` only.
