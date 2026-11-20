@@ -989,6 +989,11 @@ def _stored_object_storage_key(row: CellRow, secrets_config: SecretsConfig) -> t
     return row.b2_key_id, secret
 
 
+# The passage matrix budget that the renderer hard-coded into every cell before the chart set it.
+# Remove it, and the exclusion in `_compute_render_digest`, at the next RENDER_VERSION bump.
+_HARD_CODED_PASSAGE_MATRIX_BUDGET = "512Mi"
+
+
 def _compute_render_digest(
     row: CellRow,
     cluster_config: ClusterConfig,
@@ -1004,9 +1009,9 @@ def _compute_render_digest(
 
     resources, placement = cluster_config.workload_for_cell(row.cell_id)
     resources_material = asdict(resources)
-    if resources.passage_matrix_budget == ResourceSettings().passage_matrix_budget:
-        # Left out at its default, like every optional setting below, so the release that adds
-        # the budget restarts no cell; a budget the operator changes moves the digest.
+    if resources.passage_matrix_budget == _HARD_CODED_PASSAGE_MATRIX_BUDGET:
+        # Left out at the value cells already run with, so the release that adds the budget
+        # restarts no cell; any other budget moves the digest, whatever the current default is.
         del resources_material["passage_matrix_budget"]
     material = {
         "render_version": RENDER_VERSION,
