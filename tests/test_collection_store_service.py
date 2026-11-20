@@ -111,6 +111,16 @@ def journal_rows(tmp_path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _retitle(root, path, title):
+    """Give a file Records collection another title, through its owner's revise."""
+    import yaml
+
+    front, body, _ = vault.parse_frontmatter((root / path).read_text(), strict=True)
+    guards = call(root, "record_memory", action="inspect", collection=path)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=path, why="retitle", **guards,
+         manifest_text="---\n" + yaml.safe_dump({**front, "title": title}, sort_keys=False) + "---\n" + body)
+
+
 def busy_total():
     from exomem import metrics
 
@@ -127,6 +137,11 @@ def refused(work, code=capability.UNAVAILABLE):
     with pytest.raises((OpError, collections.CollectionError, CollectionStoreError)) as error:
         work()
     assert error.value.code == code, error.value
+
+
+def _coordinator_unreachable(client):
+    """A lease coordinator that refuses every connection, so the store cannot open."""
+    raise writer_lease._coordinator_unavailable_error(ConnectionRefusedError("connection refused"))
 
 
 def test_a_withheld_selection_without_a_service_is_indistinguishable_from_missing(service):
@@ -1503,12 +1518,15 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
     _until(lambda: page.exists() and "1004 committed rows" in page.read_text())
 
 
-def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread(service, monkeypatch):
+@pytest.mark.parametrize("selector", [CID, "Work"], ids=["by id", "by title"])
+def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread(service, monkeypatch, selector):
     """Defect: status queued behind a running batch on the one store thread, so a long batch made every
-    poll wait out its queue budget and refuse COLLECTION_STORE_BUSY."""
+    poll wait out its queue budget and refuse COLLECTION_STORE_BUSY. A title queued there too, only to
+    learn which collection it names."""
     from exomem.collection_store.writer import CollectionWriter
 
     root = service.root
+    _retitle(root, A_PATH, "Legacy")  # so that only C holds the title "Work"
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 5)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(40)), SOURCE)
     in_batch, release = threading.Event(), threading.Event()
@@ -1530,7 +1548,7 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     try:
         assert in_batch.wait(30)
         queued.clear()
-        status = imported(root, mode="status", continuation=job["continuation"])
+        status = imported(root, collection=selector, mode="status", continuation=job["continuation"])
         assert queued == []  # it never entered the store thread's queue, which the held batch keeps
         assert (status["state"], status["rows"]["imported"], status["resumable"], status["cancellable"]) == (
             "running", 10, False, True)
@@ -1549,6 +1567,139 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     done = imported(root, mode="status", continuation=job["continuation"])
     # The job no longer runs here, so nothing this host timed describes it.
     assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
+
+
+def test_a_file_collection_title_answers_while_the_store_thread_is_held(service, monkeypatch):
+    """Defect: a title queued on the store thread to learn which collection it names, so a file
+    collection's title waited out whatever held that thread, which the same collection's path never does."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    call(root, "record_memory", action="append", collection=A_PATH, item={"title": "Filed"}, why="file row")
+    held, release = threading.Event(), threading.Event()
+    serve = runtime.StoreServer._serve
+
+    def held_after_the_append(server, request):
+        serve(server, request)
+        if isinstance(request.result, dict) and request.result.get("item_key") == LATER:
+            held.set()
+            assert release.wait(30), "the test did not release the store thread"
+
+    monkeypatch.setattr(runtime.StoreServer, "_serve", held_after_the_append)
+    queued = []
+    serve_call = runtime.StoreServer._call
+    monkeypatch.setattr(runtime.StoreServer, "_call", lambda server, work, **kw: (
+        queued.append(threading.get_ident()), serve_call(server, work, **kw))[1])
+    try:
+        call(root, "record_memory", action="append", collection=CID, item_key=LATER, item={"title": "Holder"},
+             why="keep the store thread")
+        assert held.wait(5)
+        queued.clear()
+        by_title = call(root, "record_memory", action="query", collection="legacy")
+        assert queued == []  # the title resolved on this thread, beside the held store thread
+    finally:
+        release.set()
+    by_path = call(root, "record_memory", action="query", collection=A_PATH)
+    assert [row["title"] for row in by_title["rows"]] == ["Filed"]
+    assert (by_title["collection_id"], by_title["rows"]) == (KEY, by_path["rows"])
+
+
+def test_a_write_refused_while_its_title_resolves_is_journaled_once(service, tmp_path, monkeypatch):
+    """Defect: a refusal raised while a title resolved left before `invoke`, so a refused write was
+    never journaled. A and C both hold the title "Work"."""
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    root = service.root
+    with pytest.raises(OpError) as append:
+        call(root, "record_memory", action="append", collection="Work", item={"title": "Unplaced"}, why="capture")
+    assert append.value.code == "AMBIGUOUS_COLLECTION"
+    with pytest.raises(OpError) as query:
+        call(root, "record_memory", action="query", collection="Work")
+    assert query.value.code == "AMBIGUOUS_COLLECTION"
+
+    (refusal,) = [row for row in journal_rows(tmp_path) if row["outcome"] == "failed"]
+    assert (refusal["command"], refusal["error_code"]) == ("record_memory", "AMBIGUOUS_COLLECTION")
+
+
+def _rolled_back(service, monkeypatch):
+    """Stop the service, and roll its store back as the owner, which disables every store collection."""
+    service.stop()
+    monkeypatch.setenv(OPERATOR, "operator")
+    with request_scope(OWNER):
+        assert admission.rollback_route(service.root)["status"] == "disabled"
+    monkeypatch.delenv(OPERATOR)
+
+
+def test_after_the_owner_rolls_the_store_back_a_title_answers_as_its_path_does(service, monkeypatch):
+    """Defect: after the owner's rollback every request by title was refused COLLECTION_STORE_DISABLED,
+    a file collection's included, though the rollback keeps file collections writable by path."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    _rolled_back(service, monkeypatch)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: restarted.manager.status().get("collection_store", {}).get("status") == "admitted")
+        assert call(root, "record_memory", action="append", collection="Legacy", item={"title": "By title"},
+                    why="file write")["outcome"] == "committed"
+        assert titles(root, "Legacy") == titles(root, A_PATH) == ["By title"]
+
+        def refusal(collection):
+            with pytest.raises((OpError, CollectionStoreError)) as error:
+                titles(root, collection)
+            return error.value.code, str(error.value)
+
+        by_path = refusal(manifest_path())
+        assert by_path[0] == capability.DISABLED
+        assert refusal("Work") == by_path  # C alone holds the title now
+    finally:
+        restarted.stop()
+
+
+def test_after_the_owner_rolls_the_store_back_a_file_title_takes_a_write_while_the_store_opens(
+        service, monkeypatch):
+    """A write by a file collection's title must not wait for the rolled-back store to open, only to
+    be refused there as disabled, while the same collection's path commits."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    _rolled_back(service, monkeypatch)
+    opened = threading.Event()
+    open_store = runtime.StoreServer._open
+    monkeypatch.setattr(runtime.StoreServer, "_open", lambda server: (opened.wait(10), open_store(server))[1])
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime.served(root))
+        assert call(root, "record_memory", action="append", collection="Legacy", item={"title": "While opening"},
+                    why="file write")["outcome"] == "committed"
+        assert runtime._server(root.resolve()).runtime is None  # the store was still opening
+    finally:
+        opened.set()
+        restarted.stop()
+    assert titles(root, A_PATH) == ["While opening"]
+
+
+def test_a_write_by_a_title_c_may_hold_gets_the_refusal_its_path_gets_while_the_store_cannot_open(
+        service, monkeypatch):
+    """Defect: while the store could not open, the title that A and C both hold named A alone, so a
+    write by it committed into A, where the same write is refused as ambiguous once the store opens."""
+    root = service.root
+    service.stop()
+    monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", _coordinator_unreachable)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._server(root.resolve()).refusal[0] == "WRITER_COORDINATOR_UNAVAILABLE")
+        assert call(root, "record_memory", action="append", collection=A_PATH, item={"title": "Filed"},
+                    why="file row")["outcome"] == "committed"
+
+        def appended(collection):
+            with pytest.raises(OpError) as error:
+                call(root, "record_memory", action="append", collection=collection, item={"title": "Unplaced"},
+                     why="capture")
+            return error.value.as_public_dict()
+
+        by_path = appended(manifest_path())
+        assert by_path["code"] == "WRITER_COORDINATOR_UNAVAILABLE"
+        assert appended("Work") == by_path
+        assert titles(root, A_PATH) == ["Filed"]
+    finally:
+        restarted.stop()
 
 
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):
