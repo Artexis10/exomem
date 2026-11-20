@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.193.0](https://github.com/Artexis10/exomem/compare/v0.192.0...v0.193.0) (2026-11-20)
+
+
+### Features
+
+* **licensing:** offer Exomem Cloud source, add CLA, trademark policy and Apache-2.0 client artifacts ([#2952](https://github.com/Artexis10/exomem/issues/2952)) ([77c5922](https://github.com/Artexis10/exomem/commit/77c5922ac45a5c31d78991509df25b3e285133c2))
+* **service:** write a per-thread CPU and stack dump on SIGUSR1 ([#2962](https://github.com/Artexis10/exomem/issues/2962)) ([660be07](https://github.com/Artexis10/exomem/commit/660be07d725cfe06c9a2852802d8eb0b536730fc))
+
+
+### Bug Fixes
+
+* **media-store:** admit an upload as unknown when the pool marker cannot be read ([#2960](https://github.com/Artexis10/exomem/issues/2960)) ([9c90f0a](https://github.com/Artexis10/exomem/commit/9c90f0a3fed9c24bf0de05473a6b2e661ef6c0c5))
+* **originals:** keep suffix-less originals as ordinary files so the census can name them ([#2946](https://github.com/Artexis10/exomem/issues/2946)) ([bc1ee67](https://github.com/Artexis10/exomem/commit/bc1ee6757ff700618d22ef98e9f62e72d80b6430))
+* **vault-store:** keep store-mode status and the CLI fence honest once store mode is served ([#2935](https://github.com/Artexis10/exomem/issues/2935)) ([aa46584](https://github.com/Artexis10/exomem/commit/aa465843b9b0c9521d442bc3e7fd890e70acace0))
+
+
+### Performance
+
+* **cell:** serve passage search faster and index large captured Sources ([#2950](https://github.com/Artexis10/exomem/issues/2950)) ([a08c01c](https://github.com/Artexis10/exomem/commit/a08c01cbd553381d121bfbd4aa7d9a4eab108212))
+* **find:** read a store-mode browse as an ordered window that follows its limit ([#2943](https://github.com/Artexis10/exomem/issues/2943)) ([5bffa9f](https://github.com/Artexis10/exomem/commit/5bffa9f90bfa2b29aeaedd2d01eac8f491a90617))
+* **store:** decide a store-mode write's pages by scope class instead of one at a time ([#2939](https://github.com/Artexis10/exomem/issues/2939)) ([38b0626](https://github.com/Artexis10/exomem/commit/38b062669cb29231ca82f68af7c915566ce20c4a))
+
 ## [0.192.0](https://github.com/Artexis10/exomem/compare/v0.191.0...v0.192.0) (2026-11-20)
 
 
