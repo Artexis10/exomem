@@ -1,5 +1,5 @@
 {
-  "incident": "2026-11-17: agents answered about a file the user handed them and did not keep it as a Source. These cases check that custody stays scoped: a repository file the agent is asked to fix, a file the user names but says to ignore, and a handed config file that holds an API token are not kept.",
+  "incident": "2026-11-17: agents answered about a file the user handed them and did not keep it as a Source. These cases check that custody stays scoped: a repository file the agent is asked to fix or to explain, a file the user names but says to ignore, and a handed config file that holds an API token are not kept.",
   "library": {
     "retry_settings.py": {
       "kind": "text",
@@ -28,6 +28,21 @@
         "retry_settings.py"
       ],
       "prompt": "retry_settings.py in this repo sets RETRY_DELAY to 5, but the uploader reads it in milliseconds and we want five seconds. Please fix it.",
+      "pass": {
+        "sources_added": {
+          "equals": 0
+        }
+      }
+    },
+    {
+      "id": "repository-file-to-explain",
+      "about": "The work directory is a git repository and the user asks the agent to explain a tracked file, with no edit. Reading a repository file is not handing it over, so no Source may be written.",
+      "transport": "http",
+      "git": true,
+      "files": [
+        "retry_settings.py"
+      ],
+      "prompt": "How long does the uploader wait before its last retry, going by next_delay in retry_settings.py here? I'm not changing anything yet, just want to understand it.",
       "pass": {
         "sources_added": {
           "equals": 0
