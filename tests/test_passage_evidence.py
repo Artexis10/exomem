@@ -399,6 +399,128 @@ def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools
     }
 
 
+def test_a_tag_change_reaches_the_next_tagged_passage_search(vault, passage_tools):
+    """A tagged search answered before the edit must not keep a Source the edit untagged."""
+    call, _encoder = passage_tools
+    for key in ("kept", "retagged"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey {key}",
+                "source_kind": "session",
+                "tags": ["readers"],
+                "options": {"passages": [{"key": key, "text": f"lantern {key}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {
+        "query": "lantern", "limit": 2, "tags": ["readers"], "options": {"result_level": "passage"}
+    }
+    before = call("search_memory", request)
+    assert {hit["passage_key"] for hit in before["hits"]} == {"kept", "retagged"}, before
+    retagged = memory_refs.resolve_identifier_read_only(
+        vault, next(hit["ref"] for hit in before["hits"] if hit["passage_key"] == "retagged")
+    )
+
+    # Sources are append-only for agents, so the owner retags the file in an editor.
+    fields, body, _ = vault_module.parse_frontmatter((vault / retagged).read_text())
+    fields["tags"] = ["writers"]
+    (vault / retagged).write_text(
+        "---\n" + vault_module.serialize_frontmatter(fields) + "\n---\n\n" + body
+    )
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+
+    after = call("search_memory", request)
+    assert "error" not in after, after
+    assert [hit["passage_key"] for hit in after["hits"]] == ["kept"], after
+
+
+def test_a_second_tag_filter_gets_its_own_passage_answer(vault, passage_tools):
+    """The eligible set of one filter must never answer another filter at the same corpus state."""
+    call, _encoder = passage_tools
+    for tag in ("readers", "writers"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey for {tag}",
+                "source_kind": "session",
+                "tags": [tag],
+                "options": {"passages": [{"key": tag, "text": f"lantern for {tag}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    for tag in ("readers", "writers"):
+        reply = call(
+            "search_memory",
+            {"query": "lantern", "limit": 2, "tags": [tag], "options": {"result_level": "passage"}},
+        )
+        assert "error" not in reply, reply
+        assert [hit["passage_key"] for hit in reply["hits"]] == [tag], reply
+
+
+def test_a_restricted_caller_after_an_owner_search_sees_only_its_admitted_passages(
+    vault, passage_tools
+):
+    """A set answered for the owner must not stand in for a narrower caller's admission."""
+    from exomem.governance.principal import owner_principal, request_scope
+
+    call, _encoder = passage_tools
+    for key in ("shared", "withheld"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey {key}",
+                "source_kind": "session",
+                "tags": ["readers"],
+                "options": {"passages": [{"key": key, "text": f"lantern {key}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 2, "tags": ["readers"], "result_level": "passage"}
+    with request_scope(owner_principal()):
+        owner = find.find(vault, **request)
+        assert {hit["passage_key"] for hit in owner["hits"]} == {"shared", "withheld"}, owner
+        withheld = memory_refs.resolve_identifier_read_only(
+            vault, next(hit["ref"] for hit in owner["hits"] if hit["passage_key"] == "withheld")
+        )
+        restricted = find.find(vault, **request, admit_path=lambda path: path != withheld)
+    assert [hit["passage_key"] for hit in restricted["hits"]] == ["shared"], restricted
+
+
+def test_an_eligible_set_read_before_an_erasure_cutoff_is_not_served_after_it(vault, monkeypatch):
+    """An erasure removes catalogue rows before it advances the cutoff, so the corpus checkpoint
+    alone cannot prove that a set read earlier still holds."""
+    from exomem import source_custody, structured_filters, writer_lease
+
+    publish_reference(vault)
+    current = {"paths": {"Sources/erased.md", "Sources/kept.md"}}
+    monkeypatch.setattr(
+        find, "_managed_eligible_filter_paths", lambda *args, **kwargs: set(current["paths"])
+    )
+    plan = structured_filters.compile_filter(
+        None, shortcuts=structured_filters.FilterShortcuts(tags=("readers",))
+    )
+
+    def eligible():
+        snapshot = find.FreshnessSnapshot(vault, require_live_recall=True)
+        return find._reusable_eligible_filter_paths(
+            vault, scope="vault", plan=plan, snapshot=snapshot
+        )
+
+    assert eligible() == {"Sources/erased.md", "Sources/kept.md"}
+    current["paths"] = {"Sources/kept.md"}
+    with writer_lease.active_manager().mutation_guard(vault):
+        assert source_custody.advance_retirement_generation(vault)
+    assert eligible() == {"Sources/kept.md"}
+
+
 @pytest.mark.parametrize("anchor_state", ["visible", "tombstoned", "revoked"])
 def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     vault, passage_tools, monkeypatch, anchor_state

@@ -378,12 +378,8 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     snapshot = find_module.FreshnessSnapshot(vault_root, require_live_recall=True)
     walk_scope = "vault" if scope == "vault" else "kb"
     eligible = (
-        find_module._managed_eligible_filter_paths(
-            vault_root,
-            scope=walk_scope,
-            plan=plan,
-            snapshot=snapshot,
-            pending=None,
+        find_module._reusable_eligible_filter_paths(
+            vault_root, scope=walk_scope, plan=plan, snapshot=snapshot
         )
         if plan.root is not None
         else None
