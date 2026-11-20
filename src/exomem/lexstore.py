@@ -5255,8 +5255,26 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     store's tables are the ones this module declares. It owns no transaction and stamps no schema version.
     """
     LexicalStore._create_catalog_tables(conn)
+    _add_schema_17_page_columns(conn)
     LexicalStore._create_catalog_indexes(conn)
     LexicalStore._ensure_fts_schema(conn)
+
+
+def catalogue_schema_current(conn: sqlite3.Connection, *, raise_errors: bool = False) -> bool:
+    """Whether ``conn``'s catalogue carries this build's stamp and the page shape that goes with it.
+
+    The one rule that the lexical readers (`LexicalStore._schema_is_current`) and store mode's owner state
+    ask: a stamp over an older shape answers nothing, so it must not read as current. It emits no DDL.
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        if raise_errors:
+            raise
+        return False  # no catalogue tables yet
+    if not (row and row[0] == str(SCHEMA_VERSION)):
+        return False
+    return LexicalStore._pages_has_current_columns(conn, raise_errors=raise_errors)
 
 
 def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
@@ -5468,6 +5486,14 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
 
 #: The columns that schema 17 added to `pages`; a store that the released code created at schema 16 lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
+
+
+def _add_schema_17_page_columns(conn: sqlite3.Connection) -> None:
+    """Add the schema 17 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    for name in _SCHEMA_17_PAGE_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT")
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -6628,17 +6654,7 @@ class LexicalStore:
         ever creating, altering, or dropping anything. A missing `meta`/`pages`
         table or a legacy `pages` shape reads as not-current — the caller then
         defers to the atomic rebuild rather than mutating the old shape here."""
-        try:
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            if raise_errors:
-                raise
-            return False  # no `meta` table yet
-        if not (row and row[0] == str(SCHEMA_VERSION)):
-            return False
-        return self._pages_has_current_columns(conn, raise_errors=raise_errors)
+        return catalogue_schema_current(conn, raise_errors=raise_errors)
 
     @staticmethod
     def _create_catalog_tables(conn: sqlite3.Connection) -> None:
