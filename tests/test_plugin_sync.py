@@ -165,7 +165,7 @@ def test_manifest_carries_listing_metadata() -> None:
     assert manifest["author"]["url"].startswith("https://")
     assert manifest["homepage"].startswith("https://")
     assert manifest["repository"].startswith("https://github.com/")
-    assert manifest["license"] == "AGPL-3.0-or-later"
+    assert manifest["license"] == "Apache-2.0"
     assert "memory" in manifest["keywords"]
 
 

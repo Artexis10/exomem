@@ -42,23 +42,10 @@ OWNER_SCHEMA = "vault_store_owner_schema"
 # Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
 LINK_ROWS_VERSION = 1
 #: The generation of the owners' derivation. Version 3 rederives payload hashes that older builds omitted
-#: from legacy Evidence pages, and was the generation at lexical schema ``LEXICAL_SCHEMA_AT_V3``.
-#: Version 4 derives the prior-path rows of every page's lineage.
-OWNER_DERIVATION_VERSION = 4
-LEXICAL_SCHEMA_AT_V3 = 17
-
-
-def owner_schema_for(lexical_schema: int) -> int:
-    """The owner generation of a build whose lexical catalogue is at ``lexical_schema``.
-
-    Every lexical schema bump moves it, so a store that an older build derived is behind, its pass
-    derives each page again and stamps the schema (``settle``). Without that, such a store would keep
-    the stamp that migration copied, and its lexical readers would answer None for good.
-    """
-    return OWNER_DERIVATION_VERSION + lexical_schema - LEXICAL_SCHEMA_AT_V3
-
-
-OWNER_SCHEMA_VERSION = owner_schema_for(lexstore.SCHEMA_VERSION)
+#: from legacy Evidence pages. Version 4 derives the prior-path rows of every page's lineage. A lexical schema
+#: bump needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
+#: ``owner_schema_behind`` count that as behind too.
+OWNER_SCHEMA_VERSION = 4
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -180,7 +167,7 @@ def read(conn: Connection) -> Registry:
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
-    behind = _owners_behind(meta.get(OWNER_SCHEMA))
+    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
     if reflected is None or changed is None or behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
@@ -206,9 +193,17 @@ def recorded_revisions(conn: Connection) -> dict[str, str | None]:
 def owner_schema_behind(conn: Connection, *, required_version: int | None = None) -> bool:
     """Whether the store's owner objects are older than this build's, so some of the rows that this
     build reads may not exist yet. The pass creates the objects in its first batch and fills them
-    batch by batch, so only the version that its last batch records says the rows are whole."""
+    batch by batch, so only the version that its last batch records says the rows are whole.
+
+    A store whose lexical catalogue is not this build's is behind too, whatever version it records: the
+    stamp and the page shape must both be current (``lexstore.catalogue_schema_current``, the readers'
+    own test), or the lexical readers answer nothing. A caller that names ``required_version`` asks about the
+    rows of that version only, which a lexical schema does not change.
+    """
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
-    return _owners_behind(None if row is None else row[0], required_version=required_version)
+    if _owners_behind(None if row is None else row[0], required_version=required_version):
+        return True
+    return required_version is None and not lexstore.catalogue_schema_current(conn)
 
 
 def _owners_behind(value: str | None, *, required_version: int | None = None) -> bool:
@@ -287,7 +282,7 @@ def settle(root: Path, writer) -> str:
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
-        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], "owner_schema": OWNER_SCHEMA_VERSION}))
+        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], **_generation()}))
         return ADVANCED
 
 
@@ -335,12 +330,19 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
         try:
             recorded = json.loads(row[0])
             pinned = int(recorded["target"])
-            # Only this derivation version can attest pages before a saved cursor.
-            if recorded.get("owner_schema") == OWNER_SCHEMA_VERSION and (pinned == target or state == mode.UNKNOWN):
+            # Only this derivation generation can attest pages before a saved cursor.
+            if all(recorded.get(key) == value for key, value in _generation().items()) and (
+                pinned == target or state == mode.UNKNOWN
+            ):
                 return pinned, str(recorded["after"])
         except (ValueError, KeyError, TypeError):
             pass  # an unreadable cursor starts the pass over: it costs time, never correctness
     return target, ""
+
+
+def _generation() -> dict[str, int]:
+    """What a pass derives under: the owners' version and the lexical schema its rows and stamp follow."""
+    return {"owner_schema": OWNER_SCHEMA_VERSION, "lexical_schema": lexstore.SCHEMA_VERSION}
 
 
 def _revision(value: str | None) -> int | None:

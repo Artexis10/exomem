@@ -290,6 +290,18 @@ def may_pool(bound: str) -> bool:
     return not is_trash_path(bound)
 
 
+def may_share_bytes(relative: str) -> bool:
+    """Whether an original at `relative` may keep its bytes only in the shared pool.
+
+    A pool-only filing exists on disk solely as its companion page `<name>.md`, which the egress
+    artifact census tells from a note by `<name>` carrying a suffix of its own. A name without a
+    suffix (`LICENSE`, or a dotfile like `.blob`) gives a companion indistinguishable from a note,
+    so such an original keeps an ordinary file at its logical path instead, like a dataset.
+    """
+    # A trailing dot reads as a suffix of "." on newer Python and as none on older, so both count as none.
+    return PurePosixPath(relative).suffix not in ("", ".")
+
+
 def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
     """The filing of an original whose bytes are a shared pool object, which has no file at its logical path.
 
@@ -504,10 +516,22 @@ def original_state(
     return OriginalSnapshot(
         state, binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
         reference, hashlib.sha256(data).hexdigest(),
-        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
-        offloadable=not is_note_path(relative) and "data_file" not in fields,
+        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field. So does a
+        # suffix-less original of a pooled archive, whose evicted bytes could otherwise turn pool-only (`may_share_bytes`).
+        offloadable=not is_note_path(relative) and "data_file" not in fields
+        and not resident_suffixless(vault, relative, archive),
         local_path=local_path,
     )
+
+
+def resident_suffixless(vault: Path, relative: str, archive: ArchiveReads | None = None) -> bool:
+    """Whether an original named `relative` stays on the volume, never offloaded, because a pooled archive
+    keeps a suffix-less one resident (`may_share_bytes`). The one rule that offload and upload admission share."""
+    if may_share_bytes(relative):
+        return False
+    from . import original_pool
+
+    return archive.pooled() if archive is not None else original_pool.enabled(vault)
 
 
 def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:

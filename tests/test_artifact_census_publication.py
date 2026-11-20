@@ -350,3 +350,29 @@ def test_a_pooled_original_is_named_to_a_restricted_caller_exactly_as_an_ordinar
     assert _gate(vault, "See [[orchid-quarterly-terms]] for the terms.") == "See [withheld] for the terms."
     assert _gate(vault, f"See {below} for the terms.") == "See [withheld] for the terms."
     assert _gate(vault, "Ships as orchid-roadmap.v2 soon.") == "Ships as orchid-roadmap.v2 soon."
+
+
+@pytest.mark.parametrize("published", [False, True], ids=["walked", "published"])
+def test_a_suffixless_original_never_pools_so_its_name_redacts_like_any_withheld_file(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Catches a pooled suffix-less original leaking its bare name. A pool-only filing exists on disk solely as its
+    companion `LICENSE.md`, which the census cannot tell from a note, so it proposed no original alias and a
+    restricted caller read `LICENSE` unredacted. Such an original keeps an ordinary file, which the census lists."""
+    from exomem import artifact_lifecycle, original_pool, originals
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    _withhold_from_external(vault, "Evidence/**")
+    if published:
+        _publish(vault)
+
+    with library_scope():
+        filed = preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="LICENSE",
+            data=b"the license terms", text="terms",
+        )
+    assert (vault / filed.path).is_file()
+    assert originals.pooled(vault, filed.path) is None
+
+    assert _gate(vault, "See LICENSE for the terms.") == "See [withheld] for the terms."

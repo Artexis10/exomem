@@ -649,7 +649,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         with read.snapshot(vault) as snapshot:
             revision = snapshot.revision
         for value in expected.values():
-            value["graph_sync"] = {"state": "not_applicable", "generation": None}
+            value["graph_sync"] = {"state": "current", "generation": None}
             value["vault_store"] = {"state": "available", "revision": revision}
     if sample == "schema_memory:census":
         # Canonical-vault-store graph reads identify the store revision, not the sidecar counter.

@@ -12,6 +12,9 @@ from starlette.responses import JSONResponse
 from . import __version__, capabilities
 
 DISCOVERY_PATH = "/.well-known/exomem-cell"
+# Concurrent discovery reads take one store lock in turn, each in milliseconds. This wait
+# lets them queue; a store a capture holds longer reports an unknown recall space.
+RECALL_SPACE_WAIT_SECONDS = 0.5
 
 
 def software_identity(package_root: Path | None = None) -> dict:
@@ -62,12 +65,21 @@ def register_identity_route(mcp, *, cell_id: str, vault_root: Path,
 
     @mcp.custom_route(DISCOVERY_PATH, methods=["GET"])
     async def identity(request: Request) -> JSONResponse:  # noqa: ARG001
-        from .embedding_index import read_published_identity
-
-        space = await asyncio.to_thread(read_published_identity, vault_root)
-        # These states and the version belong to this discovery response schema.
+        space = await asyncio.to_thread(recall_space_state, vault_root)
         return JSONResponse({"protocol_version": 1, "cell_id": cell_id, "software": software,
-                             **service_contract(surface),
-                             "recall_space": {"state": "observed" if space is not None else "unavailable",
-                                              "id": space.identity_digest if space is not None else None}},
+                             **service_contract(surface), "recall_space": space},
                             headers={"Cache-Control": "no-store"})
+
+
+def recall_space_state(vault_root: Path) -> dict:
+    """The published recall space; a store that stays busy is unknown, never unpublished."""
+    from .embedding_index import RecallSpaceUnread, read_published_identity
+
+    # These states belong to this discovery response schema.
+    try:
+        space = read_published_identity(vault_root, wait_seconds=RECALL_SPACE_WAIT_SECONDS)
+    except RecallSpaceUnread:
+        return {"state": "unknown", "id": None}
+    if space is None:
+        return {"state": "unavailable", "id": None}
+    return {"state": "observed", "id": space.identity_digest}

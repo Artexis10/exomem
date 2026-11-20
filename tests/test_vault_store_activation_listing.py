@@ -11,12 +11,16 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import NEW, put, stored, writer  # noqa: F401
 
-from exomem import context_catalogue, find, working_set_index, working_set_runtime
-from exomem.vault_store import write
+from exomem import context_catalogue, find, reserved_paths, working_set_index, working_set_runtime
+from exomem.vault_store import mode, write
 
 ARCHIVED = "Knowledge Base/_archive/Gamma Old.md"
 TRASHED = "Knowledge Base/_trash/Gamma Gone.md"
 PAGE = b"---\ntitle: Gamma\ntype: note\n---\n# Gamma\n\nA page that only the store holds.\n"
+DELTA = "Knowledge Base/Entities/Delta.md"
+DELTA_LINKING_ALPHA = (
+    b"---\ntitle: Delta\ntype: entity\nentity_type: person\n---\n# Delta\n\nSee [[Alpha]] for more.\n"
+)
 ALPHA_WITH_ALIAS = (
     b"---\ntitle: Alpha\ntype: note\naliases: [Alpha Prime]\n---\n# Alpha\n\n"
     b"An edit that only the store holds.\n"
@@ -75,3 +79,34 @@ def test_the_index_lists_a_stored_page_by_the_walks_folder_rule(stored, writer):
 
     names = current_index(stored)[0].resolve_names(["Gamma", "Gamma Gone"])
     assert names == {"gamma": (ARCHIVED,)}
+
+
+def test_a_background_built_index_follows_the_store_revision_while_the_projections_wait(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A rehearsal answered the working set as stale and left out a link while projections were queued.
+    The lag is the background build's, which reads the store: the build ends with the link in place
+    while the projector has still written nothing."""
+    monkeypatch.setattr(working_set_runtime, "_managed", lambda: True)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda _root: True)
+
+    def ensure():
+        stamp = working_set_runtime._key_text(find.FreshnessSnapshot(stored).projection_key("kb"))
+        return working_set_runtime.ensure_index(stored, freshness_stamp=stamp)
+
+    ensure()
+    working_set_runtime.join_builds(stored)
+    state, _index, stale = ensure()
+    assert (state, stale) == (working_set_runtime.READY, False)
+    write.commit(writer, put(DELTA, DELTA_LINKING_ALPHA))
+    assert mode.projections_queued(stored) and not (stored / DELTA).exists()
+
+    state, _index, stale = ensure()
+    assert (state, stale) == (working_set_runtime.READY, True)  # the build has not landed: stale says so
+    working_set_runtime.join_builds(stored)
+
+    state, index, stale = ensure()
+    assert (state, stale) == (working_set_runtime.READY, False)
+    assert mode.projections_queued(stored)
+    [anchor] = [anchor for anchor in index.anchors() if anchor.path == DELTA]
+    assert ALPHA in anchor.neighbourhood
