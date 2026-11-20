@@ -694,6 +694,15 @@ class UploadFiles(Wire):
 
 
 def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
+    # Without a digest the send stores a bare copy at once: the file name as its title, no url, no identity check
+    # and no duplicate check. With one, the send is held and the save that redeems it carries all of them.
+    if wire["lane"] != "import" and not wire.get("expected_sha256"):
+        raise Refusal(
+            "MISSING_ARGUMENT",
+            f"upload_files with lane {wire['lane']} needs expected_sha256: take the file's SHA-256 "
+            "(for example with sha256sum) and call again with it. The send then returns a handle for "
+            "save_source or save_evidence, which takes the title, kind and url.",
+        )
     # An import archive is only ever held for `imports.file`, so that lane implies the hold.
     held = True if wire["lane"] == "import" else wire.get("hold")
     return "transfer_artifact", {"operation": "upload", **_given({
