@@ -360,6 +360,7 @@ def reconcile_media(
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     defer_fanout_to_terminal: bool = False,
     request: ExtractionRequest | None = None,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -377,6 +378,10 @@ def reconcile_media(
 
     A `request` goes into the job row when this call creates or re-queues it, in the same
     store transaction, so the worker never claims the job without it.
+
+    `queue_guard` is the hold for a commit that only touches the machine-local job store, so it
+    does not advance the commit generation. It replaces `commit_guard` when the plan writes no
+    sidecar; a plan that writes one still takes `commit_guard`.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -451,7 +456,7 @@ def reconcile_media(
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
                                        commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
-                                       request=request)
+                                       request=request, queue_guard=queue_guard)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
@@ -523,10 +528,13 @@ def reconcile_media(
             original=original,
         )
     )
+    writes_sidecar = repaired is not None or (pending is not None and original != pending)
+    queue_only = queue_guard is not None and commit_guard is not None and not writes_sidecar
 
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
     publication_intents: list[object] = []
+    rerun_with_commit_hold = False
 
     def _abort_publication_intents() -> None:
         if publication_intents:
@@ -539,6 +547,9 @@ def reconcile_media(
     def _write_sidecar(write: PlannedWrite) -> None:
         from .governance import catalog_publication
 
+        # A write needs the advancing hold. Queue-only mode plans no write and reruns with that hold
+        # when the runtime is unavailable, the one case that writes after the plan.
+        assert not queue_only, "a hold that leaves the commit generation alone never writes a sidecar"
         try:
             written = _preserve_module().commit_media_sidecar_writes(
                 vault,
@@ -615,6 +626,7 @@ def reconcile_media(
     def _commit_unit() -> tuple[bool, ReconcileResult | None]:
         """The guarded part: check that nothing changed since the plan, then commit. True with
         a result when reconcile_media returns it as it is."""
+        nonlocal rerun_with_commit_hold
         result: ReconcileResult | None = None
         commit_tier = access.access_tier(vault, rel_binary)
         if commit_tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
@@ -657,6 +669,12 @@ def reconcile_media(
             result = ReconcileResult(media_type, "completed", sidecar, None)
         else:
             assert pending is not None
+            unavailable = _runtime_unavailable(vault)
+            if queue_only and unavailable is not None:
+                # The runtime went down after the plan, so this path must also write a blocked sidecar:
+                # change nothing here and run it again with the advancing hold.
+                rerun_with_commit_hold = True
+                return False, None
             if original != pending:
                 expected = (
                     content_hash(original)
@@ -700,7 +718,6 @@ def reconcile_media(
                 durable_job = store.get(job_id)
             job_id = durable_job.id if durable_job is not None else None
             state = durable_job.state if durable_job is not None else media_jobs.PENDING
-            unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
                 reason, next_action = unavailable
                 if durable_job is None or not store.mark(
@@ -738,7 +755,12 @@ def reconcile_media(
 
     with _commit_scope():
         early, result = _committing(
-            vault, commit_guard, "media_reconcile_commit", _commit_unit
+            vault, queue_guard if queue_only else commit_guard, "media_reconcile_commit", _commit_unit
+        )
+    if rerun_with_commit_hold:
+        return reconcile_media(
+            vault, binary, explicit=explicit, commit_guard=commit_guard,
+            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request,
         )
     if early:
         return result
@@ -1440,6 +1462,7 @@ def reprocess_media(
     language: str | None = None,
     multilingual: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     """Queue one explicit second extraction of a media file, optionally with a language or mode.
 
@@ -1449,7 +1472,8 @@ def reprocess_media(
     is refused, so the caller asks again when that run ends.
     """
     return _queue_extraction(
-        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
+        queue_guard=queue_guard,
     )
 
 
@@ -1479,6 +1503,7 @@ def _queue_extraction(
     commit_guard: Callable[[], AbstractContextManager[object]] | None,
     *,
     reprocess: bool,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -1500,7 +1525,9 @@ def _queue_extraction(
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
     request = ExtractionRequest(hint, mode, reprocess)
-    result = reconcile_media(vault, binary, commit_guard=commit_guard, request=request)
+    result = reconcile_media(
+        vault, binary, commit_guard=commit_guard, request=request, queue_guard=queue_guard
+    )
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
     if not reprocess and result.state == "completed":
@@ -1512,7 +1539,8 @@ def _queue_extraction(
         return replace(result, requeued=1)
     # Only a completed transcript reaches here: reprocess replaces it, and reconcile queued nothing.
     store = media_jobs.MediaJobStore(vault)
-    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    hold = queue_guard if queue_guard is not None else commit_guard
+    boundary = hold() if hold is not None else nullcontext()
     with boundary:
         job_id = store.request_extraction(
             media_jobs.MediaJob(
