@@ -204,18 +204,38 @@ def finding(check: Mapping[str, Any]) -> str | None:
     return None
 
 
-def correction_call(ref: str, page_hash: str | None) -> str:
-    """The step that replaces a Source whose url may not name its document: compare, then a metadata-only correction.
+def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | None = None) -> str:
+    """The step that replaces a Source whose url may not name its document: a metadata-only correction.
 
-    `page_hash` is the guard the call names; None asks the agent to read the page's hash first.
+    `page_hash` is the guard the call names; None asks the agent to read the page's hash first. When `check`
+    is a `conflict` whose document shows exactly one DOI, the call names that DOI and asks for the correction
+    now: the person gave the url, the document gives the DOI, and the correction keeps the first version.
     """
     guard = f'"{page_hash}"' if page_hash else "<the page's content hash from read_page>"
-    return (
-        "Compare the Source's opening text with its url. If the url is wrong, call save_source again with no "
-        "files, the same title, the right url, and options.correction = "
-        f'{{"supersedes": "{ref}", "expected_hash": {guard}, "reason": "<what was wrong>"}}; '
+    tail = (
+        f'options.correction = {{"supersedes": "{ref}", "expected_hash": {guard}, "reason": "<what was wrong>"}}; '
         "the stored original is kept and nothing is uploaded again."
     )
+    shown = _shown_dois(check) if check and check.get("state") == CONFLICT else []
+    if len(shown) == 1:
+        return (
+            f"Unless the opening text shows a different work that cites {shown[0]}, correct the Source now and "
+            "tell the person: call save_source again with no files, the document's own title, "
+            f'url "https://doi.org/{shown[0]}" and {tail}'
+        )
+    return (
+        "Compare the Source's opening text with its url. If the url is wrong, call save_source again with no "
+        f"files, the document's own title, the right url and {tail}"
+    )
+
+
+def _shown_dois(check: Mapping[str, Any]) -> list[str]:
+    """The DOIs the document itself shows: its metadata's when it declares any, else its first page's."""
+    for key in ("declared_dois", "printed_dois"):
+        value = check.get(key)
+        if isinstance(value, list) and value:
+            return [str(item) for item in value]
+    return []
 
 
 def is_pdf(filename: str) -> bool:

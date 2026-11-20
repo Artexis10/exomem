@@ -973,7 +973,7 @@ def _check_source_identity_conflicts(
                 severity="warn",
                 path=page.rel_path,
                 detail=document_identity.finding(check) or "",
-                proposed_fix=document_identity.correction_call(reference, None),
+                proposed_fix=document_identity.correction_call(reference, None, check),
                 meta={
                     "state": check.get("state"),
                     "claimed_dois": list(check.get("claimed_dois") or []),

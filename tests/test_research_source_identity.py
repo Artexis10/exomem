@@ -171,6 +171,8 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     assert "correction" in reply["next_action"]
     assert row["ref"] in reply["next_action"]
     assert "read_page" in reply["next_action"]
+    # The agent gets the DOI the document prints, so it can correct without asking the person to check.
+    assert '"https://doi.org/10.5555/aaa"' in reply["next_action"]
     predecessor_page, predecessor_original = row["page"], row["stored_path"]
     page_before = (vault / predecessor_page).read_bytes()
     original_before = (vault / predecessor_original).read_bytes()
@@ -228,7 +230,7 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
         tags=["lanterns", "harbours"], document_form="full-text", why_captured="Cited in the harbour survey.",
     )["files"][0]
 
-    # What `next_action` asks for: no files, the same title, the right url and the correction; tags set anew.
+    # What `next_action` asks for: no files, a title, the right url and the correction; tags set anew.
     successor = _save_pdf(
         vault, source_schema, upload=False, source_kind=None, url="https://doi.org/10.5555/aaa", tags=["lighthouses"],
         correction=_correction(vault, row),

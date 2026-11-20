@@ -2364,7 +2364,8 @@ def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     if not ref:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
     more = f" The other {flagged - 1} flagged files carry their own ref." if flagged > 1 else ""
-    return document_identity.correction_call(str(ref), None) + more
+    identity = row.get("identity")
+    return document_identity.correction_call(str(ref), None, identity if isinstance(identity, Mapping) else None) + more
 
 
 #: The records dispositions that leave a canonical Record to write: filing, a recurrence, or a
