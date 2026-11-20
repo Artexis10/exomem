@@ -265,9 +265,14 @@ class ParsedPage:
         return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
+def sidecar_of(media: str) -> str:
+    """The page that describes the media file `media`: its sidecar, beside it."""
+    return media + ".md"
+
+
 def emitted_parent(parent_media: str | None, part_of: str | None) -> str | None:
     """The page a hit on a page is emitted as: a scene frame's video, or a part's Source."""
-    return parent_media + ".md" if parent_media else part_of
+    return sidecar_of(parent_media) if parent_media else part_of
 
 
 @dataclass(frozen=True)
@@ -323,6 +328,18 @@ def _format_timestamp(seconds: float) -> str:
     h, rem = divmod(total, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+#: The `Hit` fields that a page's hit can take from another page (a scene frame's text, its place in
+#: the video, the passage and transcript time its chunk matched), each with its value when nothing was taken.
+_BORROWABLE_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("excerpt", ""),
+    ("scene_frame", None),
+    ("scene_frame_ts", None),
+    ("matched_part", None),
+    ("passage", None),
+    ("transcript_ts", None),
+)
 
 
 @dataclass
@@ -383,6 +400,32 @@ class Hit:
     # — `find()` deep-copies into the cache before annotation ever runs, and
     # `test_find_hot_cache_stays_principal_free` pins that.
     decision: Any = None
+
+    def borrowed_pages(self) -> dict[str, str | None]:
+        """The pages other than its own that this hit's text and annotations may come from.
+
+        Each maps to the snapshot hash that the producer pinned, or to None for a page that only an
+        annotation names. A producer's declaration (`evidence_sources`) is exact. The scene frame
+        that the hit names adds its page, so the release gate decides it even when a producer
+        declared nothing. A part of the text is not listed: it belongs to exactly its Source's scopes.
+        """
+        pages: dict[str, str | None] = {}
+        # A scene frame names its media file, and a media file's page is its sidecar. A `.md` value
+        # already is a page (a frame with no media file), which the producer declared.
+        if self.scene_frame and not self.scene_frame.endswith(".md"):
+            pages[sidecar_of(self.scene_frame)] = None
+        pages.update(self.evidence_sources)
+        pages.pop(self.path, None)
+        return pages
+
+    def drop_borrowed(self) -> None:
+        """Clear what this hit may have taken from another page, and keep the hit.
+
+        The excerpt falls back to none, not to the page's own text: the hit does not record which of
+        the two it holds. Which fields can be borrowed is a property of this class's own fields.
+        """
+        for name, unset in _BORROWABLE_FIELDS:
+            setattr(self, name, unset)
 
     def as_dict(self) -> dict:
         out: dict = {
