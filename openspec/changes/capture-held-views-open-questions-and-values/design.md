@@ -29,11 +29,15 @@ The full rule is one sentence in the activation `capture_policy` block, after th
 
 ### The block has a hard budget
 
-The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 178 characters and brings the longest to 1,599, so 1 character remains. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 176 characters and brings the longest to 1,597, so 3 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
 
 ### An open question is not doubt about an event
 
-A real-model probe showed the open-question class absorbing tentative events: a person unsure which day they posted a parcel had the doubt saved as an open question. A person's unsure report of an event or its details is a tentative event, and the existing lifecycle rule keeps it unwritten unless a collection offers a note field for it. A question the work itself leaves open, including whether something happened, stays an open question. The served sentence says "an open question the work left, not a tentative event"; the scaffold states both halves.
+A real-model probe showed the open-question class absorbing tentative events: a person unsure which day they posted a parcel had the doubt saved as an open question. A person's unsure report of an event or its details is a tentative event, and the existing lifecycle rule keeps it unwritten unless a collection offers a note field for it. A question the work itself leaves open, including whether something happened, stays an open question. The scaffold states both halves.
+
+### The classes are stepping stones, and quiet material leaves no trace
+
+A second probe, on fresh cases, found two failures. Sessions that ended on a held view or an open question, with nothing decided, saved nothing. And a served "not a tentative event" clause came back inside writes as a disclaimer ("do not record the unsure renewal"), which kept the excluded detail. The served sentence therefore names the three classes as stepping stones and names no excluded material: "Held views, open questions and settled values are stepping stones: save a view attributed, with its uncertainty; a question as open; values in full. Mention nothing kept quiet." The baseline sentence just before it still says that tentative events stay quiet, and the scaffold adds that no write mentions what stays quiet.
 
 ### The copyable instruction blocks stay within their caps
 
@@ -47,4 +51,4 @@ The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and 
 ## Risks / Trade-offs
 
 - The model may now save material that was mid-thought. The classes say "held" and "left open" and keep the exclusion of exploration and tangents. The real-model probe includes a control for that.
-- The activation block has 2 characters left. The next addition must shorten something deliberately.
+- The activation block has 3 characters left. The next addition must shorten something deliberately.
