@@ -2709,19 +2709,22 @@ def find(
         )
 
     eligible_paths: set[str] | None = None
-    # A browse the store's index can window never resolves the plan's whole eligible set, so its
-    # cost follows the limit; `_browse_window` is None for every other request.
-    browse_window = _browse_window(
-        vault_root,
-        plan=filter_plan if filter_plan.root is not None else None,
-        query_norm=query_norm,
-        pending=pending,
-        dimension_lookups=dimension_lookups,
-        timings=timings,
-        resolve_plan=resolve_plan_paths,
-    )
-    if filter_plan.root is not None and browse_window is None:
-        with _span(timings, _nested_name(timings, "filter_eligibility")):
+    planned = filter_plan.root is not None
+    with ExitStack() as eligibility:
+        if planned:
+            eligibility.enter_context(_span(timings, _nested_name(timings, "filter_eligibility")))
+        # A browse the store's index can window never resolves the plan's whole eligible set, so its
+        # cost follows the limit; `_browse_window` is None for every other request.
+        browse_window = _browse_window(
+            vault_root,
+            plan=filter_plan if planned else None,
+            query_norm=query_norm,
+            pending=pending,
+            dimension_lookups=dimension_lookups,
+            timings=timings,
+            resolve_plan=resolve_plan_paths,
+        )
+        if planned and browse_window is None:
             eligible_paths = resolve_plan_paths()
     # Intersect the relation participants into the eligibility seam so the filter
     # composes AND with every structured filter and gates every ranking lane and
@@ -6065,8 +6068,9 @@ def _browse_window(
         query_norm
         or not pending.empty
         or dimension_lookups is not None
-        or not lexstore.maintained_content_index_enabled()
+        # First: a file-mode browse never reaches the content-index gate, which probes FTS.
         or not lexstore.store_rows_serve(vault_root)
+        or not lexstore.maintained_content_index_enabled()
     ):
         return None
     if plan is None:
