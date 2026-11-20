@@ -38,7 +38,8 @@ def names_a_manifest(selector: str) -> bool:
 
 
 def resolve_collection(
-    vault_root: Path, selector: str | None, *, profile: str, unserved: Callable[[], str | None] | None = None
+    vault_root: Path, selector: str | None, *, profile: str, unserved: Callable[[], str | None] | None = None,
+    certain: bool = False,
 ) -> str | None:
     """The manifest path of the collection `selector` names by title; `selector` otherwise.
 
@@ -47,7 +48,9 @@ def resolve_collection(
     a collection that the caller may not see answers as one that does not exist. Titles compare as
     the vault compares every title (`vault.title_key`: trimmed, normalized and case-insensitive).
     `unserved` answers instead where no readable collection carries the title but a visible one lives
-    in a store this thread does not serve, so whether it carries the title is unknown here.
+    in a store this thread does not serve, so whether it carries the title is unknown here. With
+    `certain`, it answers there even when one readable collection carries the title, because an
+    unread one may carry it too.
     """
     if selector is None or names_a_manifest(selector.strip()):
         return selector
@@ -62,9 +65,9 @@ def resolve_collection(
             f"{len(candidates)} collections are titled {selector!r}; name one by its manifest path.",
             details={"candidates": candidates},
         )
-    if matches:
-        return matches[0]
-    return unserved() if unread and unserved is not None else selector
+    if unread and unserved is not None and (certain or not matches):
+        return unserved()
+    return matches[0] if matches else selector
 
 
 def row_id(profile: str, row: Mapping[str, Any]) -> str | None:

@@ -970,7 +970,7 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     return Routed(server, proof)
 
 
-def titled_arguments(command, vault_root, arguments):
+def titled_arguments(command, vault_root, arguments, *, write=False):
     """`arguments` with a collection title replaced by the manifest path of the collection it names.
 
     A title is no path, UUID or reference, so `route` cannot tell whether the store owns the
@@ -978,15 +978,17 @@ def titled_arguments(command, vault_root, arguments):
     one resolver the facade uses (``collection_refs.resolve_collection``), over both kinds, on the
     caller's thread over the store's last commit (``StoreServer.read_beside``), which queues on the
     store thread only where that read does. So a title waits on a running batch no more than the
-    store's import status does. While the store is not open, file collections answer here; a title
-    that none carries but a visible store collection may carry queues as that manifest path would,
-    and the store thread answers it once open or refuses it as it refuses the path. A vault with no
-    store, a process that serves no store, and a title that names no visible collection leave
-    `arguments` as they are, and the facade answers.
+    store's import status does. While the store is not open, or after the owner's rollback disabled
+    it, file collections answer here. A title that a visible store collection may carry queues as
+    that manifest path would where no file collection carries it, and the store thread answers it
+    once open or refuses it as it refuses the path. While the store is not open, a `write` queues so
+    even where a file collection carries the title, because the open store may call it ambiguous. A
+    vault with no store, a process that serves no store, and a title that names no visible
+    collection leave `arguments` as they are, and the facade answers.
     """
     from .. import collection_refs
     from ..collection_profiles import PROFILES
-    from . import ownership
+    from . import capability, ownership
     from .preview import bound_writer
 
     selector = arguments.get("collection")
@@ -1004,13 +1006,19 @@ def titled_arguments(command, vault_root, arguments):
         return arguments
     connection.load_store_libraries()
 
-    def resolve(unserved=None):
-        return collection_refs.resolve_collection(root, selector, profile=profile, unserved=unserved)
+    def resolve(unserved=None, certain=False):
+        return collection_refs.resolve_collection(root, selector, profile=profile, unserved=unserved,
+                                                  certain=certain)
 
-    if server.runtime is None:
-        path = resolve(unserved=lambda: server.call(resolve, read_only=True, wake_maintenance=False))
+    opened = server.runtime is not None
+    if opened and not capability.records_summary_disabled(root):
+        path = server.read_beside(resolve, initial=proof, progress=False)
     else:
-        path = server.read_beside(resolve, initial=proof)
+        # A rolled-back store refuses every store collection until the owner restores it, so there a
+        # file collection is the only one a write by title can reach, even while the store opens.
+        certain = write and not opened and not capability.records_summary_disabled(root)
+        path = resolve(unserved=lambda: server.call(resolve, read_only=True, wake_maintenance=False),
+                       certain=certain)
     return arguments if path == selector else {**arguments, "collection": path}
 
 
@@ -1535,7 +1543,7 @@ class StoreServer:
             raise request.error
         return request.result
 
-    def read_beside(self, work, *, initial, collection=None):
+    def read_beside(self, work, *, initial, collection=None, progress=True):
         """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
 
         For import status, which must answer while a batch keeps the store thread busy. The
@@ -1545,7 +1553,9 @@ class StoreServer:
         (``_serve``), with a writer over a ``connection.SnapshotHandle``, which refuses every write.
         Where this process holds no admitted writer, the request queues on the store thread as
         before (``call``), whose checkout opens one. ``collection`` is the request's selector: a
-        collection the store keeps in full needs no read of the derived file.
+        collection the store keeps in full needs no read of the derived file. Work that reads no
+        import progress, as title resolution reads titles alone, passes ``progress`` False and
+        skips that file.
         """
         from ..cli_ops import OpError
         from ..governance import policy
@@ -1579,7 +1589,7 @@ class StoreServer:
             reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
             entry = None if initial is None or collection is None else initial.selected(self.root, collection)
             # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
-            derived = entry is None or derived_rows.is_derived(reader, entry["collection_id"])
+            derived = progress and (entry is None or derived_rows.is_derived(reader, entry["collection_id"]))
             production = runtime._session is not None and runtime._session.production
             scope.enter_context(state_paths.resolution_scope())
             scope.enter_context(policy.request_policy_snapshot())

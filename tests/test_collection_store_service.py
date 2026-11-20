@@ -139,6 +139,11 @@ def refused(work, code=capability.UNAVAILABLE):
     assert error.value.code == code, error.value
 
 
+def _coordinator_unreachable(client):
+    """A lease coordinator that refuses every connection, so the store cannot open."""
+    raise writer_lease._coordinator_unavailable_error(ConnectionRefusedError("connection refused"))
+
+
 def test_a_withheld_selection_without_a_service_is_indistinguishable_from_missing(service):
     """Routing must not disclose marker ownership before collection visibility is checked."""
     from test_collection_field_admission import GUEST
@@ -1612,6 +1617,89 @@ def test_a_write_refused_while_its_title_resolves_is_journaled_once(service, tmp
 
     (refusal,) = [row for row in journal_rows(tmp_path) if row["outcome"] == "failed"]
     assert (refusal["command"], refusal["error_code"]) == ("record_memory", "AMBIGUOUS_COLLECTION")
+
+
+def _rolled_back(service, monkeypatch):
+    """Stop the service, and roll its store back as the owner, which disables every store collection."""
+    service.stop()
+    monkeypatch.setenv(OPERATOR, "operator")
+    with request_scope(OWNER):
+        assert admission.rollback_route(service.root)["status"] == "disabled"
+    monkeypatch.delenv(OPERATOR)
+
+
+def test_after_the_owner_rolls_the_store_back_a_title_answers_as_its_path_does(service, monkeypatch):
+    """Defect: after the owner's rollback every request by title was refused COLLECTION_STORE_DISABLED,
+    a file collection's included, though the rollback keeps file collections writable by path."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    _rolled_back(service, monkeypatch)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: restarted.manager.status().get("collection_store", {}).get("status") == "admitted")
+        assert call(root, "record_memory", action="append", collection="Legacy", item={"title": "By title"},
+                    why="file write")["outcome"] == "committed"
+        assert titles(root, "Legacy") == titles(root, A_PATH) == ["By title"]
+
+        def refusal(collection):
+            with pytest.raises((OpError, CollectionStoreError)) as error:
+                titles(root, collection)
+            return error.value.code, str(error.value)
+
+        by_path = refusal(manifest_path())
+        assert by_path[0] == capability.DISABLED
+        assert refusal("Work") == by_path  # C alone holds the title now
+    finally:
+        restarted.stop()
+
+
+def test_after_the_owner_rolls_the_store_back_a_file_title_takes_a_write_while_the_store_opens(
+        service, monkeypatch):
+    """A write by a file collection's title must not wait for the rolled-back store to open, only to
+    be refused there as disabled, while the same collection's path commits."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    _rolled_back(service, monkeypatch)
+    opened = threading.Event()
+    open_store = runtime.StoreServer._open
+    monkeypatch.setattr(runtime.StoreServer, "_open", lambda server: (opened.wait(10), open_store(server))[1])
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime.served(root))
+        assert call(root, "record_memory", action="append", collection="Legacy", item={"title": "While opening"},
+                    why="file write")["outcome"] == "committed"
+        assert runtime._server(root.resolve()).runtime is None  # the store was still opening
+    finally:
+        opened.set()
+        restarted.stop()
+    assert titles(root, A_PATH) == ["While opening"]
+
+
+def test_a_write_by_a_title_c_may_hold_gets_the_refusal_its_path_gets_while_the_store_cannot_open(
+        service, monkeypatch):
+    """Defect: while the store could not open, the title that A and C both hold named A alone, so a
+    write by it committed into A, where the same write is refused as ambiguous once the store opens."""
+    root = service.root
+    service.stop()
+    monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", _coordinator_unreachable)
+    restarted = Service(root, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._server(root.resolve()).refusal[0] == "WRITER_COORDINATOR_UNAVAILABLE")
+        assert call(root, "record_memory", action="append", collection=A_PATH, item={"title": "Filed"},
+                    why="file row")["outcome"] == "committed"
+
+        def appended(collection):
+            with pytest.raises(OpError) as error:
+                call(root, "record_memory", action="append", collection=collection, item={"title": "Unplaced"},
+                     why="capture")
+            return error.value.as_public_dict()
+
+        by_path = appended(manifest_path())
+        assert by_path["code"] == "WRITER_COORDINATOR_UNAVAILABLE"
+        assert appended("Work") == by_path
+        assert titles(root, A_PATH) == ["Filed"]
+    finally:
+        restarted.stop()
 
 
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):

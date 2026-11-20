@@ -32,6 +32,7 @@ from . import structured_collections as collections
 from .collection_store import capability, ownership
 from .collection_store.preview import (
     QUERY_RECEIPT_BOUNDARY,
+    UNSERVED,
     bound_writer,
     canonical_read,
     production_bound,
@@ -2061,10 +2062,10 @@ def visible_collection_titles(
         )
     titles = tuple((manifest.title, manifest.path) for manifest in manifests
                    if manifest.semantic_profile == semantic_profile)
-    # Discovery lists an unserved store collection under this fixed refusal code, and only where the
-    # caller may learn of it (`store_notice`); a file it could not parse is no store collection.
+    # Discovery lists an unserved store collection with the message it names this state by, and only
+    # where the caller may learn of it (`store_notice`); a file it could not parse is no store collection.
     unserved = sum(1 for row in unreadable
-                   if row.code == "COLLECTION_STORE_UNAVAILABLE" and row.semantic_profile in (None, semantic_profile))
+                   if row.message == UNSERVED and row.semantic_profile in (None, semantic_profile))
     return titles, unserved
 
 

@@ -27,7 +27,7 @@ from test_collection_store_migration import (  # noqa: F401
     start_service,
 )
 from test_collection_store_s1_gate import _until
-from test_collection_store_service import ON, Service, call
+from test_collection_store_service import ON, Service, _coordinator_unreachable, call
 from test_governance_egress import write_rule, write_scope
 
 from exomem import commands, writer_lease
@@ -119,10 +119,6 @@ def test_a_served_title_answers_the_same_whether_its_file_collection_is_withheld
 
 
 # While the store opens, or cannot open, the store collections' titles are unknown, not absent.
-
-
-def _coordinator_unreachable(client):
-    raise writer_lease._coordinator_unavailable_error(ConnectionRefusedError("connection refused"))
 
 
 def test_a_title_while_the_store_cannot_open_gets_the_refusal_its_path_gets(migrated, monkeypatch) -> None:
