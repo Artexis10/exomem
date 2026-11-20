@@ -362,6 +362,17 @@ def test_an_editor_file_without_identity_at_a_prior_path_does_not_take_its_links
     assert [(finding.path, finding.paths) for finding in findings] == [(A, [C])]
 
 
+def test_a_live_page_at_a_path_beats_a_squatted_path_under_knowledge_base(moved: Path) -> None:
+    """A link written without the folder prefix keeps its own live page when a file without
+    identity squats the prefixed spelling of the same path."""
+    bare = A.removeprefix("Knowledge Base/")
+    _write(moved, bare, _note("Plain page at the bare path"))
+    _write(moved, A, "")
+    memory_refs.ReferenceIndex(moved).rebuild_all()
+
+    assert _resolve(moved, bare.removesuffix(".md")) == (bare.removesuffix(".md"), None)
+
+
 def test_a_delete_check_finds_a_link_to_a_prior_path_while_the_index_is_stale(
     moved: Path,
 ) -> None:

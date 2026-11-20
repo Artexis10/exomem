@@ -10200,6 +10200,10 @@ def _normalize_wikilink(
                     return _selected(claimed, "prior path")
             if targeted:
                 return key + anchor, None, None
+            # A live page at this key wins over a squatted later key, as it does for
+            # main's per-key order; select_wikilink then resolves this key's path axis.
+            if wikilink_candidates(resolver.candidates_by_key, (key,), visible=visible):
+                break
 
     if not targeted:
         def prepared(axis: str, key: str) -> WikilinkMatches:
