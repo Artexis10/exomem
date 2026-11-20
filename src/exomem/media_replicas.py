@@ -226,7 +226,7 @@ def status(vault: Path) -> dict[str, object]:
                 "totals": None}
     entries = originals.store_entries(config)
     try:
-        with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
+        with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
             census = _census(conn)
             exports = _exports(conn)
             groups = conn.execute(
@@ -318,7 +318,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
     entries = originals.store_entries(config)
     limit = max(1, min(int(limit), 500))
     try:
-        with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
+        with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
             census = _census(conn)
             exports = _exports(conn)
             paths = [row[0] for row in conn.execute(
@@ -356,13 +356,18 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
         return {"state": "unavailable", "reason": "no media store is configured", "replicas": None}
     snapshot = originals.original_state(vault, path)
     entries = originals.store_entries(config)
-    with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
-        exports = _exports(conn)
-        try:
-            times = {row["store"]: row["verified_at"] for row in conn.execute(
-                "SELECT store, verified_at FROM media_replicas WHERE binary_rel = ?", (snapshot.path.relative_to(vault).as_posix(),))}
-        except sqlite3.OperationalError:
-            times = {}
+    ledger = MediaJobStore(vault, create=False)  # a read never recreates a table
+    exports: dict[str, float] = {}
+    times: dict[str, float] = {}
+    if ledger.path.exists():  # With no ledger the binding alone lists the replicas, and nothing is confirmed.
+        with closing(ledger._connect(readonly=True)) as conn:
+            exports = _exports(conn)
+            try:
+                times = {row["store"]: row["verified_at"] for row in conn.execute(
+                    "SELECT store, verified_at FROM media_replicas WHERE binary_rel = ?",
+                    (snapshot.path.relative_to(vault).as_posix(),))}
+            except sqlite3.OperationalError:
+                times = {}
     found = []
     for replica in _replicas_of(snapshot):
         entry = entries.get(replica.store)
