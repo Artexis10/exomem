@@ -3285,6 +3285,10 @@ def _check_unprocessed_sources(
             age_phrase = " (capture date unknown)"
 
         if custody:
+            from . import memory_refs
+
+            identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
+            reference = memory_refs.memory_ref(identity) if identity else page.rel_path
             rows.append(
                 (
                     age_days if age_days is not None else -1,
@@ -3298,8 +3302,12 @@ def _check_unprocessed_sources(
                             + (f" ({age_days}d old)" if age_days is not None else "")
                         ),
                         proposed_fix=(
-                            "Compile a note that cites it (the citation clears the mark), "
-                            "or correct the Source with options.custody_only: false if it should wait for compilation."
+                            "A live note that cites this Source takes it off this list; the Source keeps its "
+                            "custody_only mark. To have it wait for compilation instead, call save_source again "
+                            "with no files, the Source's own title, options.custody_only: false and "
+                            f'options.correction = {{"supersedes": "{reference}", "expected_hash": '
+                            '<the page\'s content hash from read_page>, "reason": "<why it needs a note>"}; '
+                            "a text Source passes its text as content again."
                         ),
                         meta=meta,
                     ),
