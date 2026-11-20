@@ -220,7 +220,7 @@ def _integrity_failures(vault: Path, note_paths: list[str]) -> list[str]:
             failures.append(f"{rel} missing from the corpus projection")
     with file_watcher._WATCHERS_LOCK:  # noqa: SLF001
         failures.extend(
-            f"publication intent still active: {intent.path}"
+            f"publication intent still active: {key[1]}"
             for key, intent in file_watcher._PUBLICATION_INTENTS.items()  # noqa: SLF001
             if intent.disposition == "active"
         )
