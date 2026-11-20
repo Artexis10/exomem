@@ -306,9 +306,11 @@ def _class_specific(
         if len(cards) != 1 or cards[0][0] != companion_path:
             raise _stale("dataset companion is missing or ambiguous")
         _path, frontmatter, card_snapshot = cards[0]
-        if card_snapshot.identity != companion.identity or (
-            frontmatter.get("format") != expected_format
-        ):
+        # A page that the store holds has no file identity, so the same bytes name the same version.
+        same_card = card_snapshot.identity == companion.identity and (
+            card_snapshot.identity is not None or card_snapshot.data == companion.data
+        )
+        if not same_card or frontmatter.get("format") != expected_format:
             raise _stale("dataset companion binding changed")
         normalized["format"] = expected_format
         descriptor["format"] = expected_format

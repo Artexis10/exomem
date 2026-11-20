@@ -4600,10 +4600,11 @@ def _corpus_with_recovery_states(
         tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths),
         base.identity_census.reference_only_entries,
     )
-    casefold_paths = vault.vault_casefolds(root)
-    for state in states:
-        pages[state.path] = state
-        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
+    recovered = {state.path: state for state in states}
+    pages.update(recovered)
+    identity_census = identity_census.with_pages(
+        recovered, casefold_paths=vault.vault_casefolds(root)
+    )
     return semantic_contract.SemanticCorpusContext.from_states(
         root,
         pages.values(),

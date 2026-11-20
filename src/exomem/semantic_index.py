@@ -16,6 +16,7 @@ import yaml
 
 from . import (
     memory_refs,
+    note_types,
     relation_registry,
     semantic_language_registry,
     semantic_units,
@@ -336,8 +337,12 @@ def build_parent_index_state(
     path: Path | str,
     *,
     source: str | None = None,
+    owner_type_basis: note_types.Basis | None = None,
 ) -> SemanticParentIndexState:
-    """Parse one parent source for indexing without mutating canonical Markdown."""
+    """Parse one parent source for indexing without mutating canonical Markdown.
+
+    ``owner_type_basis`` is one owner-local note-type basis that a pass over many pages shares.
+    """
     root = Path(vault_root)
     candidate = Path(path)
     if candidate.is_absolute():
@@ -357,7 +362,9 @@ def build_parent_index_state(
     # Reuse the contract owner's position-preserving provenance processing.
     from . import semantic_contract
 
-    neutral = semantic_contract._parse_page_state(root, rel_path, source)
+    neutral = semantic_contract._parse_page_state(
+        root, rel_path, source, owner_type_basis=owner_type_basis
+    )
     body, candidates = neutral.body, neutral.candidates
     document = neutral.document
     source_hash = vault.content_hash(source)
@@ -422,6 +429,7 @@ def current_parent_index_state(
     path: Path | str,
     *,
     source: str | None = None,
+    owner_type_basis: note_types.Basis | None = None,
 ) -> SemanticParentIndexState:
     """Reuse an active parse only when it exactly matches committed bytes."""
     root = Path(vault_root)
@@ -443,7 +451,7 @@ def current_parent_index_state(
         and active.relation_registry_hash == relation_hash
     ):
         return active
-    return build_parent_index_state(root, path, source=source)
+    return build_parent_index_state(root, path, source=source, owner_type_basis=owner_type_basis)
 
 
 def from_semantic_page_state(state: Any) -> SemanticParentIndexState:

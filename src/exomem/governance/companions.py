@@ -93,16 +93,20 @@ class BoundCompanion:
 
 @dataclass(frozen=True, slots=True)
 class BoundSnapshot:
-    """One exact held-file identity and byte digest in the classification."""
+    """One exact held-file identity and byte digest in the classification.
+
+    A page that the vault's store holds has no file identity: it binds by its path and byte digest,
+    with ``kind`` ``"stored"`` and no device, inode or link count.
+    """
 
     role: str
     path: str
     sha256: str
     size: int
-    device: int
-    inode: int
+    device: int | None
+    inode: int | None
     kind: str
-    link_count: int
+    link_count: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,21 +259,30 @@ def _size(snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericF
     return snapshot.size if isinstance(snapshot, reserved_paths.GenericFileCopy) else len(snapshot.data)
 
 
+def _bound_snapshot(
+    role: str,
+    path: str,
+    snapshot: reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy,
+) -> BoundSnapshot:
+    identity = snapshot.identity
+    return BoundSnapshot(
+        role=role,
+        path=path,
+        sha256=_digest(snapshot),
+        size=_size(snapshot),
+        device=None if identity is None else identity.device,
+        inode=None if identity is None else identity.inode,
+        kind="stored" if identity is None else identity.kind,
+        link_count=None if identity is None else identity.link_count,
+    )
+
+
 def _bind_snapshots(
     companion: BoundCompanion,
     *snapshots: tuple[str, str, reserved_paths.GenericFileSnapshot | reserved_paths.GenericFileCopy | originals.OriginalSnapshot],
 ) -> BoundCompanion:
     identities = tuple(
-        BoundSnapshot(
-            role=role,
-            path=path,
-            sha256=_digest(snapshot),
-            size=_size(snapshot),
-            device=snapshot.identity.device,
-            inode=snapshot.identity.inode,
-            kind=snapshot.identity.kind,
-            link_count=snapshot.identity.link_count,
-        )
+        _bound_snapshot(role, path, snapshot)
         for role, path, snapshot in snapshots
         if not isinstance(snapshot, originals.OriginalSnapshot)
     )
@@ -340,10 +353,7 @@ def classify_proposed_sibling(artifact_path: str, *, artifact_sha256: str,
 
 def _dataset_cards(vault_root, artifact_path: str):
     try:
-        # A card's file identity is bound below, and a stored page has none to bind.
-        entries = reserved_paths.list_generic_tree(
-            vault_root, managed_root_rel(), recursive=True, stored=False
-        )
+        entries = reserved_paths.list_generic_tree(vault_root, managed_root_rel(), recursive=True)
     except reserved_paths.ReservedPathLeafError as error:
         raise CompanionClassificationError("companion_unsafe") from error
     cards: list[

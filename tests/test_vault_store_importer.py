@@ -731,6 +731,42 @@ def test_a_move_after_a_kill_that_lost_the_manifest_row_removes_the_old_file_and
     assert imports(stored) == [] and rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
 
 
+def test_a_sweep_adopts_the_file_of_a_page_that_the_store_lost_though_a_manifest_row_remains(
+    stored, writer, importing
+):
+    """A sweep that takes the file for Exomem's own because a manifest row remembers its bytes: the
+    store holds no page there, so no reader serves the file and nothing imports it later."""
+    with writer.handle.transaction() as tx:
+        tx.execute("DELETE FROM store_pages WHERE path = ?", (ALPHA,))
+    assert rows(stored, "SELECT COUNT(*) FROM store_manifest WHERE path = ?", ALPHA) == [(1,)]
+
+    report = importing.sweep()
+
+    assert report.imported == [ALPHA] and report.held == []
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [
+        ((stored / ALPHA).read_bytes(),)
+    ]
+    assert importing.sweep().imported == [], "the page is the store's now: nothing is left to adopt"
+
+
+def test_a_sweep_leaves_the_files_of_a_delete_and_a_move_that_the_projector_has_not_run(
+    stored, writer, importing
+):
+    """A sweep that adopts the file of a page that Exomem just deleted or moved, so that the page
+    comes back at its old path before the projector removes the file."""
+    commit(
+        writer,
+        deletes=(write.PageDelete(BETA),),
+        moves=(write.PageMove(ALPHA, f"{NOTES}/Archive/Alpha.md"),),
+    )
+    assert (stored / BETA).exists() and (stored / ALPHA).exists()
+
+    report = importing.sweep()
+
+    assert (report.imported, report.held) == ([], [])
+    assert rows(stored, "SELECT path FROM store_pages WHERE path IN (?, ?)", ALPHA, BETA) == []
+
+
 def test_a_held_delete_clears_when_the_file_comes_back_with_exomems_bytes(stored, importing):
     """An importer that leaves a deleted page held after the person restored it, so that the hold
     waits for a review that has nothing to decide, or that drops a held delete when the file comes
