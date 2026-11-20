@@ -2314,11 +2314,13 @@ def _lead(head: str, names: Sequence[str], *, of: int | None = None) -> str:
     return f"{head} {count} files -> {names[0]}{more}"
 
 
-def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -> str | None:
+def _partial_batch_summary(
+    verb: OutcomeVerb, rows: Sequence[tuple[str, str]], *, stored_clause: str = ""
+) -> str | None:
     """The sentence for a batch in which some file was not newly stored, else None.
 
     Never says "Saved" unless a file was stored by this call. No codes, ids or reasons: the
-    agent reads those from the `files` rows.
+    agent reads those from the `files` rows. `stored_clause` follows the files this call stored.
     """
     stored = [path for state, path in rows if state == "stored"]
     already = [path for state, path in rows if state == "already_stored"]
@@ -2327,7 +2329,7 @@ def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -
         return None
     lost = f"{failed} {'file' if failed == 1 else 'files'} could not be {verb}"
     if stored:
-        parts = [_lead(verb.capitalize(), stored, of=len(stored) + len(already) + failed)]
+        parts = [_lead(verb.capitalize(), stored, of=len(stored) + len(already) + failed) + stored_clause]
         if failed:
             parts.append(lost)
         if already:
@@ -2408,7 +2410,8 @@ def _user_summary(
     if result.get("status") == "committed" or reused:
         # A reused batch can still hold a failed file, so its rows speak before the settled sentence does.
         head = f"Already {verb}" if reused else verb.capitalize()
-        if (partial := _partial_batch_summary(verb, batch)) is not None:
+        clauses = _capture_clauses(result, head, verb)
+        if (partial := _partial_batch_summary(verb, batch, stored_clause=clauses)) is not None:
             return partial
     elif result.get("status") == "replayed":
         head = f"Already {verb}"
@@ -2436,33 +2439,21 @@ def _user_summary(
     if verb == "replaced" and len(names) == 2:
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
         return f"{head} -> {names[1]}, was {names[0]}"
-    sentence = _lead(head, names)
-    if _text_only_source_capture(result, head, verb):
-        sentence += " (text only; no original file stored)"
-    if _custody_only_source_capture(result, head, verb):
-        sentence += " (kept for custody only)"
-    return sentence
+    return _lead(head, names) + _capture_clauses(result, head, verb)
 
 
-def _custody_only_source_capture(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> bool:
-    """The capture stored a Source marked custody_only; say so on a fresh save, never on a reuse."""
+def _capture_clauses(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> str:
+    """What a fresh Source save stored, said after the files it names; a reuse stored nothing, so it says nothing.
+
+    A `content` capture stored supplied text, never an original file. A capture marked `custody_only` keeps the
+    Source with no note expected.
+    """
     leaf = result.get("leaf_result")
+    if verb != "saved" or head != verb.capitalize() or not isinstance(leaf, Mapping):
+        return ""
     return (
-        verb == "saved"
-        and head == verb.capitalize()
-        and isinstance(leaf, Mapping)
-        and leaf.get("custody_only") is True
-    )
-
-
-def _text_only_source_capture(result: Mapping[str, Any], head: str, verb: OutcomeVerb | None) -> bool:
-    """A `content` capture stored supplied text, never an original file; say so on a fresh save."""
-    leaf = result.get("leaf_result")
-    return (
-        verb == "saved"
-        and head == verb.capitalize()
-        and isinstance(leaf, Mapping)
-        and leaf.get("text_only") is True
+        (" (text only; no original file stored)" if leaf.get("text_only") is True else "")
+        + (" (kept for custody only)" if leaf.get("custody_only") is True else "")
     )
 
 

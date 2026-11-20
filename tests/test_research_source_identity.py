@@ -583,6 +583,41 @@ def test_a_custody_only_capture_marks_the_source_and_says_so(
     assert "(kept for custody only)" in reply["user_summary"]
 
 
+@pytest.mark.usefixtures("owner_scope", "duplicate_index")
+def test_a_batch_that_also_holds_an_already_stored_file_still_says_kept_for_custody_only(
+    vault, source_schema, tmp_path, monkeypatch
+) -> None:
+    # A batch with an already-stored file takes the partial sentence, which dropped the custody clause,
+    # so the person never saw the mark they might want to overrule.
+    payloads = {
+        "pdf-old": make_pdf(tmp_path / "old.pdf", ["The first handed page."]).read_bytes(),
+        "pdf-new": make_pdf(tmp_path / "new.pdf", ["The second handed page."]).read_bytes(),
+    }
+
+    def staged(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        payload = payloads[file["file_id"]]
+        path = tmp_path / f"staged-{uuid.uuid4().hex}.bin"
+        path.write_bytes(payload)
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"], path=path, size=len(payload), sha256=hashlib.sha256(payload).hexdigest(),
+            content_type="application/pdf", filename=f"{file['file_id']}.pdf",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", staged)
+    old = {"file_id": "pdf-old", "download_url": "https://files.example/pdf-old"}
+    new = {"file_id": "pdf-new", "download_url": "https://files.example/pdf-new"}
+    commands.op_capture_source(vault, source_schema, title="First page", source_kind="session", files=[old])
+
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Both pages", source_kind="session", files=[old, new], custody_only=True)
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+
+    assert "1 already saved" in reply["user_summary"]
+    assert "(kept for custody only)" in reply["user_summary"]
+
+
 def test_a_custody_only_text_capture_adds_the_clause_after_text_only(vault, source_schema, owner_scope) -> None:
     leaf = commands.op_capture_source(
         vault, source_schema, title="Call notes", source_kind="session",
