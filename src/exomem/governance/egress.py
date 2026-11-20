@@ -3976,6 +3976,39 @@ def classify_units(
     return [_unit_verdict(unit, ctx)[1] for unit in units]
 
 
+def page_text_bounds(
+    vault_root: Path,
+    paths: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, int | None]:
+    """The most of each page's text the caller may be served (`page_text_bound`), by path.
+
+    Each page is decided on the terms `classify_units` decides a unit's page, and, as there, only a refusal is
+    receipted: a page is released only when the served packet names it.
+    """
+    root = Path(vault_root)
+    policy, _release_gate_active = gate_state(root)
+    who = principal if principal is not None else effective_principal()
+    wanted = sorted(set(paths))
+    if policy.blocked or (not policy.empty and not who.resolved):
+        return dict.fromkeys(wanted, page_text_bound(LEVEL_NONE))
+    if _file_policy_empty(root, policy):
+        return dict.fromkeys(wanted, page_text_bound(LEVEL_FULL))
+    ctx = _PacketRelease(
+        vault_root=root, policy=policy, who=who, record="withheld", policy_decides=True,
+        tombstoned=set(), withheld=set(), prose_resolved={},
+        declared_purpose=_declared_purpose(root, who, purpose), grants_hash=_grants_hash(policy),
+    )
+    for rel_path in wanted:
+        ctx.decide(rel_path)
+    return {
+        rel_path: page_text_bound(None if ctx.decisions[rel_path] is None else ctx.decisions[rel_path].level)
+        for rel_path in wanted
+    }
+
+
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],
@@ -4066,6 +4099,10 @@ def guard_working_set(
                 from .. import domain_profiles
 
                 guarded["domain_profiles"] = domain_profiles.guard_block(vault_root, caller, guarded["domain_profiles"])
+            if "positions" in guarded:
+                from .. import positions
+
+                guarded["positions"] = positions.guard_block(vault_root, caller, guarded["positions"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
@@ -5324,7 +5361,19 @@ def _iter_path_strings(value: Any) -> Iterable[str]:
             yield from _iter_path_strings(item)
 
 
-def _excerpt_of(body: str, limit: int = 600) -> str:
+#: Characters of page text an excerpt-level (L5) read returns; `read_page` cuts a longer body to them.
+PAGE_EXCERPT_MAX = 600
+
+
+def page_text_bound(level: int | None) -> int | None:
+    """The most of a page's text a reader at `level` is served: all of it (`None`) at full release, an excerpt of
+    `PAGE_EXCERPT_MAX` characters at the excerpt level, and none below it or when the level is undecided."""
+    if level == LEVEL_FULL:
+        return None
+    return PAGE_EXCERPT_MAX if level == LEVEL_EXCERPT else 0
+
+
+def _excerpt_of(body: str, limit: int = PAGE_EXCERPT_MAX) -> str:
     """The L5 rendering of a body: a bounded, whole-word excerpt."""
     text = " ".join(body.split())
     if len(text) <= limit:
@@ -5842,7 +5891,8 @@ def _annotate_page(
         return ref_decision is None or ref_decision.level < RELEASE_FLOOR
 
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
-    if level == LEVEL_EXCERPT:
+    bound = page_text_bound(level)
+    if bound is not None:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
         from .. import provenance
 
@@ -5855,7 +5905,7 @@ def _annotate_page(
             principal=who,
             purpose=declared_purpose,
         )
-        shown = _excerpt_of(body)
+        shown = _excerpt_of(body, bound)
         excerpt = {
             "path": rel_path,
             "body": shown,
@@ -6259,6 +6309,10 @@ def _postfilter(
                 vault_root, cleaned, session=(request_kwargs or {}).get("session"),
                 purpose=(request_kwargs or {}).get("purpose"),
             )
+        if "positions" in cleaned:
+            # Every other field is in place, so the block can end the response: real-model replays used the
+            # positions when they were read last and mostly passed over them mid-packet.
+            cleaned["positions"] = cleaned.pop("positions")
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):

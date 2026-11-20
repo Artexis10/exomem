@@ -1,8 +1,9 @@
 """Admitted units of live compiled pages, as session context lines.
 
-The stance block and the domain profiles both serve a bounded set of lines from a few catalogue-narrowed
-pages. They differ in which pages they take and in their bounds; they share the rule that a unit is admitted
-before anything is counted, cached or served, and that currency and the budget come after admission.
+The stance block, the domain profiles and the recorded positions all serve a bounded set of lines from a few
+index-narrowed pages. They differ in which pages and units they take and in their bounds; they share the rule
+that a unit is admitted before anything is counted, cached or served, and that currency and the budget come
+after admission.
 """
 
 from __future__ import annotations
@@ -30,12 +31,23 @@ class Served:
     boundaries: list[date] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class Current:
+    """The admitted units that are current today, each with the review date it is due by, if any."""
+
+    items: list[tuple[working_set.LaneItem, str | None]] = field(default_factory=list)
+    expired: int = 0
+    #: The days on which a unit's currency changes without a write.
+    boundaries: list[date] = field(default_factory=list)
+
+
 def admit(
     root: Path, caller: Any, paths: Iterable[str], accepts: Callable[[Any], bool],
+    units: Callable[[Any], bool] | None = None,
 ) -> tuple[tuple[working_set.LaneItem, ...], lifecycle_statuses.Basis]:
-    """The units that pass unit admission, from the pages `accepts` takes.
+    """The units that pass unit admission, from the pages `accepts` takes and, when given, the units `units` takes.
 
-    A hidden unit changes nothing downstream: it is not counted, hashed or ordered. The catalogue narrows `paths`
+    A hidden unit changes nothing downstream: it is not counted, hashed or ordered. An index narrows `paths`
     to marked, admitted pages, so activation never walks the corpus.
     """
     candidates = []
@@ -50,7 +62,7 @@ def admit(
         if page.frontmatter.get("superseded_by"):
             continue
         for unit in page.document.units:
-            if not unit.unit_ref or any(
+            if not unit.unit_ref or (units is not None and not units(unit)) or any(
                 unit.span.start_line <= error.line <= unit.span.end_line
                 for error in page.document.errors if error.line is not None
             ):
@@ -58,7 +70,8 @@ def admit(
             candidates.append(working_set.LaneItem(
                 role="", level="unit", ref=unit.unit_ref, path=path, title=page.title,
                 text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
-                updated=unit.as_of or "", anchor=path,
+                # The unit's own authored date, read as the working set's unit lane reads it.
+                updated=unit.as_of or working_set_currency.own_time(unit.context), anchor=path,
                 # The language schema fixes these fields; relation families come from the registry.
                 provenance={
                     **{key: getattr(unit, key) for key in ("as_of", "until", "check_by") if getattr(unit, key)},
@@ -81,13 +94,9 @@ def identity(admitted: Iterable[working_set.LaneItem]) -> list[tuple]:
     return [(item.ref, item.text, item.lifecycle, dict(item.provenance), item.path, item.anchor) for item in admitted]
 
 
-def serve(
-    admitted: Iterable[working_set.LaneItem], basis: lifecycle_statuses.Basis, *,
-    cost: Callable[[dict[str, Any]], int], limit: int, today: date,
-) -> Served:
-    """Whole lines within `limit`, in the order given. `cost` is what one line occupies where it is rendered."""
-    served = Served()
-    used = 0
+def current(admitted: Iterable[working_set.LaneItem], basis: lifecycle_statuses.Basis, *, today: date) -> Current:
+    """The units whose page lifecycle is not historical and that no expiry or unit supersession has retired, in order."""
+    now = Current()
     for item in admitted:
         ordering = basis.ordering(item.lifecycle, path=item.path)
         if ordering is None or ordering.historical:
@@ -98,11 +107,24 @@ def serve(
                 if authored_date < date.max:
                     boundary = authored_date + timedelta(days=1)
                     if boundary > today:
-                        served.boundaries.append(boundary)
+                        now.boundaries.append(boundary)
         history, review_due = working_set_currency.state(item, today=today, status_basis=basis)
         if history:
-            served.expired += 1
+            now.expired += 1
             continue
+        now.items.append((item, review_due))
+    return now
+
+
+def serve(
+    admitted: Iterable[working_set.LaneItem], basis: lifecycle_statuses.Basis, *,
+    cost: Callable[[dict[str, Any]], int], limit: int, today: date,
+) -> Served:
+    """Whole lines within `limit`, in the order given. `cost` is what one line occupies where it is rendered."""
+    now = current(admitted, basis, today=today)
+    served = Served(expired=now.expired, boundaries=now.boundaries)
+    used = 0
+    for item, review_due in now.items:
         line = {"ref": item.ref, "text": item.text}
         if review_due:
             line["review_due"] = review_due

@@ -14242,6 +14242,14 @@ def _homonym_paths(
     return homonyms
 
 
+def warm_homonyms(vault_root: Path, check: Callable[[], None]) -> None:
+    """Group the resident recall resolver's names, so a restricted reader's first request need not.
+
+    The groups hold nothing of a caller (see `_HOMONYM_PATHS`), so one pass serves every reader.
+    """
+    _homonym_paths(vault_root, find_module.recall_resolver_snapshot(vault_root), check)
+
+
 @contextmanager
 def homonyms_across_patch(
     vault_root: Path, resolver: vault_module.WikilinkResolver, rels: Iterable[str],
