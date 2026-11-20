@@ -236,7 +236,13 @@ def test_the_owner_reads_a_frame_whose_media_file_is_not_its_own_sidecars_name(v
     video = _video_hit(_hits(vault, OWNER, **find_args))
 
     assert video["scene_frame"] == offbeat
-    assert FRAME_TEXT in video["excerpt"]
+    if find_args.get("query"):
+        # Only the frame matches the query, so its text is the excerpt.
+        assert FRAME_TEXT in video["excerpt"]
+    else:
+        # A browse takes the excerpt of whichever family member it meets first, which depends on
+        # walk order; the owner must still get an excerpt, never the cleared "".
+        assert video["excerpt"]
 
 
 def _write_video_whose_own_text_matches(root) -> None:
