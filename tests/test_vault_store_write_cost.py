@@ -26,6 +26,7 @@ from test_vault_store_migration import ALPHA, BETA, vault  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
 
 from exomem import commands, entity_recurrence, semantic_contract
+from exomem import vault as vault_module
 from exomem.collection_store import connection
 from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
@@ -304,3 +305,99 @@ def test_a_writes_emitted_receipt_is_the_one_it_emitted_before_sets_took_the_cla
         served, monkeypatch, owner_principal(surface="library"),
         ["Knowledge Base/Notes/Note 2.md", "Knowledge Base/Notes/Note 3.md", "Knowledge Base/Entities/People/Person 4.md", ALPHA],
     )
+
+
+class DeriveCounts:
+    """How often a save enriches a page, derives a whole corpus and builds a link resolver.
+
+    ``resolver_builds`` counts the resolvers built from the disk or the store (``WikilinkResolver.__init__``);
+    ``large_resolvers`` counts those built from more than ``LARGE`` entries (``from_entries``), the
+    whole-corpus ones: a resolver over a page or two is as cheap as a dict.
+    """
+
+    LARGE = 64
+    NAMES = ("enrichments", "whole_derives", "resolver_builds", "large_resolvers")
+
+    def __init__(self, monkeypatch):
+        self.seen = Counter()
+        for name, owner, attribute in (
+            ("enrichments", semantic_contract, "enrich_page_state"),
+            ("whole_derives", semantic_contract, "_context_from_state_map"),
+            ("resolver_builds", vault_module.WikilinkResolver, "__init__"),
+        ):
+            function = getattr(owner, attribute)
+
+            def counting(*args, _name=name, _function=function, **kwargs):
+                self.seen[_name] += 1
+                return _function(*args, **kwargs)
+
+            monkeypatch.setattr(owner, attribute, counting)
+        from_entries = vault_module.WikilinkResolver.from_entries
+
+        def counted_from_entries(vault_root, entries):
+            entries = tuple(entries)
+            self.seen["large_resolvers"] += len(entries) > self.LARGE
+            return from_entries(vault_root, entries)
+
+        monkeypatch.setattr(vault_module.WikilinkResolver, "from_entries", counted_from_entries)
+
+    def take(self):
+        taken = {name: self.seen[name] for name in self.NAMES}
+        self.seen.clear()
+        return taken
+
+
+@pytest.mark.timeout(300)
+def test_a_store_writes_corpus_derivation_does_not_grow_with_the_pages(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: a save that enriches every page of the vault, or derives the whole corpus
+    again for the page it adds, costs seconds at 20,000 pages. A create and an edit by the owner are
+    measured at N and 2N pages, each page also a file, with a read by a restricted caller before each
+    save, under a policy whose selector reads frontmatter so that the caller cannot admit the vault's
+    type overlay as the owner can. Enrichments stay with the pages the save changes, and no whole
+    corpus is derived, whatever the page count and whoever read in between. A restricted caller that
+    overwrote the owner's enrichment would make every save after its read enrich every page. The corpus
+    cache is on, as in a served vault: the suite defaults it off.
+
+    Open, for the change that owns the writer's resolver and the store commit's derivation: one
+    ``WikilinkResolver.__init__`` per save (the writer's resolver snapshot), and the one large
+    ``from_entries`` that the store commit builds over every page. Neither is asserted to be zero here.
+    The restricted caller's own read and a restricted caller's save are not measured.
+    """
+    grow(writer, 1, 70, on_disk=served)
+    restrict_external(served, "tags: [secret]")
+
+    def restricted_read():
+        with request_scope(EXTERNAL):
+            semantic_contract.build_corpus_context_with_census(served)
+
+    edit(served, create(served, "Warm-up"))
+    counts = DeriveCounts(monkeypatch)
+    measured = []
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            # The pages just committed are new to the corpus: the next save enriches them, and no more.
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        restricted_read()
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        restricted_read()
+        counts.take()
+        edit(served, path)
+        edited = counts.take()
+        measured.append((pages, created, edited))
+    (pages_n, create_n, edit_n), (pages_2n, create_2n, edit_2n) = measured
+    grown = pages_2n - pages_n
+    report = json.dumps(measured)
+    assert pages_n > counts.LARGE and grown >= 70, report
+    for at_n, at_2n in ((create_n, create_2n), (edit_n, edit_2n)):
+        # The pages a save changes are enriched; a page of the vault is not.
+        assert at_2n["enrichments"] - at_n["enrichments"] <= 2, report
+        # The page that a save adds or changes joins the corpus by the page delta, never a whole derivation.
+        assert at_n["whole_derives"] == at_2n["whole_derives"] == 0, report
+        # No resolver is built over the corpus's entries for a judged page; the store commit's own stays.
+        assert at_n["large_resolvers"] <= 1 and at_2n["large_resolvers"] <= 1, report
