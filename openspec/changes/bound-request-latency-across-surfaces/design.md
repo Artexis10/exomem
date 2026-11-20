@@ -428,9 +428,23 @@ A yield never parks a thread that holds a lock, mutation boundary, single-flight
 
 The derived drain takes the boundary in turns and ends a turn between units. A turn now also ends when a request is in flight (`foreground_elsewhere()`), not only when a writer waits. The drain then waits for the request outside the boundary, unless the turn is a loan from a long mutation, whose lender is itself foreground work.
 
-The share of its elapsed time that a pass may wait (`MAX_WAIT_SHARE`, 0.5) is a setting, `EXOMEM_BULK_WAIT_SHARE`, read at each call. Unset, malformed or out-of-range values keep 0.5. A pass that sets its own `PassBudget` keeps it.
+The share of its elapsed time that a pass may wait (`MAX_WAIT_SHARE`, 0.5) is a setting, `EXOMEM_BULK_WAIT_SHARE`, read from the process environment at each call. Unset, malformed or out-of-range values keep 0.5. A pass that sets its own `PassBudget` keeps it.
 
-Risks that remain open. A longer identity walk can see more token mismatches and fall back to the locked scan more often. The matrix load keeps its read snapshot open while it waits, which delays a WAL checkpoint. A yield on a stopped pass can delay shutdown by up to `MAX_YIELD_SECONDS`. Proof: one model-free test per pass shows no progress while a request is in flight and the same result after; the installed comparison belongs to task 3.16.
+The new yields also fire inside bulk scopes that already existed, because the walks and loops they sit in are shared: governed maintenance jobs (`background_job()`), the derived-drain dispatch, the whole-vault graph pass and the graph proofs of the scheduled catalogue fold. In each, a yield only waits, within that scope's own progress floor. The identity walk is also the locked fail-safe scan's walk. That scan holds a boundary, so its yields never wait, but it now has cancellation points that it had none of.
+
+A leader's stop is its own. A stoppable pass can lead the single-flight identity build, and its stop then ends only its own pass. The flight records no error for it, so a follower takes the typed `CAPABILITY_UNAVAILABLE` outcome that it already takes for a flight with no inventory. It never re-raises the leader's cancellation, which is a `BaseException` that its caller may not handle and that would end the caller's own pass. The matrix-load join and the freshness replacement-lock wait carry no outcome from the thread they wait on, so they cannot broadcast one.
+
+A parked yield ends on its scope's stop, polled every 50 ms, so a runtime that stops a drain with a short join does not wait out the grace. A scope that carries no stop keeps the plain condition wait.
+
+The spans and the log line that time a background pass count its waits for requests as work: `embeddings.matrix_load.rows`, `reserved.identity.baseline_build`, the background `catalogue.fold` and the matrix background-load log line. Each carries `waited_ms`, the wait inside it, so a later comparison separates work from waiting.
+
+Risks that remain open.
+- A longer identity walk can see more token mismatches and fall back to the locked scan more often.
+- The matrix load keeps its read snapshot open while it waits, which delays a WAL checkpoint. A stretched off-lock read also gives writers more time to outrun it, so `_full_load_locked` becomes more likely.
+- Warm windows get longer under traffic: a warm that waits for requests stays unwarm for longer, and so do the readers that join it.
+- `graph_drain.seconds_until_pass()` ignores the new initial yield, so it can report a pass as due while that pass is still waiting for a request.
+
+Proof: one model-free test per pass shows no progress while a request is in flight and the same result after; the installed comparison belongs to task 3.16.
 
 ## Risks / Trade-offs
 

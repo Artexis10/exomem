@@ -428,6 +428,78 @@ def test_c5_a_failed_build_releases_the_flight_and_never_hangs_a_follower(
     assert reserved_paths.identity_catalogue_ready(vault_root) is True
 
 
+def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stoppable pass can lead the cold build, and its stop ends only that pass. A follower
+    that is not stoppable, or is another pass with its own stop, gets the typed unavailable
+    outcome, not the leader's cancellation, and the next caller builds."""
+
+    vault_root = _vault(tmp_path)
+    _manager(tmp_path, monkeypatch)
+
+    stop = threading.Event()
+    build_entered = threading.Event()
+    follower_parked = threading.Event()
+    release_build = threading.Event()
+    original_from_vault = reserved_paths.IdentityCatalogue.from_vault.__func__
+
+    def held_from_vault(
+        cls: type[reserved_paths.IdentityCatalogue], root: Path
+    ) -> reserved_paths.IdentityCatalogue:
+        build_entered.set()
+        assert release_build.wait(20)
+        return original_from_vault(cls, root)
+
+    monkeypatch.setattr(
+        reserved_paths.IdentityCatalogue, "from_vault", classmethod(held_from_vault)
+    )
+    flight_wait = reserved_paths._await_baseline_flight
+
+    def counted_wait(flight, timeout: float):
+        follower_parked.set()
+        return flight_wait(flight, timeout)
+
+    monkeypatch.setattr(reserved_paths, "_await_baseline_flight", counted_wait)
+
+    leader_outcome: list[BaseException] = []
+    follower_outcome: list[BaseException] = []
+
+    def lead() -> None:
+        try:
+            with foreground_priority.bulk(stop=stop):
+                reserved_paths._baseline_identity_catalogue(vault_root)
+        except BaseException as error:  # noqa: BLE001 - the leader's stop is the case under test
+            leader_outcome.append(error)
+
+    def follow() -> None:
+        try:
+            with foreground_priority.bulk():
+                reserved_paths._baseline_identity_catalogue(vault_root)
+        except BaseException as error:  # noqa: BLE001 - what a follower is handed is the case under test
+            follower_outcome.append(error)
+
+    leader = threading.Thread(target=lead, name="catalogue-leader", daemon=True)
+    leader.start()
+    assert build_entered.wait(20)
+    follower = threading.Thread(target=follow, name="catalogue-follower", daemon=True)
+    follower.start()
+    assert follower_parked.wait(20)
+    stop.set()
+    release_build.set()
+    leader.join(20)
+    follower.join(20)
+
+    assert not leader.is_alive() and not follower.is_alive()
+    assert [type(error) for error in leader_outcome] == [foreground_priority.BulkCancelled]
+    assert [type(error) for error in follower_outcome] == [reserved_paths.ReservedPathLeafError]
+    assert str(follower_outcome[0]) == "CAPABILITY_UNAVAILABLE"
+
+    built = reserved_paths._baseline_identity_catalogue(vault_root)
+    assert built.generation is not None
+
+
 def test_every_non_nested_build_path_stamps_the_token_its_scan_validated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

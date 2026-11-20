@@ -719,9 +719,9 @@ def test_nested_bulk_stop_interrupts_without_traffic_and_restores_scope() -> Non
 def test_the_wait_share_is_a_setting_that_keeps_its_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pass waits a share of its work after one grace wait. The operator moves the
-    share with an environment setting; unset, or a value that is not a share in
-    [0, 1), keeps the 0.5 that every pass used before it was a setting."""
+    """A pass waits a share of its work after one grace wait. The environment the process
+    starts with sets the share; unset, or a value that is not a share in [0, 1), keeps the
+    0.5 that every pass used before it was a setting."""
     budget = foreground_priority.PassBudget()
     budget.started = 0.0
 
@@ -736,3 +736,62 @@ def test_the_wait_share_is_a_setting_that_keeps_its_default(
     assert default == pytest.approx(foreground_priority.MAX_YIELD_SECONDS + 100.0)
     assert raised == pytest.approx(foreground_priority.MAX_YIELD_SECONDS + 900.0)
     assert refused == default
+
+
+def test_a_parked_pass_ends_when_its_scope_stops_without_waiting_out_the_cap() -> None:
+    """A runtime stops its drains with a short join while a request may be in flight. A pass
+    parked for that request must end on its stop, not after the grace wait, or the join times
+    out and the drain cannot start again."""
+    stop = threading.Event()
+    parked = threading.Event()
+    outcome: list[tuple[str, float]] = []
+
+    def pass_under_stop() -> None:
+        started = time.monotonic()
+        try:
+            with foreground_priority.bulk(stop=stop):
+                parked.set()
+                foreground_priority.yield_to_foreground()
+            outcome.append(("finished", time.monotonic() - started))
+        except foreground_priority.BulkCancelled:
+            outcome.append(("cancelled", time.monotonic() - started))
+
+    with foreground_priority.foreground():
+        worker = threading.Thread(target=pass_under_stop, name="parked-pass", daemon=True)
+        worker.start()
+        assert parked.wait(5)
+        time.sleep(0.1)  # let it park behind the request
+        stop.set()
+        worker.join(foreground_priority.MAX_YIELD_SECONDS / 2)
+
+    assert not worker.is_alive()
+    kind, elapsed = outcome[0]
+    assert kind == "cancelled"
+    assert elapsed < foreground_priority.MAX_YIELD_SECONDS / 2, elapsed
+
+
+def test_recorded_waits_separate_a_pass_waiting_from_a_pass_working() -> None:
+    """A span around a background pass counts its pauses for requests as work. The field says
+    how much of the span was waiting, and is absent from a span that did not wait."""
+    quiet: dict[str, int] = {}
+    with foreground_priority.bulk(), foreground_priority.recording_waits(quiet):
+        foreground_priority.yield_to_foreground()
+    assert quiet == {}
+
+    waited: dict[str, int] = {}
+    parked = threading.Event()
+
+    def pass_behind_a_request() -> None:
+        with foreground_priority.bulk(), foreground_priority.recording_waits(waited):
+            parked.set()
+            foreground_priority.yield_to_foreground()
+
+    with foreground_priority.foreground():
+        worker = threading.Thread(target=pass_behind_a_request, name="waiting-pass", daemon=True)
+        worker.start()
+        assert parked.wait(5)
+        time.sleep(0.3)
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert 200 <= waited["waited_ms"] < 2000, waited

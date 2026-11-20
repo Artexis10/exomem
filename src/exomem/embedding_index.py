@@ -226,8 +226,9 @@ CATCHUP_MAX_ROUNDS = 8
 # that read; the wait starts short, so a transient failure (a busy lock) costs
 # seconds of dense recall, and doubles with each consecutive failure up to 64x.
 MATRIX_LOAD_RETRY_SECONDS = 5.0
-# Rows the background load copies between two yields to a request in flight: about
-# one progress turn (`foreground_priority.MAX_BULK_WORK_SECONDS`) of the per-row copy.
+# Rows the background load copies between two yields to a request in flight. Measured
+# at 3.5 ms (dim 384) to 8.6 ms (dim 768), well inside a progress turn
+# (`foreground_priority.MAX_BULK_WORK_SECONDS`), so a request waits one short copy.
 MATRIX_LOAD_YIELD_ROWS = 512
 
 # --------------------------------------------------------------- generation meta
@@ -2458,6 +2459,7 @@ class EmbeddingIndex:
         _ = self.identity  # Observe the initial space before capturing the invalidation witness.
         witness = self._matrix_invalidation
         started = time.perf_counter()
+        waited = 0.0  # seconds the load paused for requests; what the log reports beside its duration
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             # A resident matrix within the catch-up bound needs only its changed
@@ -2497,7 +2499,9 @@ class EmbeddingIndex:
             before = self._cache
             # Off `self._lock`: the read yields to a request in flight, which waits on no lock this holds.
             with foreground_priority.bulk():
+                waited_before = foreground_priority.pass_waited()
                 loaded = self._load_all_rows(admit_passage=True) if passage else self._load_all_rows()
+                waited = foreground_priority.pass_waited() - waited_before
             with self._lock:
                 if self._matrix_invalidation is not witness:
                     return
@@ -2547,11 +2551,12 @@ class EmbeddingIndex:
         self._matrix_load_failed_at = None
         self._matrix_load_failures = 0
         log.info(
-            "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms",
+            "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms, of which %.0f ms waiting for requests",
             reason,
             len(served.metadata),
             served.generation,
             (time.perf_counter() - started) * 1000.0,
+            waited * 1000.0,
         )
 
     def unload_cache(self) -> bool:
@@ -2767,7 +2772,8 @@ class EmbeddingIndex:
                     # Never while this thread holds `_lock`: a reader waits on it. The read snapshot is not
                     # a lock, so a bulk pass may pause on it.
                     may_yield = not self._lock._is_owned()
-                    with call_spans.span("embeddings.matrix_load.rows", fields):
+                    # The span counts the pauses for a request as work; `waited_ms` takes them apart.
+                    with call_spans.span("embeddings.matrix_load.rows", fields), foreground_priority.recording_waits(fields):
                         try:
                             cursor = conn.execute(
                                 "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"

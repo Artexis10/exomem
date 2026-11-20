@@ -3759,7 +3759,10 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             vault_key, _build_baseline_identity_catalogue(vault_root)
         )
     except BaseException as error:
-        if leading:
+        # A leader's stop is its own: a follower never re-raises it, because it is a BaseException the
+        # follower's caller may not handle, and ends that caller's own pass. It takes the typed
+        # unavailable outcome that `_await_baseline_flight` gives a flight with no inventory.
+        if leading and not isinstance(error, foreground_priority.BulkCancelled):
             flight.error = error
         raise
     finally:
@@ -3774,10 +3777,19 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     return flight.catalogue
 
 
-@call_spans.timed("reserved.identity.baseline_build")
 def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     """Walk one vault's private identities and stamp the generation that proved it."""
 
+    fields: dict[str, int] = {}
+    # The span counts a background pass's waits for requests as work; `waited_ms` takes them apart.
+    with (
+        call_spans.span("reserved.identity.baseline_build", fields),
+        foreground_priority.recording_waits(fields),
+    ):
+        return _walk_baseline_identity_catalogue(vault_root)
+
+
+def _walk_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     vault_key = _vault_identity_key(vault_root)
 
     # Walking the whole KB can take tens of seconds on a mature vault. Take two

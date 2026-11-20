@@ -1283,16 +1283,6 @@ def _graph_repair_owned(vault_root: Path, *, batch_owned: bool) -> bool | None:
     return marker_stands or batch_owned
 
 
-def _give_way(budget: foreground_priority.PassBudget | None = None) -> None:
-    """Wait for a request in flight, once, as a bulk pass between two of its units.
-
-    The bulk scope holds only this wait, so a dispatch that follows it keeps its own
-    fan-out chain unbroken: a helper below it that yields in a bulk pass never does here.
-    """
-    with foreground_priority.bulk(budget=budget):
-        foreground_priority.yield_to_foreground()
-
-
 def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
     """Run a watcher step as a background graph caller.
 
@@ -1836,7 +1826,7 @@ class FileWatcher:
                     break
             if not self._stop.is_set():
                 # Events that arrive during the wait join this batch.
-                _give_way()
+                foreground_priority.give_way()
             self._wake.clear()
             self._flush()
         # Final drain so nothing pending is lost on shutdown.
@@ -1977,7 +1967,7 @@ class FileWatcher:
             else max(0, policy.max_reconcile_embed_files - drift_admission)
         )
         drain_limit = _background_deferred_limit(policy, remaining)
-        _give_way(budget)
+        foreground_priority.give_way(budget)
         try:
             index_sync.drain_deferred_work(self._vault_root, limit=drain_limit)
         except Exception:  # noqa: BLE001 - queued work remains retryable
@@ -1993,7 +1983,7 @@ class FileWatcher:
         from . import bm25
 
         for scope in freshness.SCOPES:
-            _give_way(budget)
+            foreground_priority.give_way(budget)
             try:
                 bm25.warm(self._vault_root, scope)
             except Exception:  # noqa: BLE001

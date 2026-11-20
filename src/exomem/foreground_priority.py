@@ -47,7 +47,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
-from typing import TypeVar
+from typing import Any, TypeVar
 
 _T = TypeVar("_T")
 
@@ -294,9 +294,8 @@ class PassBudget:
 def wait_share() -> float:
     """The share of its elapsed time a `bulk()` pass may wait, in [0, 1).
 
-    `EXOMEM_BULK_WAIT_SHARE`, read at each call so an operator changes it without a
-    restart of the pass; unset, malformed or out of range means `MAX_WAIT_SHARE`.
-    A share of 1 or more would make the progress floor unbounded.
+    `EXOMEM_BULK_WAIT_SHARE`, read at each call; unset, malformed or out of range
+    means `MAX_WAIT_SHARE`. A share of 1 or more would make the progress floor unbounded.
     """
     raw = os.environ.get(WAIT_SHARE_ENV)
     if raw is None:
@@ -340,7 +339,8 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """Wait while a foreground request runs, at most `max_wait`; return the wait.
 
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
-    (`wait_share()`, unless its `PassBudget` sets its own).
+    (`wait_share()`, unless its `PassBudget` sets its own). The stop of an owned
+    scope ends the wait and cancels the pass, within `_STOP_POLL_SECONDS`.
     """
     check_cancelled()
     budget: PassBudget | None = getattr(_local, "budget", None)
@@ -354,9 +354,30 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     limit = _wait_limit(started, max_wait, budget)
     if limit <= 0.0:
         return 0.0
-    with _condition:
-        released = _condition.wait_for(_bulk_may_run, timeout=limit)
+    released = _park(limit, getattr(_local, "stop", None))
     return _account_wait(started, budget, released=released)
+
+
+#: How often a parked yield looks at its scope's stop event. A stop is a plain `threading.Event`, so it
+#: cannot notify `_condition`; a stoppable pass looks again at this rate, and its stop ends the wait
+#: within it rather than after the cap.
+_STOP_POLL_SECONDS = 0.05
+
+
+def _park(limit: float, stop: threading.Event | None) -> bool:
+    """Wait up to `limit` for bulk work to be free; whether it is. A stop ends the wait early."""
+    if stop is None:
+        with _condition:
+            return _condition.wait_for(_bulk_may_run, timeout=limit)
+    deadline = time.monotonic() + limit
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        with _condition:
+            if _condition.wait_for(_bulk_may_run, timeout=min(_STOP_POLL_SECONDS, remaining)):
+                return True
+    return False
 
 
 #: How often `wait_while` asks again. The writer it waits for polls the boundary at this rate
@@ -454,6 +475,33 @@ def yield_in_bulk() -> float:
     if getattr(_local, "bulk", 0):
         return yield_to_foreground()
     return 0.0
+
+
+def give_way(budget: PassBudget | None = None) -> None:
+    """Wait for a request in flight, once, as a bulk pass between two units of other work.
+
+    The bulk scope holds only this wait, so what follows it keeps its own fan-out chain
+    unbroken: a helper below it that yields in a bulk pass never does here. ``budget``
+    continues one pass across several of these waits.
+    """
+    with bulk(budget=budget):
+        yield_to_foreground()
+
+
+@contextmanager
+def recording_waits(fields: dict[str, Any]) -> Iterator[None]:
+    """Put what this thread's bulk pass waited at its yields in the block into `fields["waited_ms"]`.
+
+    For a span or a log line that times a pass's work: its duration counts those waits, and this
+    lets a later comparison take them apart. Nothing is recorded when the block did not wait.
+    """
+    before = pass_waited()
+    try:
+        yield
+    finally:
+        waited_ms = int((pass_waited() - before) * 1000.0)
+        if waited_ms > 0:
+            fields["waited_ms"] = waited_ms
 
 
 def yielding_in_bulk(items: Iterable[_T]) -> Iterable[_T]:
