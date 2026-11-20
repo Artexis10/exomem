@@ -109,6 +109,9 @@ jobs:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
           PYTHONDONTWRITEBYTECODE: "1"
           EXOMEM_TEST_TIER: core
+          # core-tests installs restic (scripts/ci-install-restic.sh), so its vault-backup tests fail when it is missing.
+          # The cross-platform runners do not install it, and their run skips those tests with a reason.
+          EXOMEM_REQUIRE_RESTIC: "1"
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         run: >-
           uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
@@ -211,6 +214,17 @@ jobs:
         # The script bounds its download retries at three minutes.
         timeout-minutes: 5
         run: scripts/ci-install-age.sh
+      - name: Restore the restic release archive
+        # Keyed on the script; the archive name carries the version that the Dockerfile pins.
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/restic-archive
+          key: restic-archive-${{ hashFiles('scripts/ci-install-restic.sh') }}
+      - name: Install restic
+        # The personal vault backup tests fail in CI without the real restic.
+        # The script bounds its download retries at three minutes.
+        timeout-minutes: 5
+        run: scripts/ci-install-restic.sh
       - name: Install uv
         uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with: *setup-uv-inputs

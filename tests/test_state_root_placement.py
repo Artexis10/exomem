@@ -339,6 +339,45 @@ def test_every_descriptor_has_exactly_one_explicit_placement() -> None:
     )
 
 
+def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable() -> None:
+    from exomem import reserved_paths
+
+    declared = {d.id for d in reserved_paths.non_rebuildable_state_descriptors()}
+
+    # Dropping a family from this set drops its owner decisions out of every backup, so the set is pinned.
+    assert declared == {
+        "media-jobs-store",
+        "voice-profile-store",
+        "review-state",
+        "ownership-review",
+        "collection-store",
+        "collection-archive",
+        "procedure-approval-key",
+    }
+    assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
+
+
+def test_an_external_family_that_does_not_say_whether_it_is_rebuildable_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new family must choose: leaving it unset would decide silently whether a backup carries its files."""
+    from exomem import reserved_paths
+
+    undecided = reserved_paths.InternalStateDescriptor(
+        "a-new-family", "a_new_family", reserved_paths.StatePlacement.EXTERNAL_STATE, exact=(".a-new-family.sqlite",),
+    )
+    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths._REGISTRY, undecided))
+    with pytest.raises(RuntimeError, match="registry is invalid"):
+        reserved_paths._validate_registry()
+
+    decided = reserved_paths.InternalStateDescriptor(
+        "a-new-family", "a_new_family", reserved_paths.StatePlacement.EXTERNAL_STATE, rebuildable=False,
+        exact=(".a-new-family.sqlite",),
+    )
+    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths._REGISTRY[:-1], decided))
+    reserved_paths._validate_registry()
+
+
 def test_the_seam_resolves_env_override_then_platform_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
