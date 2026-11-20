@@ -33,7 +33,7 @@ can reach any public HTTPS address. One fleet-wide bearer key, which the gateway
 cell's bearer. Substrate issues every token that the gateway accepts, and mints Home's own
 (`mintHomeAccessToken` in
 [cloud-home-mcp.ts](https://github.com/substrate-systems/substrate/blob/main/src/lib/exomem-hosted/cloud-home-mcp.ts)).
-Its database role can write every table in the schema. A compromise of Substrate or of that credential
+Its database role can write the access-token tables, and only named columns of the cell tables. A compromise of Substrate or of that credential
 reaches every cell.
 
 **Changing.** [`contain-cloud-controller-compromise`](../openspec/changes/contain-cloud-controller-compromise/)
@@ -42,7 +42,8 @@ replaces the shared bearer with signed gateway proofs.
 ## Encryption at rest and in transit
 
 **Claim.** The knowledge store and its backups are encrypted at rest. Connections from your client are
-encrypted in transit. The hop from the gateway to your cell is not yet encrypted.
+encrypted in transit. Traffic from the edge to the gateway, and from the gateway to your cell, is not yet
+encrypted.
 
 **Enforced.**
 - `render_secret` in [manifests.py](../infra/cellctl/src/cellctl/manifests.py) refuses an empty volume
@@ -56,12 +57,16 @@ encrypted in transit. The hop from the gateway to your cell is not yet encrypted
   ([cloud-ingress.yaml](../infra/helm/platform/templates/cloud-ingress.yaml)). Its optional record
   `cloudflare_dns_record.gateway` is not proxied, and `gateway_hostname` defaults to empty
   ([cloudflare.tf](../infra/terraform/foundation/cloudflare.tf#L44-L74)). The control and transfer
-  records use a proxied Cloudflare Tunnel.
+  records belong to the retired Hosted platform and carry no Cloud traffic: their tunnel targets that
+  platform's edge ([L15-L40](../infra/terraform/foundation/cloudflare.tf#L15-L40)), not the Cloud edge.
 
 **Check.** Inspect the TLS certificate of the Cloud MCP endpoint.
 
 **Limits.**
-- `defaultCellOrigin` in `cloud-handler.ts` forwards to the cell over plain HTTP. Pod traffic between
+- Two hops use plain HTTP. The edge reaches the gateway through an ExternalName Service on port 8080
+  (`cloud-ingress.yaml`), and `EXOMEM_GATEWAY_INTERNAL_ORIGIN` in
+  [cloud-gateway.yaml](../infra/helm/platform/templates/cloud-gateway.yaml) is `http://`. The gateway
+  then forwards to the cell (`defaultCellOrigin` in `cloud-handler.ts`). Pod traffic between
   nodes uses unencrypted [VXLAN](../infra/ansible/roles/k3s/templates/flannel-net-conf.json.j2). Only a
   node outside the provider's private network joins over WireGuard.
 - Older cells share one volume passphrase
@@ -76,16 +81,16 @@ gives each local cell volume its own cell-derived key before cells move.
 ## Who holds which keys
 
 **Claim.** Substrate Systems holds each cell's storage and backup keys on the server that runs the cell,
-and in an encrypted offline copy for recovery. The internet-facing edge cannot read them.
+and in encrypted recovery copies whose key it keeps off its servers. The internet-facing edge cannot
+read them.
 
 **Enforced.**
 - `_resolve_secret_material` in [reconcile.py](../infra/cellctl/src/cellctl/reconcile.py) wraps each
   cell's root key under a master key that cellctl holds. The volume passphrase derives from that root
   key ([secrets.py](../infra/cellctl/src/cellctl/secrets.py)), which also wraps the backup password and
-  media keys. The control database receives wrapped keys
-  only.
+  media keys. The control database receives wrapped keys only.
 - The master key, the fleet-wide bearer key and the shared volume passphrase are also SOPS/age ciphertext
-  under `infra/secrets/cloud/`. Their age key stays outside the cluster
+  in this public repository, under `infra/secrets/cloud/`. Only their age key is kept off the servers
   ([cloud-platform-operations](../openspec/specs/cloud-platform-operations/spec.md)).
 - The [key custodian](../infra/helm/platform/templates/key-custodian.yaml), off by default, alone
   creates each cell's object-storage key, limited to that cell's prefix.
@@ -133,8 +138,9 @@ access ([design](../openspec/changes/archive/2026-09-28-harden-exomem-cloud-oper
 **Check.** Read the binding.
 
 **Limits.** An administrator can issue a longer certificate. Substrate's database credential can mint a
-token for any account, and Substrate's admin token can set a cell image. The cluster audit log records
-neither request.
+token for any account, and Substrate's admin token can set a cell image. The cluster audit log does not
+record either Substrate request. An image change appears there only as its effect, cellctl's StatefulSet
+update.
 
 **Changing.** `make-cloud-cells-operator-resistant` adds presence-gated administrator credentials.
 
@@ -200,7 +206,8 @@ rests on the procedure.
 ## Deletion and what it proves
 
 **Claim.** Deletion revokes sessions and client access, closes routing, and destroys the cell's compute,
-storage and keys. Encrypted copies expire on a fixed schedule.
+storage and keys. Where the key custodian manages a cell's backups, they expire automatically, normally
+within about 40 days. Otherwise an operator deletes them by hand after deletion completes.
 
 **Enforced.**
 - Once every cell row reads deleted,
@@ -222,7 +229,9 @@ retention sources (`_retention_expiry` in `reconcile.py`). The chart declares no
 - etcd snapshots keep encrypted copies of cell Secrets in object storage for up to 31 days
   ([storage.tf](../infra/terraform/durability/storage.tf#L169-L187)).
 - Control-database backups keep the wrapped keys until their own retention ends.
-- Locked backups stay about 38 days by default, plus the provider's delay.
+- Locked backups stay about 31 days by default, plus the provider's delay, because their 30-day lock
+  outlasts the 7-day grace. `backup_retention_days` in
+  [variables.tf](../infra/terraform/cell-data/variables.tf) allows a lock of up to 60 days.
 - With the key custodian off, no component purges backups. An old cell's backups in the legacy bucket
   wait for an operator to empty them (`storage_cleanup_pending` in `decide.py`).
 
