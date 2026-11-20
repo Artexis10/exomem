@@ -53,7 +53,7 @@ An absent row and a retracted row are refused identically, `RECORD_NOT_FOUND`. A
 
 ### 3. Re-admission revives the same row
 
-A later write with the same natural key finds the retracted row by `item_key`, clears `retracted_txn`, and writes the next version with an `insert` effect whose `version_before` is set. This keeps one row per `item_key`, so record references, history and the row-id binder stay one-to-one. Re-admission counts against the collection's row capacity. Row history shows identical re-admitted content; it skips only `update` effects with equal hashes.
+A later write with the same natural key finds the retracted row by `item_key`, clears `retracted_txn`, and writes the next version with an `insert` effect whose `version_before` is set. This keeps one row per `item_key`, so record references, history and the row-id binder stay one-to-one. Re-admission counts against the collection's row capacity, as a new row does. An append or import that repeats a retracted row's content reports `inserted`, never `unchanged`, because the row was not current. Row history shows identical re-admitted content; it skips only `update` effects with equal hashes.
 
 ### 4. Refused collection kinds
 
@@ -76,7 +76,7 @@ A failure leaves schema 18.
 
 - **Every earlier release refuses a schema-19 store.** Back up the store with the current release before the upgrade. To go back, restore that backup, which loses writes made after it, or roll forward.
 - **A reader that must see retracted rows but reads the view** silently omits them. The history, identity and typed version reads are named in the tasks, and the history tests cover them.
-- **The import row counter assumed rows are never removed.** It becomes a count through the partial index.
+- **The import row counter assumed rows are never removed.** It still walks forward from the last import log row, and counts the current rows through the partial index when a retraction or re-admission follows that row.
 
 ## Migration Plan
 

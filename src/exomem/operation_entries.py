@@ -372,9 +372,9 @@ RECORDS = CommandOperations(
             CHANGE_RECORDS,
             "write",
             "Change records",
-            "Change human-owned Records: create a collection, append, update or bulk-upsert "
-            "items, discard a held candidate, revise or rebaseline a manifest, or start or "
-            "cancel an import. `operation.kind` selects the operation. Propose a new collection "
+            "Change human-owned Records: create a collection, append, update, retract or "
+            "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
+            "start or cancel an import. `operation.kind` selects the operation. Propose a new collection "
             "before creating it. Guarded writes need the hashes that the matching read returns. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
@@ -425,6 +425,14 @@ RECORDS = CommandOperations(
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
+        ),
+        # A retraction takes the row out of current state and keeps its history.
+        _entry(
+            "retract", CHANGE_RECORDS,
+            ("collection", "item_id", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
+            effect="write", destructive=True, outcome_verb="deleted",
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,

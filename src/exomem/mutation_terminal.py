@@ -3022,7 +3022,7 @@ def valid_record_receipt(value: Any) -> bool:
     # so `outcome: discarded` stays impossible for an append or an update.
     if operation == "discard":
         return _valid_discard_receipt(value)
-    if operation not in {"create", "append", "update"} or value.get("outcome") not in {
+    if operation not in {"create", "append", "update", "retract"} or value.get("outcome") not in {
         "committed",
         "replayed",
     }:
@@ -3076,6 +3076,16 @@ def valid_record_receipt(value: Any) -> bool:
         return (
             _hash(value.get("before_item_hash"))
             and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and value.get("payload_hash") is None
+        )
+    if operation == "retract":
+        # A retraction leaves no after-version; a retry of its request id replays the stored receipt.
+        return (
+            outcome == "committed"
+            and _hash(value.get("before_item_hash"))
+            and value.get("after_item_hash") is None
             and _hash(value.get("before_container_hash"))
             and _hash(value.get("after_container_hash"))
             and value.get("payload_hash") is None

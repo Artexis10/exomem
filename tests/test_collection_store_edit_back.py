@@ -507,7 +507,7 @@ def test_a_refused_move_commit_keeps_unknown_stage_aliases_until_the_hold_is_dur
     moving = [False]
 
     def refuse_commit(action, name, column, *_):
-        if action == sqlite3.SQLITE_UPDATE and name == "items" and column == "view_path":
+        if action == sqlite3.SQLITE_UPDATE and name == "item_rows" and column == "view_path":
             moving[0] = True
         return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_TRANSACTION and name == "COMMIT" and moving[0] else sqlite3.SQLITE_OK
 

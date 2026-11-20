@@ -71,7 +71,7 @@ def test_admission_identity_scan_uses_index_without_external_sort(store):
     for sql in scans:
         plan = [row[3] for row in store.connection.execute("EXPLAIN QUERY PLAN " + sql)]
         assert not any("TEMP B-TREE" in step for step in plan), plan
-        assert any("USING INDEX sqlite_autoindex_items_1" in step for step in plan), plan
+        assert any("USING INDEX sqlite_autoindex_item_rows_1" in step for step in plan), plan
 
 
 def values(admitted):
@@ -98,7 +98,7 @@ def test_withheld_row_is_absent_before_decode_and_projection(store):
         return value
 
     # Invalid JSON is an actual decode trap, not a mock of authorization.
-    store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
+    store.connection.execute("UPDATE item_rows SET values_json='not json' WHERE item_key=?", (OTHER,))
     with request_scope(_external()):
         with runtime.read_session(store.root, store.handle.path) as session:
             session.project_with(project, fields={"title", "count"})
@@ -395,7 +395,7 @@ def test_oversized_value_refuses_before_json_materialization(store):
     """One large stored row cannot consume the whole reader memory budget."""
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
-    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?",
+    store.connection.execute("UPDATE item_rows SET values_json=? WHERE item_key=?",
                              ('{"title":"' + "x" * (256 * 1024) + '"}', KEY))
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         with runtime.read_session(store.root, store.handle.path) as session:

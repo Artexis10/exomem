@@ -534,8 +534,12 @@ def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
                   view_path=None, row_key=None, include_held=True, batch_size=128,
-                  query_order=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata; a row key selects no manifest or held candidate."""
+                  query_order=False, retained=False) -> Iterator[CanonicalSubject]:
+    """Stream canonical metadata; a row key selects no manifest or held candidate.
+
+    ``retained`` also yields a retracted row, which only a history reader of that row may ask for;
+    every other caller sees the current rows of the ``items`` view.
+    """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
     if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
@@ -561,7 +565,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     item_order = "item_key" if query_order else "row_id"
     with closing(conn.execute(
         "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-        "FROM items WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
+        "FROM " + ("item_rows" if retained else "items") + " WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
