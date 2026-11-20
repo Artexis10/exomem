@@ -26,7 +26,7 @@ A vault whose own positions sit under another core category, such as `insight`, 
 ### Reach one hop from the served leads
 
 The incident's position sat on a page that the served lead linked to, not on the lead itself.
-The projection reads the served leads and their listed link targets, which task discovery already resolves for the caller. That gives one batched semantic-unit query, restricted to those parent pages, with the trait's categories as its filter.
+The projection reads the served leads and the pages their served connections name, in either direction, which task discovery already resolves for the caller. The agent sees the same connections, so the block reads no page the packet does not already connect. That gives one batched semantic-unit query, restricted to those parent pages, with the trait's categories as its filter.
 The query only names the pages that hold a position. The shared session-unit admission then reads those pages' own bytes, as the stance and the domain profiles do, so page lifecycle, supersession, expiry and egress decide each unit the same way for all three blocks.
 A deeper walk would multiply cost for a case not yet observed.
 
