@@ -970,6 +970,39 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     return Routed(server, proof)
 
 
+def titled_arguments(command, vault_root, arguments):
+    """`arguments` with a collection title replaced by the manifest path of the collection it names.
+
+    A title is no path, UUID or reference, so `route` cannot tell whether the store owns the
+    collection, and the facade resolves it without the store's collections. This resolves it on the
+    store thread, which sees both kinds, with the one resolver the facade uses
+    (``collection_refs.resolve_collection``); the request then routes as a manifest-path request does.
+    A vault with no store, a store this process does not serve, and a title that names no visible
+    collection leave `arguments` as they are, and the facade answers.
+    """
+    from .. import collection_refs
+    from ..collection_profiles import PROFILES
+    from . import ownership
+    from .preview import bound_writer
+
+    selector = arguments.get("collection")
+    profile = next((profile.name for profile in PROFILES.values() if profile.tool == command), None)
+    if profile is None or not isinstance(selector, str) or collection_refs.names_a_manifest(selector.strip()):
+        return arguments
+    root = Path(vault_root).resolve()
+    if bound_writer(root) is not None or ownership.current(root).marker is None:
+        return arguments
+    server = _server(root)
+    if server is None or server.runtime is None:
+        return arguments
+    connection.load_store_libraries()
+    path = server.call(
+        lambda: collection_refs.resolve_collection(root, selector, profile=profile),
+        read_only=True, wake_maintenance=False,
+    )
+    return arguments if path == selector else {**arguments, "collection": path}
+
+
 def _store_mode_server(root):
     """The store thread that a store-mode write runs on; without a service, the refusal."""
     from ..cli_ops import OpError

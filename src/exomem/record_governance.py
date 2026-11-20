@@ -2039,6 +2039,27 @@ def _presentation_inspection(
     }
 
 
+@canonical_read
+def visible_collection_titles(vault_root: Path, *, semantic_profile: str) -> tuple[tuple[str, str], ...]:
+    """The `(title, manifest_path)` of each collection of this profile whose manifest the caller may see.
+
+    A title lives only in its manifest (a file's front matter, a store collection's manifest text), so
+    the lookup reads the manifests that discovery already reads, one sweep and no census. It asks
+    `_authorize` of each manifest path, as the manifest-path route does, so a collection that route
+    withholds is not listed. It decides visibility only and emits no release receipt, as a link
+    projector's `visible_path` does.
+    """
+    root = Path(vault_root)
+    with authorization_pass(root):
+        # A duplicated identity is the refusal of the collection that carries it, not of every title.
+        manifests, _unreadable = collections.discover_collections_with_errors(
+            root, authorize_path=lambda path: _authorize(root, path),
+            reject_duplicates=False, semantic_profile=semantic_profile,
+        )
+    return tuple((manifest.title, manifest.path) for manifest in manifests
+                 if manifest.semantic_profile == semantic_profile)
+
+
 @canonical_read(receipt_boundary="record_inspection")
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.

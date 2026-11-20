@@ -4,7 +4,8 @@ A collection is named by its title. A row is named by `<head>.<version>`: the he
 and survives edits, the version names the row as the caller read it. The row's key, version and the
 container hash that the leaf guards need never reach the agent. The leaf binds the id here, after
 admission and under the writer lease, by reading the collection once. A stale id is refused with
-the current one, so the caller rereads nothing it does not need.
+the current one, so the caller rereads nothing it does not need. The row's key (its record id) is
+no row id: it names no version, so it guards no edit, and the leaf refuses it and says so.
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ _MAX_SCAN_PAGES = 20
 _SCAN_LIMIT = 500
 
 
-def _names_a_manifest(selector: str) -> bool:
+def names_a_manifest(selector: str) -> bool:
+    """Whether `selector` names a collection by reference, path or UUID. Any other spelling is a title."""
     return (
         selector.lower().startswith("exomem://")
         or selector.endswith(".md")
@@ -33,16 +35,17 @@ def _names_a_manifest(selector: str) -> bool:
 def resolve_collection(vault_root: Path, selector: str | None, *, profile: str) -> str | None:
     """The manifest path of the collection `selector` names by title; `selector` otherwise.
 
-    A path, a reference or a UUID passes unchanged. A title that names no collection also passes
-    unchanged, so the leaf's own refusal for an unknown collection still answers.
+    A path, a reference or a UUID passes unchanged. A title that names no visible collection of this
+    profile also passes unchanged, so the leaf's own refusal for an unknown collection still answers:
+    a collection that the caller may not see answers as one that does not exist. Titles compare as
+    the vault compares every title (`vault.title_key`: trimmed, normalized and case-insensitive).
     """
-    if selector is None or _names_a_manifest(selector.strip()):
+    if selector is None or names_a_manifest(selector.strip()):
         return selector
     key = vault.title_key(selector)
-    inventory = record_governance.inventory_collections(vault_root, semantic_profile=profile)
     matches = [
-        row["manifest_path"] for row in inventory.get("collections", ())
-        if vault.title_key(str(row.get("title") or "")) == key
+        path for title, path in record_governance.visible_collection_titles(vault_root, semantic_profile=profile)
+        if vault.title_key(title) == key
     ]
     if len(matches) > 1:
         raise OpError(
@@ -78,13 +81,31 @@ def mark_rows(result: Any, *, profile: str) -> Any:
     return result
 
 
-def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None) -> dict[str, str]:
-    """The binding `item_id` stands for among the readable rows that carry its head.
+def id_head(item_id: str) -> str:
+    """The head that `item_id` asks for: a record id is a row's key, whose head is the key's own."""
+    key = memory_refs.normalize_id(item_id)
+    return page_ids.part_head(key) if key is not None else item_id.partition(".")[0]
+
+
+def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | None, *, profile: str) -> dict[str, str]:
+    """The binding `item_id` stands for among the readable rows that carry its head (`id_head`).
 
     `matches` are `(item_key, item_version)` of the rows the caller may read, never of withheld
     ones, so a withheld row answers as an absent one. `snapshot` is the container hash the
-    query of that read returned.
+    query of that read returned. A row's key is no row id: it is refused for a row the caller may
+    read, and answers as no row otherwise.
     """
+    key_named = memory_refs.normalize_id(item_id)
+    if key_named is not None:
+        if any(key == key_named for key, _ in matches):
+            label = collection_profiles.profile_for(profile).item_id_property
+            raise OpError(
+                "ITEM_ID_IS_KEY",
+                f"{item_id} is the row's {label}. It names the row but no version of it, so it cannot guard an "
+                "edit. Edit by the row's `id` (`row_id` where the collection has its own `id` field). "
+                f"A query returns it beside {label}, and it changes with each edit.",
+            )
+        matches = []
     if not matches:
         raise OpError(
             "ITEM_NOT_FOUND",
@@ -114,7 +135,7 @@ def bind_item(
     only where that cannot answer.
     """
     column = collection_profiles.profile_for(profile).item_id_property
-    head = item_id.partition(".")[0]
+    head = id_head(item_id)
     found: list[Mapping[str, Any]] = []
     snapshot: str | None = None
     continuation: str | None = None
@@ -137,4 +158,4 @@ def bind_item(
             "ITEM_SCAN_INCOMPLETE",
             "this collection is too large to find a row by its id; filter the query to the row and use its key.",
         )
-    return bound_row(item_id, [(row[column], row["item_version"]) for row in found], snapshot)
+    return bound_row(item_id, [(row[column], row["item_version"]) for row in found], snapshot, profile=profile)
