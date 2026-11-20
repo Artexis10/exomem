@@ -1580,6 +1580,10 @@ def _status_main(argv: list[str]) -> int:
         print(f"  models: {status['models']}")
         print(f"  media: {status['media']}")
         print(f"  originals: {status['originals']}")
+        if "vault_backup" in status:
+            from . import vault_backup_cli
+
+            print(f"  vault_backup: {vault_backup_cli.summary_line(status['vault_backup'])}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
@@ -1589,6 +1593,12 @@ def _status_main(argv: list[str]) -> int:
             if status["layout"]["remedy"]:
                 print(f"    fix: {status['layout']['remedy']}")
     return 0
+
+
+def _backup_main(argv: list[str]) -> int:
+    from . import vault_backup_cli
+
+    return vault_backup_cli.main(argv)
 
 
 def _install_info_main(argv: list[str]) -> int:
@@ -5272,6 +5282,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "collections": _collections_main,
     "store-mode": _store_mode_main,
     "import": _import_main,
+    "backup": _backup_main,
     "cloud": _cloud_main,
     "cell-import": _cell_import_main,
     "cell-export": _cell_export_main,

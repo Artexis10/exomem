@@ -312,23 +312,23 @@ class _Turn:
         self.borrowed = coordinator.current_thread_borrows_boundary()
 
     def spent(self) -> bool:
-        """Whether to end the turn after this unit: a writer waits and the turn had its slice.
+        """Whether to end the turn after this unit: a writer waits or a request runs, and the turn had its slice.
 
         A unit under the boundary cannot yield, so the turn ends between units
         after the same slice a bulk pass works between yields
         (`foreground_priority.MAX_BULK_WORK_SECONDS`). Without it a writer
-        waits out every unit of the turn; when it ends a turn early, the rest
-        of the pass waits for the next one and spends no attempt. A borrowed
-        turn is spent after one unit: a loan is for one brief derived unit, and
-        its owner's next unit waits until it returns. On Windows only this
-        process's waiters count (`waiter_count`), so a writer in another process
-        waits out the whole turn.
+        waits out every unit of the turn, and a read request that runs beside
+        the unit's CPU-bound work waits for the GIL; when it ends a turn early,
+        the rest of the pass waits for the next one and spends no attempt. A
+        borrowed turn is spent after one unit: a loan is for one brief derived
+        unit, and its owner's next unit waits until it returns. On Windows only
+        this process's waiters count (`waiter_count`), so a writer in another
+        process waits out the whole turn.
         """
         if self.borrowed:
             return True
-        return (
-            time.monotonic() - self._started >= foreground_priority.MAX_BULK_WORK_SECONDS
-            and self._coordinator.waiter_count() > 0
+        return time.monotonic() - self._started >= foreground_priority.MAX_BULK_WORK_SECONDS and (
+            self._coordinator.waiter_count() > 0 or foreground_priority.foreground_elsewhere()
         )
 
     def hand_over(self) -> None:
@@ -485,6 +485,10 @@ class _Pass:
                     proven, waiting = self._prove(turn, waiting)
             # A turn that ended for a waiting writer must not take the boundary back before it does.
             turn.hand_over()
+            if not turn.borrowed:
+                # A turn cut for a request in flight gives it the next slice too, outside the boundary.
+                # A loan's owner is that foreground work, so a borrower never waits for it.
+                foreground_priority.yield_in_bulk()
             first = False
             if turn.borrowed and not worked:
                 break  # only owned-turn work is left: another loan would cost the lender for nothing
@@ -904,7 +908,7 @@ class DerivedDrain:
             else retire_visibility
         )
         self.resource_limit = resource_limit
-        self._stop = threading.Event()
+        self._stop = foreground_priority.StopEvent()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._owner = f"derived-{secrets.token_hex(12)}"

@@ -573,6 +573,11 @@ Syncthing's `.stignore`:
 After migration these names no longer exist under the vault, so the patterns
 are inert on current versions — they only protect against re-introduction.
 
+The state root holds files that nothing rebuilds, such as review decisions and
+the collection store. A copy of the vault alone does not carry them. The
+[personal vault backup](personal-vault-backup.md) snapshots the vault and
+exactly those files to a restic repository that you name.
+
 ## Deploying on a second machine (multi-host)
 
 Each machine has its own Exomem process and local vault replica. Replication moves

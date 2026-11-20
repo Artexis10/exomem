@@ -80,6 +80,43 @@ def test_activation_drains_queued_recovery_once_the_projection_is_current(tmp_pa
         assert vocabulary_recovery.page(tmp_path, limit=4) == ()
 
 
+def test_the_drain_waits_for_a_request_in_flight_between_jobs(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from exomem import foreground_priority, graph_sync, server_runtime
+
+    with library_scope():
+        for index in range(3):
+            vocabulary_recovery.enqueue(tmp_path, str(index), f"Knowledge Base/Notes/{index}.md")
+    projected = []
+    monkeypatch.setattr(vocabulary_delivery.vocabulary_review, "_visible", lambda root, item: True)
+    monkeypatch.setattr(
+        vocabulary_delivery,
+        "_project",
+        lambda root, path, continuation: projected.append(path)
+        or {"sync": {"state": "current"}, "continuation": None, "items": []},
+    )
+    monkeypatch.setattr(graph_sync, "status", lambda root: {"state": "current"})
+    drained = []
+    drain = threading.Thread(
+        target=lambda: drained.append(
+            server_runtime.drain_vocabulary_recovery(tmp_path, threading.Event())
+        ),
+        daemon=True,
+    )
+
+    with foreground_priority.foreground():
+        drain.start()
+        time.sleep(0.3)
+        projected_beside_a_request = len(projected)
+    drain.join(timeout=10)
+
+    assert projected_beside_a_request == 0
+    assert drained == [3]
+    assert len(projected) == 3
+
+
 def test_the_drain_gives_up_when_the_projection_never_becomes_current(tmp_path, monkeypatch):
     import threading
 

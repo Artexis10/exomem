@@ -63,6 +63,7 @@ from . import (
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .backfill import iter_kb_files
+from .capture_metadata import CaptureFacts
 from .cli_ops import OpError
 from .governance import projected_retrieval
 from .kbdir import managed_root
@@ -985,6 +986,7 @@ class MediaWorker:
                     speaker_verification=result.speaker_verification or "unavailable",
                     asr=result.asr,
                     ocr=result.ocr,
+                    capture=result.capture,
                     replaces=replaces,
                 )
             except preserve.PreserveError as exc:
@@ -1439,6 +1441,7 @@ class MediaWorker:
         speaker_verification: str | None = None,
         asr: AsrFacts | None = None,
         ocr: OcrFacts | None = None,
+        capture: CaptureFacts | None = None,
         replaces: str | None = None,
     ) -> bool:
         if self._store is not None:
@@ -1454,6 +1457,8 @@ class MediaWorker:
                 payload["ocr"] = OcrFacts(
                     ocr.confidence, preserve._cap_low_confidence_text(ocr.low_confidence_text)
                 ).as_payload()
+            if capture is not None:
+                payload["capture"] = capture.as_payload()
             if replaces is not None:
                 payload["replaces"] = replaces
             return self._store.record_result(
@@ -1499,6 +1504,7 @@ class MediaWorker:
                 speaker_verification=speaker_verification,
                 asr=asr,
                 ocr=ocr,
+                capture=capture,
                 reprocessing=replaces is not None,
             )
             receipts = deferred_index.add_full_receipts(
@@ -1535,6 +1541,7 @@ class MediaWorker:
         speaker_verification: str | None,
         asr: AsrFacts | None,
         ocr: OcrFacts | None,
+        capture: CaptureFacts | None,
         reprocessing: bool,
     ) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
         """The writes for a finished extraction, and the part pages to retire once they commit.
@@ -1553,6 +1560,7 @@ class MediaWorker:
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,
+            capture=capture,
             # Both callers have just revalidated the original; a page stored with it records these.
             binary_hints=media_processing.read_timestamp_hints(
                 media_processing.held_path(self._vault_root, job.binary_path)
@@ -2727,6 +2735,7 @@ class MediaWorker:
             if result.kind == "extraction":
                 asr = result.payload.get("asr")
                 ocr = result.payload.get("ocr")
+                capture = result.payload.get("capture")
                 writes, surplus = self._extraction_writes(
                     job,
                     before,
@@ -2737,6 +2746,7 @@ class MediaWorker:
                     speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
                     asr=AsrFacts.from_payload(asr) if asr is not None else None,
                     ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
+                    capture=CaptureFacts.from_payload(capture) if capture is not None else None,
                     reprocessing=replaces is not None,
                 )
                 target = writes[0].content

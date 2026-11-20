@@ -408,6 +408,44 @@ Published admitted sets for structured eligibility and the activation carry are 
 Proof compares the installed request ledger before and after the change, on the same concurrency buckets: alone, 1.5 to 3, and 3 to 6. Each tool needs at least 100 calls per arm, with the write count per window and a bootstrap 95% interval. Each site also has a span check: its span leaves request calls, or its p90 falls. Model-free tests guard each freshness and release guarantee above.
 
 
+### 10. Background passes give way to requests
+
+The service runs its request threads and its background threads in one process, so they share one interpreter lock. A background pass that runs beside a request takes CPU time from it. Recalls that overlapped background passes ran 1.4 to 2.2 times slower than recalls that did not. The operator measured this on the installed service; this change does not repeat it.
+
+`foreground_priority` already holds the mechanism: a pass runs inside `bulk()` and waits for requests in flight at each `yield_to_foreground()`, within a progress floor. This decision applies it to the remaining passes and adds no mechanism. The rule for every site: the pass only waits. It skips, reorders and drops no work, and its cancellation and budgets work as before.
+
+A yield never parks a thread that holds a lock, mutation boundary, single-flight build or connection that a request can wait on. A site with no safe point is left unchanged.
+
+| Pass (thread) | Unit that yields | Held at the yield | Left unchanged |
+|---|---|---|---|
+| Working-set warm (`exomem-working-set-warm`) | Each page of the page walk and each fold of the context catalogue | Nothing; the index write starts after the walks | The index write itself |
+| Graph drain (`exomem-graph-drain`) | Each drain pass, and each single-receipt replay | Nothing; each pass is its own `bulk()` scope, because an idle wait inside one long scope would earn wait allowance it never used | `drain_paths`, which runs under the mutation boundary |
+| Vocabulary recovery (`exomem-vocabulary-recovery`) | Each job | Nothing; the page of jobs is a closed snapshot and no claim is open | Shutdown still ends the loop between jobs |
+| Freshness reconcile (`kb-freshness-reconcile`) | Each entry of the stat walk, and one wait before the deferred drain and before each lexical warm | The replacement lock, which its waiters wait on inside `awaiting_bulk` | The startup seed, which gates admission; the delta dispatch and the media reconcile, which a yield would stretch |
+| Watcher flush (`kb-file-watcher`) | One wait before each batch | Nothing | The batch itself, which withdraws and republishes availability; the startup catch-up and final flushes |
+| Identity catalogue warm (`exomem-identity-catalogue-warm`) | Each directory entry of the optimistic walk | Nothing; followers of the single flight wait inside `awaiting_bulk` | The locked fail-safe scan, which holds a boundary |
+| Matrix load (`exomem-matrix-load`) | Every 512 rows of the read that runs off the index lock | The read snapshot only; a caller that holds the index lock never yields | The load a caller runs inline under the lock |
+
+The derived drain takes the boundary in turns and ends a turn between units. A turn now also ends when a request is in flight (`foreground_elsewhere()`), not only when a writer waits. The drain then waits for the request outside the boundary, unless the turn is a loan from a long mutation, whose lender is itself foreground work.
+
+The share of its elapsed time that a pass may wait (`MAX_WAIT_SHARE`, 0.5) is a setting, `EXOMEM_BULK_WAIT_SHARE`, read from the process environment at each call. Unset, malformed or out-of-range values keep 0.5. A pass that sets its own `PassBudget` keeps it.
+
+The new yields also fire inside bulk scopes that already existed, because the walks and loops they sit in are shared: governed maintenance jobs (`background_job()`), the derived-drain dispatch, the whole-vault graph pass and the graph proofs of the scheduled catalogue fold. In each, a yield only waits, within that scope's own progress floor. The identity walk is also the locked fail-safe scan's walk. That scan holds a boundary, so its yields never wait, but it now has cancellation points that it had none of.
+
+A leader's stop is its own. A stoppable pass can lead the single-flight identity build, and its stop then ends only its own pass. The flight records the stop as cancelled, not as an error: a follower never re-raises it, because it is a `BaseException` that its caller may not handle and that would end the caller's own pass. A follower with no request budget (a background caller) claims the build itself, or follows the next leader, and gets the inventory it got before the walk had cancellation points. A follower on a request budget never walks past its deadline: it follows the next leader, or takes the typed unavailable outcome that it takes when its wait runs out. The matrix-load join and the freshness replacement-lock wait carry no outcome from the thread they wait on, so they cannot broadcast one.
+
+A parked yield ends on its scope's stop. The stop is a `foreground_priority.StopEvent`, whose `set()` notifies the one condition that parked yields wait on, so no thread polls and no stop site needs a second call. The graph drain, derived drain, file watcher, maintenance jobs, original fixity and the server runtime's vocabulary and shutdown stops are `StopEvent`s. The working-set builds stop on the server runtime's shutdown event. A scope whose stop is a plain `threading.Event` still ends at the wait's cap, and a scope that carries no stop keeps the plain condition wait.
+
+The spans and the log line that time a background pass count its waits for requests as work: `embeddings.matrix_load.rows`, `reserved.identity.baseline_build`, the background `catalogue.fold` and the matrix background-load log line. Each carries `waited_ms`, the wait inside it, so a later comparison separates work from waiting.
+
+Risks that remain open.
+- A longer identity walk can see more token mismatches and fall back to the locked scan more often.
+- The matrix load keeps its read snapshot open while it waits, which delays a WAL checkpoint. A stretched off-lock read also gives writers more time to outrun it, so `_full_load_locked` becomes more likely.
+- Warm windows get longer under traffic: a warm that waits for requests stays unwarm for longer, and so do the readers that join it.
+- `graph_drain.seconds_until_pass()` ignores the new initial yield, so it can report a pass as due while that pass is still waiting for a request.
+
+Proof: one model-free test per pass shows no progress while a request is in flight and the same result after; the installed comparison belongs to task 3.16.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

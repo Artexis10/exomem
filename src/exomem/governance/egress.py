@@ -52,6 +52,7 @@ from .. import (
     access,
     activation_result,
     call_spans,
+    capture_metadata,
     find_corpus,
     memory_refs,
     originals,
@@ -5685,8 +5686,11 @@ def annotate_page(
     path — an item released below notice must be indistinguishable from one
     that never existed. Raw text is assembled only after an L6 decision and
     only when the terminal secret parser accepts the exact snapshot.
+
+    A media sidecar's recorded position is withheld here, after the release decision has validated
+    the page, from every caller who may not download the original it describes.
     """
-    return _annotate_page(
+    released = _annotate_page(
         vault_root,
         page,
         principal=principal,
@@ -5695,6 +5699,9 @@ def annotate_page(
         stable_ref=stable_ref,
         include_raw=include_raw,
     )
+    if released is None:
+        return None
+    return withhold_position(vault_root, released, principal=principal, purpose=purpose)
 
 
 def page_withheld_entirely(
@@ -6803,6 +6810,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "fix": "dry-run-default",
         "reconcile": "dry-run-opt-in",
         "backfill-ids": "dry-run-default",
+        "capture-metadata": "dry-run-default",
         "convert-originals": "dry-run-default",
         "maintenance-job": "structure",
         "maintenance-job-cancel": "mutation",
@@ -7252,6 +7260,7 @@ def release_level_for(
     purpose: str | None = None,
     receipt_decision: str | None = None,
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
+    record: bool = True,
 ) -> int | None:
     """The disclosure ceiling for one item, or `None` when it cannot be decided.
 
@@ -7260,6 +7269,9 @@ def release_level_for(
     principal -> `DISCLOSURE_MIN`, otherwise decide. `None` means the item
     could not be read or parsed, which callers must treat as "not permitted"
     rather than "no rule applies".
+
+    `record=False` decides without leaving a release receipt, for a caller that only asks what it
+    may show and hands nothing from the item itself to anyone.
     """
     vault_root = Path(vault_root)
     if lifecycle.is_tombstoned(vault_root, rel_path):
@@ -7279,7 +7291,8 @@ def release_level_for(
         return DISCLOSURE_MAX
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     if policy.blocked or not who.resolved:
-        _record_blocked_outcome(who.audience_id)
+        if record:
+            _record_blocked_outcome(who.audience_id)
         return DISCLOSURE_MIN
     decision = _decide_path(
         vault_root,
@@ -7293,6 +7306,8 @@ def release_level_for(
         artifact_copy=artifact_copy,
     )
     level = None if decision is None else decision.level
+    if not record:
+        return level
     _outcome_for_decision(
         vault_root,
         rel_path,
@@ -8663,6 +8678,93 @@ def release_allows_download(
         purpose=purpose,
         artifact_copy=artifact_copy,
     )
+
+
+def original_download_filter(
+    vault_root: Path,
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> Callable[[str | None], bool] | None:
+    """`allowed(original)` for a caller from whom a recorded position may be withheld, else `None`.
+
+    A media sidecar records where its original was captured. That position is as sensitive as the
+    original, so it reaches a caller only when `release_allows_download` would hand that caller the
+    original. `None` means the caller is unrestricted (the owner), so nothing is decided per page.
+
+    This is the same decision as `release_allows_download`, taken quietly: it asks what the caller may
+    see, hands over no bytes, so it leaves no download receipt and hashes nothing. An original that a
+    page does not name (`None`) licenses no position, so the position stays withheld. Each original is
+    decided once per filter; build one per request, because the plane does not move while one runs.
+    """
+    vault_root = Path(vault_root)
+    who = file_mode_restricted_caller(vault_root, principal)
+    if who is None:
+        return None
+    decided: dict[str, bool] = {}
+
+    def allowed(original: str | None) -> bool:
+        if original is None:
+            return False
+        verdict = decided.get(original)
+        if verdict is None:
+            level = (
+                release_level_for(vault_root, original, principal=who, purpose=purpose, record=False)
+                if content_permits(vault_root, original, who)
+                else None
+            )
+            verdict = decided[original] = level is not None and level >= LEVEL_FULL
+        return verdict
+
+    return allowed
+
+
+def withhold_position(
+    vault_root: Path,
+    page: dict[str, Any],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, Any]:
+    """`page` as a caller who may not download its original reads it: with no recorded position.
+
+    The position is dropped from the frontmatter and from the raw text, after the page's own release
+    decision has validated them, so every surface that renders a released page shows the same page. A raw
+    text that cannot be shown without its position, because its frontmatter does not parse or spells the
+    field in a way the removal misses, is withheld whole: this control fails closed.
+    """
+    from .. import preserve
+
+    frontmatter = page.get("frontmatter")
+    raw = page.get("content")
+    fields = frontmatter if isinstance(frontmatter, dict) else (
+        vault.parse_frontmatter(raw)[0] if isinstance(raw, str) else {}
+    )
+    if not capture_metadata.carries_position(fields) and not (isinstance(raw, str) and preserve.states_position(raw)):
+        return page
+    allowed = original_download_filter(vault_root, principal=principal, purpose=purpose)
+    if allowed is None or allowed(originals.bound_path(fields)):
+        return page
+    out = dict(page)
+    if isinstance(frontmatter, Mapping):
+        out["frontmatter"] = capture_metadata.without_position(frontmatter)
+    if isinstance(raw, str):
+        shown = preserve.without_position_fields(raw)
+        if shown is None:
+            del out["content"]
+        else:
+            out["content"] = shown
+    return out
+
+
+def released_frontmatter_matches(released: Mapping[str, Any], frontmatter: Mapping[str, Any]) -> bool:
+    """Whether `released` shows `frontmatter` whole, bar a position `withhold_position` drops.
+
+    A release-integrity check compares what a caller was shown with what is stored. A position a
+    caller may not see is withheld on purpose, so its absence is no sign that the release changed.
+    """
+    shown = released.get("frontmatter")
+    return shown == frontmatter or shown == capture_metadata.without_position(frontmatter)
 
 
 def release_allows_frames(

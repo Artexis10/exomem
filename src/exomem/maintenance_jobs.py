@@ -35,13 +35,13 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, state_paths
+from . import foreground_priority, reserved_paths, state_paths
 from .cli_ops import OpError
 
 #: A job's state is one of these; a job is terminal once it leaves ``RUNNING``.
@@ -66,6 +66,7 @@ OWNER_GONE_CODE = "OWNER_GONE"
 #: of one of these modes only as a job, and only with the plan_id of its preview and a why.
 JOB_FLAGS: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-set -- closed maintain_memory mode and argument literals
     "backfill-ids": (),
+    "capture-metadata": (),
     "convert-originals": (),
     "fix": ("rebuild_embeddings",),
     "reconcile": ("rebuild_graph",),
@@ -120,7 +121,7 @@ class _Live:
 
     run_id: str
     vault_root: Path
-    stop: threading.Event = field(default_factory=threading.Event)
+    stop: threading.Event = field(default_factory=foreground_priority.StopEvent)
     #: Why ``stop`` was set: ``CANCEL_CODE`` or ``SHUTDOWN_CODE``.
     reason: str | None = None
     thread: threading.Thread | None = None
@@ -1087,6 +1088,7 @@ def commit_pages(
     rewrite: Callable[[str, str], str],
     *,
     receipt_value: Callable[[str], str | None] | None = None,
+    commit: Callable[[list[Any]], object] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Rewrite a plan's pages in short holds of the mutation boundary; return `(committed, skipped)`.
 
@@ -1095,8 +1097,10 @@ def commit_pages(
     and the job lets that writer in before it takes the boundary again. Under a hold each page is read
     again: one that cannot be read, or whose hash moved, is skipped and never overwritten.
     `rewrite(rel, text)` gives a kept page's new text, and `receipt_value(rel)` what the receipt lists
-    beside the page after `rewrite` ran (a minted ID). A failed write may have reached the disk, so
-    its pages stay `outcome_unknown` in the receipt and the failure is raised.
+    beside the page after `rewrite` ran (a minted ID). `commit` takes a batch's planned writes where
+    the pages need a writer of their own (a media sidecar publishes through its catalog tuple); the
+    default is the vault's atomic batch. A failed write may have reached the disk, so its pages stay
+    `outcome_unknown` in the receipt and the failure is raised.
     """
     from . import foreground_priority
 
@@ -1108,7 +1112,8 @@ def commit_pages(
         # A writer that queued behind the last hold takes its turn before this job takes the next.
         foreground_priority.yield_to_foreground()
         position += _commit_chunk(
-            vault_root, operation, entries[position : position + CHUNK_PAGES], rewrite, receipt_value, committed, skipped
+            vault_root, operation, entries[position : position + CHUNK_PAGES], rewrite, receipt_value, committed, skipped,
+            commit,
         )
     checkpoint("committing", done=position, total=len(entries))
     return committed, skipped
@@ -1122,6 +1127,7 @@ def _commit_chunk(
     receipt_value: Callable[[str], str | None] | None,
     committed: list[str],
     skipped: list[str],
+    commit: Callable[[list[Any]], object] | None = None,
 ) -> int:
     """Write as many pages of `window` as one hold allows; return how many it reached.
 
@@ -1136,9 +1142,11 @@ def _commit_chunk(
     wrote: dict[str, str | None] = {}
     moved: list[str] = []
     unknown: list[str] = []
-    reached = 0
     failure: BaseException | None = None
-    try:
+
+    def hold() -> int:
+        nonlocal unknown
+        reached = 0
         with chunk_hold(vault_root, operation) as boundary:
             started = time.monotonic()
             slowest = 0.0
@@ -1146,12 +1154,30 @@ def _commit_chunk(
                 batch = window[reached : reached + BATCH_PAGES]
                 began = time.monotonic()
                 unknown = [rel for rel, _, _ in batch]
-                _write_batch(vault_root, batch, rewrite, receipt_value, wrote, moved)
+                _write_batch(vault_root, batch, rewrite, receipt_value, wrote, moved, commit)
                 unknown = []
                 reached += len(batch)
                 slowest = max(slowest, time.monotonic() - began)
                 if hold_is_spent(boundary, started, slowest):
                     break
+        return reached
+
+    try:
+        if commit is None:
+            reached = hold()
+        else:
+            # A store-mode vault commits a page only on its store thread, which takes the boundary for it, so the
+            # whole hold runs there (`holding_boundary`) as this job: its stop flag and run id go with it.
+            from .vault_store import media as store_media
+
+            def hold_as_job() -> int:
+                token = _JOB.set(live)
+                try:
+                    return hold()
+                finally:
+                    _JOB.reset(token)
+
+            reached = store_media.holding_boundary(vault_root, operation, hold_as_job, nullcontext)
     except BaseException as error:
         failure = error
         raise
@@ -1174,6 +1200,7 @@ def _write_batch(
     receipt_value: Callable[[str], str | None] | None,
     wrote: dict[str, str | None],
     moved: list[str],
+    commit: Callable[[list[Any]], object] | None = None,
 ) -> None:
     """Read each page of `batch` again under the hold, then write the unchanged ones in one atomic batch."""
     from . import vault
@@ -1192,7 +1219,10 @@ def _write_batch(
         kept.append(rel)
         writes.append(vault.PlannedWrite(path=path, content=rewrite(rel, text), guard=guard, expected_hash=digest))
     if writes:
-        vault.batch_atomic_write(writes, vault_root=vault_root)
+        if commit is None:
+            vault.batch_atomic_write(writes, vault_root=vault_root)
+        else:
+            commit(writes)
     for rel in kept:
         wrote[rel] = receipt_value(rel) if receipt_value is not None else None
     live = _JOB.get()

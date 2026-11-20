@@ -2,6 +2,7 @@
 
 ## Purpose
 Accept the governed unit metadata `unit.verdict` as a closed string filter field and `unit.check_by` as a typed date field, so ordered comparisons answer due-by questions and non-date operands are rejected.
+
 ## Requirements
 
 ### Requirement: Governed Unit Metadata Is Filterable
@@ -141,3 +142,20 @@ The filter compiler SHALL validate namespace, RFC 6901 pointer, reserved field, 
 #### Scenario: Filter cannot bypass excluded scope
 - **WHEN** an expression names metadata present only in an excluded subtree
 - **THEN** no excluded identity becomes eligible or visible through hits, counts, explanations, or errors
+
+### Requirement: A withheld field reads as missing in every filter
+
+When a field is withheld from the caller for a page, every structured filter SHALL evaluate that field as missing for that page. This includes reserved fields, generic frontmatter-pointer filters and `$exists`. The withholding SHALL be decided per page before the filter is evaluated. A filter on a withheld field SHALL NOT change the result count, the ranking or the error that the caller sees, compared with the same page lacking the field.
+
+#### Scenario: A pointer filter on a withheld position
+
+- **WHEN** a caller who may not read a photo's original filters on that photo's position through a frontmatter pointer with `$exists: true`
+- **THEN** the photo does not match
+- **AND** the same filter with `$exists: false` matches it
+
+#### Scenario: A lone complement of a withheld position on the managed route
+
+- **WHEN** a caller who may not read a photo's original sends a managed route a filter whose only position test is a complement, such as `$not` over a position range, with no exact bound beside it
+- **THEN** the route refuses it with the typed `UNSUPPORTED_FILTER_FIELD` refusal that it gives any shape that no maintained index can evaluate exactly
+- **AND** the refusal follows from the filter and the caller alone, so every page gets the same refusal and it reveals nothing about any photo
+- **AND** the in-memory evaluation of the same filter still reads the withheld position as missing

@@ -686,8 +686,8 @@ def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] 
     writer._require_operation_context()
     writer._facade_profile = "records"
     with writer.read_collection(collection, facade_profile="records") as manifest:
-        found = readable_matches(writer, manifest, item_id.partition(".")[0])
-    return None if found is None else collection_refs.bound_row(item_id, *found)
+        found = readable_matches(writer, manifest, collection_refs.id_head(item_id))
+    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records")
 
 
 def dispatch(

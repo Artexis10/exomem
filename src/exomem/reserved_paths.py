@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from rpds import HashTrieMap, HashTrieSet
 
-from . import call_spans, held_fs, request_budget
+from . import call_spans, foreground_priority, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
@@ -168,6 +168,11 @@ class InternalStateDescriptor:
     #: Whether store mode owns the files of this family as pages (`vault_store.ownership`). Every other
     #: reserved family stays outside the store: governance and replica state have their own owners.
     vault_store: bool = False
+    #: Whether the product can rebuild this family's files from the vault or by recomputation. False for a
+    #: family whose files hold information that nothing else records: the vault backup stages exactly the
+    #: external families that say so (`non_rebuildable_state_descriptors`). An external family must choose:
+    #: the registry refuses one that leaves it unset, so a new family never joins or leaves a backup by default.
+    rebuildable: bool | None = None
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -462,10 +467,12 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "served-context", "served_context", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
         "brief-watermarks", "brief_watermarks", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".brief-watermarks.sqlite"),
     ),
     InternalStateDescriptor(
@@ -484,6 +491,7 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "generated-fragments-index", "generated_fragment_store", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".generated-fragments.sqlite"),
     ),
     InternalStateDescriptor(
@@ -515,6 +523,7 @@ _REGISTRY = (
         "governance-store",
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".governance.sqlite"),
         migrates_from_vault=True,
     ),
@@ -522,6 +531,7 @@ _REGISTRY = (
         "embeddings-store",
         "embedding_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(*_sqlite_family(".embeddings.sqlite"), ".embeddings.active"),
         patterns=(_EMBEDDINGS_SPACE_RE,),
         migrates_from_vault=True,
@@ -530,6 +540,7 @@ _REGISTRY = (
         "clip-store",
         "clip_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".clip.sqlite"),
         migrates_from_vault=True,
     ),
@@ -537,6 +548,7 @@ _REGISTRY = (
         "lexical-store",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".lexical.sqlite"),
         migrates_from_vault=True,
     ),
@@ -544,6 +556,7 @@ _REGISTRY = (
         "graph-store",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".graph.sqlite"),
         migrates_from_vault=True,
     ),
@@ -551,6 +564,7 @@ _REGISTRY = (
         "claims-store",
         "claims",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".claims.sqlite"),
         migrates_from_vault=True,
     ),
@@ -558,6 +572,7 @@ _REGISTRY = (
         "references-store",
         "references.legacy",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         authority_enabled=False,
         exact=_sqlite_family(".references.sqlite"),
         migrates_from_vault=True,
@@ -566,6 +581,7 @@ _REGISTRY = (
         "refs-store",
         "memory_refs",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".refs.sqlite"),
         migrates_from_vault=True,
     ),
@@ -573,6 +589,7 @@ _REGISTRY = (
         "freshness-store",
         "freshness.legacy",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         authority_enabled=False,
         exact=_sqlite_family(".freshness.sqlite"),
         migrates_from_vault=True,
@@ -581,6 +598,7 @@ _REGISTRY = (
         "deferred-index-store",
         "deferred_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             *_sqlite_family(".deferred-index.sqlite"),
             *_sqlite_family(".deferred_index.sqlite"),
@@ -599,17 +617,20 @@ _REGISTRY = (
             ".media-worker.lock",
         ),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "maintenance-jobs-store",
         "maintenance_jobs",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".maintenance-jobs.sqlite"),
     ),
     InternalStateDescriptor(
         "idempotency-store",
         "idempotency",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             *_sqlite_family(".idempotency.sqlite"),
             ".idempotency.json",
@@ -623,11 +644,13 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".voice_profiles.json",),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "graph-handoff",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             ".graph-sync.json",
             ".graph-sync-floor.json",
@@ -643,6 +666,7 @@ _REGISTRY = (
         "graph-receipts",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".graph-commit-receipts",),
         migrates_from_vault=True,
     ),
@@ -653,11 +677,13 @@ _REGISTRY = (
         exact=(".review-state.json",),
         patterns=(_REVIEW_TEMP_RE,),
         migrates_from_vault=True,
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             ".due-state.json",
             ".due-state-emission.json",
@@ -673,11 +699,13 @@ _REGISTRY = (
         StatePlacement.EXTERNAL_STATE,
         exact=(".ownership-asked.jsonl", ".ownership-rotation.json"),
         patterns=(_OWNERSHIP_TEMP_RE,),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "lexical-rebuild",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_REBUILD_RE,),
         migrates_from_vault=True,
     ),
@@ -685,18 +713,21 @@ _REGISTRY = (
         "lexical-staged",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_STAGED_RE,),
     ),
     InternalStateDescriptor(
         "lexical-staged-lock",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(LEXICAL_STAGED_LOCK,),
     ),
     InternalStateDescriptor(
         "lexical-quarantine",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_QUARANTINE_RE,),
         migrates_from_vault=True,
     ),
@@ -704,6 +735,7 @@ _REGISTRY = (
         "graph-rebuild",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_GRAPH_REBUILD_RE,),
         migrates_from_vault=True,
     ),
@@ -711,6 +743,7 @@ _REGISTRY = (
         "graph-reset",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         tree_patterns=(_GRAPH_RESET_RE,),
         migrates_from_vault=True,
     ),
@@ -718,6 +751,7 @@ _REGISTRY = (
         "graph-coordination",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".graph-coordination",),
         migrates_from_vault=True,
     ),
@@ -725,6 +759,7 @@ _REGISTRY = (
         "authorization-projections",
         "governance.projections",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".authorization-projections",),
         migrates_from_vault=True,
     ),
@@ -739,6 +774,7 @@ _REGISTRY = (
         exact=(*_sqlite_family("collections.sqlite"), *_sqlite_family("collections-derived.sqlite")),
         # A reverse export keeps the retired store as evidence that no host adopts.
         patterns=(_COLLECTION_EXPORTED_RE,),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "collection-archive",
@@ -748,6 +784,7 @@ _REGISTRY = (
         # beside the store that now holds their rows, and the collections cutover's run records
         # under ``cutover/``. Canonical evidence: no reset touches it.
         trees=(".collection-archive",),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "collection-replica",
@@ -772,6 +809,7 @@ _REGISTRY = (
         # outside the vault, so a copied vault carries entries that fail their MAC
         # and nothing that resets, wipes or migrates machine-local state may touch it.
         exact=("procedure-approval.key",),
+        rebuildable=False,
     ),
     InternalStateDescriptor(
         "batch-workspace",
@@ -1006,6 +1044,21 @@ def external_canonical_descriptors() -> tuple[InternalStateDescriptor, ...]:
         descriptor
         for descriptor in _REGISTRY
         if descriptor.placement is StatePlacement.EXTERNAL_CANONICAL
+    )
+
+
+def non_rebuildable_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
+    """The external families whose files hold information that nothing else records.
+
+    A backup of the machine-local state stages exactly these. Every other external family is an index, a cache
+    or a queue that the product rebuilds, so a backup that carried it would only cost space.
+    """
+
+    return tuple(
+        descriptor
+        for descriptor in _REGISTRY
+        if descriptor.placement in (StatePlacement.EXTERNAL_STATE, StatePlacement.EXTERNAL_CANONICAL)
+        and descriptor.rebuildable is False
     )
 
 
@@ -3181,7 +3234,7 @@ class _Prefilter:
     FILTERED_FIELDS = frozenset({"exact", "trees", "patterns", "tree_patterns", "leaf_patterns",
                                  "component_tree_patterns"})
     UNMATCHED_FIELDS = frozenset({"id", "owner", "placement", "owning_command", "authority_enabled",
-                                  "migrates_from_vault", "vault_store"})
+                                  "migrates_from_vault", "vault_store", "rebuildable"})
 
     @classmethod
     def of(cls, descriptors: tuple[InternalStateDescriptor, ...]) -> _Prefilter:
@@ -3319,7 +3372,9 @@ class IdentityCatalogue:
                 raise RuntimeError(
                     "reserved identity catalogue could not enumerate the KB"
                 )
-            for record in children.require():
+            # A bulk pass waits for a request between entries. It holds no lock here: the single-flight
+            # build is waited on inside `awaiting_bulk`, and the locked fail-safe scan runs under a boundary.
+            for record in foreground_priority.yielding_in_bulk(children.require()):
                 relative = (
                     f"{prefix}/{record.relative_path}"
                     if prefix
@@ -3437,6 +3492,8 @@ class _BaselineFlight:
     done: threading.Event
     catalogue: IdentityCatalogue | None = None
     error: BaseException | None = None
+    #: The leader's own stop ended it. That says nothing about the inventory, so a follower builds it.
+    cancelled: bool = False
 
 
 _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
@@ -3484,19 +3541,26 @@ def _flight_wait_seconds() -> float:
 def _await_baseline_flight(
     flight: _BaselineFlight,
     timeout: float,
-) -> IdentityCatalogue:
+) -> IdentityCatalogue | None:
     """Wait a bounded time on the one build already running, then answer typed.
 
     A follower never starts a duplicate scan.  It receives the leader's
     inventory, re-raises the leader's failure so nothing weaker than the
     fail-closed outcome escapes, or gives up inside the same budget the
     coordination boundary itself uses and reports the boundary unavailable.
+    A leader that its own stop ended leaves no answer: the follower gets None
+    and claims the build itself.
     """
 
-    if not flight.done.wait(timeout):
+    # The leader may be the background warm, which yields to requests: this wait must not count as one.
+    with foreground_priority.awaiting_bulk():
+        finished = flight.done.wait(timeout)
+    if not finished:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     if flight.error is not None:
         raise flight.error
+    if flight.cancelled:
+        return None
     if flight.catalogue is None:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     return flight.catalogue
@@ -3654,7 +3718,8 @@ def schedule_identity_catalogue_warm(vault_root: Path) -> None:
 
     def _warm() -> None:
         try:
-            _baseline_identity_catalogue(vault_root)
+            with foreground_priority.bulk():
+                _baseline_identity_catalogue(vault_root)
         except BaseException as error:  # noqa: BLE001 - a background warm never raises
             # Class only: a failure message can name a private reserved path,
             # and this log is not inside the leaf boundary that hides them.
@@ -3728,50 +3793,79 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             vault_key, _build_baseline_identity_catalogue(vault_root)
         )
 
-    # Registration happens inside the `try`, and `leading` is set before the
-    # entry is published, so every exit -- including an interruption landing
-    # between the two -- reaches the `finally` that releases the flight.  An
-    # orphaned entry would refuse every later caller in this process forever.
-    flight = _BaselineFlight(threading.Event())
-    leading = False
-    try:
-        with _PUBLISHED_IDENTITY_LOCK:
-            cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
-            if cached is not None:
-                return cached
-            running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
-            if running is None:
-                leading = True
-                _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
-            else:
-                flight = running
-
-        if not leading:
-            return _await_baseline_flight(flight, _flight_wait_seconds())
-
-        flight.catalogue = _install_baseline_identity_catalogue(
-            vault_key, _build_baseline_identity_catalogue(vault_root)
-        )
-    except BaseException as error:
-        if leading:
-            flight.error = error
-        raise
-    finally:
-        if leading:
-            # Released before the waiters are woken, so a build that raised
-            # leaves the next caller free to retry rather than a flight nobody
-            # can finish.
+    # A follower's budget is one deadline across its waits, set when it first follows. When the leader's
+    # own stop ended the build, a follower with no request budget (a background caller) claims the
+    # build. One with a request budget never walks past its deadline, as on base: it follows the next
+    # leader, or takes the unavailable outcome when there is none.
+    deadline: float | None = None
+    may_lead = True
+    while True:
+        # Registration happens inside the `try`, and `leading` is set before the
+        # entry is published, so every exit -- including an interruption landing
+        # between the two -- reaches the `finally` that releases the flight.  An
+        # orphaned entry would refuse every later caller in this process forever.
+        flight = _BaselineFlight(threading.Event())
+        leading = False
+        try:
             with _PUBLISHED_IDENTITY_LOCK:
-                if _BASELINE_IDENTITY_FLIGHTS.get(vault_key) is flight:
-                    del _BASELINE_IDENTITY_FLIGHTS[vault_key]
-            flight.done.set()
-    return flight.catalogue
+                cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+                if cached is not None:
+                    return cached
+                running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+                if running is None:
+                    if not may_lead:
+                        raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+                    leading = True
+                    _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+                else:
+                    flight = running
+
+            if not leading:
+                if deadline is None:
+                    deadline = time.monotonic() + _flight_wait_seconds()
+                followed = _await_baseline_flight(flight, max(0.0, deadline - time.monotonic()))
+                if followed is not None:
+                    return followed
+                may_lead = request_budget.current() is None
+                continue
+
+            flight.catalogue = _install_baseline_identity_catalogue(
+                vault_key, _build_baseline_identity_catalogue(vault_root)
+            )
+        except BaseException as error:
+            # A leader's stop is its own: it is a BaseException that a follower's caller may not
+            # handle, and it says nothing about the inventory. Followers build it themselves.
+            if leading:
+                if isinstance(error, foreground_priority.BulkCancelled):
+                    flight.cancelled = True
+                else:
+                    flight.error = error
+            raise
+        finally:
+            if leading:
+                # Released before the waiters are woken, so a build that raised
+                # leaves the next caller free to retry rather than a flight nobody
+                # can finish.
+                with _PUBLISHED_IDENTITY_LOCK:
+                    if _BASELINE_IDENTITY_FLIGHTS.get(vault_key) is flight:
+                        del _BASELINE_IDENTITY_FLIGHTS[vault_key]
+                flight.done.set()
+        return flight.catalogue
 
 
-@call_spans.timed("reserved.identity.baseline_build")
 def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     """Walk one vault's private identities and stamp the generation that proved it."""
 
+    fields: dict[str, int] = {}
+    # The span counts a background pass's waits for requests as work; `waited_ms` takes them apart.
+    with (
+        call_spans.span("reserved.identity.baseline_build", fields),
+        foreground_priority.recording_waits(fields),
+    ):
+        return _walk_baseline_identity_catalogue(vault_root)
+
+
+def _walk_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
     vault_key = _vault_identity_key(vault_root)
 
     # Walking the whole KB can take tens of seconds on a mature vault. Take two
@@ -5084,6 +5178,16 @@ def _validate_registry() -> None:
         len(ids) != len(set(ids))
         or any(not descriptor.owner for descriptor in _REGISTRY)
         or any(type(descriptor.placement) is not StatePlacement for descriptor in _REGISTRY)
+        # Canonical data is by definition not rebuildable: a family that is both would drop out of a backup.
+        or any(
+            descriptor.placement is StatePlacement.EXTERNAL_CANONICAL and descriptor.rebuildable is not False
+            for descriptor in _REGISTRY
+        )
+        # An external family chooses: an unset value would decide silently whether a backup carries it.
+        or any(
+            descriptor.placement is StatePlacement.EXTERNAL_STATE and descriptor.rebuildable is None
+            for descriptor in _REGISTRY
+        )
     ):
         raise RuntimeError("internal-state registry is invalid")
 
