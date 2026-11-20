@@ -324,6 +324,17 @@ def connection_refusal(entry: originals.StoreEntry) -> str | None:
     return None
 
 
+def connection_unusable(entry: originals.StoreEntry) -> str | None:
+    """Why a store's connection cannot be built, or None. Building an adapter parses configuration and reads no store."""
+    if (refusal := connection_refusal(entry)) is not None:
+        return refusal
+    try:
+        _adapter(entry.connection, entry.name)
+    except MediaStoreError as error:
+        return str(error).removeprefix(f"{error.code}: ")
+    return None
+
+
 def declare_store(vault: Path, name: str) -> Path:
     """The owner's declaration that the directory in store `name`'s `root` is that store; it writes the root's marker.
 
@@ -354,7 +365,8 @@ def declare_store(vault: Path, name: str) -> Path:
         found = read_store_id(folder)
         if recorded is not None and found != recorded:
             raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
-                                  "the store's root carries a marker other than the one recorded for this store")
+                                  "the store's root carries a marker other than the one recorded for this store; if this is "
+                                  "a new disk on purpose, remove its marker file and declare the store again")
         if found is not None and found != recorded:
             media_replicas.record_store_id(vault, name, found)
         return folder

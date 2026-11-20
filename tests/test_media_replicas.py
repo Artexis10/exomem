@@ -337,7 +337,7 @@ def test_the_drain_picks_its_next_original_from_an_index_with_no_sort(vault: Pat
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._pick({"x"}), (
             media_replicas.PENDING, 0.0, "x")))
-    assert "media_replica_queue_pick" in plan and "TEMP B-TREE" not in plan
+    assert "USING INDEX" in plan and "TEMP B-TREE" not in plan
 
 
 def test_the_owner_s_key_export_is_what_makes_a_replica_recoverable(vault: Path, selected_store, mirrored: Path) -> None:
@@ -502,6 +502,9 @@ def test_a_malformed_connection_field_makes_only_that_store_unavailable(
         media_store.replicate(vault, original, MIRROR)
     assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
     assert media_store.store_reachable(vault, MIRROR) is False
+    [mirror] = [s for s in _measured(vault)["stores"] if s["name"] == MIRROR]
+    assert mirror["available"] is False
+    assert "connection fields are invalid" in mirror["unavailable_reason"]
 
 
 def test_a_replica_entry_that_cannot_name_an_object_is_a_failed_candidate_and_not_an_aborted_pass(

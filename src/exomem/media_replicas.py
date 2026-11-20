@@ -343,7 +343,7 @@ def status(vault: Path) -> dict[str, object]:
     stores: dict[str, dict[str, Any]] = {}
     for name in names:
         entry = entries.get(name)
-        refusal = media_store.connection_refusal(entry) if entry is not None else None
+        refusal = media_store.connection_unusable(entry) if entry is not None else None
         seen_reachable, observed_at = reach.get(name, (None, None))
         stores[name] = {
             "name": name,
