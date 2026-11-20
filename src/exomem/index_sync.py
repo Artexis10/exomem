@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, Literal
 
-from . import call_spans, deferred_index, semantic_index
+from . import call_spans, deferred_index, foreground_priority, semantic_index
 from .derived_receipts import UNACKNOWLEDGED_COMPONENTS, DerivedComponent, DerivedComponentStatus
 
 if TYPE_CHECKING:
@@ -1276,7 +1276,8 @@ def _drain_graph_receipts(
             _republish_graph_availability(index)
         return processed, False
 
-    for done_count, receipt in enumerate(stalled):
+    # Each replay holds the boundary, so a request in flight gets its turn between them, never inside one.
+    for done_count, receipt in enumerate(foreground_priority.yielding_in_bulk(stalled)):
         if done_count and index.boundary_waiters():
             # Each replay takes the boundary a writer is waiting on. Step aside;
             # the rest stay queued untouched for the next pass. Never before the

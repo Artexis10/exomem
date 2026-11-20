@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, state_paths
+from . import foreground_priority, reserved_paths, state_paths
 from .cli_ops import OpError
 
 #: A job's state is one of these; a job is terminal once it leaves ``RUNNING``.
@@ -120,7 +120,7 @@ class _Live:
 
     run_id: str
     vault_root: Path
-    stop: threading.Event = field(default_factory=threading.Event)
+    stop: threading.Event = field(default_factory=foreground_priority.StopEvent)
     #: Why ``stop`` was set: ``CANCEL_CODE`` or ``SHUTDOWN_CODE``.
     reason: str | None = None
     thread: threading.Thread | None = None
