@@ -157,7 +157,7 @@ def _await_publication_settle(root: Path) -> None:
     while time.monotonic() < deadline:
         with file_watcher._WATCHERS_LOCK:  # noqa: SLF001
             pending = [
-                intent
+                key[1]
                 for key, intent in file_watcher._PUBLICATION_INTENTS.items()  # noqa: SLF001
                 if key[0] == canon and intent.disposition == "active"
             ]
@@ -166,7 +166,7 @@ def _await_publication_settle(root: Path) -> None:
         time.sleep(0.02)
     raise AssertionError(
         f"publication intents still active after {_OBSERVE_SECONDS}s: "
-        f"{[intent.path for intent in pending]}"
+        f"{pending}"
     )
 
 
@@ -222,7 +222,8 @@ def _integrity_failures(vault: Path, note_paths: list[str]) -> list[str]:
         failures.extend(
             f"publication intent still active: {key[1]}"
             for key, intent in file_watcher._PUBLICATION_INTENTS.items()  # noqa: SLF001
-            if intent.disposition == "active"
+            # The registry is process-wide: only this vault's intents count.
+            if key[0] == file_watcher._canon_root(vault) and intent.disposition == "active"  # noqa: SLF001
         )
     return failures
 
