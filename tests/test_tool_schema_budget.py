@@ -36,7 +36,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). The door
 # operation `media.replicate`, the owner's copy of every original to a declared store, added 18 B. Raise a
 # ceiling deliberately, in the diff that needs it.
-TOTAL_BUDGET = 29_350
+# `save_source.options.custody_only`, keep a handed file for safekeeping only, added 12 B on 2026-11-18
+# (keep-handed-files-as-sources).
+TOTAL_BUDGET = 29_352
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -60,7 +62,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2800,
     "save_episode": 1100,
     "save_evidence": 1200,
-    "save_source": 1400,
+    "save_source": 1412,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

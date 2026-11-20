@@ -484,6 +484,8 @@ spec:
               value: {{ .Values.cellctl.cellResources.memoryRequest | quote }}
             - name: CELLCTL_CELL_MEMORY_LIMIT
               value: {{ .Values.cellctl.cellResources.memoryLimit | quote }}
+            - name: CELLCTL_CELL_PASSAGE_MATRIX_BUDGET
+              value: {{ .Values.cellctl.cellResources.passageMatrixBudget | quote }}
             - name: CELLCTL_B2_BUCKET_NAME
               value: {{ .Values.cellctl.b2BucketName | quote }}
             - name: CELLCTL_B2_ENDPOINT

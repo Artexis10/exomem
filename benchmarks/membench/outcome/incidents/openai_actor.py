@@ -139,7 +139,7 @@ def record_spend(model: str, usage: dict[str, int]) -> str:
 
 
 async def converse(
-    spec: dict, instructions: str, prompt: str, model: str, max_turns: int, record: dict
+    spec: dict, root: Path, instructions: str, prompt: str, model: str, max_turns: int, record: dict
 ):
     """One user turn to one agent on the arm's server, once that server is warm (``warmup``); the SDK's run result.
 
@@ -157,7 +157,13 @@ async def converse(
     try:
         async with MCPServerStdio(
             name="exomem",
-            params={"command": spec["command"], "args": spec["args"], "env": spec["env"]},
+            params={
+                "command": spec["command"],
+                "args": spec["args"],
+                "env": spec["env"],
+                # The unit root holds no `.env`; the caller's directory may, and the server loads it over `env`.
+                "cwd": str(root),
+            },
             cache_tools_list=True,
             client_session_timeout_seconds=SERVER_CALL_TIMEOUT_SECONDS,
         ) as server:
@@ -229,6 +235,7 @@ def play(
             asyncio.wait_for(
                 converse(
                     mcp_server(root, arm, arm_env),
+                    root,
                     instructions,
                     case["prompt"],
                     model,

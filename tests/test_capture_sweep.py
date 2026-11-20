@@ -621,12 +621,14 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         fence = doc.index("```", doc.index(heading))
         block = doc[fence + 3 : doc.index("```", fence + 3)]
         sizes[name] = len(block.rstrip().encode("utf-8"))
-        assert "Never save transcripts." in block, name
+        assert "Never save chat transcripts." in block, name
 
-    assert sizes == {"maximal": 1483, "balanced": 1485}, sizes
+    # 2026-11-18, keep-handed-files-as-sources: "chat transcripts" and
+    # "get no note" cost 6 bytes per block, from 1483/1485 to 1489/1491.
+    assert sizes == {"maximal": 1489, "balanced": 1491}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
-    assert 1500 - sizes["maximal"] >= 16, sizes
+    assert 1500 - sizes["maximal"] >= 11, sizes
     assert all(1500 - size < 100 for size in sizes.values()), sizes
 
 
