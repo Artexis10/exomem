@@ -3442,6 +3442,14 @@ def _evaluate(
     )
 
 
+#: What a save's structural evaluation built: a corpus, the candidate page and the corpus with it.
+StructuralImages = tuple[
+    semantic_contract.SemanticCorpusContext,
+    semantic_contract.SemanticPageState,
+    semantic_contract.SemanticCorpusContext,
+]
+
+
 def _attempt(
     root: Path,
     *,
@@ -3456,6 +3464,7 @@ def _attempt(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     reuse: _PrevalidatedAttempt | None = None,
+    structural: StructuralImages | None = None,
 ) -> _Attempt:
     status_basis = lifecycle_statuses.Basis(root)
     if operation not in _OPERATIONS:
@@ -3568,8 +3577,14 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
         )
-    # `with_candidate` is a pure function of the two inputs a reuse carries.
-    after = reused.after_corpus if reused is not None else before.with_candidate(candidate)
+    # `with_candidate` is a pure function of the two inputs a reuse carries, and of the two that the
+    # structural evaluation judged: the same corpus object and an equal candidate.
+    if reused is not None:
+        after = reused.after_corpus
+    elif structural is not None and structural[0] is before and structural[1] == candidate:
+        after = structural[2]
+    else:
+        after = before.with_candidate(candidate)
     if reused is not None:
         contracts = reused.contracts
         result = reused.result
@@ -3808,9 +3823,13 @@ def revalidate_prepared_creation_attempt(
     requested_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    structural: StructuralImages | None = None,
 ) -> _Attempt:
     """``revalidate_prepared_creation_draft``, returning the whole attempt so a
-    caller can offer it to the commit through ``prevalidated_attempt``."""
+    caller can offer it to the commit through ``prevalidated_attempt``.
+
+    ``structural`` is what the caller's structural evaluation built; see ``_attempt``.
+    """
     try:
         requested_disposition = normalize_relation_disposition(requested_disposition)
         if requested_disposition not in {None, "reviewed_none"}:
@@ -3829,6 +3848,7 @@ def revalidate_prepared_creation_attempt(
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            structural=structural,
         )
         record = attempt.artifact
         if record is None:
