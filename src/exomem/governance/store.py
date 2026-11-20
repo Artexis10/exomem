@@ -1,14 +1,13 @@
 """Per-machine governance sidecar and its monotonic schema owner.
 
-`.governance.sqlite` is never the enforcement authority (design decision
-D6): its compiled policy is rebuildable at any time from
-`_Governance/**.yaml`, it is never synced, and
-`policy.load`/`membership.evaluate`/`decisions.decide` never consult it —
-those run entirely in-process off the parsed YAML. Only an explicit
-`compile.write_snapshot` call opens this file. Schema v4 (`schema_v4`) adds
-authorization sessions, grants and withhold tokens that nothing else
-records, so the file as a whole is not rebuildable and the vault backup
-keeps it.
+`.governance.sqlite` is never the enforcement authority (design decision D6):
+its compiled policy is rebuildable at any time from `_Governance/**.yaml`,
+it is never synced, and `policy.load`/`membership.evaluate`/`decisions.decide`
+never consult it — those run entirely in-process off the parsed YAML. The
+file also keeps state that nothing else records: the receipt chain head and
+its key, withhold tokens and their signing key, grants, proposals and
+journals, and, from schema v4 (`schema_v4`), authorization sessions. So the
+file as a whole is not rebuildable, and the vault backup keeps it.
 """
 
 from __future__ import annotations

@@ -523,8 +523,9 @@ _REGISTRY = (
         "governance-store",
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
-        # The compiled policy rebuilds from `_Governance`, but schema v4 also keeps authorization sessions, session
-        # grants and withhold tokens here, and nothing else records them.
+        # Only the compiled policy rebuilds from `_Governance`. The file also keeps state that nothing else records:
+        # the receipt chain head and its key, withhold tokens and their signing key, grants, proposals and journals
+        # (schema v3), and authorization sessions (schema v4).
         rebuildable=False,
         exact=_sqlite_family(".governance.sqlite"),
         migrates_from_vault=True,

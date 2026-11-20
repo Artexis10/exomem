@@ -397,12 +397,15 @@ def _write_record(vault: Path, record: dict[str, Any]) -> None:
 # --- staging the state that cannot be rebuilt -------------------------------------------------
 
 
-def _is_sqlite(path: Path) -> bool:
-    try:
-        with path.open("rb") as source:
-            return source.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
-    except OSError:
-        return False
+def _has_sqlite_header(path: Path) -> bool:
+    """Whether a file starts with SQLite's header. Call it only on a file that SQLite refused to open as a database.
+
+    Closing any descriptor of a file drops every POSIX lock this process holds on it, and the service's own
+    connections lock their databases. SQLite shares one descriptor per file among its connections, so only a
+    descriptor opened outside SQLite drops them; a file SQLite refused is one that no connection here holds.
+    """
+    with path.open("rb") as source:
+        return source.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
 
 
 def _copy_sqlite(source: Path, target: Path) -> bool:
@@ -445,11 +448,24 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop
     if any(name.endswith(suffix) and (source.parent / name[:-len(suffix)]).is_file() for suffix in _SQLITE_SIDECARS):
         return 0
     try:
-        if _is_sqlite(source):
-            if not _copy_sqlite(source, target):
-                findings.append({"kind": "state", "path": name, "code": "state_integrity"})
-        else:
+        # SQLite opens every file first, so no descriptor outside SQLite ever touches a live database (see
+        # `_has_sqlite_header`). A file that SQLite refuses as no database is copied whole. SQLite reads an empty
+        # file as an empty database and would stage one, so an empty file is staged as an empty file, unopened.
+        if source.stat().st_size == 0:
+            target.touch(mode=0o600, exist_ok=False)
+            return 1
+        try:
+            intact = _copy_sqlite(source, target)
+        except sqlite3.DatabaseError as error:
+            target.unlink(missing_ok=True)
+            if not source.exists():
+                return 0  # removed after the listing, as below
+            if getattr(error, "sqlite_errorname", None) != "SQLITE_NOTADB" or _has_sqlite_header(source):
+                raise
             _copy_whole(source, target)
+        else:
+            if not intact:
+                findings.append({"kind": "state", "path": name, "code": "state_integrity"})
     except FileNotFoundError:
         return 0  # an atomic replace or a removal between the listing and the copy; the next backup sees the new file
     except (OSError, sqlite3.Error):

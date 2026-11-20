@@ -14,6 +14,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -627,6 +628,44 @@ def test_staging_a_write_ahead_log_database_leaves_no_sidecar_files_beside_it(va
 
     assert staged >= 1 and findings == []
     assert not list(state.glob("collections.sqlite-*"))  # a read-only open would have left a -wal and a -shm
+
+
+_HOLDS_SHARED_LOCK = """
+import fcntl, sys
+# SQLite's shared-lock range on the database file: PENDING_BYTE + 2, 510 bytes (os_unix.c).
+with open(sys.argv[1], "rb+") as database:
+    try:
+        fcntl.lockf(database, fcntl.LOCK_EX | fcntl.LOCK_NB, 510, 0x40000002)
+    except OSError:
+        print("held")
+    else:
+        print("free")
+"""
+
+
+def test_staging_keeps_the_locks_of_the_service_s_own_open_connection(vault: Path, tmp_path: Path) -> None:
+    # A raw read of a live database drops this process's locks on it when it closes: another process then
+    # checkpoints and removes the write-ahead log under the open connection, and a committed write can be lost.
+    pytest.importorskip("fcntl")
+    database = _state_dir(vault) / ".governance.sqlite"
+    service = sqlite3.connect(database)
+    service.execute("PRAGMA journal_mode=WAL")
+    service.execute("CREATE TABLE grants (id INTEGER)")
+    service.execute("INSERT INTO grants VALUES (1)")
+    service.commit()
+    service.execute("SELECT * FROM grants").fetchall()
+
+    def probe() -> str:
+        return subprocess.run([sys.executable, "-c", _HOLDS_SHARED_LOCK, str(database)],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    try:
+        assert probe() == "held"
+        staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+        assert staged >= 1 and findings == []
+        assert probe() == "held"
+    finally:
+        service.close()
 
 
 def test_a_stop_ends_staging_instead_of_finishing_every_file(vault: Path, tmp_path: Path) -> None:
