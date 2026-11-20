@@ -5,104 +5,117 @@
 See `proposal.md` for the outcome. These parts already exist:
 
 - **Admission digest.** Every original's binding records `binary_sha256` and `binary_size`.
-- **`Store` protocol.** `upload(name, stream, size, sha256)`, `head(name, version)` and `open(name, version)` carry offload, eviction and verified hydration. Uploaded bytes are `age` ciphertext. The stored-object pointer pins the ciphertext size and digest.
-- **Adapters.** `media-edge` serves Cloud, and `filesystem-test` serves tests. Only cellctl writes the store configuration.
-- **Fixity.** Fixity restores a damaged original only from a copy that hashes to the binding. The candidates today are the media-store version, a pool blob, another stored original and a local-import source file.
+- **The `Store` protocol.** It has three calls: `upload(name, stream, size, sha256)`, `head(name, version)` and `open(name, version)`. Together they carry offload, eviction and verified hydration.
+  - Offload hashes the plaintext against the binding, encrypts it with `age`, uploads it, and publishes the stored-object pointer only after the store confirms the ciphertext size and digest.
+- **Adapters.** `media-edge` serves Cloud and `filesystem-test` serves tests. Only cellctl writes the store configuration.
+- **Fixity.** Fixity restores a damaged original only from a copy that hashes to the binding. The candidates are the media-store version, a pool blob, another stored original and a local-import source file.
 
-A drill on a disposable vault with a filesystem store on a second path found these facts:
+A drill ran once, on one laptop, against a disposable vault with a filesystem store on a second path (20 Nov 2026). It found these facts:
 
 | Check | Result |
 |---|---|
 | Damaged local original | Restored from the stored copy |
 | Both copies damaged | Reported as `corrupt_no_copy` |
 | Search after eviction | Still found the sidecar |
-| Offload of 1 GiB on a laptop | 4.7 s (hash, encryption and write) |
-| Verified hydration of 1 GiB | 3.1 s |
+| 1 GiB offload | About 5 s |
+| 1 GiB verified hydration | About 3 s |
 | Damaged stored copy | Not reported. `FilesystemStore.head` rehashes the object, so eviction refused without a finding. `EdgeStore.head` returns the digest declared to the provider. |
 
-The damaged-stored-copy gap belongs to the next change (`verify-stored-replicas`). This design gives it the capability field it needs.
+The damaged-stored-copy gap belongs to the next change, `verify-stored-replicas`. This design adds the `head` descriptor field that it needs.
 
-The repository records no load target. This design sizes for one vault of 500,000 originals and 25 TB, and every original copied to two stores.
+The repository records no load target. This design sizes for one vault of 500,000 originals and 25 TB, with every original replicated to two stores.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- One original can have several verified copies in owner-declared stores.
-- Repair uses any recoverable copy.
+
+- One original can have several verified replicas in configured stores.
+- Repair uses any verified replica the install can decrypt.
 - The owner sees how protected each original is.
 
 **Non-Goals:**
+
 - Eviction on personal installs.
-- Automatic placement or a storage policy.
-- Scheduled verification of remote copies.
+- Automatic placement and storage policy.
+- Scheduled verification of stored replicas.
 - Rclone, SFTP, S3 or cold-archive adapters.
+- Cost and immutability fields.
 - A change to Cloud's one-copy offload.
 
 ## Decisions
 
-### D1: The replica list lives in the binding; verification state lives in rebuildable SQLite
+### D1: The replica list lives in the binding, and verification state lives in rebuildable SQLite
 
-The binding is in the vault and is backed up with it, so the list of copies survives the loss of derived state. It mirrors the fixity design. The binding holds the expected digest, and the table holds only the last observation.
+The binding is in the vault and is backed up with it, so the replica list survives the loss of derived state. This mirrors fixity: the binding holds the expected digest, and the table holds only the last observation.
 
 Rejected alternative: keep replicas only in the media job ledger. A lost ledger would then lose the custody record.
 
-A binding with the existing single pointer reads as a list of one. Writers keep every replica entry they do not change.
+A binding with the existing single pointer reads as a list of one. A replica in a store that does not serve eviction never changes the original's state, so the one state function keeps its meaning.
 
-### D2: A capability descriptor is configuration with a closed schema
+### D2: The capability descriptor holds only what this change reads
 
-These fields are a closed set that this schema fixes:
-- failure domain;
-- immutability: `none`, `governance` or `compliance`;
-- checksum kind;
-- whether `head` recomputes content;
-- retrieval class: `immediate`, `minutes` or `hours`;
-- deletion capability;
-- cost per GB-month, egress price and minimum retention days.
+The descriptor has three fields: failure domain, retrieval class and whether `head` recomputes content. Their enum values are protocol values that this schema fixes. Code branches only on these values, never on a store's name.
 
-The owner or the provider documentation supplies the values. Code branches only on the closed field values, never on a store's name. A descriptor that fails the schema makes that store unavailable, and the status names the reason. Parsing configuration is a parser boundary, so refusing invalid input is correct here.
+Cost, egress, immutability and minimum retention come with the policy and cold-archive changes that read them. A field that nothing reads would only add friction to setup.
 
-### D3: One configuration format for personal and Cloud
+### D3: One configuration format, and the legacy entry is one store
 
-Personal installs use the same `EXOMEM_MEDIA_STORE_CONFIG` file format and the same parser as Cloud, extended with a list of stores. Cloud keeps writing its file from cellctl.
+Personal installs use the same `EXOMEM_MEDIA_STORE_CONFIG` file format and parser as Cloud, extended with a list of stores. A vault entry without that list reads as one store with retrieval class `immediate` and unknown other fields. An unknown field is shown, never refused, so Cloud's cellctl-written file keeps working unchanged.
+
+Writers keep the per-vault `store` key, so an older parser still reads the file after a downgrade.
 
 The file holds paths to key material, never the keys. It lives outside the vault, because a vault copy must not carry the means to decrypt every replica.
 
-### D4: Every replica is ciphertext, and a replica is recoverable only with an escrowed key
+### D4: Every replica is ciphertext, and a replica is recoverable only with a surviving key
 
-All replicas go through the existing `age` path, so there is one write path and no plaintext branch.
+All replicas go through the existing `age` path. There is one write path and no plaintext branch.
 
-An encrypted copy is useless if its identity file dies with the primary disk. So a replica counts as recoverable only when both conditions hold:
-- its upload was verified against the declared size and digest;
-- the owner has confirmed an export of the decryption identity outside the primary machine.
+"Verified at upload" names the two checks that offload already makes. The plaintext must hash to the binding before encryption, and the store must confirm the published ciphertext's size and digest. No replica is read back to earn this state.
 
-On a Cloud cell, platform key custody wraps the identity, so that condition is already met. Recoverability is only a status about surviving the loss of the primary machine. Repair still uses any verified replica whose identity the install can read. A missing export therefore never blocks a repair, and Cloud's existing restore from the media-store copy is unchanged.
+An encrypted replica is useless if its identity file dies with the primary disk. A replica therefore counts as recoverable only when its key version's identity survives that loss:
+- On a personal install, the owner confirms an export of the identity.
+- On a Cloud cell, platform key custody wraps it.
 
-What this control prevents is a status that reports two safe copies when a disk loss would leave zero. What it costs when it fires wrongly is that status under-reports protection until the owner confirms the export. Only the owner pays, and only once per key.
+Recoverability is only a status. Repair uses any verified replica whose identity the install can read, so a missing export never blocks a repair.
 
-### D5: Copying is an explicit, bounded owner operation
+What this control prevents: a status that reports two safe copies when a disk loss would leave zero. Its cost when it fires wrongly: the status under-reports protection until the owner confirms the export. Only the owner pays, once per key version.
 
-The operation `replicate` copies originals that lack a replica in the named store. It runs in batches through the media job ledger and the existing offload path. It holds the vault mutation guard only for each pointer publication, and never while it hashes, encrypts or uploads. That is the foreground-first shape the media lock work established.
+### D5: The filesystem adapter proves which store it is writing to
 
-A retry after a lost reply reuses the recorded object name, as Cloud offload already does.
+The adapter never creates its root. The root holds a marker naming the configured store.
 
-### D6: Status reads an aggregate, not a walk
+Without the marker, an unmounted NAS mount point looks like an empty store. `head` would answer "absent", offload would drop the pointer, and the new upload would land on the primary disk.
 
-The owner status reads per-store counts and the oldest verification time from the SQLite table. That table is indexed by store and state, so the answer is one bounded query at 500,000 originals.
+With the marker missing or different, uploads and `head` refuse. The store reads as unavailable.
 
-A per-original view pages through results by path.
+### D6: Copying is a bounded owner operation
+
+`replicate` makes a replica in a named store for each original that lacks one. It runs in batches through the media job ledger and the existing offload path. It takes the vault mutation guard only for the short protection and publication commits, never while it hashes, encrypts or uploads. A retry after a lost reply reuses the recorded object name.
+
+### D7: Status reads an aggregate, and reports unknown during a rebuild
+
+The status reads per-store counts and the oldest verification time from an indexed SQLite table, in one bounded query. A per-original view pages through results by path.
+
+A lost table shows every value as unknown until the background rebuild from the bindings finishes. The status never walks the bindings itself.
+
+### D8: Fixity tries local copies first
+
+Fixity tries a pool blob or another stored original before any replica. A local copy needs no download. Only replicas in `immediate` stores are tried automatically. Others are named in the route for the owner to restore.
+
+On Cloud this reverses today's order, in which the media-store version came first. The outcome is the same, at no download cost when a local copy exists.
 
 ## Risks / Trade-offs
 
-- **The binding format grows.** A reader older than this change sees the first replica as the single pointer, and the change keeps that entry first. Mitigation: a compatibility test on a binding written by this change.
-- **No scheduled check of stored copies yet.** A damaged stored copy stays recoverable in the status until the next change adds verification. Mitigation: status labels the stored copies "verified at upload" with their upload time. This is honest, not "verified".
+- **Each replica store rewrites each sidecar once.** Copying 500,000 originals to one store is 500,000 binding writes, with their index, graph and sync work. Mitigation: bounded batches off the foreground guard. The implementation plan measures the write cost on a production-sized copy before any live run. An append-only per-store manifest is the alternative, if that cost breaks the budget.
+- **No scheduled check of stored replicas yet.** A damaged stored replica stays "verified at upload" until the next change adds verification. Mitigation: the status labels replicas "verified at upload" with their upload time, never "verified".
 - **Store-mode vaults.** `make-vault-store-canonical` changes where sidecars live. Mitigation: the replica list is a binding field read through the existing original resolver, not a file-layout assumption.
 
 ## Migration Plan
 
 Nothing migrates. A binding gains replicas only when the owner runs `replicate`.
 
-Rollback is a release downgrade. The older reader keeps the first replica and ignores the rest, and the copies stay in their stores.
+Rollback is a release downgrade. The older reader keeps the first replica as its single pointer and keeps reading the configuration through the per-vault `store` key. The replicas stay in their stores.
 
 ## Open Questions
 
-- Should the key-export confirmation be a CLI acknowledgement, or a check that the exported identity decrypts a probe object? The second costs one round trip per store, but it proves the export works.
+- How should the owner confirm the key export? A CLI acknowledgement is the simple option. A probe that decrypts a test object with the exported identity proves the export works, but it cannot prove the export is off the machine.

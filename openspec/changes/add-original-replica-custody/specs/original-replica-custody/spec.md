@@ -2,77 +2,90 @@
 
 ## Purpose
 
-Keep verified copies of each original in owner-declared stores, report how protected each original is, and make every recoverable copy available to repair.
+Keep verified replicas of each original in configured stores, report how protected each original is, and make every verified replica available to repair.
 
 ## ADDED Requirements
 
-### Requirement: Stores are declared with a capability descriptor
+### Requirement: Each store has a capability descriptor
 
-The owner SHALL declare each store in the media store configuration. Each store entry SHALL have a name, an adapter, and a capability descriptor with these fields:
+The media store configuration SHALL declare each store with a name, an adapter, and a capability descriptor of three fields:
 
-- failure domain;
-- immutability (`none`, `governance` or `compliance`);
-- checksum kind;
-- whether `head` recomputes content;
-- retrieval class (`immediate`, `minutes` or `hours`);
-- deletion capability;
-- cost per GB-month, egress price and minimum retention days.
+- failure domain, a string;
+- retrieval class, one of the protocol values `immediate`, `minutes` or `hours`;
+- whether `head` recomputes the stored content, a boolean.
 
-A store whose entry fails the schema SHALL be unavailable. The owner status SHALL name the field that failed. Code SHALL branch only on descriptor field values, never on a store's name.
+A store entry whose descriptor fails this schema SHALL be unavailable. The owner status SHALL name the failed field. Code SHALL branch only on descriptor values, never on a store's name.
+
+A vault entry with no list of stores SHALL read as one store, as it does today. That store's retrieval class is `immediate`, and its other descriptor fields are unknown. An unknown field SHALL show as unknown in the status and SHALL NOT make the store unavailable.
 
 #### Scenario: A complete descriptor is accepted
 
-- **WHEN** the owner declares a `filesystem` store with every descriptor field
-- **THEN** the store is available for copies
+- **WHEN** the configuration declares a `filesystem` store with all three descriptor fields
+- **THEN** the store is available for replicas
 - **AND** the status lists its failure domain and retrieval class
 
 #### Scenario: An incomplete descriptor is refused
 
-- **WHEN** a store entry omits its failure domain
-- **THEN** no copy is made to that store
+- **WHEN** a store entry in a list of stores omits its failure domain
+- **THEN** no replica is made in that store
 - **AND** the status names the store and the missing field
+
+#### Scenario: A Cloud cell's existing configuration
+
+- **WHEN** a cell's configuration names one `media-edge` store and no list of stores
+- **THEN** the cell's stored-object pointers are replicas in that store, with retrieval class `immediate`
+- **AND** the status shows that store's failure domain as unknown
 
 ### Requirement: A supported filesystem adapter serves a local disk or a mounted NAS
 
-The `filesystem` adapter SHALL write versioned ciphertext objects under its root and SHALL expose no deletion. When its root is absent, the adapter SHALL report the store as unavailable. It SHALL NOT treat an absent root as proof that a copy is gone.
+The `filesystem` adapter SHALL write versioned ciphertext objects under its root and SHALL expose no deletion. It SHALL NOT create its root. The root SHALL carry a store-identity marker that matches the configured store. When the root or its marker is absent or does not match, the adapter SHALL refuse uploads and `head`, and the store SHALL be unavailable. An unavailable store SHALL NOT be taken as proof that a replica is gone.
 
 #### Scenario: An unmounted NAS is unavailable, not empty
 
-- **WHEN** a `filesystem` store's root is not mounted
-- **THEN** its replicas keep their recorded state
-- **AND** the status shows the store as unavailable
+- **WHEN** a `filesystem` store's mount point exists but the NAS is not mounted, so the marker is absent
+- **THEN** no upload writes under the mount point
+- **AND** its replicas keep their recorded state, and the status shows the store as unavailable
 
 ### Requirement: An original's binding lists its replicas
 
-An original's binding SHALL list each copy held outside the original's own path. Each entry SHALL name the store, object, version, ciphertext size and ciphertext SHA-256. A binding with a single stored-object pointer SHALL read as a list with that one entry. A writer SHALL keep every entry it does not change, and SHALL keep the earliest entry first.
+An original's binding SHALL list each replica held outside the original's own path. Each entry SHALL name the store, object, version, key version, ciphertext size and ciphertext SHA-256. A binding with a single stored-object pointer SHALL read as a list with that one entry. A writer SHALL keep every entry it does not change, and SHALL keep the earliest entry first. A replica in a store other than the one that serves eviction SHALL NOT change the original's state (`local`, `cached`, `evicted` or `missing`).
 
 #### Scenario: A single pointer reads as one replica
 
 - **WHEN** a binding written before this change holds one stored-object pointer
-- **THEN** the original has one replica with that pointer's store, object and version
+- **THEN** the original has one replica with that pointer's store, object, version and key version
 
-#### Scenario: Adding a replica keeps the existing one
+#### Scenario: A second replica keeps the first
 
-- **WHEN** the owner copies an original that has a Cloud or legacy pointer to a second store
+- **WHEN** an original with a Cloud or legacy pointer gains a replica in a second store
 - **THEN** the binding lists both replicas, with the earlier one first
+- **AND** the original's state is unchanged
 
-### Requirement: A replica is recoverable only when its upload and its key are verified
+### Requirement: A replica is verified at upload and recoverable only with a surviving key
 
-A replica SHALL count as recoverable only when both conditions hold:
+A replica SHALL count as verified at upload when both existing checks passed:
 
-- its upload matched the declared plaintext size and SHA-256;
-- the replica's decryption identity survives the loss of the primary machine. For a personal install, the owner has confirmed an export of the identity outside that machine. For a Cloud cell, platform key custody wraps the identity.
+- the original's plaintext hashed to its binding's SHA-256 before encryption;
+- the store confirmed the ciphertext size and SHA-256 of the published version.
 
-The owner status SHALL show any other replica as present but not recoverable, and SHALL give the reason. Recoverability is a status about surviving the loss of the primary machine. It SHALL NOT stop fixity from repairing from a replica whose identity this install can read.
+Every published stored-object pointer meets both checks, because offload publishes a pointer only after the store confirms it.
 
-#### Scenario: A copy with an unexported key
+A verified replica SHALL count as recoverable only when its key version's decryption identity survives the loss of the primary machine:
 
-- **WHEN** an original has a verified copy in a second store and the owner has not confirmed the key export
-- **THEN** the status shows one recoverable copy (the local original) and one copy that is not recoverable, with the reason "key not exported"
+- On a personal install, the owner has confirmed an export of that identity outside the machine.
+- On a Cloud cell, platform key custody wraps the identity.
 
-### Requirement: The owner copies originals to a store in bounded background batches
+The owner status SHALL show every other replica as present but not recoverable, and SHALL give the reason. Recoverability is a status about surviving the loss of the primary machine. It SHALL NOT stop fixity from repairing from a verified replica whose identity this install can read.
 
-One owner operation SHALL copy originals that lack a replica in a named store. It SHALL run in bounded batches through the media job ledger and SHALL report the counts queued, copied, refused and remaining. The operation SHALL hold the vault mutation guard only while it publishes a replica entry, never while it hashes, encrypts or uploads. A retry after a lost reply SHALL reuse the recorded object name.
+#### Scenario: A replica with an unexported key
+
+- **WHEN** an original on a personal install has one verified replica in a second store, and the owner has not confirmed the key export
+- **THEN** the status shows zero recoverable replicas and one replica that is not recoverable, with the reason "key not exported"
+- **AND** the status reports the local original separately
+
+### Requirement: An owner operation copies originals to a store in bounded background batches
+
+One owner operation SHALL make a replica in a named store for each original that lacks one. It SHALL run in bounded batches through the media job ledger and SHALL report the counts queued, copied, refused and remaining. It SHALL hold the vault mutation guard only for its short protection and publication commits, never while it hashes, encrypts or uploads. A retry after a lost reply SHALL reuse the recorded object name.
 
 #### Scenario: Copying an archive to a NAS
 
@@ -84,21 +97,21 @@ One owner operation SHALL copy originals that lack a replica in a named store. I
 
 - **WHEN** an upload lands and its reply is lost
 - **THEN** the retry uses the same object name
-- **AND** the store holds one object for that original
 
 ### Requirement: The owner sees each original's protection
 
-The owner status SHALL report, per store and in aggregate:
+The owner status SHALL report these values, per store and in aggregate:
 
 - replicas;
+- verified replicas;
 - recoverable replicas;
 - distinct failure domains;
 - the oldest verification time.
 
-A per-original view SHALL page through results by path. A value that the status cannot read SHALL show as unknown, never as zero. The aggregate SHALL be one bounded query over indexed verification state.
+A per-original view SHALL page through results by path. The aggregate SHALL be one bounded query over indexed verification state. A value that the status cannot read SHALL show as unknown, never as zero.
 
-#### Scenario: An unreadable state table
+#### Scenario: A lost verification table
 
 - **WHEN** the verification table is missing
-- **THEN** the status shows replica counts from the bindings and the verification times as unknown
-- **AND** the table is rebuilt from the bindings
+- **THEN** the status shows every count and time as unknown
+- **AND** a background rebuild restores the table from the bindings, and the status reports the counts once it finishes

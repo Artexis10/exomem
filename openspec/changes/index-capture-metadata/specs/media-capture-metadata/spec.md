@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Record when and where a photo or video was captured, make those facts searchable at indexed cost, and disclose a location only to a caller who may read the original.
+Record when and where a photo or video was captured, make capture date and place searchable at indexed cost, and withhold a location from every caller who may not read the original.
 
 ## ADDED Requirements
 
@@ -10,51 +10,57 @@ Record when and where a photo or video was captured, make those facts searchable
 
 Image and video extraction SHALL record each of these values in the sidecar frontmatter when the file states it:
 
-- capture time, with the file's UTC offset;
+- capture time as the camera recorded it, with its UTC offset when the file records one;
+- capture date, the ISO calendar date of that recorded local time;
 - GPS latitude and longitude;
 - camera make and model;
 - pixel dimensions.
 
-A capture time without an offset SHALL be recorded as local time with an unknown offset. A value that the file does not state SHALL be absent, never zero, empty or a default date.
+For images, the capture time SHALL come only from the EXIF original capture time and its offset field. It SHALL NOT come from the file's modification time, which scanners and editors set. A GPS block that the file marks void SHALL count as no position. A value that the file does not state SHALL be absent, never zero, empty or a default date.
 
 #### Scenario: A phone photo with an offset
 
-- **WHEN** a JPEG records an original capture time of 2012-07-14 18:05:00 with offset +03:00 and a GPS position
-- **THEN** the sidecar records that time with offset +03:00 and that position
+- **WHEN** a JPEG records an original capture time of 2012-07-14 18:05:00 with offset +03:00 and a valid GPS position
+- **THEN** the sidecar records that time with offset +03:00, the capture date 2012-07-14, and that position
 
-#### Scenario: A scanned print with no metadata
+#### Scenario: A scanned print
 
-- **WHEN** a scanned image records no capture time and no position
-- **THEN** the sidecar has no capture time and no position
-- **AND** a time window filter does not match it
+- **WHEN** a scanned image records a modification time but no original capture time and no position
+- **THEN** the sidecar has no capture time, no capture date and no position
+- **AND** a capture date filter does not match it
 
-### Requirement: Search filters by capture time window and by place
+### Requirement: Search filters by capture date and by place
 
-A search SHALL accept a capture time window and a geographic bounding box as structured filters, using the existing ordered operators. A time without an offset SHALL match a window that is widened by the largest real UTC offset range. A filtered search SHALL use an index, and its cost SHALL not grow with the number of media files outside the filter.
+A search SHALL accept the capture date as a structured filter with the existing ordered operators on ISO dates. It SHALL accept a geographic bounding box as a pair of ordered latitude and longitude filters. A box that crosses the antimeridian SHALL be expressed as two longitude ranges joined by `$or`. A filtered search SHALL use an index, and its cost SHALL NOT grow with the number of media files outside the filter.
 
 #### Scenario: A summer window
 
-- **WHEN** a search filters capture time between 2012-06-01 and 2012-08-31
-- **THEN** results include photos taken in that window with a known offset
-- **AND** results include photos with an unknown offset whose local time falls in the widened window
+- **WHEN** a search filters the capture date between 2012-06-01 and 2012-08-31
+- **THEN** results include the photos whose recorded local date falls in that window, with or without an offset
 
-### Requirement: A location is disclosed only to a caller who may read the original
+### Requirement: A location is withheld from a caller who may not read the original
 
-A search result or page read SHALL include a GPS position only when the caller passes the original's release check. A bounding-box filter from any other caller SHALL be refused, with no result count.
+A caller who fails an original's release check SHALL see that original's position as absent on every surface, including:
+
+- page reads, excerpts and exports;
+- lexical and vector text;
+- every filter, including generic frontmatter-pointer filters and `$exists`.
+
+The release check SHALL be evaluated per original. A location filter SHALL match only originals that the caller passes the release check for.
 
 #### Scenario: A reader without original access
 
 - **WHEN** a caller who may read a photo's page but not download its original reads that page
-- **THEN** the page shows the capture time and camera but no position
+- **THEN** the page shows the capture date and camera but no position
 
-#### Scenario: A probing bounding box
+#### Scenario: A probing filter
 
-- **WHEN** that caller searches with a bounding-box filter
-- **THEN** the search is refused and reports no count of matching photos
+- **WHEN** that caller searches with a latitude range, or a frontmatter-pointer filter on the position, that the photo's position would satisfy
+- **THEN** the photo does not match, exactly as if it had no position
 
-### Requirement: The owner adds capture metadata to existing sidecars without changing their text
+### Requirement: An owner operation adds capture metadata to existing sidecars without changing their text
 
-One owner operation SHALL add capture metadata to existing image and video sidecars through the media job ledger. It SHALL rewrite only the capture block. It SHALL keep the extracted text, the preserved notes and the prior-extraction pages byte for byte. A sidecar that the boundary guard cannot classify SHALL be skipped and counted. The operation SHALL run only when the owner starts it.
+One owner operation SHALL add capture metadata to existing image and video sidecars through the media job ledger. It SHALL rewrite only the capture block. It SHALL keep the extracted text, the preserved notes and the prior-extraction pages byte for byte. A sidecar that the boundary guard cannot classify SHALL be skipped and counted. An original that is not local SHALL be skipped and counted, never hydrated by this operation. The operation SHALL run only when the owner starts it.
 
 #### Scenario: A sidecar with owner notes
 

@@ -11,16 +11,10 @@ A drill on a disposable vault showed that the existing seam works on a second fi
 ## What Changes
 
 - An original's binding lists every copy that the vault holds outside the original's own path. Each copy names its store, object, version and ciphertext digest. A binding with the current single stored-object pointer reads as a list of one.
-- The owner declares stores in configuration. Each store has a capability descriptor with a closed set of fields:
-  - failure domain;
-  - immutability;
-  - checksum kind, and whether a read of the checksum recomputes the content;
-  - retrieval class;
-  - deletion capability;
-  - cost per GB-month, egress price and minimum retention.
-- The test filesystem adapter becomes a supported `filesystem` adapter for a local disk or a mounted NAS. It never deletes.
+- The configuration declares stores. Each store has a capability descriptor with three fields: failure domain, retrieval class, and whether `head` recomputes content. A vault entry without a list of stores, such as a Cloud cell's, reads as one store, as it does today.
+- The test filesystem adapter becomes a supported `filesystem` adapter for a local disk or a mounted NAS. It never deletes and never creates its root. A store-identity marker keeps an unmounted NAS from reading as an empty store.
 - An owner operation copies originals to a named store in bounded background batches, through the existing media job ledger and offload path.
-- A copy counts as recoverable only when it was verified at upload against its declared size and digest, and when its decryption key is recoverable apart from the primary machine.
+- A replica is verified at upload by the checks offload already makes. It counts as recoverable only when its decryption key survives the loss of the primary machine.
 - Fixity repair considers every verified copy whose key the install can read, not only the one stored-object pointer.
 - An owner status reports copies, recoverable copies, failure domains and the last verification time, per original and in aggregate. Unknown values stay visible as unknown.
 
