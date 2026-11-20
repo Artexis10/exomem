@@ -264,6 +264,25 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
     assert "> Cited in the harbour survey." in (vault / successor["page"]).read_text(encoding="utf-8")
 
 
+@pytest.mark.usefixtures("owner_scope")
+def test_a_correction_with_an_empty_url_drops_a_doi_the_document_never_shows(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "summary.pdf", ["A thesis summary that cites a harbour lantern study."]))
+    row = _save_pdf(vault, source_schema, url=CLAIM, tags=["lanterns"])["files"][0]
+
+    # What `next_action` asks for when the document has no url of its own: the right kind and url "".
+    successor = _save_pdf(
+        vault, source_schema, upload=False, title="Thesis summary on harbour lanterns", source_kind="research-report",
+        url="", correction=_correction(vault, row, reason="The file is a thesis summary that cites the study."),
+    )["files"][0]
+
+    kept = _frontmatter(vault, successor["page"])
+    assert not kept.get("url")
+    assert not kept["identity_check"].get("claimed_dois")
+    assert kept["tags"] == ["lanterns"]
+
+
 def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, source_schema, saved, monkeypatch) -> None:
     # Each scan reads every canonical Source page: seconds at the load target of 20,000 pages.
     scans = []

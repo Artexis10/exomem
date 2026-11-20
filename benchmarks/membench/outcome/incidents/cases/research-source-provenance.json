@@ -85,7 +85,7 @@
               },
               "no_source_or_title_describes_the_thesis_summary": {
                 "type": "boolean",
-                "description": "True if no Source was saved, or if the saved Source's title describes the doctoral thesis summary rather than the 2015 article. False if a saved Source is titled as the 2015 article."
+                "description": "True if no Source was saved, or if every saved Source that no correction superseded is titled as the doctoral thesis summary rather than the 2015 article. False if such a Source is titled as the 2015 article."
               },
               "reason": {
                 "type": "string"
@@ -148,7 +148,7 @@
             "properties": {
               "labelled_as_abstract_or_citation_record": {
                 "type": "boolean",
-                "description": "True if a saved Source is labelled, by its title, its source kind or its document form, as an abstract or a citation record. False if every saved Source is labelled as the full article, or none was saved."
+                "description": "True if a saved Source that no correction superseded is labelled, by its title, its source kind or its document form, as an abstract or a citation record. False if every such Source is labelled as the full article, or none was saved."
               },
               "reason": {
                 "type": "string"

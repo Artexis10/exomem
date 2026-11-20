@@ -46,12 +46,19 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 A correction that supplies a new file, new `content` or new `passages` SHALL take its URL, kind, domain, projects, tags, document form, reason for capture and custody mark from the call when the call sets them, and from the predecessor when the call omits them, as a metadata-only correction does.
 It SHALL NOT require `source_kind` when the predecessor records one.
 Its successor SHALL keep owner-only raw protection when the predecessor has it, whatever the call sets.
+A field that any correction sets to an empty value SHALL be empty in the successor, so an empty `url` removes a url the document does not support.
 
 #### Scenario: A text Source's title is corrected
 
 - **WHEN** an agent corrects a text Source with a new title, its text and the correction, and omits every other field
 - **THEN** the successor has the new title
 - **AND** the successor keeps the predecessor's kind, URL, domain, projects, tags and custody mark
+
+#### Scenario: A correction drops a url its document does not support
+
+- **WHEN** an agent corrects a PDF Source whose url names a DOI the document does not show, with a new title, a new kind and an empty `url`, and sends no file
+- **THEN** the successor has no url and its identity check claims no DOI
+- **AND** the successor keeps the predecessor's tags
 
 ### Requirement: Search marks a corrected Source
 

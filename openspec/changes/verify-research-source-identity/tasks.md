@@ -34,3 +34,4 @@
 - [x] 6.4 Regenerate derived artifacts and run the public-artifact privacy gate.
 - [x] 6.5 Name the DOI the document shows, and the document's own title, in the correction call on `conflict`. The 2026-11-20 independent acceptance found an agent that asked the person instead of correcting.
 - [x] 6.6 Process a metadata-only correction's successor like any new Source, so it gets the document's text. On 2026-11-20 two live successors stayed `extracted_by: pending` with no job.
+- [x] 6.7 Say in the comparison correction call that a correction keeps every field it omits and that `url ""` removes the url. On 2026-11-20 an independent acceptance run found an agent that meant to drop a DOI its document never showed, omitted `url`, and kept it.
