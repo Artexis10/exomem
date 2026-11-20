@@ -109,7 +109,7 @@ import threading
 import unicodedata
 import weakref
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import lru_cache, wraps
@@ -164,6 +164,8 @@ from .vault import (
 log = logging.getLogger(__name__)
 
 RELATION_GENERIC_SHARE_CATEGORY = "relation_generic_share"
+#: A Source kept on purpose with no note expected (`custody_only: true`); the unprocessed pass emits it.
+CUSTODY_SOURCE = "custody_source"
 
 # These category names select implemented audit checks, not vault vocabulary.
 ALL_CATEGORIES: tuple[str, ...] = (
@@ -171,7 +173,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "forward_reference",
     "orphan_entity",
     "unprocessed_source",
-    "custody_source",
+    CUSTODY_SOURCE,
     "unresolved_source_citation",
     "index_drift",
     "tag_inconsistency",
@@ -692,15 +694,13 @@ def audit(
         # One snapshot, built on first use, for both backlog checks.
         return find_module.writer_resolver_snapshot(vault_root)
 
-    backlog_families = selected & {"unprocessed_source", "custody_source"}
+    backlog_families = selected & {"unprocessed_source", CUSTODY_SOURCE}
     with stage(backlog_families) as run:
         if run:
             findings.extend(
                 _check_unprocessed_sources(
                     vault_root, pages, today=today, source_context=source_context,
-                    resolver=backlog_resolver,
-                    # One pass emits both backlog families; an unfiltered audit gets both.
-                    custody="custody_source" in backlog_families,
+                    resolver=backlog_resolver, families=backlog_families,
                 )
             )
     with stage(review_state_module.EPISODE_BACKLOG) as run:
@@ -3185,7 +3185,7 @@ def _check_unprocessed_sources(
     status_basis: lifecycle_statuses.Basis | None = None,
     resolver: Callable[[], vault_module.WikilinkResolver] | None = None,
     source_context: bool = True,
-    custody: bool = True,
+    families: Collection[str] = ("unprocessed_source",),
 ) -> list[AuditFinding]:
     """Flag Sources that no live page compiles, aged + triaged oldest-first.
 
@@ -3205,7 +3205,8 @@ def _check_unprocessed_sources(
     A Source whose frontmatter records `custody_only: true` is kept for
     safekeeping, not for compilation: it leaves this family and lands in
     `custody_source` instead, in the same pass — always `info`, never aged
-    into a warning. `custody=False` emits only this family's rows.
+    into a warning. `families` names the families to emit; a Source of a
+    family left out is skipped before its context is built.
     """
     today = today or dt.date.today()
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
@@ -3239,6 +3240,10 @@ def _check_unprocessed_sources(
             ).lifecycle_class
             == "superseded"
         ):
+            continue
+        # Kept for safekeeping on purpose, a custody Source never waits as `unprocessed_source`.
+        custody = page.frontmatter.get("custody_only") is True
+        if (CUSTODY_SOURCE if custody else "unprocessed_source") not in families:
             continue
         coverage = source_coverage.evaluate(
             vault_root,
@@ -3279,30 +3284,27 @@ def _check_unprocessed_sources(
             severity = "info"
             age_phrase = " (capture date unknown)"
 
-        if page.frontmatter.get("custody_only") is True:
-            # Kept for safekeeping on purpose: it never waits as `unprocessed_source`, and
-            # lands in `custody_source` only when that family was selected.
-            if custody:
-                rows.append(
-                    (
-                        age_days if age_days is not None else -1,
-                        AuditFinding(
-                            category="custody_source",
-                            # `info` whatever the age: a custody Source waits by choice.
-                            severity="info",
-                            path=page.rel_path,
-                            detail=(
-                                "Source kept for custody only — no note compiles it"
-                                + (f" ({age_days}d old)" if age_days is not None else "")
-                            ),
-                            proposed_fix=(
-                                "Compile a note that cites it (the citation clears the mark), "
-                                "or correct the Source with options.custody_only: false if it should wait for compilation."
-                            ),
-                            meta=meta,
+        if custody:
+            rows.append(
+                (
+                    age_days if age_days is not None else -1,
+                    AuditFinding(
+                        category=CUSTODY_SOURCE,
+                        # `info` whatever the age: a custody Source waits by choice.
+                        severity="info",
+                        path=page.rel_path,
+                        detail=(
+                            "Source kept for custody only — no note compiles it"
+                            + (f" ({age_days}d old)" if age_days is not None else "")
                         ),
-                    )
+                        proposed_fix=(
+                            "Compile a note that cites it (the citation clears the mark), "
+                            "or correct the Source with options.custody_only: false if it should wait for compilation."
+                        ),
+                        meta=meta,
+                    ),
                 )
+            )
             continue
 
         failing = coverage.failing
