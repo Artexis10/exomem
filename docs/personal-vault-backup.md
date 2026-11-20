@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Personal vault backup
 
 This guide is for the owner of a personal install. It does not cover Exomem Cloud, which keeps its own backup Jobs.
