@@ -157,6 +157,7 @@ class LocalRuntimeActivation:
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
         self.original_fixity: threading.Thread | None = None
+        self.media_replicas: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
@@ -302,6 +303,7 @@ class LocalRuntimeActivation:
             ("vocabulary recovery", self._start_vocabulary_recovery),
             ("recall re-embed", self._start_recall_reembed),
             ("original fixity", self._start_original_fixity),
+            ("media replicas", self._start_media_replicas),
             ("review pass", self._start_review_pass),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
@@ -400,6 +402,10 @@ class LocalRuntimeActivation:
             from . import original_fixity
 
             original_fixity.stop(worker=self.original_fixity)
+        if self.media_replicas is not None:
+            from . import media_replicas
+
+            media_replicas.stop(worker=self.media_replicas)
         if self.review_pass is not None:
             from . import review_pass
 
@@ -489,6 +495,12 @@ class LocalRuntimeActivation:
         from . import original_fixity
 
         self.original_fixity = original_fixity.start(vault_root)
+
+    def _start_media_replicas(self, vault_root: Path) -> None:
+        """Its own thread: copying to a replica store is long bulk work that fixity and extraction must not wait on."""
+        from . import media_replicas
+
+        self.media_replicas = media_replicas.start(vault_root)
 
     def _start_review_pass(self, vault_root: Path) -> None:
         """Keep the owner's review passes current, in the serving HTTP runtime only.
