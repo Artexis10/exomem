@@ -11,6 +11,7 @@ import importlib.util
 import os
 import socket
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -227,3 +228,22 @@ def test_a_count_that_leaves_nothing_to_judge_is_refused_as_an_argument_error(ar
     with pytest.raises(SystemExit) as stopped:
         rehearsal.build_parser().parse_args([*argv, *required])
     assert stopped.value.code == 2
+
+
+def test_a_stderr_line_ahead_of_a_refusal_does_not_hide_its_code(layout, settings, monkeypatch):
+    """The release step tells "nothing held" from a failure by the refusal's code, and a log line
+    that reaches stderr first, as the last-resort logging handler writes one, must not hide it."""
+    rig = rehearsal.Rig(layout, settings)
+    refusal = subprocess.CompletedProcess(
+        [],
+        1,
+        stdout="",
+        stderr="a log warning: not a refusal\n"
+        "VAULT_STORE_RELEASE_NOTHING_HELD: this vault holds no store claim\n",
+    )
+    monkeypatch.setattr(rig, "cli", lambda *arguments, **options: refusal)
+
+    answer = rig.store_json("release", "--dry-run")
+
+    assert answer["code"] == "VAULT_STORE_RELEASE_NOTHING_HELD"
+    assert answer["_exit"] == 1

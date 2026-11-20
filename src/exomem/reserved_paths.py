@@ -2544,11 +2544,14 @@ def _list_candidate_records(
     recursive: bool = True,
     descend: Callable[[str], bool] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
+    leave_out: Callable[[str], bool] | None = None,
 ) -> tuple[held_fs.SagaRecord, ...]:
     """Walk safe ordinary children without following or exposing aliases.
 
     `descend` receives the path of each folder, relative to the vault root, and says whether the
     walk enters it. A folder it refuses is still listed as a child of its parent; nothing below it is.
+    `leave_out` receives each entry's path, relative to the walked folder, before the walk takes the
+    entry's identity: an entry it names is never stat'ed or opened. A complete census omits it.
     """
 
     records: list[held_fs.SagaRecord] = []
@@ -2560,9 +2563,11 @@ def _list_candidate_records(
         def admit_name(name: str) -> bool:
             if checkpoint is not None:
                 checkpoint()
+            relative = f"{prefix}/{name}" if prefix else name
+            if leave_out is not None and leave_out(relative):
+                return False
             if not require_complete:
                 return True
-            relative = f"{prefix}/{name}" if prefix else name
             child = relative if source_relative == "." else f"{source_relative.rstrip('/')}/{relative}"
             classification = classify_logical(child)
             if classification.disposition is PathDisposition.INVALID:
@@ -2574,7 +2579,8 @@ def _list_candidate_records(
         if require_complete:
             names = {name for name in filesystem.iter_names(directory) if admit_name(name)}
         children = (filesystem.children(directory, name_filter=admit_name)
-                    if require_complete or checkpoint is not None else filesystem.children(directory))
+                    if require_complete or checkpoint is not None or leave_out is not None
+                    else filesystem.children(directory))
         if not children.ok:
             code = children.error.code if children.error is not None else "IO_REFUSED"
             raise ReservedPathLeafError(code)
@@ -2690,6 +2696,9 @@ def _list_stored_tree(
 ) -> tuple[GenericTreeEntry, ...]:
     """`list_generic_tree` for a store-mode vault: the disk's entries that the store does not own,
     then the store's pages and folders, offered to ``select`` together.
+
+    A disk folder at a stored page's path is not listed, nor is anything in it: the store decides
+    which pages exist, and telling a folder from a file there would cost a stat per page.
     """
     from .vault_store import read
 
@@ -2702,6 +2711,7 @@ def _list_stored_tree(
     on_disk: set[str] = set()
     only_stored: list[str] = []
     offered_once = False
+    pages = frozenset(stored.pages)
 
     def offered(candidates: list[tuple[str, str]]) -> list[str]:
         nonlocal offered_once
@@ -2722,9 +2732,11 @@ def _list_stored_tree(
         return [name for name in chosen if name in on_disk]
 
     try:
+        # A file at a stored page's path is its projection and never an entry, so the walk skips it
+        # before it stats it: the listing reads no projection, whether it lags, is absent or is damaged.
         with open_generic_tree(
             root, value, recursive=recursive, identities=identities, select=offered,
-            checkpoint=checkpoint,
+            checkpoint=checkpoint, leave_out=pages.__contains__,
         ) as walked:
             entries = list(walked)
     except ReservedPathLeafError as error:
@@ -2733,7 +2745,6 @@ def _list_stored_tree(
             raise
         entries = []
         offered([])
-    pages = frozenset(stored.pages)
     with read.snapshot(root) as view:
         for name in only_stored:
             if name not in pages:
@@ -2805,11 +2816,14 @@ def open_generic_tree(
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
+    leave_out: Callable[[str], bool] | None = None,
 ):
     """Yield entries under one held walk; exhaust it before publishing a census.
 
     `descend` prunes a recursive walk: it receives each folder's path relative to the vault root and
     says whether to enter it (`_list_candidate_records`). A census that needs every entry omits it.
+    `leave_out` names the entries, by path relative to the walked folder, that the walk skips before it
+    takes their identity (`_list_stored_tree`). A census (`require_complete`) omits it.
 
     A Markdown header that cannot be read, decoded or prepared within its own budget ends the walk,
     unless the caller passes `markdown_header_failed`: then the walk reports that entry's relative
@@ -2821,7 +2835,7 @@ def open_generic_tree(
             vault_root, value, recursive=recursive, identities=current,
             select=select, require_complete=require_complete, descend=descend,
             markdown_header_limit=markdown_header_limit, markdown_header_failed=markdown_header_failed,
-            checkpoint=checkpoint,
+            checkpoint=checkpoint, leave_out=leave_out,
         )
         try:
             yield entries
@@ -2876,6 +2890,7 @@ def _iter_generic_tree_held(
     markdown_header_limit: int | None = None,
     markdown_header_failed: Callable[[str, Exception], None] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
+    leave_out: Callable[[str], bool] | None = None,
 ) -> Iterator[GenericTreeEntry]:
 
     if checkpoint is not None:
@@ -2900,10 +2915,13 @@ def _iter_generic_tree_held(
                     relative,
                     identities=identities,
                     require_complete=require_complete,
-                    recursive=recursive, descend=descend, checkpoint=checkpoint,
+                    recursive=recursive, descend=descend, checkpoint=checkpoint, leave_out=leave_out,
                 )
             else:
-                enumerated = filesystem.children(source_directory)
+                enumerated = filesystem.children(
+                    source_directory,
+                    name_filter=None if leave_out is None else (lambda name: not leave_out(name)),
+                )
                 if not enumerated.ok:
                     code = (
                         enumerated.error.code

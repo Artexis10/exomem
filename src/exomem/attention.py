@@ -536,18 +536,21 @@ def _decided_findings(vault_root: Path, findings: list[AuditFinding]) -> list[Au
     totals and the summary are computed over what it receives, exactly as if
     the withheld pages were absent. The contradiction queue's trailing
     summary counts pairs capped before any decision, so it is not folded in
-    for such a caller.
+    for such a caller. A bound store filters the owner's walk too, so it is
+    the caller that decides whether the summary is dropped, not the filter.
     """
     from .governance import egress
 
     visible = egress.visible_page_filter(Path(vault_root))
     if visible is None:
         return findings
+    restricted = egress.caller_restricted(Path(vault_root))
     return [
         finding
         for finding in findings
         if not (
-            finding.category == "corpus_contradictions"
+            restricted
+            and finding.category == "corpus_contradictions"
             and finding.meta
             and "truncated" in finding.meta
         )

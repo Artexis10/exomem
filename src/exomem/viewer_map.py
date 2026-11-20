@@ -179,12 +179,20 @@ def _viewer_map(
         checkpoint = current_checkpoint()
         projection = ((checkpoint.triple, checkpoint.policy_version, checkpoint.access_policy_fingerprint)
                       if checkpoint is not None else None)
-        resolver = (find.recall_resolver_snapshot_at_checkpoint(vault_root, checkpoint)
+        borrowed = (find.recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
                     if checkpoint is not None and projection is not None
                     and (stored or metadata.get("recall_projection_identity") == graph._availability_freshness_value(projection))
                     else None)
         if checkpoint != current_checkpoint():
-            resolver = None
+            borrowed = None
+        resolver, publication = borrowed if borrowed is not None else (None, None)
+
+        def resolver_patched() -> bool:
+            # A store commit patches the shared resolver in place and drops its token, while a pinned
+            # request keeps reading its own revision, so only the token shows that the maps moved.
+            # Only a restricted reader resolves links through the resolver.
+            return stored and keep is not None and resolver.publication is not publication
+
         edge_coverage = keep is None or resolver is not None
         if not edge_coverage:
             stop("inspection_edges", "resolver_unavailable", None)
@@ -421,7 +429,7 @@ def _viewer_map(
             limit = {"source_work_limit": _SOURCE_BYTES, "summary_work_limit": _SUMMARY_BYTES,
                      "preparation_work_limit": _PREPARATION_BYTES}.get(reason)
             stop("inspection_edges", reason, limit)
-        if resolver is not None and checkpoint != current_checkpoint():
+        if resolver is not None and (checkpoint != current_checkpoint() or resolver_patched()):
             # Publishers can advance shared topology during a read; withhold mixed edges, retain partial pages.
             stop("inspection_edges", "resolver_checkpoint_changed", None)
             result["edges"] = []
