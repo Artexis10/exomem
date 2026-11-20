@@ -244,7 +244,9 @@ IMMEDIATE = "immediate"
 RETRIEVAL_CLASSES: tuple[str, ...] = (IMMEDIATE, "minutes", "hours")
 #: The configuration key that lists the declared stores beside the kept `store` key.
 STORES = "stores"
-#: The optional configuration value that states who holds the decryption identity: a platform that wraps it.
+#: The optional configuration key that states who holds the decryption identity, and its one value: a platform that
+#: wraps it. Without the key, the owner's confirmed export of the identity is the only evidence of custody.
+KEY_CUSTODY = "key_custody"
 PLATFORM_CUSTODY = "platform"
 
 
@@ -338,6 +340,21 @@ def store_entries(config: dict[str, object]) -> dict[str, StoreEntry]:
         found[name] = StoreEntry(name, item, given.get("failure_domain"), given.get("retrieval_class"),
                                  given.get("head_recomputes"), missing, invalid, False, True)
     return found
+
+
+def with_replica(value: object, replica: StoredObject) -> list[object]:
+    """A sidecar's `replicas` list with `replica` in place of the entry for its store, or after the last entry.
+
+    Every other entry stays as written and in its place, one that does not parse included, so a writer never drops
+    what it did not change and the earliest entry stays first.
+    """
+    entries = list(value) if isinstance(value, list) else []
+    for index, entry in enumerate(entries):
+        held = stored_reference(entry)
+        if held is not None and held.store == replica.store:
+            entries[index] = replica.fields()
+            return entries
+    return [*entries, replica.fields()]
 
 
 def store_entry(config: dict[str, object], name: str | None = None) -> StoreEntry | None:

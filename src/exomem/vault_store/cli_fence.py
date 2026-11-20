@@ -99,6 +99,8 @@ ACCESS: dict[str, VaultAccess] = {
     "cell-import": VaultAccess.PAGES,
     "cell-export": VaultAccess.PAGES,
     "cell-init": VaultAccess.PAGES,
+    # Writes a store marker outside the vault and ledger rows beside it; it reads the vault's configuration.
+    "media-replicas": VaultAccess.PAGES,
     # Reads the cell's media drain record, which the file-mode drain wrote.
     "cell-media-census": VaultAccess.PAGES,
     # Reads the vault's companions for the media references that they hold.

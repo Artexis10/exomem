@@ -76,7 +76,8 @@ BLOB = "blob"
 TEXT = "text"
 
 # Where a matching copy lives, in the order a restore tries them (design D5). Closed protocol tokens.
-MEDIA_STORE = "media_store"
+MEDIA_STORE = "media_store"  # the pointer of the store that serves eviction; REPLICA names every other store's copy
+REPLICA = "replica"
 POOL_BLOB = "pool_blob"
 STORED_ORIGINAL = "stored_original"
 LOCAL_IMPORT = "local_import"
@@ -687,16 +688,13 @@ class _Changed(Exception):
 
 
 def _copies(vault: Path, row: Row, reads: _Reads) -> list[dict[str, str]]:
-    """The candidate copies that may hold the row's bytes, in the order a restore tries them (D5).
+    """The candidate copies that may hold the row's bytes, in the order a restore tries them (D5, D8).
 
-    This reads no candidate: a restore hashes one before it uses it. A candidate whose recorded size
-    is not the row's cannot hold its bytes, so it is left out.
+    Local copies come first, because they need no download; the replicas that the binding lists follow, the store
+    that serves eviction first. This reads no candidate: a restore hashes one before it uses it. A local candidate
+    whose recorded size is not the row's cannot hold its bytes, so it is left out.
     """
     found: list[dict[str, str]] = []
-    if row.kind == FILE and row.stored:
-        snapshot = originals.original_state(vault, row.path)
-        if snapshot.reference is not None and snapshot.binary_sha256 == row.sha256:
-            found.append({"source": MEDIA_STORE, "path": row.path})
     with closing(_connect(vault)) as connection:
         others = connection.execute(
             f"SELECT kind, path FROM originals WHERE sha256 = ? AND path != ? AND kind IN (?, ?)"
@@ -706,7 +704,46 @@ def _copies(vault: Path, row: Row, reads: _Reads) -> list[dict[str, str]]:
     for outside, sha256, size_then in reads.recorded_files():
         if sha256 == row.sha256 and row.size in (None, size_then) and _outside_size(outside) == size_then:
             found.append({"source": LOCAL_IMPORT, "path": str(outside)})
+    return [*found, *_replica_copies(vault, row)]
+
+
+def _replica_copies(vault: Path, row: Row) -> list[dict[str, str]]:
+    """The replicas that the row's binding lists: the pointer of the store that serves eviction, then the others."""
+    if row.kind != FILE:
+        return []
+    try:
+        snapshot = originals.original_state(vault, row.path)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return []
+    if snapshot.binary_sha256 != row.sha256:
+        return []
+    found = [{"source": MEDIA_STORE, "path": row.path}] if snapshot.reference is not None else []
+    found.extend({"source": REPLICA, "store": replica.store, "object": replica.object, "version": replica.version,
+                  "key_version": replica.key_version} for replica in snapshot.replicas)
     return found
+
+
+def _listed(vault: Path, row: Row, copy: dict[str, str]) -> originals.StoredObject | None:
+    """The replica that a candidate names, as the binding lists it now; None when the binding no longer lists it."""
+    snapshot = originals.original_state(vault, row.path)
+    if copy["source"] == MEDIA_STORE:
+        return snapshot.reference
+    return next((replica for replica in snapshot.replicas
+                 if (replica.store, replica.object, replica.version) == (copy["store"], copy["object"], copy["version"])),
+                None)
+
+
+def _replica_unusable(vault: Path, row: Row, copy: dict[str, str]) -> str | None:
+    """Why a restore does not read this replica: a reason token, or None when it may."""
+    from . import media_store
+
+    try:
+        replica = _listed(vault, row, copy)
+        return "no_longer_listed" if replica is None else media_store.replica_unusable(vault, replica)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        return "unreadable"
+    except media_store.MediaStoreError as error:
+        return error.code
 
 
 def _outside_size(path: Path) -> int | None:
@@ -778,19 +815,23 @@ def _copy_parts(vault: Path, copy: dict[str, str]) -> Iterator[Iterable[bytes]]:
         yield _parts(copy_row, source.stream)
 
 
-def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | None:
-    """Write one candidate into private state as the row's file bytes; keep it only if it hashes to the binding."""
+def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | str:
+    """Write one candidate into private state as the row's file bytes; keep it only if it hashes to the binding.
+
+    Returns the staged file, or the token that says why the candidate did not verify.
+    """
     from . import archive_members, media_store
 
     staged = private_state.store(vault, STORE_DIRNAME) / f"{secrets.token_hex(16)}.part"
     try:
         with open(staged, "xb") as sink:
             with archive_members.blob_writer(sink) if row.kind == BLOB else _plain(sink) as target:
-                if copy["source"] == MEDIA_STORE:
-                    snapshot = originals.original_state(vault, row.path)
-                    if snapshot.reference is None:
+                if copy["source"] in (MEDIA_STORE, REPLICA):
+                    reference = _listed(vault, row, copy)
+                    if reference is None:
                         raise _Unreadable("no stored version")
-                    head = media_store.write_stored_original(vault, snapshot.reference, target)
+                    head = media_store.write_stored_original(
+                        vault, reference, target, store=copy["store"] if copy["source"] == REPLICA else None)
                     sha256, size = head.sha256, head.size
                 else:
                     digest, size = hashlib.sha256(), 0
@@ -804,11 +845,13 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | N
             os.fsync(sink.fileno())
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
+        failure = "hash_mismatch"
     except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
+        failure = str(getattr(error, "code", None) or type(error).__name__)
     staged.unlink(missing_ok=True)
-    return None
+    return failure
 
 
 @contextmanager
@@ -827,9 +870,17 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         copies = [copy for copy in copies if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
         install = _install_pooled
     kept = _kept_trash(vault, row, hashed)
+    # The replicas this pass named and did not restore from, with why: the route records them (D8).
+    tried: list[dict[str, str]] = []
     for copy in copies:
+        replica = copy["source"] in (MEDIA_STORE, REPLICA)
+        if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
+            tried.append({**copy, "failed": reason})
+            continue
         staged = _stage(vault, row, copy, pace)
-        if staged is None:
+        if isinstance(staged, str):
+            if replica:
+                tried.append({**copy, "failed": staged})
             continue
         trashed: list[str] = []
         try:
@@ -845,17 +896,17 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
             # The entry names the Trash copy of these bytes, so a retry adds no second one.
             trash = trashed[0] if trashed else kept
             _record(vault, row, state=CORRUPT_NO_COPY, identity=row.identity, cause=cause,
-                    route=[{**copy, "code": str(code),
-                            **({"trash": trash, "found_sha256": hashed.sha256} if trash else {})}])
+                    route=[*tried, {**copy, "code": str(code),
+                                    **({"trash": trash, "found_sha256": hashed.sha256} if trash else {})}])
             _count(result, CORRUPT_NO_COPY)
             return
         finally:
             staged.unlink(missing_ok=True)
         _after_restore(vault, row)
-        _record(vault, row, state=RESTORED, identity=identity, cause=cause, route=[copy], verified=True)
+        _record(vault, row, state=RESTORED, identity=identity, cause=cause, route=[*tried, copy], verified=True)
         _count(result, RESTORED)
         return
-    _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, verified=True)
+    _record(vault, row, state=CORRUPT_NO_COPY, identity=hashed.identity, cause=cause, route=tried, verified=True)
     _count(result, CORRUPT_NO_COPY)
 
 
@@ -1154,7 +1205,10 @@ def _fix(state: str) -> str:
                 "then copy it back to the path, or restore the file from a backup. Exomem does not restore a "
                 "deleted original itself, because the deletion may be deliberate.")
     return ("Restore the file from a backup, or copy a candidate from the route after checking its SHA-256. "
-            "An entry with a code verified but could not be put in place, and the next pass tries it again. "
+            "A replica entry names an encrypted object in a store: decrypt it with the identity of its key version. "
+            "An entry marked failed says why fixity did not restore from it; owner_restores means its store is not "
+            "immediate, so the owner retrieves it. An entry with a code verified but could not be put in place, "
+            "and the next pass tries it again. "
             "A vault_store entry is the store's own page: settle the held item with keep-store. "
             "The original is as Exomem found it.")
 
@@ -1186,8 +1240,9 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
     restricted = bool(rows) and egress.caller_restricted(Path(vault))
 
     def route(row: Row) -> list[dict[str, str]]:
+        # A replica's object and version locate ciphertext in the owner's store: they go to the owner only.
         return [copy if copy["source"] in _VAULT_COPIES or not restricted
-                else {key: value for key, value in copy.items() if key != "path"}
+                else {key: value for key, value in copy.items() if key not in ("path", "object", "version")}
                 for copy in row.route]
 
     return [

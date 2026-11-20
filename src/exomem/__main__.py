@@ -5217,6 +5217,48 @@ def _cell_export_main(argv: list[str]) -> int:
     return export_main(argv)
 
 
+def _media_replicas_main(argv: list[str]) -> int:
+    """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
+    parser = argparse.ArgumentParser(
+        prog="exomem media-replicas",
+        description="Declare a replica store, confirm that you exported its key, or list the replicas by original.",
+    )
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+                        help="vault root (default: $EXOMEM_VAULT_PATH)")
+    actions = parser.add_subparsers(dest="action", required=True)
+    declare = actions.add_parser("declare-store", parents=[common],
+                                 help="write the identity marker into a filesystem store's root")
+    declare.add_argument("store", help="the store's name in the vault's media store configuration")
+    confirm = actions.add_parser("confirm-key-export", parents=[common],
+                                 help="record that you exported the key outside this machine")
+    confirm.add_argument("--key-version", help="the key version; default is the vault's current one")
+    listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
+    listing.add_argument("--after", help="the path that the previous page ended on")
+    listing.add_argument("--limit", type=int, default=100)
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
+        return 2
+    from . import media_replicas, media_store, state_migration
+    from .vault_store import cli_fence
+
+    vault = Path(args.vault).expanduser()
+    state_migration.require_vault_state_ready(vault)
+    cli_fence.require("media-replicas", vault)
+    try:
+        if args.action == "declare-store":
+            print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
+        elif args.action == "confirm-key-export":
+            print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        else:
+            print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
+    except (media_store.MediaStoreError, ValueError) as error:
+        print(f"Error [{getattr(error, 'code', 'INVALID')}]: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _cell_media_census_main(argv: list[str]) -> int:
     # It reads one file, so it loads no CLI, server framework or native runtime.
     from .cell_media_census import main as census_main
@@ -5277,6 +5319,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "cell-import": _cell_import_main,
     "cell-export": _cell_export_main,
     "cell-init": _cell_init_main,
+    "media-replicas": _media_replicas_main,
     "cell-media-census": _cell_media_census_main,
     "cell-media-manifest": _cell_media_manifest_main,
     "cell-media-collect": _cell_media_collect_main,

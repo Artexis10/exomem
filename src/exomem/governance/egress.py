@@ -6713,6 +6713,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "status": "structure",
         "retry": "mutation",
         "reprocess": "mutation",
+        "replicate": "mutation",
     },
     ("observe_memory", "operation"): {
         "add": "mutation",
