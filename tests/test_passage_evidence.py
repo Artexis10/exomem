@@ -773,6 +773,36 @@ def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_t
     assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
 
 
+def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools):
+    """The capture's overlap check encoded title-prefixed paragraphs that the index could not
+    reuse, so every passage of a capture was encoded twice."""
+    from collections import Counter
+
+    from exomem import page_names, passage_evidence
+
+    call, encoder = passage_tools
+    earlier = call("save_source", {"title": "Earlier record", "source_kind": "session", "detail": "full",
+                                   "content": "The harbour keeps one lantern lit."})
+    assert "error" not in earlier, earlier
+    embeddings.index_incremental(vault)  # The overlap check scores against an index with vectors.
+    passages = [passage for passage in _mixed_passages("once") if not passage["key"].endswith("/long")]
+    saved = call("save_source", {"title": "Encoded once", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "once",
+                                                                 "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    assert embeddings.upsert_after_write_status(vault, [path], defer_during_warm=False).status == "completed"
+
+    page = find_corpus.parse_page(path, 0, vault, content=path.read_bytes(),
+                                  resolved_relative=path.relative_to(vault).as_posix())
+    cut = [chunk.text for chunk in passage_evidence.declared_chunks(page)]
+    assert len(cut) > len(passages)
+    encoded = Counter(encoder.texts)
+    assert {text: encoded[text] for text in cut} == dict.fromkeys(cut, 1)
+    assert not [text for text in encoder.texts if text.startswith("Encoded once")]
+
+
 def test_a_source_of_hundreds_of_declared_passages_is_indexed_within_the_preparation_budget(
     vault, passage_tools, monkeypatch
 ):

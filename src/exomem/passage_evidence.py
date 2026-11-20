@@ -8,8 +8,9 @@ import re
 import threading
 from array import array
 from collections import OrderedDict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -108,23 +109,7 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
         offset = len(head) + len(marker)
         for ordinal, (key, text) in enumerate(zip(keys, texts, strict=True), 1):
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            cuts = [0]
-            if embeddings._needs_character_cap(text):
-                cursor = 0
-                for piece in embeddings._split_by_characters(text)[:-1]:
-                    cursor = text.index(piece, cursor) + len(piece)
-                    cuts.append(cursor)
-            elif len(text.split()) > embeddings.MAX_WORDS_PER_CHUNK:
-                # Whitespace tokens define the fixed chunk cap; no prose meaning is inferred.
-                # str.split and \S share one definition of whitespace: under the cap, no cut.
-                cuts.extend(
-                    word.start()
-                    for number, word in enumerate(re.finditer(r"\S+", text))
-                    if number and number % embeddings.MAX_WORDS_PER_CHUNK == 0
-                )
-            cuts.append(len(text))
-            for start, end in zip(cuts[:-1], cuts[1:], strict=True):
-                # A declared passage is embedded exactly as the caller sent it; the title adds no signal.
+            for start, end in pairwise(_cuts(text)):
                 chunks.append(
                     PassageChunk(key, ordinal, digest, offset + start, end - start, text[start:end])
                 )
@@ -132,6 +117,34 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
     result = tuple(chunks)
     page.__dict__["_declared_passage_chunks"] = result
     return result
+
+
+def _cuts(text: str) -> list[int]:
+    """Where one declared passage splits into encoder-sized chunks, its start and end included."""
+    cuts = [0]
+    if embeddings._needs_character_cap(text):
+        cursor = 0
+        for piece in embeddings._split_by_characters(text)[:-1]:
+            cursor = text.index(piece, cursor) + len(piece)
+            cuts.append(cursor)
+    elif len(text.split()) > embeddings.MAX_WORDS_PER_CHUNK:
+        # Whitespace tokens define the fixed chunk cap; no prose meaning is inferred.
+        # str.split and \S share one definition of whitespace: under the cap, no cut.
+        cuts.extend(
+            word.start()
+            for number, word in enumerate(re.finditer(r"\S+", text))
+            if number and number % embeddings.MAX_WORDS_PER_CHUNK == 0
+        )
+    cuts.append(len(text))
+    return cuts
+
+
+def chunk_texts(passages: Iterable[str]) -> list[str]:
+    """The texts the index encodes for these declared passages, in order.
+
+    A declared passage is embedded exactly as the caller sent it; the title adds no signal.
+    """
+    return [text[start:end] for text in passages for start, end in pairwise(_cuts(text))]
 
 
 def packed_cut(chunks: Sequence[PassageChunk]) -> bytes:
