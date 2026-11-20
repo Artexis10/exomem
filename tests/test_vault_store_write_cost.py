@@ -354,8 +354,8 @@ def test_a_store_writes_corpus_derivation_does_not_grow_with_the_pages(
     """Defect that this guards: a save that enriches every page of the vault, or derives the whole corpus
     again for the page it adds, costs seconds at 20,000 pages. A create and an edit by the owner are
     measured at N and 2N pages, each page also a file, with a read by a restricted caller before each
-    save, under a policy whose selector reads frontmatter so that the caller admits the vault's type
-    overlay no more than the owner does. Enrichments stay with the pages the save changes, and no whole
+    save, under a policy whose selector reads frontmatter so that the caller cannot admit the vault's
+    type overlay as the owner can. Enrichments stay with the pages the save changes, and no whole
     corpus is derived, whatever the page count and whoever read in between. A restricted caller that
     overwrote the owner's enrichment would make every save after its read enrich every page. The corpus
     cache is on, as in a served vault: the suite defaults it off.
