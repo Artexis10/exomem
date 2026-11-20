@@ -16,6 +16,7 @@ from . import (
     call_spans,
     deferred_index,
     envelope,
+    foreground_priority,
     mutation_terminal,
     tag_variants,
     topic_carrier_considerations,
@@ -228,7 +229,8 @@ def recover(vault_root: Path, *, limit: int = 4) -> dict[str, Any]:
     processed = 0
     unavailable = False
     warming = False
-    for job in vocabulary_recovery.page(vault_root, limit=limit):
+    # `page` is a closed snapshot, so a bulk pass waits for a request between jobs with nothing held.
+    for job in foreground_priority.yielding_in_bulk(vocabulary_recovery.page(vault_root, limit=limit)):
         if not vocabulary_recovery.claim(vault_root, job):
             continue
         # A fixed window bounds disclosure work even when every job is hidden.

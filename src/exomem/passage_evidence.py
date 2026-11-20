@@ -372,6 +372,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     from . import semantic_contract
 
     limit, scope, query = request["limit"], request["scope"], request["query"]
+    plan = find_module._withhold_positions(vault_root, plan)
     _stop_if_caller_left("eligibility")
     publication = semantic_contract.borrow_published_corpus(vault_root)
     if publication is None:

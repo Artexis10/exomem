@@ -179,7 +179,9 @@ def seal(vault_root: Path, value: Any) -> dict[str, Any]:
             if field not in item:
                 continue
             snapshot = retained_inputs.resolve_retained_input(vault_root, item.pop(field))
-            if snapshot.released is None or snapshot.released.get("frontmatter") != snapshot.page.frontmatter:
+            if snapshot.released is None or not egress.released_frontmatter_matches(
+                snapshot.released, snapshot.page.frontmatter
+            ):
                 raise retained_inputs.RetainedInputError("RETAINED_INPUT_UNAVAILABLE", "input is unavailable")
             if field == "original_reference":
                 binary = originals.binary_binding(snapshot.page.frontmatter)
@@ -262,7 +264,9 @@ def _read_current(vault_root: Path, item: dict, *, max_bytes: int) -> tuple[dict
     try:
         canonical, unit_ref = retained_inputs.parse_reference(reading["reference"])
         snapshot = retained_inputs.resolve_retained_input(vault_root, canonical)
-        if snapshot.released is None or snapshot.released.get("frontmatter") != snapshot.page.frontmatter:
+        if snapshot.released is None or not egress.released_frontmatter_matches(
+            snapshot.released, snapshot.page.frontmatter
+        ):
             return {"status": "unavailable"}, None
         if provenance.evidence_version(snapshot.page.content) != reading["version"]:
             return {"status": "stale"}, (snapshot, "")

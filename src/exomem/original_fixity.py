@@ -1266,7 +1266,7 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
 # --- the thread --------------------------------------------------------------------------------
 
 _LOCK = threading.Lock()
-_stop = threading.Event()
+_stop = foreground_priority.StopEvent()
 _thread: threading.Thread | None = None
 
 
