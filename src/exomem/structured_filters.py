@@ -78,7 +78,7 @@ _KNOWN_STRING_FIELDS = frozenset(
 # Fields compared as real dates rather than strings. Every site that used to
 # name `page.updated` alone consults this set, so a second typed date field is
 # one entry instead of five scattered special cases.
-_KNOWN_DATE_FIELDS = frozenset({"page.updated", "page.capture_date", "unit.check_by"})
+_KNOWN_DATE_FIELDS = frozenset({"page.updated", "page.capture_date", "unit.check_by"})  # nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
 # The sidecar's recorded position: real numbers, compared as numbers. These are the filter-field
 # spellings of `capture_metadata.LOCATION_FIELDS`, which is where a caller's access to them is decided.
 # nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
@@ -934,7 +934,7 @@ INDEX_PAGE_SCALAR_AXES: Final = frozenset(
 #: Page axes stored only as a members array.
 INDEX_PAGE_LIST_AXES: Final = frozenset({"page.project", "page.tags", "page.speakers"})
 #: The page axis compared as a real date.
-INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated", "page.capture_date"})
+INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated", "page.capture_date"})  # nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
 #: The page axes compared as numbers: a recorded position, one REAL column each.
 INDEX_PAGE_NUMBER_AXES: Final = _KNOWN_NUMBER_FIELDS
 #: The axes a media sidecar records and the catalogue indexes on their own: the capture day and the position.

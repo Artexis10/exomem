@@ -5500,7 +5500,7 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
 #: The columns that schemas 17 and 18 added to `pages`; a store that the released code created before them
 #: lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
-_SCHEMA_18_PAGE_COLUMNS = ("capture_day", "capture_date_json", "capture_lat", "capture_lon")
+_SCHEMA_18_PAGE_COLUMNS = ("capture_day", "capture_date_json", "capture_lat", "capture_lon")  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
 _LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + _SCHEMA_18_PAGE_COLUMNS
 
 
