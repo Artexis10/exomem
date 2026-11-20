@@ -28,6 +28,9 @@ from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 _HOOKS_SRC = Path(__file__).parent / "_hooks"
+#: The one copy of the Apache-2.0 text. Every package of client artifacts (the plugin,
+#: the cloud packages) is written with this file, so none holds a second copy by hand.
+APACHE_LICENSE = Path(__file__).parent / "_licenses" / "Apache-2.0.txt"
 
 #: Wherever a shipped doc shows an install line it writes this placeholder instead
 #: of a version: every deployment fills the release it ships, so no copy advises a
@@ -267,7 +270,7 @@ def _plugin_manifest() -> dict:
         "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
         "homepage": "https://substratesystems.io/exomem",
         "repository": "https://github.com/Artexis10/exomem",
-        "license": "AGPL-3.0-or-later",
+        "license": "Apache-2.0",
         "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
         # and declaring it as well fails the install with "Duplicate hooks file
@@ -388,6 +391,8 @@ def sync_plugin(plugin_root: Path) -> dict:
 
     manifest_dir.mkdir(parents=True, exist_ok=True)
     _write_generated(manifest_dir / "plugin.json", _plugin_manifest())
+    # The marketplace copies only this directory, so the licence it declares travels with it.
+    shutil.copyfile(APACHE_LICENSE, plugin_root / "LICENSE")
 
     return {"plugin_root": str(plugin_root), "skills": names, "version": _package_version()}
 
