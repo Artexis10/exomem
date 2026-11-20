@@ -22,6 +22,7 @@ import anyio
 
 from . import (
     env_compat,
+    foreground_priority,
     media_jobs,
     media_processing,
     metrics,
@@ -442,6 +443,7 @@ class LocalRuntimeActivation:
             except Exception:  # noqa: BLE001 - shutdown still has to join activation
                 log.warning("dreamer runtime shutdown failed", exc_info=True)
         self._vocabulary_stop.set()
+        foreground_priority.wake_parked()
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
@@ -644,6 +646,7 @@ class LocalRuntimeActivation:
         """Finish the tracked shutdown before process teardown."""
         with self._lock:
             self._shutdown.set()
+            foreground_priority.wake_parked()
             timer = self._timer
             self._timer = None
             thread = self._thread
@@ -676,6 +679,7 @@ class LocalRuntimeActivation:
         # Activation may have started the watcher after the stop above;
         # it saw the stop event already set, so this join is short.
         self._vocabulary_stop.set()
+        foreground_priority.wake_parked()
         await anyio.to_thread.run_sync(self._join_vocabulary_recovery)
         from . import graph_sync
 

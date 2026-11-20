@@ -340,7 +340,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
 
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
     (`wait_share()`, unless its `PassBudget` sets its own). The stop of an owned
-    scope ends the wait and cancels the pass, within `_STOP_POLL_SECONDS`.
+    scope ends the wait and cancels the pass once its owner calls `wake_parked()`.
     """
     check_cancelled()
     budget: PassBudget | None = getattr(_local, "budget", None)
@@ -358,26 +358,22 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     return _account_wait(started, budget, released=released)
 
 
-#: How often a parked yield looks at its scope's stop event. A stop is a plain `threading.Event`, so it
-#: cannot notify `_condition`; a stoppable pass looks again at this rate, and its stop ends the wait
-#: within it rather than after the cap.
-_STOP_POLL_SECONDS = 0.05
-
-
 def _park(limit: float, stop: threading.Event | None) -> bool:
-    """Wait up to `limit` for bulk work to be free; whether it is. A stop ends the wait early."""
-    if stop is None:
-        with _condition:
+    """Wait up to `limit` for bulk work to be free; whether it is, or the scope's stop is set."""
+    with _condition:
+        if stop is None:
             return _condition.wait_for(_bulk_may_run, timeout=limit)
-    deadline = time.monotonic() + limit
-    while not stop.is_set():
-        remaining = deadline - time.monotonic()
-        if remaining <= 0.0:
-            return False
-        with _condition:
-            if _condition.wait_for(_bulk_may_run, timeout=min(_STOP_POLL_SECONDS, remaining)):
-                return True
-    return False
+        return _condition.wait_for(lambda: _bulk_may_run() or stop.is_set(), timeout=limit)
+
+
+def wake_parked() -> None:
+    """Wake every parked yield, so a pass whose stop was just set ends its wait now.
+
+    A stop is a plain `threading.Event` and cannot notify `_condition`. The owner of a stop calls
+    this right after setting it. A stop site that does not is still bounded by the wait's cap.
+    """
+    with _condition:
+        _condition.notify_all()
 
 
 #: How often `wait_while` asks again. The writer it waits for polls the boundary at this rate

@@ -1297,6 +1297,7 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
         if worker is not None and thread is not worker:
             return
         _stop.set()
+    foreground_priority.wake_parked()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _LOCK:

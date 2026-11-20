@@ -1014,6 +1014,7 @@ class DerivedDrain:
     def stop(self, timeout: float = HOSTED_STOP_DEADLINE_SECONDS) -> None:
         """Prove the pass thread is dead within ``timeout`` or fail closed."""
         self._stop.set()
+        foreground_priority.wake_parked()
         self._wake.set()
         thread = self._thread
         if thread is threading.current_thread():

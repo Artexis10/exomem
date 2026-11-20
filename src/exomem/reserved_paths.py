@@ -3439,6 +3439,8 @@ class _BaselineFlight:
     done: threading.Event
     catalogue: IdentityCatalogue | None = None
     error: BaseException | None = None
+    #: The leader's own stop ended it. That says nothing about the inventory, so a follower builds it.
+    cancelled: bool = False
 
 
 _BASELINE_IDENTITY_FLIGHTS: dict[str, _BaselineFlight] = {}
@@ -3486,13 +3488,15 @@ def _flight_wait_seconds() -> float:
 def _await_baseline_flight(
     flight: _BaselineFlight,
     timeout: float,
-) -> IdentityCatalogue:
+) -> IdentityCatalogue | None:
     """Wait a bounded time on the one build already running, then answer typed.
 
     A follower never starts a duplicate scan.  It receives the leader's
     inventory, re-raises the leader's failure so nothing weaker than the
     fail-closed outcome escapes, or gives up inside the same budget the
     coordination boundary itself uses and reports the boundary unavailable.
+    A leader that its own stop ended leaves no answer: the follower gets None
+    and claims the build itself.
     """
 
     # The leader may be the background warm, which yields to requests: this wait must not count as one.
@@ -3502,6 +3506,8 @@ def _await_baseline_flight(
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     if flight.error is not None:
         raise flight.error
+    if flight.cancelled:
+        return None
     if flight.catalogue is None:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     return flight.catalogue
@@ -3734,47 +3740,58 @@ def _baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:
             vault_key, _build_baseline_identity_catalogue(vault_root)
         )
 
-    # Registration happens inside the `try`, and `leading` is set before the
-    # entry is published, so every exit -- including an interruption landing
-    # between the two -- reaches the `finally` that releases the flight.  An
-    # orphaned entry would refuse every later caller in this process forever.
-    flight = _BaselineFlight(threading.Event())
-    leading = False
-    try:
-        with _PUBLISHED_IDENTITY_LOCK:
-            cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
-            if cached is not None:
-                return cached
-            running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
-            if running is None:
-                leading = True
-                _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
-            else:
-                flight = running
-
-        if not leading:
-            return _await_baseline_flight(flight, _flight_wait_seconds())
-
-        flight.catalogue = _install_baseline_identity_catalogue(
-            vault_key, _build_baseline_identity_catalogue(vault_root)
-        )
-    except BaseException as error:
-        # A leader's stop is its own: a follower never re-raises it, because it is a BaseException the
-        # follower's caller may not handle, and ends that caller's own pass. It takes the typed
-        # unavailable outcome that `_await_baseline_flight` gives a flight with no inventory.
-        if leading and not isinstance(error, foreground_priority.BulkCancelled):
-            flight.error = error
-        raise
-    finally:
-        if leading:
-            # Released before the waiters are woken, so a build that raised
-            # leaves the next caller free to retry rather than a flight nobody
-            # can finish.
+    # A follower's budget is one deadline across its waits, set when it first follows: it may wait
+    # on a leader that its own stop ended, then claim the build or follow the next leader.
+    deadline: float | None = None
+    while True:
+        # Registration happens inside the `try`, and `leading` is set before the
+        # entry is published, so every exit -- including an interruption landing
+        # between the two -- reaches the `finally` that releases the flight.  An
+        # orphaned entry would refuse every later caller in this process forever.
+        flight = _BaselineFlight(threading.Event())
+        leading = False
+        try:
             with _PUBLISHED_IDENTITY_LOCK:
-                if _BASELINE_IDENTITY_FLIGHTS.get(vault_key) is flight:
-                    del _BASELINE_IDENTITY_FLIGHTS[vault_key]
-            flight.done.set()
-    return flight.catalogue
+                cached = _BASELINE_IDENTITY_CATALOGUES.get(vault_key)
+                if cached is not None:
+                    return cached
+                running = _BASELINE_IDENTITY_FLIGHTS.get(vault_key)
+                if running is None:
+                    leading = True
+                    _BASELINE_IDENTITY_FLIGHTS[vault_key] = flight
+                else:
+                    flight = running
+
+            if not leading:
+                if deadline is None:
+                    deadline = time.monotonic() + _flight_wait_seconds()
+                followed = _await_baseline_flight(flight, max(0.0, deadline - time.monotonic()))
+                if followed is not None:
+                    return followed
+                continue
+
+            flight.catalogue = _install_baseline_identity_catalogue(
+                vault_key, _build_baseline_identity_catalogue(vault_root)
+            )
+        except BaseException as error:
+            # A leader's stop is its own: it is a BaseException that a follower's caller may not
+            # handle, and it says nothing about the inventory. Followers build it themselves.
+            if leading:
+                if isinstance(error, foreground_priority.BulkCancelled):
+                    flight.cancelled = True
+                else:
+                    flight.error = error
+            raise
+        finally:
+            if leading:
+                # Released before the waiters are woken, so a build that raised
+                # leaves the next caller free to retry rather than a flight nobody
+                # can finish.
+                with _PUBLISHED_IDENTITY_LOCK:
+                    if _BASELINE_IDENTITY_FLIGHTS.get(vault_key) is flight:
+                        del _BASELINE_IDENTITY_FLIGHTS[vault_key]
+                flight.done.set()
+        return flight.catalogue
 
 
 def _build_baseline_identity_catalogue(vault_root: Path) -> IdentityCatalogue:

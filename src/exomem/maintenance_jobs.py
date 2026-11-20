@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import reserved_paths, state_paths
+from . import foreground_priority, reserved_paths, state_paths
 from .cli_ops import OpError
 
 #: A job's state is one of these; a job is terminal once it leaves ``RUNNING``.
@@ -558,6 +558,7 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
                 if live is not None and row["state"] == RUNNING:
                     live.reason = live.reason or CANCEL_CODE
                     live.stop.set()
+                    foreground_priority.wake_parked()
                 row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
                 return _job_view(conn, row, full=True)
         except FileNotFoundError:
@@ -847,6 +848,7 @@ def stop_all(vault_root: Path, *, wait: float = SHUTDOWN_JOIN_SECONDS) -> None:
     for live in jobs:
         live.reason = live.reason or SHUTDOWN_CODE
         live.stop.set()
+    foreground_priority.wake_parked()
     deadline = time.monotonic() + wait
     for live in jobs:
         if live.thread is not None:

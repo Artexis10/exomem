@@ -49,7 +49,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-from . import state_paths
+from . import foreground_priority, state_paths
 
 log = logging.getLogger(__name__)
 
@@ -884,6 +884,7 @@ def stop(timeout: float = 2.0, *, worker: threading.Thread | None = None) -> Non
             return
         _stop.set()
         _DEBT.set()
+    foreground_priority.wake_parked()
     if thread is not None and thread is not threading.current_thread():
         thread.join(timeout=timeout)
     with _LOCK:
