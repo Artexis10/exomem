@@ -1399,7 +1399,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction."
+          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only."
         },
         "detail": {
           "enum": [

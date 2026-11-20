@@ -5592,7 +5592,11 @@ def _reusable_eligible_filter_paths(
     unit predicate is resolved every time, because its units follow a selected interpretation that
     no identity in the proof names.
     """
-    proof = None if plan.has_unit_predicate else _eligibility_proof(vault_root, scope, snapshot)
+    # A plan gated for a caller who may not see positions answers differently from the same plan ungated, and the
+    # cache key does not carry the gate, so a gated plan neither reads nor fills the cache.
+    if plan.has_unit_predicate or plan.position_withheld:
+        return _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
+    proof = _eligibility_proof(vault_root, scope, snapshot)
     if proof is None:
         return _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
     key = (vault_root.absolute(), scope, _filter_plan_key(plan))

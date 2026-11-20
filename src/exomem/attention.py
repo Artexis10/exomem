@@ -101,6 +101,9 @@ ATTENTION_CATEGORIES: tuple[str, ...] = (
     *audit_module.TYPED_SEMANTIC_CATEGORIES,
     *audit_module.EPISTEMIC_REVIEW_CATEGORIES,
     *audit_module.DUPLICATE_CATEGORIES,
+    # Listed only by name, never in the default union or the due block: a custody Source
+    # waits by choice, so nothing pushes it.
+    audit_module.CUSTODY_SOURCE,
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}

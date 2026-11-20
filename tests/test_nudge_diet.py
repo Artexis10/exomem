@@ -102,7 +102,7 @@ def test_the_short_capture_check_keeps_the_incident_rules_by_name():
     assert text.startswith("[Exomem capture check]")
     for rule in (
         "live policy",
-        "no transcripts",
+        "no chat transcripts",
         "supersede_note supersedes",
         "intent->Planning",
         "outcome->Records",

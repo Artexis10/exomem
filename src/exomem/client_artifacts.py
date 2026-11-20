@@ -878,7 +878,7 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     })
 
 
-def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
+def _media_commit_guard(manager, vault_root: Path, operation: str):  # noqa: ANN001, ANN202
     """The per-file media boundary, as a guard `reconcile_media` opens itself.
 
     Built the way `commands._process_media` builds its own, and for the same
@@ -893,11 +893,38 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
         return manager.mutation_guard(
             vault_root,
             request_id=active_mutation_request_id(),
-            operation="preserve_artifacts_media",
+            operation=operation,
             holder_kind="command",
         )
 
     return guard
+
+
+def _schedule_media(  # noqa: ANN001
+    manager, vault_root: Path, stored: str | None, warnings: list[str], *, kept: str, operation: str
+) -> None:
+    """Queue media processing for a file this call just committed, so its page gets the document's text.
+
+    Run after the commit, under its own per-file guard named `operation`. Waiting for the file watcher instead
+    left a corrected Source unprocessed when its one event was missed and the bounded sweep had not reached it.
+    A failure only warns, naming what stays recoverable (`kept`): the committed file stays authoritative, and
+    the watcher and sweep still retry it.
+    """
+    if not stored:
+        return
+    try:
+        from . import media_processing
+
+        if media_processing.classify_media(vault_root / stored) is not None:
+            media_processing.reconcile_media(
+                vault_root,
+                vault_root / stored,
+                explicit=False,
+                commit_guard=_media_commit_guard(manager, vault_root, operation),
+                defer_fanout_to_terminal=True,
+            )
+    except Exception:  # noqa: BLE001 - the committed original remains authoritative and recoverable
+        warnings.append(f"media reconciliation failed; {kept} remains recoverable")
 
 
 def _destination(vault_root: Path, *parts: str) -> str:
@@ -1637,21 +1664,10 @@ def _preserve_evidence_adoption(
             receipt_payload = payload.get("adoption")
             if not isinstance(receipt_payload, Mapping):
                 raise RuntimeError("canonical artifact writer omitted its adoption receipt")
-            try:
-                from . import media_processing
-
-                if media_processing.classify_media(
-                    vault_root / str(receipt_payload["stored_path"])
-                ) is not None:
-                    media_processing.reconcile_media(
-                        vault_root,
-                        vault_root / str(receipt_payload["stored_path"]),
-                        explicit=False,
-                        commit_guard=_media_commit_guard(manager, vault_root),
-                        defer_fanout_to_terminal=True,
-                    )
-            except Exception:  # noqa: BLE001 - committed custody remains authoritative
-                warnings.append("media reconciliation failed; evidence remains recoverable")
+            _schedule_media(
+                manager, vault_root, str(receipt_payload["stored_path"]), warnings,
+                kept="evidence", operation="preserve_artifacts_media",
+            )
             payload = dict(payload)
             payload["warnings"] = warnings
             outcomes[selected_index] = _stored_outcome(
@@ -1805,6 +1821,13 @@ def _commit_staged_sources(
                     outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
                     continue
                 payload = _with_unavailable_warning(result.as_dict(), available, "this file")
+                if payload.get("artifact_path"):
+                    warnings = list(payload.get("warnings") or [])
+                    _schedule_media(
+                        manager, vault_root, str(payload["artifact_path"]), warnings,
+                        kept="the original", operation="capture_source_media",
+                    )
+                    payload = {**payload, "warnings": warnings}
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
@@ -1864,6 +1887,9 @@ def _commit_staged_sources(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
+    if source_fields.get("custody_only") is True:
+        # The resolved mark (a correction carries its predecessor's): the outcome line says so.
+        out["custody_only"] = True
     return _unless_written(out)
 
 
@@ -1890,15 +1916,7 @@ def capture_source_correction(
 
     plan = source_corrections.prepare_correction(vault_root, correction)
     metadata, _body, _front = parse_frontmatter(plan.old_source)
-    # The frontmatter keys `add._render_source` writes for these capture fields, read back with their types.
-    carried: dict[str, object] = {
-        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
-           if isinstance(metadata.get(name), str) and metadata[name]},
-        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
-           if isinstance(metadata.get(name), list) and metadata[name]},
-    }
-    if why := add_module.stored_why(plan.old_source):
-        carried["why_captured"] = why
+    carried = add_module.correction_carry(plan.old_source)
     source_fields = {**source_fields, **{name: value for name, value in carried.items() if source_fields.get(name) is None}}
     if source_fields.get("source_type") is None:
         raise add_module.kind_required(vault_root, supplied=None)
@@ -2138,19 +2156,10 @@ def preserve_artifacts(
                 warnings = list(payload.get("warnings") or [])
                 if not held.available:
                     warnings.append(duplicates.unavailable_warning("this file"))
-                try:
-                    from . import media_processing
-
-                    if media_processing.classify_media(vault_root / payload["path"]) is not None:
-                        media_processing.reconcile_media(
-                            vault_root,
-                            vault_root / payload["path"],
-                            explicit=False,
-                            commit_guard=_media_commit_guard(manager, vault_root),
-                            defer_fanout_to_terminal=True,
-                        )
-                except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
-                    warnings.append("media reconciliation failed; evidence remains recoverable")
+                _schedule_media(
+                    manager, vault_root, payload.get("path") or payload.get("stored_path"), warnings,
+                    kept="evidence", operation="preserve_artifacts_media",
+                )
                 stored_path = payload.get("stored_path") or payload.get("path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,
