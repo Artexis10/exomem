@@ -878,7 +878,7 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     })
 
 
-def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
+def _media_commit_guard(manager, vault_root: Path, operation: str):  # noqa: ANN001, ANN202
     """The per-file media boundary, as a guard `reconcile_media` opens itself.
 
     Built the way `commands._process_media` builds its own, and for the same
@@ -893,19 +893,22 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
         return manager.mutation_guard(
             vault_root,
             request_id=active_mutation_request_id(),
-            operation="preserve_artifacts_media",
+            operation=operation,
             holder_kind="command",
         )
 
     return guard
 
 
-def _schedule_media(manager, vault_root: Path, stored: str | None, warnings: list[str]) -> None:  # noqa: ANN001
+def _schedule_media(  # noqa: ANN001
+    manager, vault_root: Path, stored: str | None, warnings: list[str], *, kept: str, operation: str
+) -> None:
     """Queue media processing for a file this call just committed, so its page gets the document's text.
 
-    Run after the commit, under its own per-file guard. Waiting for the file watcher instead left a corrected
-    Source unprocessed when its one event was missed and the bounded sweep had not reached it. A failure only
-    warns: the committed original stays authoritative, and the watcher and sweep still retry it.
+    Run after the commit, under its own per-file guard named `operation`. Waiting for the file watcher instead
+    left a corrected Source unprocessed when its one event was missed and the bounded sweep had not reached it.
+    A failure only warns, naming what stays recoverable (`kept`): the committed file stays authoritative, and
+    the watcher and sweep still retry it.
     """
     if not stored:
         return
@@ -917,11 +920,11 @@ def _schedule_media(manager, vault_root: Path, stored: str | None, warnings: lis
                 vault_root,
                 vault_root / stored,
                 explicit=False,
-                commit_guard=_media_commit_guard(manager, vault_root),
+                commit_guard=_media_commit_guard(manager, vault_root, operation),
                 defer_fanout_to_terminal=True,
             )
     except Exception:  # noqa: BLE001 - the committed original remains authoritative and recoverable
-        warnings.append("media reconciliation failed; evidence remains recoverable")
+        warnings.append(f"media reconciliation failed; {kept} remains recoverable")
 
 
 def _destination(vault_root: Path, *parts: str) -> str:
@@ -1661,7 +1664,10 @@ def _preserve_evidence_adoption(
             receipt_payload = payload.get("adoption")
             if not isinstance(receipt_payload, Mapping):
                 raise RuntimeError("canonical artifact writer omitted its adoption receipt")
-            _schedule_media(manager, vault_root, str(receipt_payload["stored_path"]), warnings)
+            _schedule_media(
+                manager, vault_root, str(receipt_payload["stored_path"]), warnings,
+                kept="evidence", operation="preserve_artifacts_media",
+            )
             payload = dict(payload)
             payload["warnings"] = warnings
             outcomes[selected_index] = _stored_outcome(
@@ -1817,7 +1823,10 @@ def _commit_staged_sources(
                 payload = _with_unavailable_warning(result.as_dict(), available, "this file")
                 if payload.get("artifact_path"):
                     warnings = list(payload.get("warnings") or [])
-                    _schedule_media(manager, vault_root, str(payload["artifact_path"]), warnings)
+                    _schedule_media(
+                        manager, vault_root, str(payload["artifact_path"]), warnings,
+                        kept="the original", operation="capture_source_media",
+                    )
                     payload = {**payload, "warnings": warnings}
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
@@ -2156,7 +2165,10 @@ def preserve_artifacts(
                 warnings = list(payload.get("warnings") or [])
                 if not held.available:
                     warnings.append(duplicates.unavailable_warning("this file"))
-                _schedule_media(manager, vault_root, payload.get("path") or payload.get("stored_path"), warnings)
+                _schedule_media(
+                    manager, vault_root, payload.get("path") or payload.get("stored_path"), warnings,
+                    kept="evidence", operation="preserve_artifacts_media",
+                )
                 stored_path = payload.get("stored_path") or payload.get("path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,
