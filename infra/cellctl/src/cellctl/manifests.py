@@ -270,6 +270,10 @@ class ResourceSettings:
     cpu_limit: str = "2"
     memory_request: str = "512Mi"
     memory_limit: str = "3Gi"
+    # The resident passage matrix ceiling of the serving pod, rendered as
+    # EXOMEM_PASSAGE_MATRIX_BYTES. It sits with the memory limit because it is a share of it:
+    # 512Mi is the budget the 2026-11-14 qualification measured in the default 3Gi cell.
+    passage_matrix_budget: str = "512Mi"
 
 
 # limits.memory of one backup/restore/init Job pod (`_job_pod_spec` and the
@@ -289,7 +293,7 @@ def _memory_mib(quantity: str) -> int:
     for suffix, factor in (("Gi", 1024), ("Mi", 1)):
         if quantity.endswith(suffix) and quantity.removesuffix(suffix).isdigit():
             return int(quantity.removesuffix(suffix)) * factor
-    raise ValueError(f"memory limit must be a whole number of Gi or Mi, got {quantity!r}")
+    raise ValueError(f"memory quantity must be a whole number of Gi or Mi, got {quantity!r}")
 
 
 def _quota_memory_limit(memory_limit: str, jobs: int) -> str:
@@ -836,11 +840,11 @@ MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 # The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
 SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
 # The resident passage matrix ceiling, the variable the runtime's passage_matrix module
-# reads. 512 MiB is the budget the 2026-11-14 qualification measured in the default
-# 2-CPU, 3 GiB cell; the runtime still admits it against the pod's memory headroom and
-# scores from disk when it does not fit. model_env may set another value for a cell.
+# reads. The platform chart sets it for every cell in cellctl.cellResources.passageMatrixBudget,
+# next to the cell memory limit. The runtime still admits it against the pod's memory headroom
+# and scores from disk when it does not fit. A model_env entry for the same variable replaces
+# it in every cell, because model_env is cluster-wide.
 PASSAGE_MATRIX_BYTES_ENV = "EXOMEM_PASSAGE_MATRIX_BYTES"
-DEFAULT_PASSAGE_MATRIX_BYTES = 512 * 1024 * 1024
 
 
 # NEW-2: model_env is operator-only chart configuration, so this stays a
@@ -1019,7 +1023,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     # Defence in depth: settings load already refused these (main.py).
     check_model_env(spec.model_env)
     if PASSAGE_MATRIX_BYTES_ENV not in spec.model_env:
-        env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(DEFAULT_PASSAGE_MATRIX_BYTES)})
+        budget_mib = _memory_mib(spec.resources.passage_matrix_budget)
+        env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(budget_mib * 1024 * 1024)})
     for key, value in sorted(spec.model_env.items()):
         env.append({"name": key, "value": value})
     if spec.media_engines:

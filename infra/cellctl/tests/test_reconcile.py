@@ -19,7 +19,7 @@ from cellctl import alerts, db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
 from cellctl.exports import ExportJob
 from cellctl.imports import StagedObjects
-from cellctl.manifests import STORAGE_CLASS, namespace_name
+from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.secrets import wrap_secret
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
@@ -3042,6 +3042,16 @@ def test_dedicated_selection_changes_only_the_selected_render_digest() -> None:
     selected = dataclasses.replace(_cluster_config(), dedicated_cell_ids=(row.cell_id,))
     assert reconcile._compute_render_digest(row, other, _secrets_config()) == baseline
     assert reconcile._compute_render_digest(row, selected, _secrets_config()) != baseline
+
+
+def test_a_changed_passage_matrix_budget_moves_the_render_digest() -> None:
+    # The digest decides which cells roll; a budget it ignored would never reach a running cell.
+    row = CellRow(cell_id="aaaaaaaaaaaaaaaa", tenant_id=tenant_uuid("a"), storage_gib=10,
+                  rollout_priority=1, desired_state="running", desired_image=None, generation=1)
+    larger = dataclasses.replace(_cluster_config(), resources=ResourceSettings(passage_matrix_budget="1Gi"))
+    assert reconcile._compute_render_digest(row, larger, _secrets_config()) != (
+        reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    )
 
 
 async def test_reserved_node_publishes_zero_general_slots_with_real_attachment_count(cell_db: CellDatabase) -> None:

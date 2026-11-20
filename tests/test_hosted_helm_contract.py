@@ -555,6 +555,7 @@ def test_cloud_cell_default_resources_agree_with_cellctls_own_defaults() -> None
         "cpuLimit": defaults["cpu_limit"],
         "memoryRequest": defaults["memory_request"],
         "memoryLimit": defaults["memory_limit"],
+        "passageMatrixBudget": defaults["passage_matrix_budget"],
     }
     assert chart["memoryLimit"] == "3Gi"
 

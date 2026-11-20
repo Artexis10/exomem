@@ -15,6 +15,7 @@ from cellctl.manifests import (
     CELL_PORT,
     STORAGE_CLASS,
     CellManifestSpec,
+    ResourceSettings,
     namespace_name,
     render_cell_manifests,
     render_import_job,
@@ -412,6 +413,13 @@ def test_a_cell_serves_passages_from_a_resident_matrix_by_default() -> None:
     # four concurrent searches miss the cell's latency budget.
     env = render_statefulset(_spec())["spec"]["template"]["spec"]["containers"][0]["env"]
     assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == [str(512 * 1024 * 1024)]
+
+
+def test_a_cell_renders_the_passage_matrix_budget_its_resources_name() -> None:
+    # The chart sets the budget beside the memory limit; a cell sized differently needs a different one.
+    resources = ResourceSettings(memory_limit="6Gi", passage_matrix_budget="1Gi")
+    env = render_statefulset(_spec(resources=resources))["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == [str(1024 * 1024 * 1024)]
 
 
 def test_a_cells_model_env_replaces_the_passage_matrix_default_instead_of_duplicating_it() -> None:
