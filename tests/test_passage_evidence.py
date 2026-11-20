@@ -27,6 +27,7 @@ from exomem import (
     freshness,
     lexstore,
     memory_refs,
+    passage_evidence,
     readiness,
     reserved_paths,
     runtime_resources,
@@ -919,6 +920,107 @@ def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_t
 
     assert list(passage_evidence.source_chunks(first, entry)) == list(passage_evidence.declared_chunks(first))
     assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
+
+
+def test_source_bytes_edited_after_publication_are_read_again_not_served_from_memory(
+    vault, passage_tools, monkeypatch
+):
+    """Reading and hashing every selected Source on each search was a third of a search's work; a
+    memory of verified passages that outlived an edit would attest the old text instead."""
+    # The capture starts a background graph rebuild that can unpublish the corpus after the edit.
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["entry"], first
+    reads = []
+    resolve = find._resolve_page
+    monkeypatch.setattr(
+        find,
+        "_resolve_page",
+        lambda root, path, *args, **kwargs: reads.append(path) or resolve(root, path, *args, **kwargs),
+    )
+
+    assert call("search_memory", request)["hits"] == first["hits"]
+    assert saved["source"]["path"] not in reads
+
+    # The owner edits the passage in an editor, and the corpus republishes before the index re-embeds.
+    path = vault / saved["source"]["path"]
+    path.write_text(path.read_text().replace("The lantern burns oil.", "The lantern burns whale oil."))
+    publish_reference(vault)
+    edited = call("search_memory", request)
+
+    assert "error" not in edited, edited
+    assert edited["hits"] == []
+    assert edited["withheld_chunks"] == 1
+    assert saved["source"]["path"] in reads
+
+
+def test_an_erased_source_is_not_served_from_memory_while_the_index_still_selects_it(
+    vault, passage_tools, monkeypatch
+):
+    """An erasure advances the retirement generation once its derived rows are gone. A memory kept
+    past that would serve the erased passage to an index that still selects it, as a lagging one can."""
+    from exomem import source_custody, writer_lease
+
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Erased log", source_kind="session",
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["entry"], first
+    reads = []
+    resolve = find._resolve_page
+    monkeypatch.setattr(
+        find,
+        "_resolve_page",
+        lambda root, path, *args, **kwargs: reads.append(path) or resolve(root, path, *args, **kwargs),
+    )
+    assert call("search_memory", request)["hits"] == first["hits"]
+    assert saved["source"]["path"] not in reads
+
+    (vault / saved["source"]["path"]).unlink()
+    with writer_lease.active_manager().mutation_guard(vault):
+        assert source_custody.advance_retirement_generation(vault)
+    erased = call("search_memory", request)
+
+    assert "error" not in erased, erased
+    assert erased["hits"] == []
+    assert erased["withheld_chunks"] == 1
+
+
+@pytest.mark.parametrize(("bound", "value", "held"), [("max_entries", 2, 2), ("max_bytes", 0, 0)])
+def test_the_memory_of_verified_passages_stays_within_its_bound(
+    vault, passage_tools, monkeypatch, bound, value, held
+):
+    """Every Source a search reads adds an entry, so an unbounded memory grows with the corpus."""
+    call, _encoder = passage_tools
+    for name in ("one", "two", "three"):
+        saved = commands.op_capture_source(
+            vault, schema.load_source_schema(vault), title=f"Log {name}", source_kind="session",
+            passages=[{"key": name, "text": f"The lantern burns {name}."}],
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    monkeypatch.setattr(passage_evidence._VERIFIED_SOURCES, bound, value)
+
+    reply = call("search_memory", {"query": "lantern", "limit": 3, "options": {"result_level": "passage"}})
+
+    assert {hit["passage_key"] for hit in reply["hits"]} == {"one", "two", "three"}, reply
+    assert len(passage_evidence._VERIFIED_SOURCES) == held
 
 
 def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools, monkeypatch):

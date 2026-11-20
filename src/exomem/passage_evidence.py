@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 import threading
 from array import array
 from collections import OrderedDict
@@ -287,6 +288,146 @@ def declared_sources(vault_root: Path, publication) -> frozenset[str]:
         return paths
 
 
+@dataclass(frozen=True)
+class _VerifiedSource:
+    """What a passage answer discloses from one Source page: its frontmatter and selected chunks."""
+
+    frontmatter: Mapping[str, Any]
+    #: Chunk number to chunk, for the selected numbers the Source's cut holds. Never changed after
+    #: creation, so readers may share it.
+    chunks: Mapping[int, PassageChunk]
+
+
+class _VerifiedSources:
+    """The selected chunks of published Source pages, so a repeated selection reads no Source.
+
+    An entry is keyed by vault, scope, path and the hash that the publication holds for the page,
+    and holds only chunks cut from bytes that hashed to it, so it serves no other bytes. It serves
+    while its proof (`find._eligibility_proof`) holds: the recall checkpoint moves with every
+    watched edit, and the retirement generation moves once a Source erasure has removed its rows.
+    Stat data plays no part. Chunks, not parsed pages, are kept: a full corpus's pages outgrow the
+    page cache's byte bound, so page-sized entries would be evicted as fast as its pages are.
+    """
+
+    def __init__(self, *, max_entries: int, max_bytes: int) -> None:
+        self.max_entries = max_entries
+        self.max_bytes = max_bytes
+        self._entries: OrderedDict[tuple, tuple[tuple, _VerifiedSource, int]] = OrderedDict()
+        self._held = 0
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def get(self, key: tuple, proof: tuple, numbers: set[int]) -> _VerifiedSource | None:
+        """The entry for `key` when it was kept under `proof` and holds every chunk in `numbers`."""
+        with self._lock:
+            held = self._entries.get(key)
+            if held is None or held[0] != proof:
+                if held is not None:
+                    self._drop(key)
+                return None
+            if not numbers <= held[1].chunks.keys():
+                return None
+            self._entries.move_to_end(key)
+            return held[1]
+
+    def keep(self, verified: Mapping[tuple, _VerifiedSource], proof: tuple) -> None:
+        """Add the chunks one search read under `proof`, then evict down to both bounds."""
+        with self._lock:
+            for key, source in verified.items():
+                held = self._entries.get(key)
+                if held is not None and held[0] == proof:
+                    source = _VerifiedSource(source.frontmatter, {**held[1].chunks, **source.chunks})
+                self._drop(key)
+                weight = sys.getsizeof(source.frontmatter) + sum(
+                    sys.getsizeof(chunk.text) + sys.getsizeof(chunk.key) + sys.getsizeof(chunk.passage_hash)
+                    for chunk in source.chunks.values()
+                )
+                self._entries[key] = (proof, source, weight)
+                self._held += weight
+            while self._entries and (
+                len(self._entries) > self.max_entries or self._held > self.max_bytes
+            ):
+                self._drop(next(iter(self._entries)))
+
+    def forget(self, key: tuple) -> None:
+        """Drop an entry that a read has shown no longer describes the page."""
+        with self._lock:
+            self._drop(key)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+            self._held = 0
+
+    def _drop(self, key: tuple) -> None:
+        held = self._entries.pop(key, None)
+        if held is not None:
+            self._held -= held[2]
+
+
+# Sixteen MiB holds about 20,000 chunks of 500 characters; 4096 entries cover a vault of that many
+# Sources. `find.unload_ram_caches` releases it with the page cache.
+_VERIFIED_SOURCES = _VerifiedSources(max_entries=4096, max_bytes=16 * 1024 * 1024)
+
+
+def _verified_sources(
+    vault_root: Path, scope: str, snapshot, publication, selected: Sequence[tuple]
+) -> dict[str, _VerifiedSource | None]:
+    """Each selected Source's selected chunks, from memory while its proof holds, else read again.
+
+    None for a Source whose page is not admitted or cannot be read now.
+    """
+    from . import find as find_module
+    from . import semantic_contract
+
+    wanted: dict[str, set[int]] = {}
+    for path, number, _stored, _score in selected:
+        wanted.setdefault(path, set()).add(number)
+    proof = find_module._eligibility_proof(vault_root, scope, snapshot)
+    root = vault_root.absolute()
+    sources: dict[str, _VerifiedSource | None] = {}
+    verified: dict[tuple, _VerifiedSource] = {}
+    entries = None
+    for path, numbers in wanted.items():
+        published = publication.source_hash(path)
+        key = (root, scope, path, published)
+        if proof is not None and published is not None:
+            held = _VERIFIED_SOURCES.get(key, proof, numbers)
+            if held is not None:
+                sources[path] = held
+                continue
+        if entries is None:
+            inventory = semantic_contract.borrow_capture_inventory(vault_root)
+            entries = inventory[0].entries if inventory is not None else {}
+        # Passage search admits no catalogue view, so this read checks no catalogue hash.
+        page = find_module._resolve_page(vault_root, path)
+        if page is None:
+            sources[path] = None
+            _VERIFIED_SOURCES.forget(key)
+            continue
+        chunks = source_chunks(page, entries.get(path))
+        source = sources[path] = _VerifiedSource(
+            page.frontmatter,
+            {
+                number: chunks[number]
+                for number in numbers
+                if chunks is not None and 0 <= number < len(chunks)
+            },
+        )
+        if published is not None and page.snapshot_hash == published:
+            verified[key] = source
+        else:
+            _VERIFIED_SOURCES.forget(key)
+    # Proved before the reads and again before the insert, as for the eligible set: chunks read
+    # across a corpus change or a Source erasure are answered but never kept.
+    if verified and proof is not None and find_module._eligibility_proof(vault_root, scope, snapshot) == proof:
+        _VERIFIED_SOURCES.keep(verified, proof)
+    return sources
+
+
 def _require_authority(vault_root: Path) -> None:
     from . import source_capture
 
@@ -359,7 +500,7 @@ def _stop_if_caller_left(phase: str) -> None:
 
 
 class _CallerDeparture:
-    """The serving host's record that the caller left, as the stop event a model-turn wait polls."""
+    """The serving host's record that the caller left, as the `StopSignal` a model-turn wait polls."""
 
     def is_set(self) -> bool:
         from anyio import from_thread
@@ -435,40 +576,30 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     )
     selected = selection.hits
     _stop_if_caller_left("verification")
-    pages = {
-        path: find_module._resolve_page(vault_root, path)
-        for path in dict.fromkeys(path for path, _number, _stored, _score in selected)
-    }
-    inventory = semantic_contract.borrow_capture_inventory(vault_root)
-    entries = inventory[0].entries if inventory is not None else {}
-    cut = {
-        path: source_chunks(page, entries.get(path)) if page is not None else None
-        for path, page in pages.items()
-    }
+    sources = _verified_sources(vault_root, walk_scope, snapshot, publication, selected)
+
+    def chunk_of(path: str, number: int) -> PassageChunk | None:
+        source = sources[path]
+        return source.chunks.get(number) if source is not None else None
+
     matches = index.matching_chunks(
         [
-            (
-                path,
-                number,
-                stored,
-                chunks[number].text if chunks is not None and 0 <= number < len(chunks) else None,
-            )
+            (path, number, stored, chunk.text if chunk is not None else None)
             for path, number, stored, _score in selected
-            for chunks in (cut[path],)
+            for chunk in (chunk_of(path, number),)
         ]
     )
     hits = []
     for path, number, _stored, score in selected:
-        page = pages[path]
-        chunks = cut[path]
-        if page is None or (path, number) not in matches or chunks is None or number >= len(chunks):
+        chunk = chunk_of(path, number)
+        if chunk is None or (path, number) not in matches:
             continue
-        chunk = chunks[number]
+        frontmatter = sources[path].frontmatter
         hits.append(
             {
-                "ref": memory_refs.memory_ref(page.frontmatter["exomem_id"]),
+                "ref": memory_refs.memory_ref(frontmatter["exomem_id"]),
                 "path": path,
-                "source_identity": page.frontmatter.get("source_identity"),
+                "source_identity": frontmatter.get("source_identity"),
                 "passage_key": chunk.key,
                 "passage_ordinal": chunk.ordinal,
                 "passage_hash": chunk.passage_hash,

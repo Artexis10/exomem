@@ -9593,6 +9593,10 @@ def unload_ram_caches(
         # noise into the number that says whether a governed write discarded
         # receipt-covered work.
         _CACHE.release()
+        from . import passage_evidence
+
+        # Selected Source chunks are page text, keyed by their proof like the rows below.
+        passage_evidence._VERIFIED_SOURCES.clear()
         # The admitted recall rows are keyed by the catalogue snapshot, and each
         # scope set by its subject text and the inputs of its evaluation, so a
         # correctness eviction cannot make either stale; only a caller handing

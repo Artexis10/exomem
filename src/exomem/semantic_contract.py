@@ -2256,6 +2256,13 @@ class PublishedCorpusSnapshot:
             if self._owns is None or self._owns(path):
                 yield path, page
 
+    def source_hash(self, path: str) -> str | None:
+        """The hash of the bytes this publication parsed for one page that its proof covers."""
+        page = self._corpus.pages.get(path)
+        if page is None or (self._owns is not None and not self._owns(path)):
+            return None
+        return page.source_hash
+
 
 def _resident_corpus_entry(
     root: Path,

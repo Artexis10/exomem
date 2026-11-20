@@ -1516,7 +1516,7 @@ def _interactive_execution(model, bulk_execution):
 
 
 @contextlib.contextmanager
-def query_turn(*, cancel_event: threading.Event | None = None):
+def query_turn(*, cancel_event: runtime_resources.StopSignal | None = None):
     """The execution turn of one search query that waits for its turn.
 
     The caller keeps its own model admission. A resident model that can encode
