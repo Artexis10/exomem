@@ -6,8 +6,9 @@ import hashlib
 import json
 import re
 import threading
+from array import array
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -115,7 +116,7 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
                     cuts.append(cursor)
             elif len(text.split()) > embeddings.MAX_WORDS_PER_CHUNK:
                 # Whitespace tokens define the fixed chunk cap; no prose meaning is inferred.
-                # str.split and \S share one whitespace definition, so a passage under the cap has no cut.
+                # str.split and \S share one definition of whitespace: under the cap, no cut.
                 cuts.extend(
                     word.start()
                     for number, word in enumerate(re.finditer(r"\S+", text))
@@ -131,6 +132,58 @@ def declared_chunks(page: ParsedPage) -> tuple[PassageChunk, ...] | None:
     result = tuple(chunks)
     page.__dict__["_declared_passage_chunks"] = result
     return result
+
+
+def packed_cut(chunks: Sequence[PassageChunk]) -> bytes:
+    """A Source's cut without its text: each chunk's passage ordinal, body start and length."""
+    return array(
+        "q", [value for chunk in chunks for value in (chunk.ordinal, chunk.start, chunk.length)]
+    ).tobytes()
+
+
+class _PublishedChunks(Sequence[PassageChunk]):
+    """A Source's chunks read from a cut published for these exact bytes, built only when asked."""
+
+    def __init__(self, body: str, keys: tuple[str, ...], cut: bytes) -> None:
+        self._body = body
+        self._keys = keys
+        self._cut = array("q")
+        self._cut.frombytes(cut)
+        self._digests: dict[int, str] = {}
+
+    def __len__(self) -> int:
+        return len(self._cut) // 3
+
+    def __getitem__(self, number):  # type: ignore[override]  # A chunk number, never a slice.
+        if not 0 <= number < len(self):
+            raise IndexError(number)
+        cut = self._cut
+        ordinal, start, length = cut[3 * number : 3 * number + 3]
+        if ordinal not in self._digests:
+            # One passage's chunks are adjacent, so its span runs from its first chunk to its last.
+            first = last = number
+            while first and cut[3 * (first - 1)] == ordinal:
+                first -= 1
+            while last + 1 < len(self) and cut[3 * (last + 1)] == ordinal:
+                last += 1
+            passage = self._body[cut[3 * first + 1] : cut[3 * last + 1] + cut[3 * last + 2]]
+            self._digests[ordinal] = hashlib.sha256(passage.encode("utf-8")).hexdigest()
+        return PassageChunk(
+            self._keys[ordinal - 1], ordinal, self._digests[ordinal], start, length,
+            self._body[start : start + length],
+        )
+
+
+def source_chunks(page: ParsedPage, entry: Any | None) -> Sequence[PassageChunk] | None:
+    """`declared_chunks`, read from the capture inventory's cut when it cut these exact bytes."""
+    cut = getattr(entry, "chunk_cut", None)
+    if cut is not None and entry.source_hash == page.snapshot_hash and has_declaration(
+        page.frontmatter, page.vault_root
+    ):
+        block = parse_key_block(page.body)
+        if block is not None and block.keys is not None:
+            return _PublishedChunks(page.body, block.keys, cut)
+    return declared_chunks(page)
 
 
 def validate_ranking_options(options: Mapping[str, Any]) -> None:
@@ -327,6 +380,12 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         path: find_module._resolve_page(vault_root, path)
         for path in dict.fromkeys(path for path, _number, _stored, _score in selected)
     }
+    inventory = semantic_contract.borrow_capture_inventory(vault_root)
+    entries = inventory[0].entries if inventory is not None else {}
+    cut = {
+        path: source_chunks(page, entries.get(path)) if page is not None else None
+        for path, page in pages.items()
+    }
     matches = index.matching_chunks(
         [
             (
@@ -336,13 +395,13 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
                 chunks[number].text if chunks is not None and 0 <= number < len(chunks) else None,
             )
             for path, number, stored, _score in selected
-            for chunks in (declared_chunks(pages[path]) if pages[path] is not None else None,)
+            for chunks in (cut[path],)
         ]
     )
     hits = []
     for path, number, _stored, score in selected:
         page = pages[path]
-        chunks = declared_chunks(page) if page is not None else None
+        chunks = cut[path]
         if page is None or (path, number) not in matches or chunks is None or number >= len(chunks):
             continue
         chunk = chunks[number]

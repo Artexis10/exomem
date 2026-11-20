@@ -26,6 +26,8 @@ class CaptureEntry:
     capture_digest: str
     chunk_digest: str | None
     chunk_count: int | None
+    # Passage search reads this cut for the same bytes instead of cutting the Source again.
+    chunk_cut: bytes | None = None
 
     @property
     def path(self) -> str:
@@ -60,6 +62,7 @@ def input_from_bytes(root: Path, path: str, data: bytes) -> CaptureInput:
             raise ValueError("canonical identity lacks a Source witness")
         chunk_digest = None
         count = None
+        cut = None
         if "declared_passages" in fields:
             parsed = find_corpus.parse_page(root / path, 0, root, content=data, resolved_relative=path)
             chunks = passage_evidence.declared_chunks(parsed) if parsed is not None else None
@@ -67,8 +70,9 @@ def input_from_bytes(root: Path, path: str, data: bytes) -> CaptureInput:
                 raise ValueError("invalid passage declaration")
             chunk_digest = embedding_index.ordered_chunk_digest(chunk.text for chunk in chunks)
             count = len(chunks)
+            cut = passage_evidence.packed_cut(chunks)
         return CaptureInput(page, CaptureEntry((identity["system"], identity["record_id"], identity["revision"], reference, path), reference,
-                                               page.sha256, digest, chunk_digest, count))
+                                               page.sha256, digest, chunk_digest, count, cut))
     except (ValueError, TypeError, UnicodeError):
         return CaptureInput(page, None, True)
 

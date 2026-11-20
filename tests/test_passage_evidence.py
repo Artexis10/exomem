@@ -711,6 +711,68 @@ def test_spaced_passage_cuts_skip_the_per_character_script_scan(vault, passage_t
     ]
 
 
+def _mixed_passages(prefix):
+    """One passage per cut rule: under the cap, over the word cap, and unspaced over the character cap."""
+    return [
+        {"key": f"{prefix}/short", "text": "The lantern keeper records oil deliveries."},
+        {"key": f"{prefix}/long", "text": " ".join(f"lantern{n}" for n in range(embeddings.MAX_WORDS_PER_CHUNK + 40))},
+        {"key": f"{prefix}/unspaced", "text": "灯台の油の記録。" * 90},
+    ]
+
+
+def test_passage_search_reads_the_published_cut_instead_of_cutting_the_source(vault, passage_tools, monkeypatch):
+    """Cutting every selected Source again on each search was a fixed cost that four callers queued behind."""
+    from exomem import file_watcher, passage_evidence
+
+    call, _encoder = passage_tools
+    passages = _mixed_passages("r")
+    saved = call("save_source", {"title": "Harbour survey", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "cut", "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._raw_witness.activate()  # This test drives the existing watcher synchronously.
+    assert watcher._flush_raw(census=True)
+    cuts = []
+    real_cut = passage_evidence.declared_chunks
+    monkeypatch.setattr(passage_evidence, "declared_chunks", lambda page: cuts.append(page.rel_path) or real_cut(page))
+
+    reply = call("search_memory", {"query": "lantern oil", "limit": 10, "options": {"result_level": "passage"}})
+
+    assert "error" not in reply, reply
+    assert cuts == []
+    assert {hit["passage_key"] for hit in reply["hits"]} == {passage["key"] for passage in passages}
+    path = memory_refs.resolve_identifier_read_only(vault, reply["hits"][0]["ref"])
+    body = vault_module.parse_frontmatter(vault_module.read_guarded_text(vault, vault / path)[0])[1]
+    for hit in reply["hits"]:
+        passage = passages[hit["passage_ordinal"] - 1]["text"]
+        assert hit["passage_hash"] == hashlib.sha256(passage.encode()).hexdigest()
+        assert body[hit["span"]["start"] : hit["span"]["start"] + hit["span"]["length"]] in passage
+
+
+def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_tools):
+    """A cut read for bytes it was not made from reports wrong spans, keys and passage hashes."""
+    from exomem import capture_inventory, page_names, passage_evidence
+
+    call, _encoder = passage_tools
+    pages = []
+    for revision, passages in (("one", _mixed_passages("a")), ("two", _mixed_passages("b")[::-1])):
+        saved = call("save_source", {"title": "Cut record", "source_kind": "session", "detail": "full",
+                                     "options": {"source_identity": {"system": "archive", "record_id": "bound", "revision": revision},
+                                                 "passages": passages}})
+        assert "error" not in saved, saved
+        path = (vault / page_names.resolve_page(vault, saved["source"]["id"])).relative_to(vault).as_posix()
+        data = (vault / path).read_bytes()
+        pages.append(find_corpus.parse_page(vault / path, 0, vault, content=data, resolved_relative=path))
+    first, second = pages
+    entry = capture_inventory.input_from_bytes(vault, first.rel_path, (vault / first.rel_path).read_bytes()).entry
+
+    assert list(passage_evidence.source_chunks(first, entry)) == list(passage_evidence.declared_chunks(first))
+    assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
+
+
 def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
     """A format-based global strip would erase authored text in an ordinary note."""
     from exomem.find_types import ParsedPage
