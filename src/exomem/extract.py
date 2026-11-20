@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import codecs
 import functools
-import importlib.util
 import itertools
 import json
 import logging
@@ -757,7 +756,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
     raises (same contract as `prewarm`).
     """
     try:
-        from . import voice_profiles
+        from . import voice_embed, voice_profiles
 
         enabled = _diarize_enabled()
         sidecar_venv = _diarizer_sidecar_python() is not None
@@ -773,7 +772,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         # The voice embedder is the `diarization` extra's `speechbrain`; without it every
         # cluster stays anonymous even with voiceprints enrolled, and `voice_embed` only
         # logs that once per call, so name the gap here at boot.
-        voice_embedder = importlib.util.find_spec("speechbrain") is not None
+        voice_embedder = voice_embed.installed()
         line = (
             f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
             f"hf_token={hf_token} voice_embedder={voice_embedder} profiles={len(names)}"
@@ -781,7 +780,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         if names:
             line += f" ({', '.join(names)})"
         if enabled and names and not voice_embedder:
-            line += "; named attribution disabled: install the 'diarization' extra (profile 'media')"
+            line += "; named attribution disabled: install the 'diarization' extra"
         level = (
             logging.WARNING
             if enabled and (not (sidecar_venv and hf_token) or (names and not voice_embedder))

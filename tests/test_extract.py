@@ -1050,6 +1050,7 @@ def test_readiness_healthy_logs_info_with_profiles(
         "load_profiles",
         lambda _path, **_kwargs: {"Fixture Speaker": object(), "Maria": object()},
     )
+    monkeypatch.setattr(voice_embed, "installed", lambda: True)
     with caplog.at_level(logging.INFO, logger="exomem.extract"):
         extract.log_diarization_readiness(tmp_path)
     rec = _readiness_record(caplog)
@@ -1058,6 +1059,26 @@ def test_readiness_healthy_logs_info_with_profiles(
     assert "enabled=True" in msg and "sidecar_venv=True" in msg and "hf_token=True" in msg
     assert "profiles=2" in msg and "Fixture Speaker" in msg and "Maria" in msg
     assert "hf_secret_value_123" not in caplog.text  # token presence only, never the value
+
+
+def test_readiness_warns_when_voiceprints_are_enrolled_but_the_embedder_is_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    # A managed install without the `diarization` extra left every cluster anonymous with
+    # nothing in the boot log: the worker named no speakers and no line said why.
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "x")
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(
+        voice_profiles, "load_profiles", lambda _path, **_kwargs: {"Maria": object()}
+    )
+    monkeypatch.setattr(voice_embed, "installed", lambda: False)
+    with caplog.at_level(logging.INFO, logger="exomem.extract"):
+        extract.log_diarization_readiness(tmp_path)
+    rec = _readiness_record(caplog)
+    assert rec.levelno == logging.WARNING
+    assert "voice_embedder=False" in rec.getMessage()
+    assert "install the 'diarization' extra" in rec.getMessage()
 
 
 def test_readiness_warns_when_enabled_but_venv_missing(

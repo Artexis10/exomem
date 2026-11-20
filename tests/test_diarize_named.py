@@ -7,7 +7,6 @@ cases — enrolled→named, unknown→anonymous, no-profiles→byte-identical, e
 """
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -126,21 +125,3 @@ def test_resolution_failure_never_raises(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert r.text == "[Speaker A]: hello there\n[Speaker B]: general kenobi"
 
-
-def test_boot_line_warns_when_voiceprints_are_enrolled_but_the_embedder_is_missing(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # A managed install without the `diarization` extra left every cluster anonymous with
-    # nothing in the boot log: the worker named no speakers and no line said why.
-    _wire(monkeypatch, profiles={"Owner": Profile("Owner", _OWNER, 0.5)}, embed=lambda p, s: None)
-    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path("/sidecar/python"))
-    monkeypatch.setenv("HF_TOKEN", "present")
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-
-    with caplog.at_level("INFO", logger=extract.log.name):
-        extract.log_diarization_readiness(Path("/vault"))
-
-    [record] = [r for r in caplog.records if "diarization readiness" in r.getMessage()]
-    assert record.levelname == "WARNING"
-    assert "voice_embedder=False" in record.getMessage()
-    assert "install the 'diarization' extra" in record.getMessage()
