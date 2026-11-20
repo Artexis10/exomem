@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import codecs
 import functools
+import importlib.util
 import itertools
 import json
 import logging
@@ -769,13 +770,23 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
                     vault_root=vault_root,
                 )
             )
+        # The voice embedder is the `diarization` extra's `speechbrain`; without it every
+        # cluster stays anonymous even with voiceprints enrolled, and `voice_embed` only
+        # logs that once per call, so name the gap here at boot.
+        voice_embedder = importlib.util.find_spec("speechbrain") is not None
         line = (
             f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
-            f"hf_token={hf_token} profiles={len(names)}"
+            f"hf_token={hf_token} voice_embedder={voice_embedder} profiles={len(names)}"
         )
         if names:
             line += f" ({', '.join(names)})"
-        level = logging.WARNING if enabled and not (sidecar_venv and hf_token) else logging.INFO
+        if enabled and names and not voice_embedder:
+            line += "; named attribution disabled: install the 'diarization' extra (profile 'media')"
+        level = (
+            logging.WARNING
+            if enabled and (not (sidecar_venv and hf_token) or (names and not voice_embedder))
+            else logging.INFO
+        )
         log.log(level, "%s", line)
     except Exception:  # noqa: BLE001 — a diagnostics line must never break startup
         log.debug("diarization readiness check failed", exc_info=True)
