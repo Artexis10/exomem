@@ -115,7 +115,7 @@ _OWNERSHIP_MEMO_MAX = 131_072
 
 
 def _ownership_key() -> tuple[str, int, int]:
-    """The inputs of ``classify_by_rule`` beyond the path: folder name, collection profiles, registry."""
+    """The inputs of ``classify_by_rule`` beyond the path: folder name, profiles and registry."""
     return (
         managed_root_rel(),
         id(collection_profiles.PROFILES),

@@ -14243,7 +14243,7 @@ def _homonym_paths(
 
 
 def warm_homonyms(vault_root: Path, check: Callable[[], None]) -> None:
-    """Group the names of the resident recall resolver, so a restricted reader's first request does not.
+    """Group the resident recall resolver's names, so a restricted reader's first request need not.
 
     The groups hold nothing of a caller (see `_HOMONYM_PATHS`), so one pass serves every reader.
     """
