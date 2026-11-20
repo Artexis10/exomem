@@ -8,7 +8,7 @@ At a stepping stone, the capture predicate SHALL include three classes besides t
 - a question the work leaves open, saved as an open question;
 - the concrete values a task settled, such as times, prices, terms, contacts and limits, saved in full and never as a pointer to a working file.
 
-The activation `capture_policy` block, at every disposition except `off`, and every scaffold surface that teaches capture SHALL carry the three classes. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten.
+The activation `capture_policy` block, at every disposition except `off`, and every scaffold surface that teaches capture SHALL carry the three classes. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten.
 
 #### Scenario: A held interpretation is saved attributed, with its uncertainty
 
@@ -26,7 +26,7 @@ The activation `capture_policy` block, at every disposition except `off`, and ev
 
 - **WHEN** a task settles concrete values, such as a time, a price, a term or a contact, and records them in a working file
 - **THEN** the saved material states each value in full
-- **AND** it does not stand in a pointer to the working file
+- **AND** it does not save only a pointer to the working file
 
 #### Scenario: A casual tentative personal claim stays quiet
 

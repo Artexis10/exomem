@@ -23,13 +23,17 @@ Casual tentative claims about a person ("I might switch gyms") stay quiet, so th
 
 ### The full rule rides the activation block
 
-The bootstrap core is at its byte ceiling. At `maximal`, the populated core had 6 to 41 bytes of headroom. The core therefore gets only the same-length wording fix, and `balanced` gets one clause (27 bytes) that replaces "or unresolved questions" with "a question the work leaves open is saved as open". `balanced` had 240 to 275 bytes of headroom before the clause and has 213 to 248 after it.
+The bootstrap core is at its byte ceiling. At `maximal`, the populated core had 6 to 41 bytes of headroom. The core therefore gets only the same-length wording fix, and `balanced` gets one clause (39 bytes) that replaces "or unresolved questions" with "a question the work leaves open is saved as an open question". `balanced` had 240 to 275 bytes of headroom before the clause and has 201 to 236 after it.
 
 The full rule is one sentence in the activation `capture_policy` block, after the baseline doctrine. Every client receives that block, hook or MCP-only. A client that reads only the bootstrap still gets the `balanced` clause and the scaffold.
 
 ### The block has a hard budget
 
-The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 161 characters and brings the longest to 1,582, so 18 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering is empty or lacks the sentence.
+The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 171 characters and brings the longest to 1,592, so 8 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+
+### The copyable instruction blocks stay within their caps
+
+The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and `QUICKSTART.md` carry the same quiet rule, and a hookless client pastes them first. A same-length swap to "tentative events stay quiet" aligns them. The `balanced` block also drops its "or open questions" exclusion, which only shortens it. Each block stays within its byte cap (1,500; 1,490 for the `QUICKSTART.md` block). The blocks do not carry the three classes: the blocks stay within their caps, and the bootstrap and the activation block carry the classes.
 
 ### Sources
 
@@ -39,5 +43,4 @@ The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `
 ## Risks / Trade-offs
 
 - The model may now save material that was mid-thought. The classes say "held" and "left open" and keep the exclusion of exploration and tangents. The real-model probe includes a control for that.
-- The activation block has 18 characters left. The next addition must shorten something deliberately.
-- The pasted instruction blocks in the public docs keep their old "tentative claims" wording. They are copy-paste text with a 1,500-byte cap, and a hookless client reads the bootstrap after pasting them. Aligning them is follow-up work.
+- The activation block has 8 characters left. The next addition must shorten something deliberately.

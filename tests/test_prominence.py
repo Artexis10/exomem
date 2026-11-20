@@ -407,7 +407,7 @@ def test_effective_capture_applies_authored_posture_under_the_active_level(
 _BASE_CARRIER_REVISION = "fdc9ab4d"
 _BASE_CAPTURE_SENTENCES = {
     "balanced": (
-        "Not mid-thought exploration or tangents; a question the work leaves open is saved as open.",
+        "Not mid-thought exploration or tangents; a question the work leaves open is saved as an open question.",
         "Route stated intent to Planning and observed outcome to Records.",
         "Transition only on explicit user intent",
     ),

@@ -29,5 +29,6 @@ None.
 
 - `src/exomem/prominence.py`: one wording fix, one new constant, one clause in the `balanced` capture text.
 - The skill scaffold (`operations.md`, `engagement.md`, the `exomem-capture` workflow skill) and the packages generated from it.
-- The activation `capture_policy` block grows by one sentence. Its longest rendering stays under the hook's 1,600-character cap. The bootstrap core grows by 27 bytes at `balanced` and by none at `maximal`.
+- The copyable custom-instruction blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and `QUICKSTART.md`: a same-length swap to "tentative events stay quiet", and the `balanced` block drops its "or open questions" exclusion.
+- The activation `capture_policy` block grows by one sentence. Its longest rendering stays under the hook's 1,600-character cap. The bootstrap core grows by 39 bytes at `balanced` and by none at `maximal`.
 - No tool schema, write path or stored data changes. The behaviour depends on a model's judgement, so a real-model probe on the three classes and the control decides the release.

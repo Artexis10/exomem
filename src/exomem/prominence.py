@@ -245,8 +245,8 @@ _BASELINE_CAPTURE = (
 #: `_CAPTURE_POLICY_MAX_CHARS` the hook keeps only the block's lead sentence, so a longer text here
 #: silences every capture rule.
 _EPISTEMIC_CAPTURE = (
-    "At a stepping stone save: held views, attributed and uncertain, never as fact; questions left "
-    "open, as open questions; settled values in full, not file pointers."
+    "At a stepping stone save: a held view, attributed, with its uncertainty, not as fact; a question "
+    "left open, as an open question; settled values in full, not file pointers."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
@@ -456,7 +456,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + "Capture at a stepping stone: a durable conclusion, central or recurring "
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
-            "mid-thought exploration or tangents; a question the work leaves open is saved as open. "
+            "mid-thought exploration or tangents; a question the work leaves open is saved as an open question. "
             + _CORRECTION_CAPTURE
             + " "
             + _BASELINE_CAPTURE
