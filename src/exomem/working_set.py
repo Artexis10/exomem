@@ -1896,10 +1896,14 @@ def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
 
 def _connection_why(
     vault_root: Path, *, relation: str, direction: str, authoring_rel: str,
-    target_rel: str, authoring_body: str | None, target_body: str | None,
+    target_rel: str, authoring_body: str | None, lede_rel: str, lede_body: str | None,
     resolver: Any, seen: Callable[[str], bool],
 ) -> str:
-    """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary."""
+    """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary.
+
+    The lede that stands in is the connected page's, so `lede_rel` owns `lede_body` for egress;
+    on an inbound connection that page is the edge's author, not its target.
+    """
     from . import markdown_relations
     from .governance import egress
 
@@ -1930,9 +1934,9 @@ def _connection_why(
                     # so the line is not quoted and the lede stands in.
                     if "[[" in context:
                         context = ""
-    if not context and target_body:
+    if not context and lede_body:
         context = working_set_index.lede(
-            egress.prose_for_caller(vault_root, target_body, owner_path=target_rel)
+            egress.prose_for_caller(vault_root, lede_body, owner_path=lede_rel)
         )
         # A lede link is shown by its display name only when it names a page the caller sees;
         # otherwise the bare relation stands, so no path or withheld name reaches the reason.
@@ -2050,7 +2054,8 @@ def read_connections(
             return _connection_why(
                 Path(vault_root), relation=connection.relation, direction=connection.direction,
                 authoring_rel=authoring_rel, target_rel=target_rel,
-                authoring_body=_body(authoring_rel), target_body=_body(connection.target_path),
+                authoring_body=_body(authoring_rel),
+                lede_rel=connection.target_path, lede_body=_body(connection.target_path),
                 resolver=resolver, seen=_seen,
             )
         except egress.ReaderViewUnavailable:

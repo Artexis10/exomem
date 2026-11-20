@@ -409,3 +409,29 @@ def test_the_default_recall_budget_is_six_thousand_with_a_half_turn_slice(vault:
     assert packet["budget"]["limit_chars"] == 6000
     assert packet["map"]["items"] and packet["task_context"]["candidates"]
     assert context_views._slice_reserve(6000) == int(6000 * context_views.TURN_SLICE_SHARE) == 3000
+
+
+def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lede that stands in for a bare inbound relation is the other page's, so its carrier is withheld.
+
+    A source page keeps its own carriers, so judging the other page's lede as the seed's
+    served a restricted reader that page's origin carrier inside the reason.
+    """
+    seed = _page(vault, "visit-capture", body=LEAD_BODY, folder="Knowledge Base/Sources/Articles")
+    _page(vault, "visit-report", body=(
+        "<!-- exomem-origin withheld-input-reference -->\n\nThe revised visit report.\n\n"
+        f"- supersedes [[{seed.removesuffix('.md')}]]\n"
+    ))
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+    # A vault with a configured audience: every caller but the owner gets withheld prose.
+    monkeypatch.setattr(egress, "projects_origin_for_caller", lambda *args, **kwargs: True)
+
+    served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+
+    listed, _omitted = served[seed]
+    inbound = next(connection for connection in listed if connection.direction == "inbound")
+    assert "The revised visit report" in inbound.why
+    assert "exomem-origin" not in inbound.why
