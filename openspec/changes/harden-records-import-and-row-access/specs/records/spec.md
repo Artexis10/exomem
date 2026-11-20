@@ -99,7 +99,7 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 - **THEN** the batch takes fewer `execute` calls than it has rows, and its fetched rows are at most the rows written plus a fixed number, as the benchmark records in `executes` and `rows_fetched`
 
 #### Scenario: An unrelated write during an import
-- **WHEN** a 4,795-row import runs while background passes keep the process busy, and the agent saves an unrelated note
+- **WHEN** a 4,795-row import runs while background passes that yield to foreground requests keep the process busy, and the agent saves an unrelated note
 - **THEN** the note commits without `MUTATION_BUSY`, and no import batch holds the boundary longer than the hold budget
 
 #### Scenario: Status during a batch

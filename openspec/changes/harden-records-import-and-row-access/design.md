@@ -148,6 +148,7 @@ The Q1 phase gate's other conditions stay with that change: the 1.8 memory probe
   - Beside two such threads, an off-thread status runs 43 statements and waits for no boundary, yet answers in a median of 2.1 to 2.6 s. A note save alone takes 25.5 s, against 0.25 s without busy threads.
   - One run each at a 0.5 ms GIL switch interval (`sys.setswitchinterval`; the default is 5 ms) took 6.5 s for the import, with a median hold of 0.6 s and a longest of 0.75 s. Status answered in a median of 0.30 s, and the note save took 3.2 s.
   - The hold and status bounds under contention need fewer steps per operation, a shorter switch interval, or the CPU-bound passes moved out of the process. This change builds none of them.
+  - A later measurement over four intervals with 3 interleaved repeats rejected the shorter switch interval. Beside the service's own background pass, which yields to foreground requests, the bounds held at the default 5 ms, and no shorter interval made a difference. Beside threads that never yield, shorter intervals helped but met no bound with two such threads. The remaining risk is work in the process that does not yield, so the fix belongs with that work, not with the interpreter setting.
 
 ### 7. Load target
 
