@@ -986,10 +986,11 @@ def upload_refusal(
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
     Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
-    on the volume (design D1); the Source lane files every upload through `add` as an offloadable original,
-    whatever its name, so an Evidence upload whose name is not known yet (`filename` None) is admitted. A size
-    known only as a range, at least `declared_bytes` and at most `most_bytes`, is refused only when every size
-    in it is. An artifact too large to offload stays on the volume in either lane. The recorded
+    on the volume (design D1), as does a pooled archive for a suffix-less name (`originals.resident_suffixless`).
+    The Source lane files every other upload through `add` as an offloadable original, whatever its name, so
+    a Source upload whose name is not known yet is charged. An Evidence upload whose name is not known yet
+    (`filename` None) is admitted. A size known only as a range, at least `declared_bytes` and at most
+    `most_bytes`, is refused only when every size in it is. An artifact too large to offload stays on the volume in either lane. The recorded
     census decides first. Only a record that says the upload does not fit is confirmed by a census read now,
     and only the confirmed figure refuses. No record, an unknown figure, or a configuration, volume or ledger
     that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
@@ -1021,7 +1022,7 @@ def upload_refusal(
         decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
         if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
             decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
-    except (OSError, ValueError, TypeError, MediaStoreError) as error:  # An unreadable policy, volume or ledger.
+    except (OSError, ValueError, TypeError, MediaStoreError, held_fs.HeldFsError) as error:  # An unreadable policy, volume, ledger or pool marker.
         log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
         return None
     if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
