@@ -50,7 +50,66 @@ def test_discovery_never_reads_a_foreign_sidecar_alias(vault, tmp_path):
         alias.symlink_to(index.path)
     except OSError:
         pytest.skip("symbolic links are unavailable")
-    assert embedding_index.read_published_identity(vault) is None
+    assert cell_identity.recall_space_state(vault) == {"state": "unknown", "id": None}
+
+
+def _publish_space(vault):
+    from contextlib import closing
+
+    from exomem import embedding_index, recall_space
+
+    index = embedding_index.EmbeddingIndex(vault)
+    with closing(index._connect()) as connection, connection:
+        space = recall_space.SpaceIdentity("cell-model", "cell-weights", 2)
+        recall_space.write_identity(connection, space)
+    return embedding_index.read_published_identity(vault).identity_digest
+
+
+def _hold_store(vault, seconds):
+    """Hold the store lock in another thread, as a concurrent reader or a capture does."""
+    import threading
+
+    from exomem import reserved_paths
+
+    held = threading.Event()
+
+    def hold():
+        with reserved_paths._subsystem_authority_scope("embedding_index"), \
+                reserved_paths._identity_coordination_scope(
+                    vault, descriptor_ids=("embeddings-store",), identity_may_change=False):
+            held.set()
+            threading.Event().wait(seconds)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(5)
+    return holder
+
+
+def test_discovery_waits_out_a_short_store_hold_instead_of_reporting_no_space(vault):
+    """Four concurrent discovery calls reported a published space unavailable 3 times in 4."""
+    space = _publish_space(vault)
+    holder = _hold_store(vault, 0.05)
+    try:
+        assert cell_identity.recall_space_state(vault) == {"state": "observed", "id": space}
+    finally:
+        holder.join()
+
+
+def test_a_store_held_past_the_wait_reports_an_unknown_recall_space(vault, monkeypatch):
+    """A busy store must not read as a cell with no published recall space."""
+    _publish_space(vault)
+    monkeypatch.setattr(cell_identity, "RECALL_SPACE_WAIT_SECONDS", 0.01)
+    holder = _hold_store(vault, 0.5)
+    try:
+        assert cell_identity.recall_space_state(vault) == {"state": "unknown", "id": None}
+    finally:
+        holder.join()
+
+
+def test_a_cell_without_a_published_space_reports_it_unavailable(vault):
+    """An empty cell must stay distinguishable from a busy one."""
+    assert cell_identity.recall_space_state(vault) == {"state": "unavailable", "id": None}
 
 
 def test_discovery_follows_the_filtered_command_registry():

@@ -835,6 +835,12 @@ def _container_security_context() -> dict:
 MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 # The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
 SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
+# The resident passage matrix ceiling, the variable the runtime's passage_matrix module
+# reads. 512 MiB is the budget the 2026-11-14 qualification measured in the default
+# 2-CPU, 3 GiB cell; the runtime still admits it against the pod's memory headroom and
+# scores from disk when it does not fit. model_env may set another value for a cell.
+PASSAGE_MATRIX_BYTES_ENV = "EXOMEM_PASSAGE_MATRIX_BYTES"
+DEFAULT_PASSAGE_MATRIX_BYTES = 512 * 1024 * 1024
 
 
 # NEW-2: model_env is operator-only chart configuration, so this stays a
@@ -1012,6 +1018,8 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     )
     # Defence in depth: settings load already refused these (main.py).
     check_model_env(spec.model_env)
+    if PASSAGE_MATRIX_BYTES_ENV not in spec.model_env:
+        env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(DEFAULT_PASSAGE_MATRIX_BYTES)})
     for key, value in sorted(spec.model_env.items()):
         env.append({"name": key, "value": value})
     if spec.media_engines:

@@ -22,6 +22,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -1070,6 +1071,8 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
 #: limit (about 290-330 bge-m3 tokens for CJK prose).
 MAX_UNSPACED_CHARS_PER_CHUNK = 500
 _SENTENCE_END_MARKS = frozenset("。！？.!?")
+#: A run of non-space characters longer than the cap: the shape of one over-long "word".
+_OVERLONG_WORD = re.compile(rf"\S{{{MAX_UNSPACED_CHARS_PER_CHUNK + 1}}}")
 
 
 def _needs_character_cap(paragraph: str) -> bool:
@@ -1081,8 +1084,12 @@ def _needs_character_cap(paragraph: str) -> bool:
     limit = MAX_UNSPACED_CHARS_PER_CHUNK
     if len(paragraph) <= limit:
         return False
-    if max(len(word) for word in paragraph.split()) > limit:
+    # str.split and \S share one whitespace definition, so this finds the words the split yields.
+    if _OVERLONG_WORD.search(paragraph):
         return True
+    if not text_scripts.contains_scriptio_continua(paragraph):
+        # With no unspaced character both bounds below are false; skip the per-character scan.
+        return False
     token_chars = 0
     unspaced = 0
     for character in paragraph:
@@ -1961,7 +1968,7 @@ def reconstruct_publication(vault_root: Path, path: Path) -> EmbeddingPublicatio
             if page is None:
                 return None
             identity = index.identity or recall_space.current_identity(recall_space.current_dim())
-            prepared.check_page(page, vector_dim=0 if prepared.source_bytes <= 1024 else identity.dim)
+            prepared.check_page(page, vector_dim=0)  # This chunk pass encodes nothing.
             chunks = _chunks_for_page(vault_root, page, allow_encode=False)
             if chunks is None:
                 return None  # The existing segmenter needs inference: replay instead.
@@ -2297,7 +2304,7 @@ def _upsert_after_write_status(
         if preparation is not None:
             identity = getattr(index, "identity", None)
             width = identity.dim if identity else recall_space.current_dim()
-            preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
+            preparation.check_page(page, vector_dim=0)  # The first chunk pass encodes nothing.
         try:
             chunks = _chunks_for_page(vault_root, page, allow_encode=False) if preparation is not None else None
             if chunks is None:
@@ -2537,7 +2544,7 @@ def parent_rows_from_source(
         raise ValueError("the page could not be parsed")
     identity = getattr(index, "identity", None)
     width = identity.dim if identity else recall_space.current_dim()
-    preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
+    preparation.check_page(page, vector_dim=0)  # This chunk pass encodes nothing.
     chunks = _chunks_for_page(vault_root, page, allow_encode=False)
     if chunks is None:
         # Timed segmentation encodes while it chunks, so its reservation comes first.
