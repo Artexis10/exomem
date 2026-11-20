@@ -5543,11 +5543,10 @@ def _managed_eligible_filter_paths(
         include_units=plan.has_unit_predicate,
     )
     return _metadata_eligible_filter_paths(
-        vault_root,
         plan=plan,
         candidate_parent_paths=candidate_parents,
         metadata=metadata,
-        proven=snapshot.proven_recall_paths(scope),
+        emitted_as=_emission_rule(vault_root, metadata, snapshot.proven_recall_paths(scope)),
     )
 
 
@@ -5764,10 +5763,9 @@ def _emission_rule(
     caller may not see, is dropped. A child is reported as its emitted parent when that parent has a
     view and is a recall candidate, else as itself; the page it is reported as must be visible too.
     `proven` holds the paths that the catalogue's projection already admitted for recall; the
-    symlink and access walk runs only for the others, once per path, in one batch pass over the
-    rows of `metadata`, under one read of the access policy.
+    symlink and access walk runs only for the others, once per path, in one
+    `recall_policy.admitted_among` batch over the rows of `metadata`, which applies the access policy.
     """
-    from . import access
 
     def viewed(rel: str | None) -> bool:
         row = metadata.get(rel) if rel is not None else None
@@ -5776,15 +5774,12 @@ def _emission_rule(
     admitted = recall_policy.admitted_among(
         vault_root, (rel for rel in metadata if viewed(rel) and rel not in proven)
     )
-    _fingerprint, indexable = access.indexable_filter(vault_root)
 
     def recall_admitted(rel: str) -> bool:
         return rel in proven or rel in admitted
 
     def visible(rel: str) -> bool:
-        return viewed(rel) and (
-            rel in proven or (rel in admitted and (indexable is None or indexable(rel)))
-        )
+        return viewed(rel) and recall_admitted(rel)
 
     def emitted_as(rel: str) -> str | None:
         if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
@@ -5797,19 +5792,17 @@ def _emission_rule(
 
 
 def _metadata_eligible_filter_paths(
-    vault_root: Path,
     *,
     plan: structured_filters.FilterPlan,
     candidate_parent_paths: set[str],
     metadata: dict[str, Any],
-    proven: AbstractSet[str] = frozenset(),
+    emitted_as: Callable[[str], str | None],
 ) -> set[str]:
     """Canonical filter evaluation over index views, including parent collapse.
 
-    `proven` holds the paths the catalogue's projection already admitted for
-    recall; the symlink and access walk runs only for the others.
+    `emitted_as` is the caller's `_emission_rule` over the same `metadata`, so a caller that also
+    groups rows by it admits each row once.
     """
-    emitted_as = _emission_rule(vault_root, metadata, proven)
     eligible: set[str] = set()
     matches: dict[str, bool] = {}
     for rel in candidate_parent_paths:
@@ -6337,18 +6330,17 @@ def _window_order(
         read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
         if any(metadata[rel].updated != updated for rel, updated in read.items()):
             raise RetrievalIndexWarming(site="browse_ordering_stale")
+        emitted_as = _emission_rule(vault_root, metadata, proven)
         eligible = (
             None
             if plan is None
             else _metadata_eligible_filter_paths(
-                vault_root,
                 plan=plan,
                 candidate_parent_paths=set(keys),
                 metadata=metadata,
-                proven=proven,
+                emitted_as=emitted_as,
             )
         )
-        emitted_as = _emission_rule(vault_root, metadata, proven)
         first: dict[str, str] = {}
         frames: dict[str, Any] = {}
         for group, rows in groups.items():
