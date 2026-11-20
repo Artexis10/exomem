@@ -228,8 +228,8 @@ def routes(monkeypatch):
 
 
 def declined_window(monkeypatch):
-    """The browse index reads as missing, which is how the window declines for an older store."""
-    monkeypatch.setattr(lexstore, "BROWSE_INDEX", "pages_browse_declined")
+    """Every browse takes the exhaustive route, whatever the cell (a keyed relation walk too)."""
+    monkeypatch.setattr(find_module, "_browse_window", lambda *args, **kwargs: None)
 
 
 def answers(root, caller):
@@ -313,6 +313,47 @@ def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, rout
     assert all(windowed[(100, name)] for name in CELLS)
     everything = json.dumps(windowed[(100, "no filter")])
     assert "Clip-Three.mp4" in everything and "scene-000-004.000" in everything
+
+
+def paths_of(answer):
+    return answer if isinstance(answer, tuple) else [hit["path"] for hit in answer]
+
+
+def test_a_relation_browse_over_several_chunks_lists_each_page_once(vault, routes, monkeypatch):  # noqa: F811
+    """A relation browse that lists a page twice, or drops one, once its limit is not filled by the
+    first two chunks: a type that only two of the fourteen linked pages hold, at small limits."""
+    pages = {HUB: page("Hub", updated="2026-01-01")}
+    for index in range(14):
+        pages[f"{NOTES}/Link-{index:02d}.md"] = page(
+            f"Link {index}",
+            kind="insight" if index in (5, 13) else "note",
+            updated=f"2026-02-{14 - index:02d}",
+            body="It follows [[Hub]].",
+        )
+    write_files(vault, pages)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    cells = {
+        "relation": {"relation_of": HUB},
+        "relation, insight": {"relation_of": HUB, "types": ["insight"]},
+    }
+    limits = (1, 2, 3, 6)
+
+    def run():
+        return {
+            (name, limit): paths_of(browse(vault, nullcontext, limit, cell))
+            for name, cell in cells.items()
+            for limit in limits
+        }
+
+    windowed = run()
+    assert routes == [], "the window must answer every cell, or this comparison proves nothing"
+    declined_window(monkeypatch)
+    assert windowed == run()
+    assert routes
+    for key, found in windowed.items():
+        assert len(found) == len(set(found)), key
+    assert windowed[("relation, insight", 6)] == [f"{NOTES}/Link-05.md", f"{NOTES}/Link-13.md"]
 
 
 def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):

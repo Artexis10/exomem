@@ -6215,8 +6215,10 @@ def _keyed_chunks(
     ordered = sorted(
         emitted.values(), key=lambda row: _browse_order_key(row.path, row.updated), reverse=True
     )
-    for start in range(0, len(ordered), size):
+    start = 0
+    while start < len(ordered):
         yield ordered[start : start + size], children
+        start += size
         size = min(size * 2, _BROWSE_CHUNK_LIMIT)
 
 
