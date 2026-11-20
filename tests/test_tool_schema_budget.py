@@ -38,7 +38,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # ceiling deliberately, in the diff that needs it.
 # `save_source.options.custody_only`, keep a handed file for safekeeping only, added 12 B on 2026-11-18
 # (keep-handed-files-as-sources).
-TOTAL_BUDGET = 29_352
+# The door operation `maintenance.capture_metadata`, the owner's metadata-only capture backfill, added 62 B to the two
+# door enums on 2026-11-20 (index-capture-metadata).
+TOTAL_BUDGET = 29_450
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -54,7 +56,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_record": 800,
     "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2500,
+    "manage_memory": 2550,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

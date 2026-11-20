@@ -3109,6 +3109,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "reconcile": False,
             "backfill-ids": True,
             # Preview unless `dry_run=false`, like fix and backfill-ids; only the owner runs either.
+            "capture-metadata": True,
             "convert-originals": True,
             # A job read is a structure read; its cancel flags a job and is a write.
             "maintenance-job": True,

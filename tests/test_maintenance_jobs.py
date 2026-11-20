@@ -69,6 +69,7 @@ def _session(server, scenario):
 #: The door operation that carries each maintenance kind, on the read door and on the write door.
 _DOOR_OPERATIONS = {
     "backfill-ids": "maintenance.backfill_ids",
+    "capture-metadata": "maintenance.capture_metadata",
     "convert-originals": "maintenance.convert_originals",
     "fix": "maintenance.fix",
     "reconcile": "maintenance.reconcile",

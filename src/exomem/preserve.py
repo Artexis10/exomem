@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, BinaryIO
 
 from . import (
+    capture_metadata,
     document_identity,
     indexes,
     memory_refs,
@@ -51,6 +52,7 @@ from . import (
     temporal,
 )
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
+from .capture_metadata import CaptureFacts
 from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts
 from .source_inspection import Inspection, inspect_source
@@ -59,6 +61,7 @@ from .vault import (
     ContentHashMismatchError,
     DeferredGraphCompletion,
     DefiniteNoEffect,
+    FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
@@ -1867,6 +1870,7 @@ def render_sidecar_extraction(
     attempts: int | None = None,
     asr: AsrFacts | None = None,
     ocr: OcrFacts | None = None,
+    capture: CaptureFacts | None = None,
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
     parts: Layout | None = None,
@@ -1881,6 +1885,7 @@ def render_sidecar_extraction(
     `asr` records what the speech engine decided; facts of an earlier extraction never
     survive into the new one. `ocr` records the confidence of an image's OCR and holds the
     words it withheld under `## Low-confidence OCR`; an extraction without it records neither.
+    `capture` is what the original states about its capture; without it the page's capture fields stay as they are.
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
     `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
@@ -1923,6 +1928,8 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if capture is not None:
+        content = set_capture_fields(content, capture)
     if identity_check is not None:
         # The recorded check could not read a scanned PDF; the OCR text now can (`document_identity.after_extraction`).
         content = _set_frontmatter_field(content, "identity_check", document_identity.render(identity_check))
@@ -1940,6 +1947,63 @@ def render_sidecar_extraction(
         content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
     )
     return with_newline(content, newline)
+
+
+def set_capture_fields(content: str, capture: CaptureFacts) -> str:
+    """`content` with its capture fields replaced by exactly what `capture` states, in the frontmatter alone.
+
+    A field that the file does not state is removed, so a sidecar never keeps a value that the original
+    no longer supports. The extracted text, the preserved notes and every other field stay as they are.
+    """
+    stated = capture.frontmatter()
+    content = _remove_frontmatter_fields(
+        content, lambda key: key in capture_metadata.FIELDS and key not in stated
+    )
+    for field, value in stated.items():
+        content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def without_position_fields(content: str) -> str | None:
+    """`content` as a page with no recorded position reads: the position fields removed, nothing else.
+
+    The lines are removed by their key, so a key spelled another way (quoted, spaced) survives. A text
+    that still states a position afterwards has no safe form to show, and the answer is `None`.
+    """
+    stripped = _remove_frontmatter_fields(content, lambda key: key in capture_metadata.LOCATION_FIELDS)
+    return None if states_position(stripped) else stripped
+
+
+def states_position(content: str) -> bool:
+    """Whether the page text states a position, or has frontmatter too damaged to prove that it states none."""
+    try:
+        fields = parse_frontmatter(content, custody=True)[0]
+    except FrontmatterError:
+        # An unparseable block cannot be shown to hold no position (a key can be escaped past any name check), so it
+        # counts as stating one and a restricted caller gets no raw text. The body and parsed fields stay readable.
+        return True
+    return capture_metadata.carries_position(fields)
+
+
+def render_capture_block(before: str, capture: CaptureFacts) -> str:
+    """The owner backfill's write: `before` with only its capture block replaced.
+
+    A page that already holds exactly that block comes back as it is. A sidecar whose preserved notes
+    have no machine-owned boundary is refused when the write would change it, as an extraction write
+    is: the backfill leaves such a page to its owner rather than guess.
+    """
+    newline = document_newline(before)
+    text = with_newline(before, "\n")
+    updated = set_capture_fields(text, capture)
+    if updated == text:
+        return before
+    if _has_ambiguous_legacy_preserved_notes(text):
+        raise PreserveError(
+            code="AMBIGUOUS_SIDECAR_BOUNDARY",
+            missing=[],
+            reason="unmarked nonempty preserved notes have no machine-owned boundary",
+        )
+    return with_newline(updated, newline)
 
 
 #: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
@@ -2286,7 +2350,8 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     head, body = content[:end], content[end:]
     pattern = re.compile(rf"(?m)^{re.escape(field)}:.*$")
     if pattern.search(head):
-        head = pattern.sub(f"{field}: {value}", head, count=1)
+        line = f"{field}: {value}"
+        head = pattern.sub(lambda _match: line, head, count=1)  # a callable: a backslash in a value is no template escape
     else:
         head = head.rstrip("\n") + f"\n{field}: {value}"
     updated = head + body

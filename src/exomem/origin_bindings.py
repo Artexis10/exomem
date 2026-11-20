@@ -202,7 +202,7 @@ def resolve_origin_input(
             str(page.frontmatter.get("type") or "").casefold(), note_types.raw
         )
         or retained.released is None
-        or retained.released.get("frontmatter") != page.frontmatter
+        or not egress.released_frontmatter_matches(retained.released, page.frontmatter)
     ):
         raise _unavailable()
     try:

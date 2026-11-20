@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal, Protocol, TypeAlias, cast
 
-from . import semantic_labels, semantic_language_registry, semantic_units, temporal
+from . import (
+    capture_metadata,
+    originals,
+    semantic_labels,
+    semantic_language_registry,
+    semantic_units,
+    temporal,
+)
 from .vocabulary.registry import PUBLIC_INSTANCE
 
 MAX_PLAN_BYTES = 16 * 1024
@@ -71,8 +78,12 @@ _KNOWN_STRING_FIELDS = frozenset(
 # Fields compared as real dates rather than strings. Every site that used to
 # name `page.updated` alone consults this set, so a second typed date field is
 # one entry instead of five scattered special cases.
-_KNOWN_DATE_FIELDS = frozenset({"page.updated", "unit.check_by"})
-_KNOWN_SCALAR_FIELDS = _KNOWN_STRING_FIELDS | _KNOWN_DATE_FIELDS
+_KNOWN_DATE_FIELDS = frozenset({"page.updated", "page.capture_date", "unit.check_by"})  # nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
+# The sidecar's recorded position: real numbers, compared as numbers. These are the filter-field
+# spellings of `capture_metadata.LOCATION_FIELDS`, which is where a caller's access to them is decided.
+# nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
+_KNOWN_NUMBER_FIELDS = frozenset({"page.capture_lat", "page.capture_lon"})
+_KNOWN_SCALAR_FIELDS = _KNOWN_STRING_FIELDS | _KNOWN_DATE_FIELDS | _KNOWN_NUMBER_FIELDS
 _PAGE_FIELDS = frozenset(
     {
         "page.status",
@@ -82,6 +93,12 @@ _PAGE_FIELDS = frozenset(
         "page.speakers",
         "page.file_type",
         "page.updated",
+        # When and where the original was captured, recorded on a media sidecar. The day is a typed
+        # date; the position is two numbers and is withheld from a caller who may not download the
+        # original (`FilterPlan.position_withheld`).
+        "page.capture_date",
+        "page.capture_lat",
+        "page.capture_lon",
         # The two open source-classification axes. First-class rather than only
         # reachable through `page.frontmatter:/...` because they are a primary
         # way to find a source; page predicates are evaluated in memory over the
@@ -116,6 +133,7 @@ ScalarKind = Literal["null", "boolean", "number", "string", "date", "datetime"]
 CategoryResolver = Callable[[str], str]
 KindResolver = Callable[[str], str]
 DimensionResolver = Callable[[str], str]
+PositionGate = Callable[[str | None], bool]
 
 
 class DimensionSource(Protocol):
@@ -241,12 +259,23 @@ class FilterPlan:
     dimensions: DimensionSource | None = dataclasses.field(
         default=None, compare=False, repr=False
     )
+    #: Set for a caller from whom the release plane may withhold a recorded position: given the
+    #: original a page's position is bound to (None when it names none), says whether this caller
+    #: may not see that position. `evaluate_filter` then reads a withheld page as one with no
+    #: position, and the index narrowing stops leaning on the position columns for a complement.
+    #: Like `dimensions`, it belongs to the caller and not to the plan's identity.
+    position_withheld: PositionGate | None = dataclasses.field(
+        default=None, compare=False, repr=False
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return _node_to_dict(self.root) if self.root is not None else {}
 
     def with_dimensions(self, source: DimensionSource) -> FilterPlan:
         return dataclasses.replace(self, dimensions=source)
+
+    def with_position_gate(self, withheld: PositionGate) -> FilterPlan:
+        return dataclasses.replace(self, position_withheld=withheld)
 
 
 @dataclass(slots=True)
@@ -381,12 +410,62 @@ def evaluate_filter(
     """Evaluate one normalized plan against one parent/unit pair."""
     if plan.root is None:
         return True
+    if plan.position_withheld is not None:
+        page = _as_caller_sees(page, plan.position_withheld)
     return (
         _evaluate_node(
             plan.root, page=page, unit=unit, instance=plan.unit_instance, dimensions=plan.dimensions
         )
         is True
     )
+
+
+def _as_caller_sees(page: Mapping[str, Any], withheld: PositionGate) -> Mapping[str, Any]:
+    """`page` as a caller who may not see its position reads it: with no position at all.
+
+    The decision is taken here, per page and before any test runs, so a withheld page answers every
+    predicate exactly as a page that never recorded a position: a range, `$exists` either way, a
+    complement, and the `page.frontmatter:/capture_lat` pointer. Both shapes of page are read: the
+    live view, which holds the frontmatter, and the catalogue's stored view, which holds only the axes.
+    """
+    frontmatter = page.get("frontmatter")
+    if not (capture_metadata.carries_position(page) or capture_metadata.carries_position(frontmatter)):
+        return page
+    if not withheld(page.get("position_original")):
+        return page
+    seen = {
+        key: value
+        for key, value in page.items()
+        if key not in capture_metadata.LOCATION_FIELDS and key != "position_original"
+    }
+    if isinstance(frontmatter, Mapping):
+        seen["frontmatter"] = capture_metadata.without_position(frontmatter)
+    return seen
+
+
+def reads_position(plan: FilterPlan) -> bool:
+    """Whether any predicate of `plan` can read a recorded position: a position axis or a pointer to one."""
+    found = False
+
+    def visit(node: FilterNode | None) -> None:
+        nonlocal found
+        if node is None or found:
+            return
+        if isinstance(node, Predicate):
+            field = node.field
+            found = field.name in INDEX_PAGE_NUMBER_AXES or (
+                field.pointer is not None
+                and bool(field.pointer)
+                and field.pointer[0] in capture_metadata.LOCATION_FIELDS
+            )
+        elif isinstance(node, Not):
+            visit(node.child)
+        else:
+            for child in node.children:
+                visit(child)
+
+    visit(plan.root)
+    return found
 
 
 def named_dimensions(plan: FilterPlan) -> frozenset[str]:
@@ -855,7 +934,11 @@ INDEX_PAGE_SCALAR_AXES: Final = frozenset(
 #: Page axes stored only as a members array.
 INDEX_PAGE_LIST_AXES: Final = frozenset({"page.project", "page.tags", "page.speakers"})
 #: The page axis compared as a real date.
-INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated"})
+INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated", "page.capture_date"})  # nosemgrep: ep-word-set -- the closed filter fields this module defines, not a customer vocabulary
+#: The page axes compared as numbers: a recorded position, one REAL column each.
+INDEX_PAGE_NUMBER_AXES: Final = _KNOWN_NUMBER_FIELDS
+#: The axes a media sidecar records and the catalogue indexes on their own: the capture day and the position.
+INDEX_CAPTURE_AXES: Final = INDEX_PAGE_NUMBER_AXES | {"page.capture_date"}
 #: Unit axes stored as one scalar column on `semantic_units`.
 INDEX_UNIT_SCALAR_AXES: Final = frozenset(
     {
@@ -903,11 +986,11 @@ class AxisTest:
 
     axis: str
     op: Literal["eq", "ne", "in", "all", "contains", "exists", "range", "nullish"]
-    values: tuple[str, ...] = ()
+    values: tuple[str | float, ...] = ()
     present: bool = True
-    lower: str | None = None
+    lower: str | float | None = None
     lower_op: str = ">="
-    upper: str | None = None
+    upper: str | float | None = None
     upper_op: str = "<="
 
 
@@ -972,6 +1055,24 @@ class EligibilityPlan:
         return self.expr != ELIGIBILITY_TRUE
 
     @property
+    def reads_capture_index(self) -> bool:
+        """Whether an index on a capture axis can drive this plan's scan.
+
+        True when a capture test the index answers (a range, an equality or a membership) can hold
+        for a row without a `$not` having turned it around.
+        """
+
+        def drives(node: EligibilityExpr) -> bool:
+            if isinstance(node, AxisTest):
+                # nosemgrep: ep-word-membership -- AxisTest's closed op literals that an index range scan can answer.
+                return node.axis in INDEX_CAPTURE_AXES and node.op in {"range", "eq", "in"}
+            if isinstance(node, (EligibilityAll, EligibilityAny)):
+                return any(drives(child) for child in node.children)
+            return False
+
+        return drives(self.expr)
+
+    @property
     def refuses(self) -> bool:
         """A complement the columns cannot express, with nothing to fall back on.
 
@@ -1018,7 +1119,10 @@ class _EligibilityIssues:
 def plan_index_eligibility(plan: FilterPlan) -> EligibilityPlan:
     """Classify a compiled plan for index-backed eligibility resolution."""
     issues = _EligibilityIssues()
-    expr, exact, _reasons = _eligibility_expr(plan.root, issues)
+    # A caller whose position access is limited gets the position columns as a superset only: a page
+    # the columns place inside a window may be one this caller reads as having no position.
+    hidden = plan.position_withheld is not None
+    expr, exact, _reasons = _eligibility_expr(plan.root, issues, hidden)
     if issues.fields:
         return EligibilityPlan("unsupported", tuple(sorted(set(issues.fields))))
     return EligibilityPlan(
@@ -1037,13 +1141,13 @@ _Reasons = tuple[tuple[str, str], ...]
 
 
 def _eligibility_expr(
-    node: FilterNode | None, issues: _EligibilityIssues
+    node: FilterNode | None, issues: _EligibilityIssues, hidden: bool
 ) -> tuple[EligibilityExpr, bool, _Reasons]:
     """One subtree as a column expression, whether it is exact, and why not."""
     if node is None:
         return ELIGIBILITY_TRUE, True, ()
     if isinstance(node, Predicate):
-        return _eligibility_predicate(node, issues)
+        return _eligibility_predicate(node, issues, hidden)
     if isinstance(node, AllOf):
         children: list[EligibilityExpr] = []
         exact = True
@@ -1051,7 +1155,7 @@ def _eligibility_expr(
         for child in node.children:
             # Recursed unconditionally: an unsupported field anywhere in the
             # tree still has to be evaluated, so it still has to be reported.
-            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues)
+            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues, hidden)
             exact = exact and child_exact
             reasons.extend(child_reasons)
             if child_expr == ELIGIBILITY_FALSE:
@@ -1064,7 +1168,7 @@ def _eligibility_expr(
         exact = True
         or_reasons: list[tuple[str, str]] = []
         for child in node.children:
-            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues)
+            child_expr, child_exact, child_reasons = _eligibility_expr(child, issues, hidden)
             exact = exact and child_exact
             or_reasons.extend(child_reasons)
             if child_expr == ELIGIBILITY_TRUE:
@@ -1072,7 +1176,7 @@ def _eligibility_expr(
             elif child_expr != ELIGIBILITY_FALSE and or_children != [ELIGIBILITY_TRUE]:
                 or_children.append(child_expr)
         return _fold_any(or_children), exact, tuple(or_reasons)
-    child_expr, child_exact, child_reasons = _eligibility_expr(node.child, issues)
+    child_expr, child_exact, child_reasons = _eligibility_expr(node.child, issues, hidden)
     if not child_exact:
         # The complement of a SUPERSET is an under-selection, which would drop
         # pages the evaluator keeps. Widen to "every page" and record the shape:
@@ -1112,7 +1216,7 @@ def _fold_any(children: list[EligibilityExpr]) -> EligibilityExpr:
 
 
 def _eligibility_predicate(
-    predicate: Predicate, issues: _EligibilityIssues
+    predicate: Predicate, issues: _EligibilityIssues, hidden: bool
 ) -> tuple[EligibilityExpr, bool, _Reasons]:
     field = predicate.field.name
     if predicate.field.pointer is not None or field not in INDEX_ANSWERABLE_FIELDS:
@@ -1124,10 +1228,10 @@ def _eligibility_predicate(
     exact = True
     reasons: list[tuple[str, str]] = []
     for operator, operand in predicate.operators:
-        test, test_exact = _axis_test(field, operator, operand)
+        test, test_exact = _axis_test(field, operator, operand, hidden=hidden)
         exact = exact and test_exact
         if not test_exact:
-            reasons.append((field, _inexactness_reason(field, operator, operand)))
+            reasons.append((field, _inexactness_reason(field, operator, operand, hidden=hidden)))
         if test is not None:
             tests.append(test)
     if not tests:
@@ -1142,7 +1246,11 @@ def _eligibility_predicate(
 
 
 def _inexactness_reason(
-    field: str, operator: str, operand: TypedScalar | tuple[TypedScalar, ...] | bool
+    field: str,
+    operator: str,
+    operand: TypedScalar | tuple[TypedScalar, ...] | bool,
+    *,
+    hidden: bool = False,
 ) -> str:
     """Why one comparison is only a superset, in the caller's own terms.
 
@@ -1152,6 +1260,8 @@ def _inexactness_reason(
     """
     if isinstance(operand, TypedScalar) and operand.kind == "null":
         return f"a null-valued {field} comparison"
+    if hidden and field in INDEX_PAGE_NUMBER_AXES:
+        return f"a {field} {operator} comparison for a caller who may not see every position"
     if field in INDEX_PAGE_DATE_AXES or field in INDEX_UNIT_DATE_AXES:
         if operator == "$between":
             return f"a {field} $between window, which is settled by kind identity"
@@ -1167,13 +1277,19 @@ def _inexactness_reason(
 
 
 def _axis_test(
-    field: str, operator: str, operand: TypedScalar | tuple[TypedScalar, ...] | bool
+    field: str,
+    operator: str,
+    operand: TypedScalar | tuple[TypedScalar, ...] | bool,
+    *,
+    hidden: bool = False,
 ) -> tuple[EligibilityExpr | None, bool]:
     """One column test for one operator, plus whether it is exact.
 
     ``None`` means the operator contributes no constraint; paired with
     ``exact=False`` that is a widening, which the evaluation then settles.
     """
+    if field in INDEX_PAGE_NUMBER_AXES:
+        return _position_test(field, operator, operand, hidden=hidden)
     if operator == "$exists":
         assert isinstance(operand, bool)
         # The axis is kept even for the unit keys `unit_view` always names, so
@@ -1230,6 +1346,46 @@ def _axis_test(
         return AxisTest(field, "eq" if operator == "$eq" else "ne", (operand.value,)), True
     if is_date and operator in _ORDERED:
         return _date_range_test(field, operator, operand)
+    return None, False
+
+
+def _position_test(
+    field: str,
+    operator: str,
+    operand: TypedScalar | tuple[TypedScalar, ...] | bool,
+    *,
+    hidden: bool,
+) -> tuple[EligibilityExpr | None, bool]:
+    """One test on a recorded position, against its REAL column.
+
+    Every operator that needs a stated position is exact: the column holds a number exactly when the
+    view does. Where the caller may not see every position the same tests only bound the answer, because
+    a page the column places inside the window can be one this caller reads as having no position,
+    so they are supersets and no complement may lean on them. `$exists false` then says nothing:
+    a withheld page has no position whatever its column holds.
+    """
+    if operator == "$exists":
+        assert isinstance(operand, bool)
+        if hidden and not operand:
+            return None, False
+        return AxisTest(field, "exists", present=operand), not hidden
+    exact = not hidden
+    numbers = tuple(
+        float(item.value)
+        for item in (operand if isinstance(operand, tuple) else (operand,))
+        if isinstance(item, TypedScalar) and item.kind == "number" and not isinstance(item.value, bool)
+        and isinstance(item.value, (int, float))
+    )
+    if operator == "$in" and isinstance(operand, tuple):
+        return AxisTest(field, "in", numbers), exact
+    if operator in {"$eq", "$ne"} and len(numbers) == 1:
+        return AxisTest(field, "eq" if operator == "$eq" else "ne", numbers), exact
+    if operator in {"$gt", "$gte"} and len(numbers) == 1:
+        return AxisTest(field, "range", lower=numbers[0], lower_op=">" if operator == "$gt" else ">="), exact
+    if operator in {"$lt", "$lte"} and len(numbers) == 1:
+        return AxisTest(field, "range", upper=numbers[0], upper_op="<" if operator == "$lt" else "<="), exact
+    if operator == "$between" and isinstance(operand, tuple) and len(numbers) == 2:
+        return AxisTest(field, "range", lower=numbers[0], upper=numbers[1]), exact
     return None, False
 
 
@@ -1408,6 +1564,20 @@ def page_view(page: Any) -> dict[str, Any]:
             # "updated after 09:00" is not answerable for a page recorded only
             # to the day.
             out["updated"] = moment.instant or moment.day
+    # When the original was captured, and where. The day is settled like `updated` but never carries a
+    # time, because the field is a date. A position is stated only when `capture_metadata.coordinate`
+    # accepts it, so this view and the catalogue columns derived from it hold the same set.
+    if "capture_date" in frontmatter:
+        captured = temporal.parse(frontmatter["capture_date"])
+        out["capture_date"] = frontmatter["capture_date"] if captured is None else captured.day
+    for position in sorted(capture_metadata.LOCATION_FIELDS):
+        stated = capture_metadata.coordinate(position, frontmatter.get(position))
+        if stated is not None:
+            out[position] = stated
+    if capture_metadata.carries_position(frontmatter):
+        # The original that licenses the position. The release plane decides whether this caller may
+        # download it; the view carries the binding so a stored view can be decided without its page.
+        out["position_original"] = originals.bound_path(frontmatter)
     return out
 
 
@@ -1623,6 +1793,14 @@ def _parse_predicate(
                 f"{operator} cannot order string field {field.name}",
                 "$eq, $ne, $in, or $contains",
                 "Use exact or substring comparison for string fields.",
+            )
+        if field.name in _KNOWN_NUMBER_FIELDS and operator == "$contains":
+            raise _error(
+                "INVALID_FILTER_OPERATOR",
+                operator_path,
+                f"$contains cannot compare the number field {field.name}",
+                "$eq, $ne, $in, or an ordered number comparison",
+                "Use a number, or a range with $gte and $lte.",
             )
         if field.name in _KNOWN_DATE_FIELDS and operator == "$contains":
             raise _error(
@@ -1843,6 +2021,14 @@ def _validate_closed_field_operand(
                 path,
                 f"{field.name} accepts only typed ISO dates or timezone-qualified date-times",
                 "date/date-time operand (or null for $eq/$ne)",
+            )
+        return
+    if field.name in _KNOWN_NUMBER_FIELDS:
+        if any(value.kind != "number" for value in scalars):
+            raise _invalid_value(
+                path,
+                f"{field.name} accepts only numbers",
+                "number operand in degrees",
             )
         return
     if field.name in _KNOWN_STRING_FIELDS:
