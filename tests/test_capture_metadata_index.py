@@ -11,6 +11,7 @@ so they need no image codecs: reading the fields from a file is `test_capture_me
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ import pytest
 
 from exomem import commands, freshness, lexstore, media_jobs, preserve
 from exomem import find as find_module
+from exomem import structured_filters as sf
 from exomem.capture_metadata import CaptureFacts
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
@@ -313,3 +315,57 @@ def test_a_job_result_with_an_out_of_range_position_is_discarded():
 
     assert media_jobs._validated_result_payload("extraction", good) == good
     assert media_jobs._validated_result_payload("extraction", bad) is None
+
+
+# --- a catalogue that the previous release built ------------------------------------------------------
+
+
+def test_a_catalogue_built_before_the_capture_columns_is_rebuilt_with_them(vault, photos):
+    import sqlite3
+
+    database = lexstore.lexical_path(vault)
+    connection = sqlite3.connect(database)
+    try:
+        for index in ("pages_capture_day", "pages_capture_lat", "pages_capture_lon"):
+            connection.execute(f"DROP INDEX {index}")
+        for column in ("capture_day", "capture_date_json", "capture_lat", "capture_lon"):
+            connection.execute(f"ALTER TABLE pages DROP COLUMN {column}")
+        connection.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(lexstore.SCHEMA_VERSION - 1),))
+        connection.commit()
+    finally:
+        connection.close()
+
+    assert lexstore.ensure_fresh(vault)
+
+    connection = sqlite3.connect(database)
+    try:
+        in_the_box = {
+            path
+            for (path,) in connection.execute("SELECT path FROM pages WHERE capture_lat BETWEEN 59 AND 61")
+        }
+    finally:
+        connection.close()
+    assert in_the_box == {photos["helsinki"][1]}
+
+
+@pytest.mark.parametrize(
+    ("filters", "index"),
+    [
+        (WINDOW, "pages_capture_day"),
+        (BOX, "pages_capture_lon"),
+        ({"$and": [WINDOW, BOX]}, "pages_capture_"),
+    ],
+)
+def test_a_capture_filter_scans_a_capture_index_not_the_whole_scope(filters, index):
+    # Every page is in the scope, so a scan driven from the scope flag reads the whole catalogue: the
+    # cost that grows with the library. SQLite has no statistics here, as in a freshly built catalogue.
+    conn = sqlite3.connect(":memory:")
+    lexstore.LexicalStore._create_catalog_tables(conn)
+    lexstore.LexicalStore._create_catalog_indexes(conn)
+    eligibility = sf.plan_index_eligibility(sf.compile_filter(filters))
+    predicate, params = lexstore._eligibility_predicate(eligibility, "in_kb", None)
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN SELECT p.path FROM pages p WHERE "
+        f"{lexstore._scope_term(eligibility, 'in_kb')} AND ({predicate})", params
+    ).fetchall()
+    assert index in " ".join(str(row[3]) for row in plan)

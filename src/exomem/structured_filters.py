@@ -937,6 +937,8 @@ INDEX_PAGE_LIST_AXES: Final = frozenset({"page.project", "page.tags", "page.spea
 INDEX_PAGE_DATE_AXES: Final = frozenset({"page.updated", "page.capture_date"})
 #: The page axes compared as numbers: a recorded position, one REAL column each.
 INDEX_PAGE_NUMBER_AXES: Final = _KNOWN_NUMBER_FIELDS
+#: The axes a media sidecar records and the catalogue indexes on their own: the capture day and the position.
+INDEX_CAPTURE_AXES: Final = INDEX_PAGE_NUMBER_AXES | {"page.capture_date"}
 #: Unit axes stored as one scalar column on `semantic_units`.
 INDEX_UNIT_SCALAR_AXES: Final = frozenset(
     {
@@ -1051,6 +1053,23 @@ class EligibilityPlan:
     @property
     def narrows(self) -> bool:
         return self.expr != ELIGIBILITY_TRUE
+
+    @property
+    def reads_capture_index(self) -> bool:
+        """Whether an index on a capture axis can drive this plan's scan.
+
+        True when a capture test the index answers (a range, an equality or a membership) can hold
+        for a row without a `$not` having turned it around.
+        """
+
+        def drives(node: EligibilityExpr) -> bool:
+            if isinstance(node, AxisTest):
+                return node.axis in INDEX_CAPTURE_AXES and node.op in {"range", "eq", "in"}
+            if isinstance(node, (EligibilityAll, EligibilityAny)):
+                return any(drives(child) for child in node.children)
+            return False
+
+        return drives(self.expr)
 
     @property
     def refuses(self) -> bool:

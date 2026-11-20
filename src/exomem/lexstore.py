@@ -880,6 +880,17 @@ def _eligibility_sql(
     return _axis_test_sql(expr, _PAGE_AXIS_COLUMNS[axis], "p")
 
 
+def _scope_term(eligibility: Any, scope_column: str) -> str:
+    """The `pages p` condition that keeps a query to one scope.
+
+    The scope flag holds the whole corpus, but with no statistics SQLite estimates an equality on its
+    index at ten rows and drives the scan from it. A plan that a capture index can drive then reads
+    every page of the scope. The unary plus keeps that term from choosing an index, so the capture
+    index, which holds only the pages that record the axis, is the one that drives it.
+    """
+    return f"{'+' if eligibility.reads_capture_index else ''}p.{scope_column} = 1"
+
+
 def _eligibility_predicate(
     eligibility: Any, scope_column: str, labels: SelectedAxisLabels | None = None
 ) -> tuple[str, list[object]]:
@@ -947,7 +958,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 17: `pages.payload_hash` and `pages.source_url` hold the exact-bytes identity and the canonical URL
 #: that `duplicates.derive_page_payload` derives for Sources and Evidence pages. A v16 catalogue is
 #: rebuilt from canonical pages, which also indexes every page written before the columns existed.
-SCHEMA_VERSION = 17
+#: 18: `pages.capture_day`, `capture_date_json`, `capture_lat` and `capture_lon` hold the capture date and
+#: position a media sidecar records, so a search filters on them from the index. A v17 catalogue is
+#: rebuilt from canonical pages, which also indexes every sidecar that already records them.
+SCHEMA_VERSION = 18
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -5483,24 +5497,27 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
     return cur.lastrowid
 
 
-#: The columns that schema 17 added to `pages`; a store that the released code created at schema 16 lacks them.
+#: The columns that schemas 17 and 18 added to `pages`; a store that the released code created before them
+#: lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
+_SCHEMA_18_PAGE_COLUMNS = ("capture_day", "capture_date_json", "capture_lat", "capture_lon")
+_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + _SCHEMA_18_PAGE_COLUMNS
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
-    """`columns` without the schema 17 columns that this connection's `pages` table does not have yet.
+    """`columns` without the schema 17 and 18 columns that this connection's `pages` table does not have yet.
 
-    No door reads a store's own `pages` table (the duplicate index is the sidecar, which a schema 16 build
-    reads as not current and answers "unchecked"), so a page written without these values leaves nothing
-    to mislead. Any other missing column still fails the insert, because that is a store that is wrong.
+    The duplicate index reads the sidecar, so a page written to an older store without these values
+    misleads no door. A store-mode read of the capture columns needs them added to that store, which
+    store mode's own DDL owns. Any other missing column still fails the insert: that store is wrong.
     """
     present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
-    if all(name in present for name in _SCHEMA_17_PAGE_COLUMNS):
+    if all(name in present for name in _LATER_PAGE_COLUMNS):
         return columns
     return {
         name: value
         for name, value in columns.items()
-        if name in present or name not in _SCHEMA_17_PAGE_COLUMNS
+        if name in present or name not in _LATER_PAGE_COLUMNS
     }
 
 
@@ -13133,7 +13150,7 @@ class LexicalStore:
         )
         rows = conn.execute(
             "WITH matched AS ("
-            f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
+            f" SELECT p.path AS parent_path FROM pages p WHERE {_scope_term(eligibility, col)} AND (" + predicate + ")"
             ") "
             "SELECT parent_path FROM matched "
             "UNION "
@@ -13191,7 +13208,7 @@ class LexicalStore:
         )
         rows = conn.execute(
             "WITH matched AS ("
-            f" SELECT p.path AS parent_path FROM pages p WHERE p.{col} = 1 AND (" + predicate + ")"
+            f" SELECT p.path AS parent_path FROM pages p WHERE {_scope_term(eligibility, col)} AND (" + predicate + ")"
             ") "
             f"SELECT p.path, p.updated, p.emitted_parent_path FROM pages p WHERE p.{col} = 1 "
             "AND (p.path IN (SELECT parent_path FROM matched)"
