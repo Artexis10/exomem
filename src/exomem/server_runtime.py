@@ -158,6 +158,7 @@ class LocalRuntimeActivation:
         self.graph_drain: threading.Thread | None = None
         self.original_fixity: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
+        self.vault_backup: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -303,6 +304,7 @@ class LocalRuntimeActivation:
             ("recall re-embed", self._start_recall_reembed),
             ("original fixity", self._start_original_fixity),
             ("review pass", self._start_review_pass),
+            ("vault backup", self._start_vault_backup),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -399,6 +401,10 @@ class LocalRuntimeActivation:
             from . import review_pass
 
             review_pass.stop(worker=self.review_pass)
+        if self.vault_backup is not None:
+            from . import vault_backup
+
+            vault_backup.stop(worker=self.vault_backup)
         semantic_failure = None
         for label, worker in (
             ("semantic drain", self.semantic_drain),
@@ -484,6 +490,14 @@ class LocalRuntimeActivation:
         from . import original_fixity
 
         self.original_fixity = original_fixity.start(vault_root)
+
+    def _start_vault_backup(self, vault_root: Path) -> None:
+        """Keep the owner's backup current when a backup config names this vault, in the serving HTTP runtime only."""
+        if not self.serves_upload_sessions:
+            return
+        from . import vault_backup
+
+        self.vault_backup = vault_backup.start(vault_root)
 
     def _start_review_pass(self, vault_root: Path) -> None:
         """Keep the owner's review passes current, in the serving HTTP runtime only.

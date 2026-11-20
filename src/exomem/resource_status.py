@@ -212,6 +212,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         media_jobs,
         original_fixity,
         runtime_resources,
+        vault_backup,
     )
 
     policy = mode.resolved()
@@ -233,6 +234,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "cuda": cuda_accounting_if_initialized(),
         "dreamer": dreamer.status(),
         "originals": original_fixity.status(vault_root),
+        "vault_backup": vault_backup.status(vault_root),
     }
 
 

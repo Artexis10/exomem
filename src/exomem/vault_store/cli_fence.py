@@ -93,6 +93,11 @@ ACCESS: dict[str, VaultAccess] = {
     "collections cutover": VaultAccess.PAGES,
     # Copies a folder into the vault's import folder.
     "import": VaultAccess.PAGES,
+    # The backup copies the vault's files and staged state to a repository, and restore writes a separate
+    # directory; none answers a question from the files, so a store-mode vault changes nothing for them.
+    "backup status": VaultAccess.NONE,
+    "backup run": VaultAccess.NONE,
+    "backup restore": VaultAccess.NONE,
     # The cloud client talks to the cloud service and reads no local vault.
     "cloud": VaultAccess.NONE,
     # The cell jobs: imports into and exports from the vault, and creates it when absent.
