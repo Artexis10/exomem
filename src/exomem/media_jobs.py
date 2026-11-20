@@ -934,9 +934,10 @@ class MediaJobStore:
                     """
                 )
                 self._migrate_job_key(conn)
-                from . import media_bindings
+                from . import media_bindings, media_replicas
 
                 media_bindings.initialize(conn)
+                media_replicas.initialize(conn)
                 version = conn.execute("PRAGMA schema_version").fetchone()[0]
             stat = os.stat(self.path, follow_symlinks=False)
             _CURRENT_SCHEMA[str(self.path)] = (stat.st_dev, stat.st_ino, version)
@@ -969,6 +970,11 @@ class MediaJobStore:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(media_protections)").fetchall()}
         if "uploadable" not in columns:
             conn.execute("ALTER TABLE media_protections ADD COLUMN uploadable INTEGER NOT NULL DEFAULT 0")
+        # add-original-replica-custody: the replica store that a name was minted for. An empty store is the store that
+        # serves eviction, so a record from before the column keeps its meaning, and an original keeps one open name
+        # for each store.
+        if "store" not in columns:
+            conn.execute("ALTER TABLE media_protections ADD COLUMN store TEXT NOT NULL DEFAULT ''")
 
     @staticmethod
     def _migrate_census_blockers(conn: sqlite3.Connection) -> None:
@@ -3287,6 +3293,7 @@ def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str
             result["stored_originals"], stored_coverage = media_store.processing_status(vault_root, path=path)
             result["offload_refusals"], refusal_coverage = media_store.offload_refusals(vault_root, path=path)
             result["media_inventory"] = {"stored_originals": stored_coverage, "offload_refusals": refusal_coverage}
+            _add_replica_status(vault_root, result, path)
     if vault_root is not None and path is not None:
         from . import media_store, originals
 
@@ -3323,6 +3330,25 @@ def tool_status(vault_root: Path | None, *, path: str | None = None) -> dict[str
             result["counts"] = None
             result["reconciliation_required_count"] = None
     return result
+
+
+def _add_replica_status(vault_root: Path, result: dict[str, Any], path: str | None) -> None:
+    """The owner's view of replica protection: the aggregate, or one original's replicas for an exact path.
+
+    Replica stores, failure domains and counts describe the owner's whole vault, so another audience gets no key.
+    """
+    from . import media_replicas
+    from .governance import egress
+
+    if egress.owner_only_aggregate(vault_root) is not None:
+        return
+    if path is None:
+        result["replicas"] = media_replicas.status(vault_root)
+        return
+    try:
+        result["replicas"] = media_replicas.original_view(vault_root, path)
+    except (OSError, ValueError, sqlite3.Error) as error:
+        result["replicas"] = {"state": "unknown", "reason": f"the binding cannot be read: {type(error).__name__}"}
 
 
 def tool_job_state(vault_root: Path, state: str, job_id: int | None) -> str:

@@ -33,9 +33,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
 # `add_observation`; that string added 336 B, 112 B each. The door operation `maintenance.convert_originals`, the
 # owner's conversion into shared original storage, added the last 64 B to the two door enums.
-# `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). Raise a
-# ceiling deliberately, in the diff that needs it.
-TOTAL_BUDGET = 29_325
+# `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). The door
+# operation `media.replicate`, the owner's copy of every original to a declared store, added 18 B. The capture-date
+# and place filter fields and the door operation `maintenance.capture_metadata`, the owner's metadata-only backfill,
+# added 62 B. Raise a ceiling deliberately, in the diff that needs it.
+TOTAL_BUDGET = 29_400
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -51,7 +53,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_record": 800,
     "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2500,
+    "manage_memory": 2550,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

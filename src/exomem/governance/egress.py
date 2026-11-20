@@ -3041,6 +3041,34 @@ def _hit_path(hit: Any) -> str:
     return str(getattr(hit, "path", None) or getattr(hit, "parent_path", "") or "")
 
 
+def _borrowed_of(hit: Any) -> dict[str, str | None]:
+    """The pages other than its own that a hit's producer named as supplying its content, with their pins."""
+    return hit.borrowed_pages() if isinstance(hit, Hit) else {}
+
+
+def _withhold_borrowed(
+    hits: Sequence[Any], releasable: Callable[[str, str | None], bool]
+) -> frozenset[str]:
+    """Clear from each hit what a page that `releasable` refuses lent it, and name those pages.
+
+    A hit's own decision covers its own page only; a frame or a part that supplied its excerpt is a
+    page of its own, and the policy may withhold it from this caller. The hit stays where it ranks
+    and keeps what it has of its own. One verdict per page and pin, however many hits borrowed from it.
+    """
+    verdicts: dict[tuple[str, str | None], bool] = {}
+    refused: set[str] = set()
+    for hit in hits:
+        pages = _borrowed_of(hit)
+        for path, pin in pages.items():
+            if (path, pin) not in verdicts:
+                verdicts[path, pin] = releasable(path, pin)
+        lost = [path for path, pin in pages.items() if not verdicts[path, pin]]
+        if lost:
+            hit.drop_borrowed(lost)
+            refused.update(lost)
+    return frozenset(refused)
+
+
 def annotate_hits(
     vault_root: Path,
     hits: list[Any],
@@ -3064,26 +3092,26 @@ def annotate_hits(
     # every tombstone and event file, and the plane does not move during one pass.
     tombstones = lifecycle.tombstoned_paths(vault_root)
 
-    tombstoned = frozenset(
-        path
-        for hit in hits
-        if (path := _hit_path(hit)) and (
-            lifecycle.is_tombstoned_in(tombstones, path)
-            or not content_permits(vault_root, path, who)
-        )
-    )
+    def floored(path: str) -> bool:
+        return lifecycle.is_tombstoned_in(tombstones, path) or not content_permits(vault_root, path, who)
+
+    tombstoned = frozenset(path for hit in hits if (path := _hit_path(hit)) and floored(path))
     if tombstoned:
         hits = [hit for hit in hits if _hit_path(hit) not in tombstoned]
     # The pool is decided below and again by the terminal filter: the store decides its pages together.
-    announce(path for hit in hits if (path := _hit_path(hit)))
+    # The pages that hits borrowed from are named with them, so one store request decides both.
+    announce(path for hit in hits for path in (_hit_path(hit), *_borrowed_of(hit)) if path)
 
     # (1) Open fast path — no governance configured. The pool can still hold
     #     more than `limit` (a restricted caller, a tombstone): cut it here.
     if _file_policy_empty(vault_root, policy):
+        released = hits[:effective_limit]
+        # No rule withholds a page here, so only a floor or a tombstone can refuse one.
+        lost = _withhold_borrowed(released, lambda path, _pin: not floored(path))
         return AnnotatedHits(
-            hits=hits[:effective_limit],
-            withheld_paths=tombstoned,
-            active=bool(tombstoned),
+            hits=released,
+            withheld_paths=tombstoned | lost,
+            active=bool(tombstoned or lost),
             fingerprint=policy.fingerprint,
         )
 
@@ -3112,12 +3140,9 @@ def annotate_hits(
     pending_notices: list[tuple[str, Decision, dict[str, Any]]] = []
     withheld: set[str] = set()
 
-    for hit in hits:
-        rel_path = _hit_path(hit)
-        if not rel_path:
-            permitted.append(hit)
-            continue
-        decision = _decide_path(
+    def decide(rel_path: str, expected_content_hash: str | None) -> Decision | None:
+        # One decision for a hit and for a page that a hit borrowed from.
+        return _decide_path(
             vault_root,
             rel_path,
             policy=policy,
@@ -3126,9 +3151,16 @@ def annotate_hits(
             grants_hash=grants_hash,
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
-            expected_content_hash=getattr(hit, "snapshot_hash", None),
+            expected_content_hash=expected_content_hash,
             tombstones=tombstones,
         )
+
+    for hit in hits:
+        rel_path = _hit_path(hit)
+        if not rel_path:
+            permitted.append(hit)
+            continue
+        decision = decide(rel_path, getattr(hit, "snapshot_hash", None))
         if decision is None:
             # The page vanished or would not parse: it cannot be shown to
             # have been permitted, so it is withheld rather than released.
@@ -3163,6 +3195,13 @@ def annotate_hits(
     frozen_withheld = frozenset(withheld)
     permitted = [h for h in permitted if not _seeded_only_by_withheld(h, frozen_withheld)]
     released = permitted[:effective_limit]
+
+    def releasable(path: str, pin: str | None) -> bool:
+        decision = decide(path, pin)
+        # A page released only with some identities stripped cannot lend its text: a borrowed excerpt is not stripped.
+        return decision is not None and decision.level >= RELEASE_FLOOR and not decision.release_strip
+
+    refused_sources = _withhold_borrowed(released, releasable)
     # D4: notices occupy a slot only once the over-fetch pool is exhausted —
     # until then the withheld slot is backfilled by the next permitted
     # candidate, so the count does not reveal that anything was withheld.
@@ -3222,7 +3261,7 @@ def annotate_hits(
     return AnnotatedHits(
         hits=released,
         notices=notices,
-        withheld_paths=frozen_withheld,
+        withheld_paths=frozen_withheld | refused_sources,
         active=True,
         blocked=False,
         fingerprint=policy.fingerprint,
@@ -6758,6 +6797,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "status": "structure",
         "retry": "mutation",
         "reprocess": "mutation",
+        "replicate": "mutation",
     },
     ("observe_memory", "operation"): {
         "add": "mutation",

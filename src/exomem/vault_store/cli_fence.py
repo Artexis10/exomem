@@ -125,6 +125,8 @@ ACCESS: dict[str, Declaration] = {
     "cell-import": _pages(),
     "cell-export": _pages(),
     "cell-init": _pages(),
+    # Writes a store marker outside the vault and ledger rows beside it; it reads no page, projection or index.
+    "media-replicas": _NONE,
     # Reads the cell's media drain record, which the file-mode drain wrote.
     "cell-media-census": _pages(),
     # Reads the vault's companions for the media references that they hold.

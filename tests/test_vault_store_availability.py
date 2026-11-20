@@ -333,6 +333,7 @@ def _entry_arguments(name, vault, scratch):
         "cell-export": ["cell-export", "--export-id", str(uuid.uuid4()), "--max-bytes", "1", "--vault", where,
                         "--termination-log", termination_log],
         "cell-init": ["cell-init", "--vault", where],
+        "media-replicas": ["media-replicas", "list", "--vault", where],
         "cell-media-census": ["cell-media-census", "--vault", where],
         "cell-media-manifest": ["cell-media-manifest", "--vault", where],
     }[name]
