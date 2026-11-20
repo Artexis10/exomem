@@ -278,11 +278,14 @@ def inventory(root: Path, *, system: str, record_id: str | None = None, cursor: 
         {item.path: (item.chunk_digest, item.chunk_count) for item in selected if item.chunk_digest is not None},
         source_hashes={item.path: item.source_hash for item in selected},
     )
-    from .embedding_index import read_published_identity
+    from .embedding_index import RecallSpaceUnread, read_published_identity
 
     active_space = next((value[2] for value in observations.values() if value[2] is not None), None)
     if not observations:
-        identity = read_published_identity(root)
+        try:
+            identity = read_published_identity(root)
+        except RecallSpaceUnread:
+            identity = None
         active_space = identity.identity_digest if identity is not None else None
     items = []
     for item in selected:
