@@ -36,7 +36,7 @@ The repository records no load target. This design sizes for one vault of 500,00
 
 The backup is for installs that run the service on the owner's machine. A Cloud cell sets no backup config and runs no thread.
 
-Originals are part of the vault, so they are in the snapshot by default. An owner can set `include_originals` to false when replicas elsewhere cover them. The backup then excludes each bound original and the original pool. The status warns that originals are out, and shows how many. It shows how many of them lack a recoverable replica as `unknown`. The replica-custody change will supply that number. This change reads nothing from it.
+Originals are part of the vault, so they are in the snapshot by default. An owner can set `include_originals` to false when replicas elsewhere cover them. The backup then leaves out each bound original and the original pool. It passes restic the list of paths it keeps (a folder with no original below it is one entry), because one exclude pattern per original costs restic a comparison per file and pattern: 49 to 74 s at 64,000 files with 31,846 originals, against 2 to 26 s for the list (the slowest run read a cold file cache). A snapshot of such a backup names every entry it holds as a path, so the vault root is a tag on the snapshot and retention groups by host only. The status warns that originals are out, and shows how many. It shows how many of them lack a recoverable replica as `unknown`. The replica-custody change will supply that number. This change reads nothing from it.
 
 Rejected alternative: exclude originals only when replicas exist. That needs the replica-custody change, which has not shipped. An opt-out the owner states is simple and honest.
 
@@ -72,7 +72,7 @@ Rejected alternative: add the keys to `EXOMEM_MEDIA_STORE_CONFIG`. `cellctl` wri
 
 A file lock under the vault's state directory makes a cycle single-flight, across the service thread and the CLI. A second runner reports "already running" and does nothing.
 
-Each restic call has a timeout and runs with `subprocess.run` and an argument list. Only calls that are safe to repeat retry, at most twice with a pause: `snapshots`, `check`, `forget` and `restore` into a fresh directory. `backup` never retries inside a cycle, and the next cycle repeats it. The backup timeout is 7 days, because restic resumes by reusing uploaded data and a first backup of a very large vault has to finish inside one call. The other calls have shorter named limits.
+Each restic call has a timeout and runs with `subprocess.run` and an argument list. Only calls that are safe to repeat retry, at most twice with a pause: `snapshots`, `check` and `forget`, and a `restore` that a repository lock stopped before it wrote. A `restore` that timed out never runs again into the same target: `--overwrite never` skips the file that the first run left truncated and reports success. `backup` never retries inside a cycle, and the next cycle repeats it. The backup timeout is 7 days, because restic resumes by reusing uploaded data and a first backup of a very large vault has to finish inside one call. The other calls have shorter named limits.
 
 The thread never takes the vault mutation guard. restic reads the vault as plain files, as a file-sync agent does. The in-process walks, which build the exclude list and the sample, run under `foreground_priority` and yield to requests. A backup, a check and a restore therefore cause no busy refusal.
 
@@ -92,7 +92,7 @@ The backup stage walks the state root's top level, classifies each name through 
 
 For each kept file:
 
-- A SQLite database goes through `sqlite3.Connection.backup` into a staging directory under the state root. The copy is then checked with `PRAGMA quick_check`. A failed check is a finding, and the copy is still staged.
+- A SQLite database goes through `sqlite3.Connection.backup`, in one step so the copy reads one snapshot, into a staging directory under the state root. The source opens read-write with `query_only`: a read-only open leaves a `-wal` and a `-shm` file beside a database that was closed cleanly. The copy is then checked with `PRAGMA quick_check`. A failed check is a finding, and the copy is still staged.
 - `-wal`, `-shm` and `-journal` files are never copied. The suffix set is the SQLite family that `reserved_paths` already defines.
 - Any other regular file is copied whole. These files are replaced atomically, or are append-only.
 - Symbolic links are skipped.
@@ -120,7 +120,7 @@ Rejected alternative: compare restored files with the live files. A file edited 
 
 ### D6: Retention follows a complete backup
 
-After a complete backup, `restic forget --prune` with the entry's `--keep-last`, `--keep-daily`, `--keep-weekly` and `--keep-monthly` counts runs, restricted to snapshots that carry this change's tag. A snapshot of another vault or tool in the same repository is not touched, because restic groups by host and paths. A partial or failed backup never runs it.
+After a complete backup, `restic forget --prune` with the entry's `--keep-last`, `--keep-daily`, `--keep-weekly` and `--keep-monthly` counts runs, restricted to the snapshots that carry this change's tag and the vault's root tag and that this machine took (`--host`), as one group. A snapshot of another vault, machine or tool in the same repository is not touched. Restic's default grouping by host and paths would apply one vault's keep rules to every other vault in the repository, and a backup without originals records a different path list each time. A machine that is renamed starts a new group; its older snapshots stay until the owner forgets them. A partial or failed backup never runs it.
 
 ### D7: Owner operations are a CLI, and restore writes only to a separate directory
 
@@ -161,7 +161,9 @@ Nothing migrates. With no config the feature is off, and `exomem status` reads "
 
 The registry field adds no migration: its default leaves every other family as it was.
 
-Rollback is a release downgrade. The record and staging directory are private state that an older release ignores. Existing snapshots stay in the owner's repository.
+Rollback is a release downgrade. The record and staging directory are private state that an older release ignores.
+
+An entry with a key the service does not know is invalid, so a misspelled keep rule is never replaced by a default that prunes history. The registry's `rebuildable` attribute has no default for an external family: a new family must choose. Existing snapshots stay in the owner's repository.
 
 ## Open Questions
 

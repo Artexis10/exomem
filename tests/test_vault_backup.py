@@ -14,13 +14,22 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from filelock import FileLock
 
-from exomem import preserve, private_state, reserved_paths, state_paths, vault_backup
+from exomem import (
+    preserve,
+    private_state,
+    reserved_paths,
+    state_paths,
+    vault_backup,
+    vault_backup_cli,
+)
 from exomem.governance.principal import library_scope
 
 #: Keep rules combine as a union in restic, so "keep only the newest snapshot" must zero the other three.
@@ -168,7 +177,7 @@ def test_the_service_thread_backs_up_on_its_own_and_never_creates_the_repository
     repository = configured()
     try:
         assert vault_backup.start(vault) is not None
-        _wait_for(lambda: vault_backup.status(vault).get("last_error"))
+        _wait_for(lambda: isinstance(vault_backup.status(vault)["last_error"], dict))
     finally:
         vault_backup.stop(timeout=60)
     missing = vault_backup.status(vault)
@@ -307,6 +316,7 @@ def test_nothing_runs_until_the_owner_names_a_config(vault: Path, monkeypatch: p
         ({"repository": "inside-vault"}, "repository"),
         ({"keep_last": 0, "keep_daily": 0, "keep_weekly": 0, "keep_monthly": 0}, "keep"),
         ({"include_originals": "no"}, "include_originals"),
+        ({"keep_montly": 6}, "keep_montly"),  # a typo would fall back to the default rules, and those prune history
     ],
 )
 def test_an_unusable_entry_is_reported_with_the_field_and_never_run(
@@ -410,4 +420,222 @@ def test_stopping_the_service_ends_a_running_backup_and_leaves_no_false_failure(
     assert time.monotonic() - started < 30  # the service stops in seconds, not when restic's own timeout expires
     assert not worker.is_alive()
     status = vault_backup.status(vault)
-    assert status["last_backup"]["state"] == "unknown" and status["findings"] == []  # a stop is not a failed backup
+    # A stop is not a failed backup, and a record that was never written says nothing about findings.
+    assert status["last_backup"]["state"] == "unknown" and status["findings"] == "unknown"
+
+
+def _fake_restic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    """Put a stand-in `restic` first on PATH; `script` is its shell body, after the version answer."""
+    shim = tmp_path / "bin" / "restic"
+    shim.parent.mkdir(exist_ok=True)
+    shim.write_text(f'#!/bin/sh\n[ "$1" = version ] && {{ echo "restic 0.19.1 compiled with go"; exit 0; }}\n{script}\n')
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim.parent}:{os.environ['PATH']}")
+
+
+def test_an_empty_sample_never_reads_as_a_passed_restore(
+    restic_binary: str, vault: Path, configured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured()
+    monkeypatch.setattr(vault_backup, "_draw", lambda *_args: ([], []))  # every file changed since the snapshot
+
+    outcome = vault_backup.run_now(vault, init_repository=True)
+
+    assert outcome["sample"]["state"] == "empty"
+    assert vault_backup.status(vault)["last_sampled_restore"]["last_success"] == "never"
+
+
+def test_a_successful_retention_records_when_it_last_succeeded(
+    restic_binary: str, vault: Path, configured
+) -> None:
+    configured()
+
+    vault_backup.run_now(vault, init_repository=True)
+
+    retention = vault_backup.status(vault)["last_retention"]
+    assert retention["state"] == "ok" and retention["last_success"] != "never" and retention["at"]
+
+
+def test_a_lost_record_reads_unknown_for_findings_and_the_last_error(vault: Path, configured) -> None:
+    configured()
+
+    shown = vault_backup.status(vault)
+
+    assert shown["findings"] == "unknown" and shown["last_error"] == "unknown"
+    assert vault_backup_cli.summary_line(shown).endswith("findings unknown")
+
+
+def test_the_status_shows_the_keep_rules_that_retention_applies(vault: Path, configured) -> None:
+    configured(keep_monthly=3)
+
+    shown = vault_backup.status(vault)
+
+    assert shown["keep"] == {"last": 5, "daily": 7, "weekly": 4, "monthly": 3}  # the unset ones are the defaults
+
+
+def test_a_secret_that_straddles_the_cut_of_a_logged_error_does_not_leak_its_tail(
+    vault: Path, tmp_path: Path, configured, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The log keeps the last 300 characters of restic's error: this one cuts through the secret's middle."""
+    _fake_restic(tmp_path, monkeypatch,
+                 'echo "$(printf "%0100d" 0)$INVENTED_SECRET$(printf "%0288d" 0)" >&2\nexit 1')
+    credentials = tmp_path / "owner-secrets" / "credentials"
+    configured(environment_file=str(credentials))
+    credentials.write_text("INVENTED_SECRET=abcdefghijklmnopqrstuvwx\n")
+    caplog.set_level(logging.DEBUG)
+
+    with pytest.raises(vault_backup.BackupError):
+        vault_backup.run_now(vault)
+
+    assert "rstuvwx" not in caplog.text and "restic cat exited 1" in caplog.text
+
+
+def _two_vaults(vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept: tuple[int, int]) -> tuple[Path, Path]:
+    """A second vault, and one config that sends both to one repository with their own `keep_last`."""
+    other = tmp_path / "vault-b"
+    shutil.copytree(vault, other)
+    repository = tmp_path / "repository"
+    secrets = tmp_path / "owner-secrets"
+    secrets.mkdir(exist_ok=True)
+    (secrets / "password").write_text("an invented repository password\n")
+    entries = {str(place.resolve()): {"repository": str(repository), "password_file": str(secrets / "password"),
+                                      "keep_daily": 0, "keep_weekly": 0, "keep_monthly": 0, "keep_last": last}
+               for place, last in ((vault, kept[0]), (other, kept[1]))}
+    (secrets / "backup.json").write_text(json.dumps({"vaults": entries}))
+    monkeypatch.setenv(vault_backup.CONFIG_ENV, str(secrets / "backup.json"))
+    return repository, other
+
+
+def _snapshots_of(repository: Path, tmp_path: Path, place: Path) -> list[dict]:
+    listed = json.loads(_restic(repository, tmp_path, "snapshots", "--json"))
+    return [snapshot for snapshot in listed if str(place.resolve()) in snapshot["paths"]]
+
+
+def test_retention_never_prunes_another_vaults_snapshots_in_a_shared_repository(
+    restic_binary: str, vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, other = _two_vaults(vault, tmp_path, monkeypatch, kept=(1, 5))
+    vault_backup.run_now(vault, init_repository=True)
+    for _ in range(3):
+        vault_backup.run_now(other)
+    vault_backup.run_now(vault)
+
+    # The first vault keeps one snapshot by its own rule; the second keeps all three it took by its own.
+    assert len(_snapshots_of(repository, tmp_path, vault)) == 1
+    assert len(_snapshots_of(repository, tmp_path, other)) == 3
+
+
+def test_retention_never_prunes_another_machines_snapshots_of_the_same_vault_path(
+    restic_binary: str, vault: Path, tmp_path: Path, configured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = configured(keep_last=5)
+    monkeypatch.setattr(vault_backup.socket, "gethostname", lambda: "machine-two")
+    vault_backup.run_now(vault, init_repository=True)
+    vault_backup.run_now(vault)
+    vault_backup.run_now(vault)
+    configured(**ONLY_THE_LAST)  # the first machine's own config for the same vault path
+    monkeypatch.setattr(vault_backup.socket, "gethostname", lambda: "machine-one")
+
+    vault_backup.run_now(vault)
+    vault_backup.run_now(vault)
+
+    hosts = [snapshot["hostname"] for snapshot in _snapshots_of(repository, tmp_path, vault)]
+    assert sorted(hosts) == ["machine-one", "machine-two", "machine-two", "machine-two"]
+
+
+def test_a_backup_without_originals_still_keeps_exactly_the_snapshots_the_rule_names(
+    restic_binary: str, vault: Path, tmp_path: Path, configured
+) -> None:
+    """Each such snapshot names the files it holds, and a new top-level file changes that list: grouping by
+    path would make every snapshot its own group and keep them all."""
+    repository = configured(include_originals=False, **ONLY_THE_LAST)
+    vault_backup.run_now(vault, init_repository=True)
+    (vault / "Fresh note.md").write_text(NOTE)
+    vault_backup.run_now(vault)
+
+    assert len(_snapshot_ids(repository, tmp_path)) == 1
+
+
+def test_a_backup_without_originals_keeps_whole_clean_folders_and_leaves_only_the_originals_out(
+    restic_binary: str, vault: Path, tmp_path: Path, configured
+) -> None:
+    repository = configured(include_originals=False)
+    original = _stored_original(vault)
+    clean = vault / "Knowledge Base" / "Clean folder" / "deeper"
+    clean.mkdir(parents=True)
+    (clean / "a.md").write_text(NOTE)
+    (clean / "b.txt").write_text("a plain file")
+
+    vault_backup.run_now(vault, init_repository=True)
+
+    listing = (json.loads(line) for line in _restic(repository, tmp_path, "ls", "latest", "--json").splitlines())
+    held = {entry["path"] for entry in listing if entry.get("type") == "file"}
+    assert {str(clean / "a.md"), str(clean / "b.txt")} <= held and str(original) not in held
+    # Every other file of the vault is in the snapshot: the original's neighbours and the rest of the vault.
+    expected = {str(path) for path in vault.rglob("*") if path.is_file() and path != original
+                and reserved_paths.ORIGINAL_POOL_DIRNAME not in path.parts}
+    assert expected <= held
+
+
+def test_a_restore_is_repeated_only_when_a_lock_stopped_it_before_it_wrote(
+    vault: Path, tmp_path: Path, configured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timed-out restore may have left a truncated file; `--overwrite never` would skip it and call that a success."""
+    configured()
+    calls = tmp_path / "restore-calls"
+    listed = [{"group_key": {}, "snapshots": [{
+        "id": "aaaa1111", "hostname": vault_backup.socket.gethostname(), "time": "2026-01-01T00:00:00Z",
+        "paths": [str(vault), str(tmp_path / vault_backup.STAGE_DIRNAME)],
+        "tags": [vault_backup.TAG, vault_backup.ROOT_TAG + quote(str(vault.resolve()), safe="/")]}]}]
+    (tmp_path / "snapshots.json").write_text(json.dumps(listed))
+    _fake_restic(tmp_path, monkeypatch, f'[ "$1" = snapshots ] && {{ cat "{tmp_path}/snapshots.json"; exit 0; }}\n'
+                 f'echo x >> "{calls}"\nexec sleep 3600')
+    monkeypatch.setitem(vault_backup._TIMEOUT_SECONDS, "restore", 1)
+    monkeypatch.setattr(vault_backup, "_RETRY_PAUSE_SECONDS", 0.01)
+
+    with pytest.raises(vault_backup.BackupError) as refused:
+        vault_backup.restore(vault, tmp_path / "recovered", paths=[NOTE_PATH])
+    assert refused.value.code == "timeout" and calls.read_text().count("x") == 1
+
+    calls.unlink()
+    _fake_restic(tmp_path, monkeypatch, f'[ "$1" = snapshots ] && {{ cat "{tmp_path}/snapshots.json"; exit 0; }}\n'
+                 f'echo x >> "{calls}"\n[ "$(wc -l < "{calls}")" -ge 2 ] && exit 0\nexit 11')  # locked, then free
+    assert vault_backup.restore(vault, tmp_path / "recovered-again", paths=[NOTE_PATH])["snapshot_id"] == "aaaa1111"
+    assert calls.read_text().count("x") == 2
+
+
+def test_a_config_file_inside_the_vault_is_refused(vault: Path, tmp_path: Path, configured, monkeypatch) -> None:
+    configured()
+    inside = vault / "backup.json"
+    shutil.copy(tmp_path / "owner-secrets" / "backup.json", inside)
+    monkeypatch.setenv(vault_backup.CONFIG_ENV, str(inside))
+
+    shown = vault_backup.status(vault)
+
+    assert shown["state"] == "invalid_config" and shown["field"] == vault_backup.CONFIG_ENV
+
+
+def test_staging_a_write_ahead_log_database_leaves_no_sidecar_files_beside_it(vault: Path, tmp_path: Path) -> None:
+    state = _state_dir(vault)
+    database = sqlite3.connect(state / "collections.sqlite")
+    database.execute("PRAGMA journal_mode=WAL")
+    database.execute("CREATE TABLE decisions (name TEXT)")
+    database.commit()
+    database.close()  # closed cleanly: SQLite removed the sidecar files
+
+    staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+
+    assert staged >= 1 and findings == []
+    assert not list(state.glob("collections.sqlite-*"))  # a read-only open would have left a -wal and a -shm
+
+
+def test_a_stop_ends_staging_instead_of_finishing_every_file(vault: Path, tmp_path: Path) -> None:
+    _state_dir(vault)
+    (_state_dir(vault) / ".review-state.json").write_text("{}")
+    stop = threading.Event()
+    stop.set()
+
+    with pytest.raises(vault_backup.BackupError) as stopped:
+        vault_backup.stage_state(vault, tmp_path / "stage", stop)
+
+    assert stopped.value.code == "stopped"

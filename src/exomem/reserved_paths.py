@@ -170,9 +170,9 @@ class InternalStateDescriptor:
     vault_store: bool = False
     #: Whether the product can rebuild this family's files from the vault or by recomputation. False for a
     #: family whose files hold information that nothing else records: the vault backup stages exactly the
-    #: external families that say so (`non_rebuildable_state_descriptors`). The default keeps a new family
-    #: out of a backup until its owner declares that losing it loses information, not work.
-    rebuildable: bool = True
+    #: external families that say so (`non_rebuildable_state_descriptors`). An external family must choose:
+    #: the registry refuses one that leaves it unset, so a new family never joins or leaves a backup by default.
+    rebuildable: bool | None = None
     exact: tuple[str, ...] = ()
     trees: tuple[str, ...] = ()
     patterns: tuple[re.Pattern[str], ...] = ()
@@ -467,10 +467,12 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "served-context", "served_context", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".served-context.sqlite"),
     ),
     InternalStateDescriptor(
         "brief-watermarks", "brief_watermarks", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".brief-watermarks.sqlite"),
     ),
     InternalStateDescriptor(
@@ -489,6 +491,7 @@ _REGISTRY = (
     ),
     InternalStateDescriptor(
         "generated-fragments-index", "generated_fragment_store", StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".generated-fragments.sqlite"),
     ),
     InternalStateDescriptor(
@@ -520,6 +523,7 @@ _REGISTRY = (
         "governance-store",
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".governance.sqlite"),
         migrates_from_vault=True,
     ),
@@ -527,6 +531,7 @@ _REGISTRY = (
         "embeddings-store",
         "embedding_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(*_sqlite_family(".embeddings.sqlite"), ".embeddings.active"),
         patterns=(_EMBEDDINGS_SPACE_RE,),
         migrates_from_vault=True,
@@ -535,6 +540,7 @@ _REGISTRY = (
         "clip-store",
         "clip_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".clip.sqlite"),
         migrates_from_vault=True,
     ),
@@ -542,6 +548,7 @@ _REGISTRY = (
         "lexical-store",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".lexical.sqlite"),
         migrates_from_vault=True,
     ),
@@ -549,6 +556,7 @@ _REGISTRY = (
         "graph-store",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".graph.sqlite"),
         migrates_from_vault=True,
     ),
@@ -556,6 +564,7 @@ _REGISTRY = (
         "claims-store",
         "claims",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".claims.sqlite"),
         migrates_from_vault=True,
     ),
@@ -563,6 +572,7 @@ _REGISTRY = (
         "references-store",
         "references.legacy",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         authority_enabled=False,
         exact=_sqlite_family(".references.sqlite"),
         migrates_from_vault=True,
@@ -571,6 +581,7 @@ _REGISTRY = (
         "refs-store",
         "memory_refs",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".refs.sqlite"),
         migrates_from_vault=True,
     ),
@@ -578,6 +589,7 @@ _REGISTRY = (
         "freshness-store",
         "freshness.legacy",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         authority_enabled=False,
         exact=_sqlite_family(".freshness.sqlite"),
         migrates_from_vault=True,
@@ -586,6 +598,7 @@ _REGISTRY = (
         "deferred-index-store",
         "deferred_index",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             *_sqlite_family(".deferred-index.sqlite"),
             *_sqlite_family(".deferred_index.sqlite"),
@@ -610,12 +623,14 @@ _REGISTRY = (
         "maintenance-jobs-store",
         "maintenance_jobs",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=_sqlite_family(".maintenance-jobs.sqlite"),
     ),
     InternalStateDescriptor(
         "idempotency-store",
         "idempotency",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             *_sqlite_family(".idempotency.sqlite"),
             ".idempotency.json",
@@ -635,6 +650,7 @@ _REGISTRY = (
         "graph-handoff",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             ".graph-sync.json",
             ".graph-sync-floor.json",
@@ -650,6 +666,7 @@ _REGISTRY = (
         "graph-receipts",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".graph-commit-receipts",),
         migrates_from_vault=True,
     ),
@@ -666,6 +683,7 @@ _REGISTRY = (
         "due-state",
         "due_state",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(
             ".due-state.json",
             ".due-state-emission.json",
@@ -687,6 +705,7 @@ _REGISTRY = (
         "lexical-rebuild",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_REBUILD_RE,),
         migrates_from_vault=True,
     ),
@@ -694,18 +713,21 @@ _REGISTRY = (
         "lexical-staged",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_STAGED_RE,),
     ),
     InternalStateDescriptor(
         "lexical-staged-lock",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         exact=(LEXICAL_STAGED_LOCK,),
     ),
     InternalStateDescriptor(
         "lexical-quarantine",
         "lexstore",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_LEXICAL_QUARANTINE_RE,),
         migrates_from_vault=True,
     ),
@@ -713,6 +735,7 @@ _REGISTRY = (
         "graph-rebuild",
         "epistemic_graph",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         patterns=(_GRAPH_REBUILD_RE,),
         migrates_from_vault=True,
     ),
@@ -720,6 +743,7 @@ _REGISTRY = (
         "graph-reset",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         tree_patterns=(_GRAPH_RESET_RE,),
         migrates_from_vault=True,
     ),
@@ -727,6 +751,7 @@ _REGISTRY = (
         "graph-coordination",
         "graph_sync",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".graph-coordination",),
         migrates_from_vault=True,
     ),
@@ -734,6 +759,7 @@ _REGISTRY = (
         "authorization-projections",
         "governance.projections",
         StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
         trees=(".authorization-projections",),
         migrates_from_vault=True,
     ),
@@ -1032,7 +1058,7 @@ def non_rebuildable_state_descriptors() -> tuple[InternalStateDescriptor, ...]:
         descriptor
         for descriptor in _REGISTRY
         if descriptor.placement in (StatePlacement.EXTERNAL_STATE, StatePlacement.EXTERNAL_CANONICAL)
-        and not descriptor.rebuildable
+        and descriptor.rebuildable is False
     )
 
 
@@ -5113,7 +5139,12 @@ def _validate_registry() -> None:
         or any(type(descriptor.placement) is not StatePlacement for descriptor in _REGISTRY)
         # Canonical data is by definition not rebuildable: a family that is both would drop out of a backup.
         or any(
-            descriptor.placement is StatePlacement.EXTERNAL_CANONICAL and descriptor.rebuildable
+            descriptor.placement is StatePlacement.EXTERNAL_CANONICAL and descriptor.rebuildable is not False
+            for descriptor in _REGISTRY
+        )
+        # An external family chooses: an unset value would decide silently whether a backup carries it.
+        or any(
+            descriptor.placement is StatePlacement.EXTERNAL_STATE and descriptor.rebuildable is None
             for descriptor in _REGISTRY
         )
     ):

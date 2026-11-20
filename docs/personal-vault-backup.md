@@ -44,17 +44,21 @@ Only `repository` and `password_file` are required. A secret never appears in th
 | --- | --- | --- |
 | `include_originals` | `true` | Set `false` to leave original files out. Status then counts them and warns. |
 | `interval_hours` | 24 | Time between backups. |
-| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly` | 0, 7, 4, 12 | restic keep rules. restic keeps the union of them. |
+| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly` | 0, 7, 4, 12 | restic keep rules. restic keeps the union of them. Status shows the rules in effect. |
 | `check_interval_days`, `check_subset_parts` | 7, 12 | Each check reads one part of N of the repository data, and the part advances each time. |
 | `sample_interval_days`, `sample_size`, `sample_max_mib` | 7, 20, 64 | Each sample restores this many notes and originals, and skips an original larger than the limit. |
 
-The service refuses a `password_file`, `environment_file` or local `repository` path inside the vault.
+The service refuses a `password_file`, `environment_file` or local `repository` path inside the vault. It also refuses a config file inside the vault.
+
+The service refuses a key that it does not know and names that key in the status. A misspelled `keep_monthly` would otherwise fall back to its default, and a default keep rule can remove snapshots that you meant to keep.
+
+Retention only ever touches this vault's snapshots from this machine. Several vaults, or the same vault path on several machines, can share one repository, and each applies its own keep rules to its own snapshots. A machine that you rename starts a new group: its older snapshots stay until you remove them yourself with `restic forget`.
 
 ## Read the status
 
 `exomem status` shows one `vault_backup` line. `exomem backup status` shows the last backup, retention, check and sampled restore, what is due next, and each finding with its path and code.
 
-- `unknown` means the service cannot read the record. It never means zero.
+- `unknown` means the service cannot read the record. It never means zero. A lost record also makes `findings` and `last error` read `unknown`, because it cannot show that there are none.
 - `never` means the activity has not run yet.
 - `empty` means a sampled restore had nothing to draw, for example a vault with no notes. It never counts as a passed restore.
 - `restic not found` means restic is not on the `PATH` of this process.
@@ -66,14 +70,14 @@ A damaged repository shows as a finding with `check` or `sample` as the activity
 The restore command never writes into the vault. It writes into a new or empty directory that you name.
 
 1. Run `exomem backup restore --target /path/to/new-directory --path "Knowledge Base/Notes/example.md"`.
-2. Add `--snapshot <id>` to restore from an older snapshot. The default is the latest.
+2. Add `--snapshot <id>` to restore from an older snapshot. The default is the latest of this machine, or of another machine that backed up this vault path.
 3. Add `--state` instead of `--path` to restore the staged machine-local state.
 4. Copy the files you need back into the vault yourself.
 
-The command refuses a target inside the vault, a target that holds the vault, and a target that already holds files.
+The command refuses a target inside the vault, a target that holds the vault, and a target that already holds files. A restore has no time limit of its own. If it stops before it ends, empty the target directory before you run it again: a second run into a half-restored directory would skip a truncated file and report success.
 
 ## What this does not protect against
 
 A repository on the same disk as the vault does not protect you from losing that disk. Choose a repository on another device or service.
 
-With `include_originals` set to `false`, an original with no other copy is not in this backup.
+With `include_originals` set to `false`, an original with no other copy is not in this backup. The snapshot then lists the files it keeps, one entry for each folder that holds no original and one for each other file, and a folder that held only originals is not recreated by a restore.

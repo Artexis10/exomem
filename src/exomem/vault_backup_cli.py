@@ -24,8 +24,10 @@ def summary_line(block: dict[str, Any]) -> str:
         f"{label} {block[key]['state']} {block[key].get('at') or ''}".rstrip()
         for label, key in (("backup", "last_backup"), ("check", "last_check"), ("sampled restore", "last_sampled_restore"))
     ]
-    findings = len(block["findings"])
-    return "; ".join([*parts, f"{findings} finding(s)" if findings else "no findings"])
+    findings = block["findings"]
+    if findings == vault_backup.UNKNOWN:  # a lost record: no findings is not what it says
+        return "; ".join([*parts, "findings unknown"])
+    return "; ".join([*parts, f"{len(findings)} finding(s)" if findings else "no findings"])
 
 
 def _print_status(block: dict[str, Any]) -> None:
@@ -36,6 +38,7 @@ def _print_status(block: dict[str, Any]) -> None:
                 print(f"  {key}: {block[key]}")
         return
     print(f"  repository: {block['repository_id']} (fingerprint)  originals included: {block['include_originals']}")
+    print("  retention keeps: " + ", ".join(f"{count} {name}" for name, count in block["keep"].items() if count))
     for label, key, due in (
         ("last backup", "last_backup", "backup"),
         ("last retention", "last_retention", None),
@@ -45,13 +48,18 @@ def _print_status(block: dict[str, Any]) -> None:
         entry = block[key]
         line = f"  {label}: {entry['state']} {entry.get('at') or ''}"
         print((f"{line}  next due: {block['next_due'][due]}" if due else line).rstrip())
-    if block["last_error"]:
-        print(f"  last error: {block['last_error']['code']} at {block['last_error']['at']}")
+    error = block["last_error"]
+    if error == vault_backup.UNKNOWN:
+        print("  last error: unknown")
+    elif error:
+        print(f"  last error: {error['code']} at {error['at']}")
     if "originals_excluded" in block:
         excluded = block["originals_excluded"]
         print(f"  originals excluded: {excluded['count']}, without a recoverable replica: "
               f"{excluded['without_recoverable_replica']}")
-    for finding in block["findings"]:
+    if block["findings"] == vault_backup.UNKNOWN:
+        print("  findings: unknown")
+    for finding in [] if block["findings"] == vault_backup.UNKNOWN else block["findings"]:
         print(f"  finding: {finding['activity']} {finding.get('kind', '')} {finding.get('path', '')} {finding['code']}")
 
 

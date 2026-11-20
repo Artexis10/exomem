@@ -22,6 +22,7 @@ import os
 import random
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import threading
@@ -31,6 +32,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import quote, unquote
 
 from filelock import FileLock, Timeout
 
@@ -48,6 +50,9 @@ STAGE_DIRNAME = "exomem-state-stage"
 SAMPLE_PREFIX = "sample-"
 #: Marks this service's snapshots, so retention and restore never act on another tool's in the same repository.
 TAG = "exomem-vault"
+#: Starts the tag that names the vault root a snapshot was taken from. The root is a tag, not a snapshot path:
+#: a backup without originals lists each file it keeps as a path, so the paths cannot name the root.
+ROOT_TAG = "exomem-vault-root="
 #: The first restic release with distinct exit codes for a missing repository (10) and a wrong password (12).
 MIN_RESTIC = (0, 17, 1)
 SCHEMA = 1
@@ -73,9 +78,11 @@ DUE = "due"
 _RESTIC_EXIT_CODES = {10: "repository_missing", 11: "repository_locked", 12: "wrong_password"}
 _BACKUP_PARTIAL_EXIT = 3  # a snapshot exists, but some source files could not be read
 
-#: Seconds each kind of restic call may run. A backup of a very large vault has to finish in one call, because
-#: restic resumes only by reusing the data it already uploaded. The others bound a hung connection.
-_TIMEOUT_SECONDS = {"backup": 7 * 86400, "check": 3 * 86400, "forget": 86400, "restore": 86400, "query": 3600}
+#: Seconds each kind of restic call may run. A backup or an owner restore of a very large vault has to finish in
+#: one call, because restic resumes only by reusing the data it already moved. The others bound a hung connection;
+#: a sampled restore is small, so a day of silence means the connection hung.
+_TIMEOUT_SECONDS = {"backup": 7 * 86400, "check": 3 * 86400, "forget": 86400, "restore": 7 * 86400,
+                    "sample": 86400, "query": 3600}
 _RETRY_PAUSE_SECONDS = 30.0
 #: How often a running restic process is checked against the stop signal and its timeout.
 _POLL_PROCESS_SECONDS = 1.0
@@ -131,6 +138,26 @@ class Config:
         return hashlib.sha256(self.repository.encode("utf-8")).hexdigest()[:8]
 
 
+#: Restic's own keep policies, with the count each defaults to. Restic fixes the names; the owner sets the counts.
+# nosemgrep: ep-word-set -- restic's forget policies are a closed set that restic defines, not vault vocabulary.
+_KEEP_DEFAULTS = {"last": 0, "daily": 7, "weekly": 4, "monthly": 12}
+#: The numeric settings of an entry: key -> (default, whole number, zero allowed).
+# nosemgrep: ep-word-set -- this file format's own closed schema keys; the owner defines no key.
+_SETTINGS = {
+    "interval_hours": (24, False, False),
+    "check_interval_days": (7, False, False),
+    "check_subset_parts": (12, True, False),
+    "sample_interval_days": (7, False, False),
+    "sample_size": (20, True, False),
+    "sample_max_mib": (64, True, False),
+}
+#: Every key an entry may hold. Any other key is a typo: it would silently fall back to a default, and a default
+#: keep rule prunes history, so it is refused.
+# nosemgrep: ep-word-set -- this file format's own closed schema; the owner defines no key.
+_ENTRY_KEYS = frozenset((*_SETTINGS, *(f"keep_{name}" for name in _KEEP_DEFAULTS), "repository", "password_file",
+                         "environment_file", "include_originals"))
+
+
 def _number(entry: dict[str, Any], key: str, default: float, *, whole: bool = False, zero: bool = False) -> Any:
     value = entry.get(key, default)
     if isinstance(value, bool) or not isinstance(value, int if whole else (int, float)):
@@ -153,6 +180,8 @@ def load_config(vault: Path) -> Config | None:
     if not configured:
         return None
     vault = Path(vault).resolve()
+    # The file names the credential files, so a copy of the vault that carried it would carry the way to the backup.
+    _outside(vault, Path(configured), CONFIG_ENV)
     try:
         document = json.loads(Path(configured).read_text(encoding="utf-8"))
     except (OSError, ValueError) as error:
@@ -164,6 +193,9 @@ def load_config(vault: Path) -> Config | None:
         return None
     if not isinstance(entry, dict):
         raise ConfigError("invalid_config", "entry")
+    for key in sorted(entry):
+        if key not in _ENTRY_KEYS:
+            raise ConfigError("invalid_config", str(key))
     repository = entry.get("repository")
     password = entry.get("password_file")
     environment = entry.get("environment_file")
@@ -179,24 +211,23 @@ def load_config(vault: Path) -> Config | None:
     # paths reads no scheme: a remote location is never an absolute local path.
     if Path(repository).is_absolute():
         _outside(vault, Path(repository), "repository")
-    keep = {
-        name: _number(entry, f"keep_{name}", default, whole=True, zero=True)
-        # nosemgrep: ep-word-set -- restic's own forget policies, a closed set that restic fixes.
-        for name, default in (("last", 0), ("daily", 7), ("weekly", 4), ("monthly", 12))
-    }
+    keep = {name: _number(entry, f"keep_{name}", default, whole=True, zero=True)
+            for name, default in _KEEP_DEFAULTS.items()}
     if not any(keep.values()):
         raise ConfigError("invalid_config", "keep")
+    settings = {key: _number(entry, key, default, whole=whole, zero=zero)
+                for key, (default, whole, zero) in _SETTINGS.items()}
     return Config(
         repository=repository,
         password_file=_outside(vault, Path(password).expanduser(), "password_file"),
         environment_file=_outside(vault, Path(environment).expanduser(), "environment_file") if environment else None,
-        interval_hours=_number(entry, "interval_hours", 24),
+        interval_hours=settings["interval_hours"],
         keep=keep,
-        check_interval_days=_number(entry, "check_interval_days", 7),
-        check_parts=_number(entry, "check_subset_parts", 12, whole=True),
-        sample_interval_days=_number(entry, "sample_interval_days", 7),
-        sample_size=_number(entry, "sample_size", 20, whole=True),
-        sample_max_bytes=_number(entry, "sample_max_mib", 64, whole=True) << 20,
+        check_interval_days=settings["check_interval_days"],
+        check_parts=settings["check_subset_parts"],
+        sample_interval_days=settings["sample_interval_days"],
+        sample_size=settings["sample_size"],
+        sample_max_bytes=settings["sample_max_mib"] << 20,
         include_originals=entry.get("include_originals", True),
     )
 
@@ -255,12 +286,29 @@ class _Restic:
 
     def __init__(self, vault: Path, config: Config, stop: threading.Event | None = None) -> None:
         self.config = config
+        self.vault = Path(vault)
+        # The machine's name is recorded on each snapshot and used as a filter; it is one value for the whole call.
+        self.host = socket.gethostname()
         self.stop = stop or threading.Event()
         cache = private_state.store(vault, STORE_DIRNAME) / "restic-cache"
         self.environment, self.secrets = _environment(config, cache)
         self.executable = shutil.which("restic")
         if self.executable is None:
             raise BackupError(RESTIC_NOT_FOUND)
+
+    @property
+    def tags(self) -> str:
+        """The tags of this vault's snapshots, as restic's one comma-joined value. The root is percent-encoded,
+        because restic splits a tag value at a comma."""
+        return f"{TAG},{ROOT_TAG}{quote(str(self.vault), safe='/')}"
+
+    @property
+    def own(self) -> list[str]:
+        """restic's filters for this vault's snapshots made on this machine. The root tag keeps two vaults in one
+        repository apart, and the host keeps two machines that use the same path apart, so a retention rule or a
+        sample never reaches a snapshot that another vault or machine took. A machine that is renamed starts a
+        new group: its old snapshots stay until the owner forgets them, which is the safe direction."""
+        return ["--host", self.host, "--tag", self.tags]
 
     def require_version(self) -> None:
         done = self._once(["version"], timeout=_TIMEOUT_SECONDS["query"])
@@ -294,23 +342,26 @@ class _Restic:
                             process.communicate()
                         raise BackupError("stopped" if self.stop.is_set() else "timeout", args[0]) from None
 
-    def run(self, args: list[str], *, kind: str, retries: int = 0, ok: tuple[int, ...] = (0,)
-            ) -> subprocess.CompletedProcess[bytes]:
+    def run(self, args: list[str], *, kind: str, retries: int = 0, ok: tuple[int, ...] = (0,),
+            retry_timeouts: bool = True) -> subprocess.CompletedProcess[bytes]:
         """Run restic. Only a call that is safe to repeat passes `retries`, and only a timeout or a repository
-        lock held by another restic process is retried: any other failure repeats the same way."""
+        lock held by another restic process is retried: any other failure repeats the same way. A call that has
+        written partial output by the time it times out (a restore) passes `retry_timeouts=False`: a lock
+        failure happens before restic writes anything, a timeout does not."""
         attempt = 0
         while True:
             try:
                 done = self._once(args, timeout=_TIMEOUT_SECONDS[kind])
             except BackupError as error:
-                if error.code != "timeout":  # a stop or a missing executable is not repeated
+                if error.code != "timeout" or not retry_timeouts:  # a stop or a missing executable is not repeated
                     raise
                 failure = error
             else:
                 if done.returncode in ok:
                     return done
+                # Scrub the whole text, then cut: a secret that straddles the cut would otherwise leak its tail.
                 log.warning("restic %s exited %d: %s", args[0], done.returncode,
-                            _scrub(done.stderr.decode("utf-8", "replace")[-300:], self.secrets))
+                            _scrub(done.stderr.decode("utf-8", "replace"), self.secrets)[-300:])
                 code = _RESTIC_EXIT_CODES.get(done.returncode)
                 failure = BackupError(code or f"restic_exit_{done.returncode}", args[0])
                 if code != "repository_locked":
@@ -357,12 +408,15 @@ def _is_sqlite(path: Path) -> bool:
 def _copy_sqlite(source: Path, target: Path) -> bool:
     """Copy a live database with SQLite's online backup API; whether the copy passes a quick integrity check.
 
-    The source opens read-only, so closing it never checkpoints or writes the live file. The copy goes in 4 MiB
-    steps, so a writer to the source waits at most one step.
+    The copy is one step, so it reads one snapshot of the database: a stepped copy starts over whenever another
+    connection writes, and never ends on a busy database. The source opens read-write but refuses writes
+    (`query_only`): a read-only open leaves a `-wal` and a `-shm` file beside a database that is closed
+    cleanly, and a read-write one removes them when it is the last connection to close.
     """
-    with closing(sqlite3.connect(f"{source.as_uri()}?mode=ro", uri=True, timeout=30)) as origin, \
+    with closing(sqlite3.connect(f"{source.as_uri()}?mode=rw", uri=True, timeout=30)) as origin, \
             closing(sqlite3.connect(target)) as copy:
-        origin.backup(copy, pages=1024, sleep=0.01)
+        origin.execute("PRAGMA query_only = ON")
+        origin.backup(copy, pages=-1)
     os.chmod(target, 0o600)
     with closing(sqlite3.connect(target)) as copy:
         return copy.execute("PRAGMA quick_check(1)").fetchone() == ("ok",)
@@ -374,13 +428,16 @@ def _copy_whole(source: Path, target: Path) -> None:
     os.chmod(target, 0o600)
 
 
-def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]]) -> int:
-    """Stage one state file or tree; the count of files staged. A file it cannot stage becomes a finding."""
+def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop: threading.Event) -> int:
+    """Stage one state file or tree; the count of files staged. A file it cannot stage becomes a finding. A stop
+    ends it between files."""
+    if stop.is_set():
+        raise BackupError("stopped", "staging")
     if source.is_symlink():
         return 0
     if source.is_dir():
         target.mkdir(mode=0o700)
-        return sum(_stage_tree(child, target / child.name, findings) for child in sorted(source.iterdir()))
+        return sum(_stage_tree(child, target / child.name, findings, stop) for child in sorted(source.iterdir()))
     if not source.is_file():
         return 0
     name = source.name
@@ -401,7 +458,7 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]]) -> i
     return 1
 
 
-def stage_state(vault: Path, stage: Path) -> tuple[int, list[dict[str, str]]]:
+def stage_state(vault: Path, stage: Path, stop: threading.Event | None = None) -> tuple[int, list[dict[str, str]]]:
     """Copy every non-rebuildable state family into `stage`, emptied first. Returns the file count and findings.
 
     The registry decides which families: `reserved_paths.non_rebuildable_state_descriptors` is the one place
@@ -418,7 +475,8 @@ def stage_state(vault: Path, stage: Path) -> tuple[int, list[dict[str, str]]]:
     staged = 0
     for name in names:
         if reserved_paths.classify_logical(name).descriptor_id in kept:
-            staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings)
+            staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings,
+                                  stop or threading.Event())
     return staged, findings
 
 
@@ -438,20 +496,41 @@ def _bound_originals(vault: Path) -> Iterator[Any]:
     return foreground_priority.yielding(media_store.bound_originals(vault, unconfirmed=lambda error: None))
 
 
-def _write_exclusions(vault: Path, target: Path) -> int:
-    """List what a backup without originals leaves out: the original pool and each bound original. Returns
-    how many bound originals the walk named."""
+def _write_targets(vault: Path, target: Path) -> int:
+    """List what a backup without originals keeps, as NUL-separated paths for restic's `--files-from-raw`. Returns
+    how many bound originals the walk named.
+
+    An exclude pattern per original costs restic one comparison per file and pattern, so it grows as files times
+    originals. A list costs one entry per file: a directory with no original below it is one entry, and a
+    directory that holds one lists its other entries. The original pool and each bound original are left out.
+    """
     from . import original_pool
 
+    omitted = {str(original_pool.pool_root(vault))}
     count = 0
-    with target.open("w", encoding="utf-8") as sink:
-        sink.write(_literal(str(original_pool.pool_root(vault))) + "\n")
-        for snapshot in _bound_originals(vault):
-            count += 1
-            for path in {snapshot.path, snapshot.local_path} - {None}:
-                # A note is never an original that offload moves (originals.is_note_path), so it stays.
-                if not originals.is_note_path(path.name):
-                    sink.write(_literal(str(path)) + "\n")
+    for snapshot in _bound_originals(vault):
+        count += 1
+        for path in {snapshot.path, snapshot.local_path} - {None}:
+            # A note is never an original that offload moves (originals.is_note_path), so it stays.
+            if not originals.is_note_path(path.name):
+                omitted.add(str(path))
+    holders = {str(vault)}  # the directories with an omitted path somewhere below
+    for place in omitted:
+        parent = str(Path(place).parent)
+        while parent not in holders and Path(parent).is_relative_to(vault):
+            holders.add(parent)
+            parent = str(Path(parent).parent)
+    pending = [str(vault)]
+    with target.open("wb") as sink:
+        while pending:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    if entry.path in omitted:
+                        continue
+                    if entry.path in holders and entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    else:
+                        sink.write(os.fsencode(entry.path) + b"\0")
     return count
 
 
@@ -483,25 +562,27 @@ def _backup(vault: Path, restic: _Restic, previous: dict[str, Any] | None) -> di
     store = private_state.store(vault, STORE_DIRNAME)
     entry: dict[str, Any] = {"findings": []}
     stage = store / STAGE_DIRNAME
-    exclusions = store / "excluded.txt"
+    targets = store / "targets.list"
     try:
         try:
-            entry["state_files"], entry["findings"] = stage_state(vault, stage)
+            entry["state_files"], entry["findings"] = stage_state(vault, stage, restic.stop)
         except (OSError, sqlite3.Error):
             entry["state_files"], entry["findings"] = None, [{"kind": "state", "code": "state_staging_failed"}]
-        arguments = ["backup", "--json", "--quiet", "--tag", TAG]
-        if not restic.config.include_originals:
+        arguments = ["backup", "--json", "--quiet", "--host", restic.host, "--tag", restic.tags]
+        if restic.config.include_originals:
+            arguments.append(str(vault))
+        else:
             if not _POSIX:
                 raise BackupError("unsupported_platform", "include_originals")
-            entry["excluded_originals"] = _write_exclusions(vault, exclusions)
-            arguments += ["--exclude-file", str(exclusions)]
-        done = restic.run([*arguments, str(vault), str(stage)], kind="backup", ok=(0, _BACKUP_PARTIAL_EXIT))
+            entry["excluded_originals"] = _write_targets(vault, targets)
+            arguments += ["--files-from-raw", str(targets)]
+        done = restic.run([*arguments, str(stage)], kind="backup", ok=(0, _BACKUP_PARTIAL_EXIT))
     except BackupError as error:
         return _stamp({**entry, "state": FAILED, "code": error.code}, previous, success=False,
                       wait=_RETRY_AFTER_FAILURE_SECONDS)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-        exclusions.unlink(missing_ok=True)
+        targets.unlink(missing_ok=True)
     summary = _summary(done)
     if summary is None or not isinstance(summary.get("snapshot_id"), str):
         return _stamp({**entry, "state": FAILED, "code": "backup_summary_missing"}, previous, success=False,
@@ -515,13 +596,16 @@ def _backup(vault: Path, restic: _Restic, previous: dict[str, Any] | None) -> di
         previous, success=complete, wait=restic.config.interval_hours * 3600)
 
 
-def _forget(restic: _Restic) -> dict[str, Any]:
+def _forget(restic: _Restic, previous: dict[str, Any] | None) -> dict[str, Any]:
     keep = [part for name, count in restic.config.keep.items() if count for part in (f"--keep-{name}", str(count))]
     try:
-        restic.run(["forget", "--prune", "--tag", TAG, *keep], kind="forget", retries=_IDEMPOTENT_RETRIES)
+        # The filters leave this vault's snapshots on this machine, so one group by host is the whole set: a
+        # backup without originals records a different path list each time, and grouping by path would keep every one.
+        restic.run(["forget", "--prune", "--group-by", "host", *restic.own, *keep], kind="forget",
+                   retries=_IDEMPOTENT_RETRIES)
     except BackupError as error:
-        return {"at": time.time(), "state": FAILED, "code": error.code}
-    return {"at": time.time(), "state": OK}
+        return _stamp({"state": FAILED, "code": error.code}, previous, success=False, wait=0)
+    return _stamp({"state": OK}, previous, success=True, wait=0)
 
 
 def _check(restic: _Restic, previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -615,20 +699,36 @@ def _restored_digest(root: Path, pick: _Pick) -> str | None:
     return pick.digest
 
 
-def _restore(restic: _Restic, source: str, target: Path, paths: Iterable[str], *, verify: bool = True) -> None:
+def _restore(restic: _Restic, source: str, target: Path, paths: Iterable[str], *, kind: str) -> None:
+    """Restore into an empty folder. A timed-out restore is never run again into that folder: `--overwrite never`
+    would skip a file that the first run left truncated and still report success. A lock held by another restic
+    process fails before restic writes anything, so only that is retried."""
     includes = [part for path in paths for part in ("--include", "/" + _literal(path))]
-    arguments = ["restore", "--overwrite", "never", "--target", str(target)]
-    restic.run([*arguments, *(["--verify"] if verify else []), source, *includes], kind="restore",
-               retries=_IDEMPOTENT_RETRIES)
+    arguments = ["restore", "--overwrite", "never", "--verify", "--target", str(target)]
+    restic.run([*arguments, source, *includes], kind=kind, retries=_IDEMPOTENT_RETRIES, retry_timeouts=False)
 
 
-def _snapshots(restic: _Restic) -> list[dict[str, Any]]:
-    done = restic.run(["snapshots", "--json", "--tag", TAG], kind="query", retries=_IDEMPOTENT_RETRIES)
+def _snapshots(restic: _Restic, *, own: bool, wanted: str = "latest") -> list[dict[str, Any]]:
+    """The snapshots to choose from: with `own`, this vault's on this machine, otherwise all of this service's.
+
+    A snapshot of a backup without originals names every file it holds, so a listing never asks for all
+    snapshots: it asks for the newest of each machine and vault, and an older one by its ID.
+    """
+    filters = restic.own if own else ["--tag", TAG]
+    query = ["--group-by", "host,tags", "--latest", "1", *filters] if wanted == "latest" else [*filters, wanted]
+    try:
+        done = restic.run(["snapshots", "--json", *query], kind="query", retries=_IDEMPOTENT_RETRIES)
+    except BackupError as error:
+        if wanted != "latest" and error.code == "restic_exit_1":  # restic's one exit code for an ID it cannot match
+            raise BackupError("snapshot_not_found", wanted) from None
+        raise
     try:
         listed = json.loads(done.stdout)
     except ValueError:
         raise BackupError("restic_unusable", "snapshots") from None
-    return [snap for snap in listed if isinstance(snap, dict) and isinstance(snap.get("id"), str)
+    found = [snap for item in listed if isinstance(item, dict)
+             for snap in (item["snapshots"] if isinstance(item.get("snapshots"), list) else [item])]
+    return [snap for snap in found if isinstance(snap, dict) and isinstance(snap.get("id"), str)
             and isinstance(snap.get("paths"), list)]
 
 
@@ -641,25 +741,29 @@ def _instant(text: str) -> float:
 
 
 def _roots(snapshot: dict[str, Any]) -> tuple[str | None, str | None]:
-    """The vault root and the staged-state root inside a snapshot, found by the staging directory's name."""
+    """The vault root a snapshot was taken from, named by its tag, and its staged-state root, found by the
+    staging directory's name among the snapshot's paths."""
     staged = [path for path in snapshot["paths"] if PurePosixPath(path).name == STAGE_DIRNAME]
-    others = [path for path in snapshot["paths"] if path not in staged]
-    return (others[0] if len(others) == 1 else None), (staged[0] if len(staged) == 1 else None)
+    roots = [unquote(tag[len(ROOT_TAG):]) for tag in snapshot.get("tags") or [] if tag.startswith(ROOT_TAG)]
+    return (roots[0] if len(roots) == 1 else None), (staged[0] if len(staged) == 1 else None)
 
 
-def _pick_snapshot(snapshots: list[dict[str, Any]], vault: Path, wanted: str = "latest") -> dict[str, Any]:
-    """The named snapshot, or this vault's latest. A repository that holds several vaults needs a snapshot ID."""
+def _pick_snapshot(snapshots: list[dict[str, Any]], vault: Path, host: str, wanted: str = "latest") -> dict[str, Any]:
+    """The named snapshot, or the latest of this vault. This machine's snapshots come first, then another
+    machine's of the same vault (a replacement machine restores those). A repository that holds more than one
+    vault or machine at that level needs a snapshot ID."""
     if wanted != "latest":
         match = [snap for snap in snapshots if snap["id"].startswith(wanted)]
         if len(match) != 1:
             raise BackupError("snapshot_not_found", wanted)
         return match[0]
-    own = [snap for snap in snapshots if _roots(snap)[0] == str(vault)]
-    if own:
-        return max(own, key=lambda snap: _instant(str(snap.get("time", ""))))
-    if len({_roots(snap)[0] for snap in snapshots}) == 1 and snapshots:
-        return max(snapshots, key=lambda snap: _instant(str(snap.get("time", ""))))
-    raise BackupError("snapshot_not_found" if not snapshots else "ambiguous_snapshot", "latest")
+    here = [snap for snap in snapshots if _roots(snap)[0] == str(vault)]
+    pool = [snap for snap in here if snap.get("hostname") == host] or here or snapshots
+    if not pool:
+        raise BackupError("snapshot_not_found", "latest")
+    if len({(_roots(snap)[0], snap.get("hostname")) for snap in pool}) != 1:
+        raise BackupError("ambiguous_snapshot", "latest")
+    return max(pool, key=lambda snap: _instant(str(snap.get("time", ""))))
 
 
 def _finding(kind: str, path: str, code: str) -> dict[str, str]:
@@ -685,7 +789,7 @@ def _sample(vault: Path, restic: _Restic, previous: dict[str, Any] | None, stop:
         shutil.rmtree(stale, ignore_errors=True)
     scratch = store / f"{SAMPLE_PREFIX}{os.urandom(6).hex()}"
     try:
-        snapshot = _pick_snapshot(_snapshots(restic), vault)
+        snapshot = _pick_snapshot(_snapshots(restic, own=True), vault, restic.host)
         root = _roots(snapshot)[0]
         if root is None:
             raise BackupError("snapshot_layout", snapshot["id"][:8])
@@ -696,7 +800,7 @@ def _sample(vault: Path, restic: _Restic, previous: dict[str, Any] | None, stop:
         source = f"{snapshot['id']}:{root}"
         failed: set[str] = set()
         try:
-            _restore(restic, source, scratch, wanted)
+            _restore(restic, source, scratch, wanted, kind="sample")
         except BackupError:
             for path in dict.fromkeys(wanted):  # restic names no file in its error, so find the damaged one alone
                 if len(failed) >= _FALLBACK_FAILURES:  # many failures mean the repository, not one file
@@ -704,7 +808,7 @@ def _sample(vault: Path, restic: _Restic, previous: dict[str, Any] | None, stop:
                     entry["findings"].append(_finding(_kind_of(path), path, "not_attempted"))
                     continue
                 try:
-                    _restore(restic, source, scratch / "alone", [path])
+                    _restore(restic, source, scratch / "alone", [path], kind="sample")
                     shutil.copytree(scratch / "alone", scratch, dirs_exist_ok=True)
                 except BackupError as error:
                     failed.add(path)
@@ -738,7 +842,7 @@ def _sample(vault: Path, restic: _Restic, previous: dict[str, Any] | None, stop:
     return _stamp(
         {**entry, "state": state, "snapshot_id": snapshot["id"], "notes": results["note"],
          "originals": results["original"], "code": "sample_findings" if failures else None},
-        previous, success=not failures,
+        previous, success=bool(picks) and not failures,  # an empty sample proves nothing, so it never counts as a pass
         wait=retry if failures else restic.config.sample_interval_days * 86400)
 
 
@@ -823,7 +927,7 @@ def run_cycle(vault: Path, *, force: bool = False, init: bool = False, stop: thr
                 if not finished(name, step()):
                     break
                 if name == "backup" and record["backup"]["state"] == COMPLETE:
-                    finished("forget", _forget(restic))  # a partial or failed backup never prunes
+                    finished("forget", _forget(restic, record.get("forget")))  # a partial or failed backup never prunes
                 _write_record(vault, record)
             return {"ran": ran, **{name: record[name] for name in ran}}
     finally:
@@ -878,12 +982,12 @@ def restore(vault: Path, target: Path, *, snapshot: str = "latest", paths: Itera
     target = _checked_target(vault, target)
     restic = _Restic(vault, config)
     restic.require_version()
-    chosen = _pick_snapshot(_snapshots(restic), vault, snapshot)
+    chosen = _pick_snapshot(_snapshots(restic, own=False, wanted=snapshot), vault, restic.host, snapshot)
     root = _roots(chosen)[1 if state else 0]
     if root is None:
         raise BackupError("snapshot_layout", chosen["id"][:8])
     target.mkdir(parents=True, exist_ok=True)
-    _restore(restic, f"{chosen['id']}:{root}", target, wanted)
+    _restore(restic, f"{chosen['id']}:{root}", target, wanted, kind="restore")
     restored = sum(1 for place in target.rglob("*") if place.is_file())
     return {"snapshot_id": chosen["id"], "target": str(target), "files": restored}
 
@@ -934,6 +1038,7 @@ def status(vault: Path | None) -> dict[str, Any]:
     record = _read_record(vault)
     block: dict[str, Any] = {
         "state": CONFIGURED, "repository_id": config.fingerprint, "include_originals": config.include_originals,
+        "keep": dict(config.keep),  # the effective rules after defaults: what retention keeps and prunes
         "last_backup": _section(record, "backup"), "last_retention": _section(record, "forget"),
         "last_check": _section(record, "check"), "last_sampled_restore": _section(record, "sample"),
         "next_due": {
@@ -941,8 +1046,9 @@ def status(vault: Path | None) -> dict[str, Any]:
             "check": _next_due(record, "check"),
             "sampled_restore": _next_due(record, "sample"),
         },
-        "last_error": None,
-        "findings": [],
+        # A lost record says nothing about errors or findings: unknown, not none.
+        "last_error": UNKNOWN if record is None else None,
+        "findings": UNKNOWN if record is None else [],
     }
     if record is not None:
         error = record.get("error")

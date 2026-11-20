@@ -9,7 +9,7 @@ Keep dated, verified restic snapshots of a personal vault and its non-rebuildabl
 
 The service SHALL run no backup work until an owner config file, named by `EXOMEM_VAULT_BACKUP_CONFIG`, holds a valid entry for the vault. The status SHALL read "not configured" when the variable is unset or the file has no entry for the vault.
 
-An entry SHALL name a restic repository string, a password file path and optionally an environment file path. The service SHALL pass the repository string to restic without parsing it beyond requiring a non-empty string. An entry whose password file, environment file or local repository path lies inside the vault SHALL be invalid, and the status SHALL name the invalid field.
+An entry SHALL name a restic repository string, a password file path and optionally an environment file path. The service SHALL pass the repository string to restic without parsing it beyond requiring a non-empty string. An entry whose password file, environment file or local repository path lies inside the vault SHALL be invalid, and the status SHALL name the invalid field. A config file that lies inside the vault SHALL be invalid, and the status SHALL name `EXOMEM_VAULT_BACKUP_CONFIG`. An entry that holds a key the service does not know SHALL be invalid, and the status SHALL name that key, because a misspelled keep rule would otherwise fall back to a default that prunes history.
 
 The service SHALL pass the repository, the password file path and every backend credential to restic only in the subprocess environment. It SHALL NOT store a secret, SHALL NOT show the repository string in status, and SHALL replace a configured secret value in any log line.
 
@@ -24,6 +24,16 @@ The service SHALL pass the repository, the password file path and every backend 
 - **WHEN** an entry's password file lies inside the vault
 - **THEN** the entry is invalid, no backup runs, and the status names the password file field
 
+#### Scenario: A misspelled key
+
+- **WHEN** an entry holds `keep_montly` and no other keep rule
+- **THEN** the entry is invalid, no backup runs, and the status names `keep_montly`
+
+#### Scenario: A config file inside the vault
+
+- **WHEN** `EXOMEM_VAULT_BACKUP_CONFIG` names a file inside the vault
+- **THEN** the entry is invalid, no backup runs, and the status names `EXOMEM_VAULT_BACKUP_CONFIG`
+
 #### Scenario: Secrets never reach the command line
 
 - **WHEN** the service runs a restic call for a configured entry
@@ -32,7 +42,7 @@ The service SHALL pass the repository, the password file path and every backend 
 
 ### Requirement: A snapshot holds the vault and the non-rebuildable state, taken consistently
 
-A backup SHALL write one restic snapshot that holds the vault root and a staged copy of every machine-local state family that declares itself not rebuildable. It SHALL copy each SQLite database with SQLite's online backup API and SHALL NOT copy a write-ahead-log, shared-memory or journal file. It SHALL exclude every rebuildable family. It SHALL NOT hold the vault mutation guard while it runs.
+A backup SHALL write one restic snapshot that holds the vault root and a staged copy of every machine-local state family that declares itself not rebuildable. It SHALL copy each SQLite database with SQLite's online backup API in one step, so the copy reads one snapshot of the database, through a connection that refuses writes. It SHALL NOT copy a write-ahead-log, shared-memory or journal file, and it SHALL NOT leave one beside a database that was closed cleanly. A stop request SHALL end staging between files. It SHALL exclude every rebuildable family. It SHALL NOT hold the vault mutation guard while it runs.
 
 When staging a state file fails, the backup SHALL still snapshot the vault, SHALL record the outcome `partial` with the failing code, and SHALL NOT apply retention.
 
@@ -54,7 +64,7 @@ When staging a state file fails, the backup SHALL still snapshot the vault, SHAL
 
 ### Requirement: The original bytes are included unless the owner opts out
 
-By default the snapshot SHALL hold every original's bytes. When the entry sets `include_originals` to false, the backup SHALL exclude each bound original and the original pool. The status SHALL then warn that originals are excluded, SHALL show how many, and SHALL show the count of excluded originals without a recoverable replica as `unknown` until a source for that count exists.
+By default the snapshot SHALL hold every original's bytes. When the entry sets `include_originals` to false, the backup SHALL leave out each bound original and the original pool. The work to leave them out SHALL grow with the number of files plus the number of originals, never with their product. The status SHALL then warn that originals are excluded, SHALL show how many, and SHALL show the count of excluded originals without a recoverable replica as `unknown` until a source for that count exists.
 
 #### Scenario: Opt-out
 
@@ -64,12 +74,17 @@ By default the snapshot SHALL hold every original's bytes. When the entry sets `
 
 ### Requirement: Retention follows a complete backup
 
-After a backup whose outcome is complete, the service SHALL run `restic forget --prune` with the entry's keep rules, restricted to snapshots that carry the service's tag. It SHALL NOT run retention after a partial or failed backup.
+After a backup whose outcome is complete, the service SHALL run `restic forget --prune` with the entry's keep rules, restricted to the snapshots of this vault that this machine took, and treating them as one group. It SHALL NOT remove a snapshot of another vault, of another machine, or of another tool, which may share the repository. It SHALL NOT run retention after a partial or failed backup. A successful retention SHALL record when it last succeeded.
 
 #### Scenario: Keep rules apply
 
 - **WHEN** a complete backup succeeds and older snapshots exceed the keep rules
 - **THEN** the older snapshots are forgotten and their data pruned
+
+#### Scenario: A shared repository
+
+- **WHEN** two vaults with different keep rules back up to one repository, or two machines back up the same vault path
+- **THEN** each retention applies its own rules to its own snapshots and removes no other
 
 #### Scenario: A failed backup keeps history
 
@@ -101,7 +116,7 @@ On the sample interval, the service SHALL restore a sample of originals and note
 
 ### Requirement: An owner restores a path only into a separate target directory
 
-The owner operation `exomem backup restore` SHALL restore selected paths, or the staged state, from a named snapshot into a target directory. It SHALL refuse a target that is inside the vault, holds the vault or overlaps the vault's state directory. It SHALL refuse a target that exists and is not empty. It SHALL NOT write into the vault in any case. It SHALL refuse an absolute path, a path with `..`, and SHALL treat glob characters in a path literally.
+The owner operation `exomem backup restore` SHALL restore selected paths, or the staged state, from a named snapshot into a target directory. It SHALL refuse a target that is inside the vault, holds the vault or overlaps the vault's state directory. It SHALL refuse a target that exists and is not empty. It SHALL NOT write into the vault in any case. It SHALL prefer this machine's latest snapshot of the vault, then another machine's of the same vault path, and SHALL refuse a choice that is ambiguous between several. It SHALL refuse an absolute path, a path with `..`, and SHALL treat glob characters in a path literally.
 
 The owner operations SHALL be owner-only.
 
@@ -118,7 +133,7 @@ The owner operations SHALL be owner-only.
 
 ### Requirement: Status reports every step, and unknown is never zero
 
-The status SHALL report the last backup (time, snapshot ID, files, bytes and outcome), the last check, the last sampled restore (counts and failures), the next due time of each, and the findings. A value the service cannot read SHALL be `unknown`. An activity that has not run SHALL be `never`. Neither SHALL read as zero. When restic is absent the status SHALL read "restic not found", and when it is older than the supported version, "restic too old". A missing repository SHALL read `repository_missing`.
+The status SHALL report the last backup (time, snapshot ID, files, bytes and outcome), the last check, the last sampled restore (counts and failures), the next due time of each, and the findings. A value the service cannot read SHALL be `unknown`, which includes the findings and the last error when the record is lost. An activity that has not run SHALL be `never`. Neither SHALL read as zero. A sampled restore that drew nothing SHALL read `empty` and SHALL NOT record a success. The status SHALL show the keep rules in effect. When restic is absent the status SHALL read "restic not found", and when it is older than the supported version, "restic too old". A missing repository SHALL read `repository_missing`.
 
 The service SHALL record this state in a small private file under the vault's state directory, and a missing or unreadable file SHALL read as unknown.
 
@@ -140,7 +155,7 @@ The service SHALL record this state in a small private file under the vault's st
 
 ### Requirement: Only one backup flight runs, and every restic call is bounded
 
-At most one cycle SHALL run per vault across the service thread and the CLI. Every restic call SHALL have a timeout. Only calls that are safe to repeat SHALL retry, with a bounded count and a pause.
+At most one cycle SHALL run per vault across the service thread and the CLI. Every restic call SHALL have a timeout. Only calls that are safe to repeat SHALL retry, with a bounded count and a pause. A restore that timed out SHALL NOT run again into the same target, because restic would skip a file that it left truncated and report success. A repository lock, which fails before restic writes anything, MAY be retried.
 
 #### Scenario: A second runner
 
