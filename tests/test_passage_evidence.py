@@ -9,6 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import anyio
@@ -1188,6 +1189,118 @@ def test_abandoned_passage_search_stops_before_it_encodes(vault, passage_tools, 
 
     asyncio.run(search_then_leave())
     assert caller_left.is_set()
+    assert encoder.texts[before:] == []
+
+
+def test_a_capture_encode_does_not_hold_up_a_passage_query_on_a_concurrent_encoder(
+    vault, passage_tools, monkeypatch
+):
+    """A capture encodes its Source one inference per shared turn; a search must not queue behind each one."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    # The served ONNX encoder runs inferences side by side; the fixture's plain model does not.
+    concurrent = SimpleNamespace(texts_fit=lambda _texts: True, concurrent_encodes=True)
+    monkeypatch.setattr(embeddings, "_MODEL", concurrent)
+    monkeypatch.setattr(embeddings, "get_model", lambda: concurrent)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    shared = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
+    inferring, release = threading.Event(), threading.Event()
+
+    def capture_inference():
+        # A capture holds one admission for its Source and the shared turn for each inference.
+        with shared.admission(), shared.execution():
+            inferring.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capture = pool.submit(capture_inference)
+        assert inferring.wait(5)
+        try:
+            search = pool.submit(
+                call,
+                "search_memory",
+                {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+            )
+            reply = search.result(timeout=5)
+        finally:
+            release.set()
+        capture.result()
+    assert [hit["passage_key"] for hit in reply["hits"]] == ["record"], reply
+    assert shared.admitted_count() == 0
+
+
+def test_abandoned_passage_search_leaves_its_model_turn_queue_at_once(vault, passage_tools, monkeypatch):
+    """A search queued behind another encode must free its admission when its caller leaves, not after that encode."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    with monkeypatch.context() as service:
+        # Cells run the service profile, whose turn queue is the one a waiter can leave.
+        service.setenv("EXOMEM_CLOUD_CELL", "1")
+        service.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+        gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    holding, release = threading.Event(), threading.Event()
+
+    def other_encode():
+        with gate.admission(), gate.execution():
+            holding.set()
+            assert release.wait(10)
+
+    def settles(condition, seconds):
+        deadline = time.monotonic() + seconds
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return condition()
+
+    mcp = server.build_server(require_auth=False)
+    before = len(encoder.texts)
+
+    async def search_then_leave():
+        async with Client(mcp) as client:
+            async with anyio.create_task_group() as caller:
+                caller.start_soon(
+                    client.call_tool,
+                    "search_memory",
+                    {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+                )
+                queued = lambda: gate.waiting_counts()["foreground"] == 1  # noqa: E731
+                assert await anyio.to_thread.run_sync(settles, queued, 10)
+                caller.cancel_scope.cancel()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(other_encode)
+        assert holding.wait(5)
+        try:
+            asyncio.run(search_then_leave())
+            # Only the other encode still holds the gate while it runs.
+            left = lambda: gate.waiting_counts()["foreground"] == 0 and gate.admitted_count() == 1  # noqa: E731
+            assert settles(left, 5)
+        finally:
+            release.set()
+        holder.result()
     assert encoder.texts[before:] == []
 
 

@@ -72,7 +72,8 @@ Concurrent readers SHALL NOT exclude one another from borrowing a proved immutab
 Publisher activity SHALL NOT prevent borrowing while that generation's configuration and full publication checkpoint remain proved.
 The outcome SHALL name the existing publication or warm-up action that can make the request ready, and SHALL promise a retry only when publication can progress.
 When the cell cannot admit a passage request's model work at once, it SHALL refuse with a busy outcome and a retry hint.
-The request SHALL NOT wait for an admission slot. Admitted requests MAY await the existing serialized model execution turn within their bounded admission capacity.
+The request SHALL NOT wait for an admission slot. Admitted requests MAY await a serialized model execution turn within their bounded admission capacity.
+When the served encoder runs inferences concurrently, a passage request's query encode SHALL wait only for other passage requests' query encodes, not for the passage inferences of a capture or a background drain.
 
 #### Scenario: Page reads do not grow with the vault
 
@@ -113,6 +114,12 @@ The request SHALL NOT wait for an admission slot. Admitted requests MAY await th
 
 - **WHEN** a passage request arrives while the cell's model admission is full
 - **THEN** the request is refused at once with a busy outcome and a retry hint
+
+#### Scenario: A capture encodes its passages
+
+- **WHEN** a capture encodes its Source's passages on a served encoder that runs inferences concurrently
+- **AND** a passage request is admitted during that encode
+- **THEN** the request encodes its query without waiting for the capture's passage inferences
 
 #### Scenario: Two passages of one Source both rank
 
@@ -227,6 +234,7 @@ A Source captured without declared passages SHALL keep its title in its embedded
 When the caller of a passage request leaves before the reply, the cell SHALL stop that request at its next phase boundary and release its admission capacity.
 The phase boundaries SHALL be the points before eligibility, query encoding, chunk selection and byte verification.
 A stopped request SHALL NOT start a later phase.
+A request that waits for its model execution turn SHALL leave that wait when its caller leaves, and SHALL stop before it encodes the query.
 The cell SHALL log each stopped request with the phase it stopped before.
 A request without a serving host, such as a command-line request, SHALL run to completion.
 
@@ -240,3 +248,9 @@ A request without a serving host, such as a command-line request, SHALL run to c
 
 - **WHEN** a passage request runs from the command line
 - **THEN** the request runs every phase to completion
+
+#### Scenario: The caller leaves while the request waits for its model turn
+
+- **WHEN** a caller abandons a passage request while the request waits for a model execution turn that another encode holds
+- **THEN** the request leaves the wait and stops before it encodes the query
+- **AND** its admission capacity is free while the other encode still runs

@@ -372,9 +372,9 @@ def _process_gate() -> ModelAdmissionGate:
         return _gate
 
 
-def model_execution(*, wait: bool = True):
+def model_execution(*, wait: bool = True, cancel_event: threading.Event | None = None):
     """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
-    return _process_gate().execution(wait=wait)
+    return _process_gate().execution(wait=wait, cancel_event=cancel_event)
 
 
 def model_admission():

@@ -358,6 +358,21 @@ def _stop_if_caller_left(phase: str) -> None:
         raise
 
 
+class _CallerDeparture:
+    """The serving host's record that the caller left, as the stop event a model-turn wait polls."""
+
+    def is_set(self) -> bool:
+        from anyio import from_thread
+
+        try:
+            from_thread.check_cancelled()
+        except RuntimeError:
+            return False  # No serving host, as in `_stop_if_caller_left`.
+        except asyncio.CancelledError:
+            return True
+        return False
+
+
 def _publication_unavailable() -> cli_ops.OpError:
     return cli_ops.OpError(
         "PASSAGE_INDEX_UNAVAILABLE",
@@ -406,8 +421,13 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     _stop_if_caller_left("encode")
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
-    with runtime_resources.model_execution(), recall_space.encoding_for(index):
-        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+    try:
+        with embeddings.query_turn(cancel_event=_CallerDeparture()), recall_space.encoding_for(index):
+            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+    except runtime_resources.ModelBusyError:
+        # The turn wait also ends when the caller leaves; that search stops before its encode.
+        _stop_if_caller_left("encode")
+        raise
     recall_space.require_same_space(index, identity, query_vector)
     _stop_if_caller_left("selection")
     selection = index.select_passage_chunks(
