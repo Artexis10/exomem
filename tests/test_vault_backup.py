@@ -456,7 +456,7 @@ def test_a_successful_retention_records_when_it_last_succeeded(
     assert retention["state"] == "ok" and retention["last_success"] != "never" and retention["at"]
 
 
-def test_a_lost_record_reads_unknown_for_findings_and_the_last_error(vault: Path, configured) -> None:
+def test_a_lost_record_reads_unknown_for_findings_and_the_last_error(vault: Path, configured, restic_binary: str) -> None:
     configured()
 
     shown = vault_backup.status(vault)
@@ -465,7 +465,7 @@ def test_a_lost_record_reads_unknown_for_findings_and_the_last_error(vault: Path
     assert vault_backup_cli.summary_line(shown).endswith("findings unknown")
 
 
-def test_the_status_shows_the_keep_rules_that_retention_applies(vault: Path, configured) -> None:
+def test_the_status_shows_the_keep_rules_that_retention_applies(vault: Path, configured, restic_binary: str) -> None:
     configured(keep_monthly=3)
 
     shown = vault_backup.status(vault)
