@@ -381,9 +381,7 @@ def test_a_family_disposition_set_through_the_write_door_shows_in_the_read_door(
     assert {row["family"]: row["disposition"] for row in listed["dispositions"]}["prediction_window"] == "quiet"
 
 
-def test_upload_files_without_a_digest_is_refused_and_names_the_digest(build, vault, monkeypatch) -> None:
-    # A send without a digest stored a second, bare copy of a file the vault already kept: no title, no url and
-    # no duplicate check. The refusal tells the agent the one field to add.
+def test_upload_files_returns_an_upload_step_and_writes_nothing(build, vault, monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "synthetic-upload-secret")
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
     before = sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*"))
@@ -391,10 +389,10 @@ def test_upload_files_without_a_digest_is_refused_and_names_the_digest(build, va
     async def scenario(client):
         return await _call(client, "upload_files", {"lane": "source"})
 
-    refused = _session(build(), scenario)
+    step = _session(build(), scenario)
 
-    assert "expected_sha256" in json.dumps(refused["error"])
-    assert "upload_url" not in refused
+    assert step["upload_url"] == "https://capture.example/upload" and step["lane"] == "source"
+    assert step["committed"] is False
     assert sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*")) == before
 
 

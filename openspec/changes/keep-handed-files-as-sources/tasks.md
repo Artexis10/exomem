@@ -11,7 +11,6 @@
 - [x] 2.1 Make a `content` capture's reply say that Exomem kept text, not the original file.
 - [x] 2.2 Implement `options.custody_only`: record `custody_only: true` on the Source, say "kept for custody only" in the outcome line, skip it in `unprocessed_source`, and list it in a new `custody_source` family that stays `info` and outside the default attention set. Teach the option in the ingest and capture skill text.
 
-- [x] 2.3 Refuse `upload_files` for lanes `source` and `evidence` without `expected_sha256`, so every agent upload is held for the save that names it. Round 5 on 2026-11-20 found agents whose digest-less send stored a bare copy: no title, no url and a second Source of a re-sent file.
 ## 3. Harness
 
 - [x] 3.1 Wait until recall stops abstaining with `index_warming`, and count a unit that starts while warming as a harness fault.

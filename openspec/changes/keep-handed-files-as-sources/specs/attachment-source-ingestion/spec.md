@@ -36,16 +36,3 @@ When `save_source` stores supplied text rather than an uploaded original, its ou
 #### Scenario: Compiling a custody Source clears it
 - **WHEN** a live note cites a Source marked `custody_only: true`
 - **THEN** the Source appears in neither `custody_source` nor `unprocessed_source`
-
-### Requirement: An agent's file upload is always held for its save
-
-`upload_files` with lane `source` or `evidence` SHALL require `expected_sha256` and SHALL refuse a call without it, naming that field, before it issues any upload step. The send SHALL then be held for the session, and only the `save_source` or `save_evidence` that redeems it SHALL store the file, with that call's title, kind and url, the document identity check and the duplicate check.
-
-#### Scenario: An agent asks for an upload without a digest
-- **WHEN** an agent calls `upload_files` with lane `source` and no `expected_sha256`
-- **THEN** the call is refused with a message that names `expected_sha256`
-- **AND** no upload step is issued and nothing is stored
-
-#### Scenario: A re-sent file is not stored twice
-- **WHEN** an agent uploads a file whose bytes an existing Source already holds, and redeems the held send with `save_source`
-- **THEN** the reply reports `already_stored` and no second Source is written
