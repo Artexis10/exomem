@@ -13,7 +13,7 @@
 ## 3. Proof
 
 - [x] 3.1 Add one test: the block carries the sentence and stays ASCII at every non-`off` disposition and link-acceptance value. Show it fail on an over-long sentence.
-- [ ] 3.2 Run the real-model probe on the three classes and the control (a casual tentative personal claim). Record the per-case result against the base text.
+- [x] 3.2 Run the real-model probe on the three classes and the control (a casual tentative personal claim). Record the per-case result against the base text.
 - [x] 3.3 Run the scoped suites, `openspec validate --all --strict` and the public-artifact privacy gate.
 
 ## 4. Release

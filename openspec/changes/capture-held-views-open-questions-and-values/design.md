@@ -51,4 +51,5 @@ The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and 
 ## Risks / Trade-offs
 
 - The model may now save material that was mid-thought. The classes say "held" and "left open" and keep the exclusion of exploration and tangents. The real-model probe includes a control for that.
+- Measured on fresh blind cases, the served text cuts saves of material that must stay unwritten sharply, while an open question about whether something happened is saved less often than before: the served sentence has no room for that tie-breaker. The next change moves the full predicate out of the capped block and restores it.
 - The activation block has 3 characters left. The next addition must shorten something deliberately.
