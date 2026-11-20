@@ -2134,7 +2134,7 @@ def test_a_held_whole_log_view_is_withheld_from_a_caller_who_cannot_read_every_r
         assert store._operation.decision(hold).level == 0
 
 
-X3 ="Knowledge Base/Records/Health/X3/_collection.md"
+X3 = "Knowledge Base/Records/Health/X3/_collection.md"
 X3_LOG = "Knowledge Base/Records/Health/X3/Training Log.md"
 
 
