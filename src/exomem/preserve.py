@@ -1979,8 +1979,9 @@ def states_position(content: str) -> bool:
     try:
         fields = parse_frontmatter(content, custody=True)[0]
     except FrontmatterError:
-        # An unparseable block cannot be shown to hold no position, so its text decides, by the field names.
-        return any(name in content for name in capture_metadata.LOCATION_FIELDS)
+        # An unparseable block cannot be shown to hold no position (a key can be escaped past any name check), so it
+        # counts as stating one and a restricted caller gets no raw text. The body and parsed fields stay readable.
+        return True
     return capture_metadata.carries_position(fields)
 
 
