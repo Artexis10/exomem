@@ -19,7 +19,7 @@ from ..collection_store.connection import CollectionStoreError
 #: store code of its own.
 GRAPH_DISABLED = "graph_disabled"
 STORE_UNREADABLE = "store_unreadable"
-#: ``StoreGraph.state`` of a graph that serves nothing for a cause that ``reason`` names.
+#: ``StoreGraph.state`` of a graph that the build has switched off. A failed read is ``unknown`` instead.
 UNAVAILABLE = "unavailable"
 
 
@@ -30,7 +30,8 @@ class StoreGraph:
     ``current`` says the graph serves rows: it is enabled and the store opens. It does not say how fresh
     the rows are: ``registry`` is `rederive`'s state of the snapshot (``current``, ``rebuilding`` or
     ``unknown``), which stays behind while a schema or access-policy pass re-derives the pages. It is
-    None when the graph serves nothing for a known cause, and ``unknown`` when the store could not be read.
+    ``unknown`` for any read that failed, with its code in ``reason``, and None only for a graph that
+    the build has switched off.
     """
 
     current: bool
@@ -65,7 +66,7 @@ def read(vault_root: Path) -> StoreGraph | None:
         readiness = store_read.readiness(vault_root)
         return StoreGraph(True, readiness.revision, registry=readiness.registry)
     except CollectionStoreError as error:
-        return StoreGraph(False, None, error.code)
+        return StoreGraph(False, None, error.code, mode.UNKNOWN)
     except state_migration.StateMigrationManifestError as error:
         return StoreGraph(False, None, error.code, mode.UNKNOWN)
     except sqlite3.Error:

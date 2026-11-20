@@ -106,7 +106,15 @@ def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
     from . import index_sync
     from .vault_store import mode as store_mode
 
-    if vault_root is not None and store_mode.store_mode_for_reads(vault_root):
+    in_store_mode, unreadable = (
+        (False, None) if vault_root is None else store_mode.store_mode_or_unreadable(vault_root)
+    )
+    if unreadable is not None:
+        return {
+            "state": "unknown",
+            "reason": f"The vault's mode could not be read ({unreadable}), so its index queue is not known.",
+        }
+    if in_store_mode:
         # Migration leaves file mode's queues where they were and nothing in store mode drains them: the
         # vectors follow the store's audit trail. Their counts would report work that never runs.
         return {

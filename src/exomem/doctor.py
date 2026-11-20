@@ -924,7 +924,18 @@ def _check_store_lexical(vault_root: Path) -> DoctorCheck | None:
     from .collection_store.connection import CollectionStoreError
     from .vault_store import mode, read
 
-    if not mode.store_mode_for_reads(vault_root):
+    def unreadable_store(reason: str) -> DoctorCheck:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The store's lexical rows could not be read ({reason}).",
+            "Fix the store failure that the vault store checks in this report name.",
+        )
+
+    in_store_mode, unreadable = mode.store_mode_or_unreadable(vault_root)
+    if unreadable is not None:
+        return unreadable_store(unreadable)
+    if not in_store_mode:
         return None
     try:
         with read.request_snapshot(vault_root):
@@ -932,12 +943,7 @@ def _check_store_lexical(vault_root: Path) -> DoctorCheck | None:
             with read.snapshot(vault_root) as view:
                 pages = view.connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
     except (CollectionStoreError, OSError, sqlite3.Error) as error:
-        return _check(
-            "dep.fts5-lexical",
-            "warn",
-            f"The store's lexical rows could not be read ({getattr(error, 'code', type(error).__name__)}).",
-            "Fix the store failure that the vault store checks in this report name.",
-        )
+        return unreadable_store(getattr(error, "code", type(error).__name__))
     details = {"vault_store_revision": state.revision, "registry": state.registry}
     notice = read.registry_notice(state)
     if notice is not None:
@@ -983,7 +989,16 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
     from . import index_sync, lexstore
     from .vault_store import mode as store_mode
 
-    if store_mode.store_mode_for_reads(vault_root):
+    in_store_mode, unreadable = store_mode.store_mode_or_unreadable(vault_root)
+    if unreadable is not None:
+        return _check(
+            "deferred_index_backlog",
+            "warn",
+            f"The vault's mode could not be read ({unreadable}), so its deferred index backlog was not inspected.",
+            "Fix the store failure that the vault store checks in this report name.",
+            details=details,
+        )
+    if in_store_mode:
         # Migration leaves file mode's queue in place, and a store commit drains nothing from it: the
         # vectors follow the store's audit trail. A warning here would name `exomem index`, which a
         # store-mode vault refuses.
@@ -1765,8 +1780,13 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         "graph_scheduling_enabled": graph_scheduling,
     }
 
+    in_store_mode, unreadable = (
+        (False, None)
+        if event_indexes or vault_root is None
+        else store_mode.store_mode_or_unreadable(vault_root)
+    )
     # A store-mode vault drains no file-mode queue, so the queue says nothing about its write path.
-    if not event_indexes and vault_root is not None and not store_mode.store_mode_for_reads(vault_root):
+    if not event_indexes and vault_root is not None and not in_store_mode and unreadable is None:
         from . import index_sync
 
         status = index_sync.deferred_work_status(vault_root)
@@ -1794,6 +1814,8 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         notes.append("EXOMEM_DISABLE_CORPUS_CACHE is set (corpus-context cache off).")
     if not event_indexes:
         notes.append("EXOMEM_DISABLE_EVENT_INDEXES is set (no periodic drain).")
+    if unreadable is not None:
+        notes.append(f"The queued index work was not inspected: the vault's mode could not be read ({unreadable}).")
     if not graph_scheduling:
         notes.append("EXOMEM_DISABLE_GRAPH_SCHEDULING is set (no new graph work).")
     if notes:

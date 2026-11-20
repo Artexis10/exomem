@@ -7,6 +7,7 @@ acknowledged and the repair that it queued, and then reads what a reader reports
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 
@@ -15,6 +16,7 @@ import test_vault_store_read_write as read_write
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, vault  # noqa: F401
 
+from exomem import __main__ as cli
 from exomem import (
     deferred_index,
     doctor,
@@ -28,7 +30,7 @@ from exomem import (
     writer_lease,
 )
 from exomem.collection_store import connection
-from exomem.vault_store import graph_state, read, rederive
+from exomem.vault_store import graph_state, mode, read, rederive
 
 stored = read_write.stored
 
@@ -85,6 +87,40 @@ def test_doctor_and_status_report_a_store_mode_vault_from_the_store_not_file_mod
     assert queue["state"] == "not_applicable"
 
 
+@pytest.mark.parametrize("damage", ["corrupt", "newer"])
+def test_status_and_doctor_report_a_store_that_cannot_be_read_as_unknown_not_a_crash(
+    stored, monkeypatch, capsys, damage
+):
+    """Defect: `exomem status --vault` raised on a store-mode vault whose store cannot be read, where it
+    reported the mode as unknown, and the doctor's store checks raised with it."""
+    error = (
+        sqlite3.DatabaseError("file is not a database")
+        if damage == "corrupt"
+        else connection.CollectionStoreError("COLLECTION_STORE_SCHEMA_NEWER", "newer")
+    )
+
+    def unreadable(*_args):
+        raise error
+
+    mode.forget_read_mode(stored)
+    monkeypatch.setattr(mode, "_stored_row", unreadable)
+    monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")  # the write-path check reads the queue only then
+    reason = getattr(error, "code", type(error).__name__)
+
+    capsys.readouterr()  # the migration that built the fixture printed its own result
+    assert cli._dispatch_main(["status", "--vault", str(stored), "--json"]) == 0
+    status = json.loads(capsys.readouterr().out)
+
+    assert (status["vault_store"]["mode"], status["vault_store"]["unreadable"]) == ("unknown", reason)
+    assert status["deferred_work"]["state"] == "unknown" and reason in status["deferred_work"]["reason"]
+    for check in (
+        doctor._check_lexical(stored),
+        doctor._check_deferred_index_backlog(stored),
+        doctor._check_write_path_env_flags(stored),
+    ):
+        assert check.status == "warn"
+
+
 def start_a_registry_pass(root):
     """A governed overlay commit that the registry pass has not yet re-derived the rows for."""
     with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
@@ -110,23 +146,32 @@ def test_doctor_warns_and_the_lease_status_agrees_while_a_registry_pass_re_deriv
     assert writer_lease.coordination_status(stored)["graph_sync"]["state"] == rederive.REBUILDING
 
 
-@pytest.mark.parametrize("failure", ["sqlite", "manifest"])
+@pytest.mark.parametrize("failure", ["sqlite", "store", "manifest"])
 def test_the_store_graph_reports_an_unknown_state_when_its_read_fails(stored, monkeypatch, failure):
-    """Defect: a snapshot that raises, or an unreadable manifest, escapes both doctor graph checks."""
-    if failure == "sqlite":
-
-        def torn(_root):
-            raise sqlite3.DatabaseError("torn")
-
-        monkeypatch.setattr(read, "readiness", torn)
-    else:
+    """Defect: a snapshot that raises, or an unreadable manifest, escapes both doctor graph checks, and a busy
+    or newer store reads `unavailable` in doctor where the lease status says `unknown`."""
+    if failure == "manifest":
         (state_paths.vault_state_dir(stored) / state_migration.MANIFEST_NAME).write_bytes(b"{not json")
+    else:
+        error = (
+            sqlite3.DatabaseError("torn")
+            if failure == "sqlite"
+            else connection.CollectionStoreError("COLLECTION_STORE_BUSY", "busy")
+        )
+
+        def failing(_root):
+            raise error
+
+        monkeypatch.setattr(read, "readiness", failing)
 
     graph = graph_state.read(stored)
     check = doctor._check_graph_sync_state(stored)
 
     assert (graph.current, graph.state) == (False, "unknown")
     assert check.status == "fail"
+    assert check.details["state"] == "unknown"
+    if failure != "manifest":  # the lease status reads the manifest outside its guard
+        assert writer_lease.coordination_status(stored)["graph_sync"]["state"] == "unknown"
 
 
 def test_doctor_names_no_graph_recovery_for_a_store_mode_vault(stored):
