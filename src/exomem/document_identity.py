@@ -219,8 +219,9 @@ def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | 
     shown = _shown_dois(check) if check and check.get("state") == CONFLICT else []
     if len(shown) == 1:
         return (
-            f"Unless the opening text shows a different work that cites {shown[0]}, correct the Source now and "
-            "tell the person: call save_source again with no files, the document's own title, "
+            f"Unless the opening text shows a different work that cites {shown[0]}, correct the Source now, even "
+            "when the person gave the url, then tell them what changed: call save_source again with no files, the "
+            "document's own title, "
             f'url "https://doi.org/{shown[0]}" and {tail}'
         )
     return (
