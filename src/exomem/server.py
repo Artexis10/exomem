@@ -863,14 +863,14 @@ def _find_call_summary(message) -> str:
     return f' query="{query}" mode={mode} scope={scope}'
 
 
+#: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
+SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
+
 #: What every MCP client is told at `initialize`. A host with lifecycle hooks
 #: injects the working set before a turn; a chat app or a generic client has no
 #: such hook and sees only this text and the tool descriptions, so this is the
 #: one channel that can ask it to activate context without a user reminder.
 #: Kept short, because some clients cut server instructions off.
-#: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
-SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
-
 SERVER_INSTRUCTIONS = (
     "This server is the user's long-term governed memory. Named tools belong to this server. "
     'Reuse live policy; read_instructions first if absent/stale. Connection grants no recall/save. off: '
