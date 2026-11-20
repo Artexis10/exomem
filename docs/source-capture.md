@@ -132,6 +132,7 @@ Exomem does not refill withheld hits. A request reads at most `limit` distinct s
 
 `EXOMEM_PASSAGE_MATRIX_BYTES` configures the process-wide numerical ceiling for optional passage matrices and replacement scratch.
 Its default is zero. A positive ceiling permits background loading after declared passages are published.
+Cells that `cellctl` provisions set it to 512 MiB unless the cell's model environment sets it.
 Current admitted matrices can serve resident scoring. Cold, lagging or capacity-denied state uses disk scoring without waiting for a matrix.
 Reader-held matrices retain their charge after replacement or eviction.
 The [passage reference](../benchmarks/passage-evidence/README.md) records the measured configuration and its limits.
