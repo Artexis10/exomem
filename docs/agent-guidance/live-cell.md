@@ -26,7 +26,7 @@ restart the service reflexively — restarts CAUSE pattern (1) for live sessions
 `top -H` shows every service thread as `python`. To name them, send `kill -USR1 <worker pid>`
 (the `service_manager ... worker` process). The worker writes `thread-dump-<time>-<pid>.txt` in
 its log directory: each OS thread by CPU time, busiest first, with its Python name and stack. The
-dump only reads state. Send two a minute apart to see whether a thread is stuck or looping.
+dump only reads state. Signal the worker pid itself: `systemctl kill -s USR1` also signals the manager and the media child. Send two a minute apart to see whether a thread is stuck or looping.
 
 ## Live-cell guardrails (2026-08 incident; standing until `bound-graph-recovery-funnel` lands in code)
 

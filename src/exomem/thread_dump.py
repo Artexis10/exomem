@@ -39,7 +39,9 @@ def _cpu_seconds(native_id: int) -> float | None:
 def render() -> str:
     """The dump text: one block per OS thread, busiest first."""
     frames = sys._current_frames()
-    python_threads = {thread.native_id: thread for thread in threading.enumerate()}
+    python_threads = {
+        thread.native_id: thread for thread in threading.enumerate() if thread.native_id is not None
+    }
     native_ids: set[int] = set(python_threads)
     try:
         native_ids.update(int(entry) for entry in os.listdir("/proc/self/task"))
