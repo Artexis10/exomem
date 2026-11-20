@@ -374,6 +374,9 @@ def build_cluster_config() -> ClusterConfig:
             cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
             memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
             memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
+            passage_matrix_budget=os.environ.get(
+                "CELLCTL_CELL_PASSAGE_MATRIX_BUDGET", DEFAULT_RESOURCES.passage_matrix_budget
+            ),
         ),
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),

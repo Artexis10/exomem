@@ -1003,9 +1003,14 @@ def _compute_render_digest(
     into the PVC and the quota, and it is part of the refusal park key."""
 
     resources, placement = cluster_config.workload_for_cell(row.cell_id)
+    resources_material = asdict(resources)
+    if resources.passage_matrix_budget == ResourceSettings().passage_matrix_budget:
+        # Left out at its default, like every optional setting below, so the release that adds
+        # the budget restarts no cell; a budget the operator changes moves the digest.
+        del resources_material["passage_matrix_budget"]
     material = {
         "render_version": RENDER_VERSION,
-        "resources": asdict(resources),
+        "resources": resources_material,
         "model_env": cluster_config.model_env or {},
         "job_egress_except": sorted(cluster_config.job_egress_except),
         "cell_token_key_version": secrets_config.cell_token_key_version,
