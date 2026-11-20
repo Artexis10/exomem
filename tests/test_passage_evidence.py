@@ -773,6 +773,30 @@ def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_t
     assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
 
 
+def test_a_source_of_hundreds_of_declared_passages_is_indexed_within_the_preparation_budget(
+    vault, passage_tools, monkeypatch
+):
+    """Sources of 159 or more passages were refused before chunking and never indexed."""
+    from exomem import page_names
+
+    call, encoder = passage_tools
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    passages = [{"key": f"g/{n:03d}", "text": " ".join(f"w{n}r{w}" for w in range(200))} for n in range(450)]
+    saved = call("save_source", {"title": "Large record", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "large",
+                                                                 "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    before = len(encoder.texts)
+
+    result = embeddings.upsert_after_write_status(vault, [path], defer_during_warm=False)
+
+    assert result.status == "completed", result
+    assert {passage["text"] for passage in passages} <= set(encoder.texts[before:])
+
+
 def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
     """A format-based global strip would erase authored text in an ordinary note."""
     from exomem.find_types import ParsedPage
