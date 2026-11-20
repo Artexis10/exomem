@@ -171,6 +171,7 @@ def test_a_batch_of_results_takes_one_hold_advances_the_generation_once_and_land
     worker, pairs = _recorded_results(vault, ["one.mp3", "two.mp3", "three.mp3"])
     caplog.set_level(logging.INFO, logger="exomem.writer_lease")
     caplog.set_level(logging.INFO, logger="exomem.epistemic_graph")
+    caplog.clear()  # count only the measured call; another test may have enabled INFO already
 
     worker._drain_parent_results()
 
@@ -257,6 +258,7 @@ def test_a_result_that_cannot_stage_stays_pending_while_the_others_commit_in_the
 
     monkeypatch.setattr(worker, "_extraction_writes", extraction_writes)
     caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+    caplog.clear()  # count only the measured call; another test may have enabled INFO already
 
     worker._drain_parent_results()
 
@@ -287,6 +289,7 @@ def test_a_refused_boundary_leaves_the_whole_batch_pending_and_costs_one_attempt
 
     monkeypatch.setattr(store_media, "holding_boundary", refuse_once)
     caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+    caplog.clear()  # count only the measured call; another test may have enabled INFO already
 
     worker._drain_parent_results()
 
@@ -432,6 +435,7 @@ def test_a_multi_path_reprocess_request_queues_completed_paths_without_advancing
     _transcribe_all(vault, [binary for binary, _sidecar in pairs], worker)
     paths = [binary.relative_to(vault).as_posix() for binary, _sidecar in pairs]
     caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+    caplog.clear()  # count only the measured call; another test may have enabled INFO already
 
     result = commands.op_process_media(vault, paths=paths, operation="reprocess", language="et")
 
@@ -456,6 +460,7 @@ def test_a_reprocess_request_plans_every_path_outside_the_boundary_and_commits_a
     rels = [path.relative_to(vault).as_posix() for path in (pairs[0][0], fresh, pairs[1][0])]
     planning_under_boundary = _boundary_held_during(monkeypatch, "_read_provenance")
     caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+    caplog.clear()  # count only the measured call; another test may have enabled INFO already
 
     result = commands.op_process_media(vault, paths=rels, operation="reprocess")
 
