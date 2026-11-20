@@ -132,7 +132,7 @@ def disabled() -> bool:
     return bool(os.environ.get("EXOMEM_DISABLE_ORIGINAL_FIXITY"))
 
 
-def _setting(name: str, default: float) -> float:
+def setting(name: str, default: float) -> float:
     """A positive number from the environment, or the default when unset or unusable."""
     try:
         value = float(os.environ.get(name) or default)
@@ -142,20 +142,20 @@ def _setting(name: str, default: float) -> float:
 
 
 def pass_seconds() -> float:
-    return _setting("EXOMEM_ORIGINAL_FIXITY_PASS_SECONDS", DEFAULT_PASS_SECONDS)
+    return setting("EXOMEM_ORIGINAL_FIXITY_PASS_SECONDS", DEFAULT_PASS_SECONDS)
 
 
 def cycle_seconds() -> float:
-    return _setting("EXOMEM_ORIGINAL_FIXITY_CYCLE_DAYS", DEFAULT_CYCLE_DAYS) * 86400.0
+    return setting("EXOMEM_ORIGINAL_FIXITY_CYCLE_DAYS", DEFAULT_CYCLE_DAYS) * 86400.0
 
 
 def read_rate() -> float:
     """The read-rate cap in bytes per second."""
-    return _setting("EXOMEM_ORIGINAL_FIXITY_READ_MIB_PER_SECOND", DEFAULT_READ_MIB_PER_SECOND) * 1024**2
+    return setting("EXOMEM_ORIGINAL_FIXITY_READ_MIB_PER_SECOND", DEFAULT_READ_MIB_PER_SECOND) * 1024**2
 
 
 def walk_seconds() -> float:
-    return _setting("EXOMEM_ORIGINAL_FIXITY_WALK_SECONDS", DEFAULT_WALK_SECONDS)
+    return setting("EXOMEM_ORIGINAL_FIXITY_WALK_SECONDS", DEFAULT_WALK_SECONDS)
 
 
 # --- the table ---------------------------------------------------------------------------------

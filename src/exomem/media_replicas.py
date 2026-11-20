@@ -12,6 +12,7 @@ no rebuild has completed, shows every value as unknown.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import foreground_priority, originals
+from . import foreground_priority, held_fs, originals, reserved_paths
 from .media_jobs import MediaJobStore
 
 log = logging.getLogger(__name__)
@@ -29,9 +30,20 @@ log = logging.getLogger(__name__)
 #: A replica the vault published after the store confirmed its ciphertext. No later check has changed it.
 UPLOAD_VERIFIED = "verified-at-upload"
 
+#: A replica that a check found absent or damaged. Nothing trusts it, and the worker copies the original again.
+QUARANTINED = "quarantined"
+
+#: What a check proved, strongest last. Protocol tokens of the owner status, not vault vocabulary.
+PRESENCE = "presence"  # the version exists with the recorded size and the digest the store declares
+CONTENT = "content"  # the store recomputed the digest of the stored ciphertext
+DECRYPTED = "decrypted"  # a download decrypted and its plaintext hashed to the binding
+
 PENDING = "pending"
 DONE = "done"
 REFUSED = "refused"
+#: What a queue row asks for: a first replica in a store, or a new version for a quarantined one.
+REPLICATE = "replicate"
+RECOPY = "recopy"
 
 #: The least time between two rebuilds of the table from the bindings.
 REBUILD_SECONDS = 86400.0
@@ -46,6 +58,27 @@ _IDLE_SECONDS = 30.0
 _OBSERVE_SECONDS = 60.0
 #: A scan writes its queue rows this many at a time.
 _SCAN_BATCH = 500
+DEFAULT_CHECK_CYCLE_DAYS = 30.0
+DEFAULT_CHECK_READ_MIB_PER_SECOND = 32.0
+#: The least time between two check rounds of a vault, the longest one runs, the replicas one pick takes, and the
+#: replicas a round may check in a store however small it is, so a small vault still finishes its cycle.
+_CHECK_INTERVAL = 600.0
+_CHECK_ROUND_SECONDS = 120.0
+_CHECK_BATCH = 64
+_CHECK_FLOOR_ROWS = 16
+
+
+#: Columns that a table made by an earlier release lacks. `0` in a time column means never.
+_ADDED_COLUMNS = (
+    ("size", "INTEGER NOT NULL DEFAULT 0"),  # ciphertext bytes, which the check and sample budgets spend
+    ("checked_at", "REAL NOT NULL DEFAULT 0"),  # the last scheduled check, passed or failed
+    ("level", "TEXT"),  # what that check proved, or the level that failed for a quarantined row
+    ("decrypted_at", "REAL NOT NULL DEFAULT 0"),  # the last sample whose plaintext hashed to the binding
+    ("failure", "TEXT"),  # why a quarantined row failed
+    ("sample_month", "INTEGER NOT NULL DEFAULT 0"),  # the UTC month (YYYYMM) in which a sample skipped this row for size
+)
+_STATUS_INDEX_COLUMNS = ("store", "key_version", "state", "level", "verified_at", "checked_at", "decrypted_at",
+                         "sample_month")
 
 
 def initialize(conn: sqlite3.Connection) -> None:
@@ -54,13 +87,34 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS media_replicas ("
                  "binary_rel TEXT NOT NULL, store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, "
                  "key_version TEXT NOT NULL, verified_at REAL, state TEXT NOT NULL, seen INTEGER NOT NULL, "
-                 "PRIMARY KEY (binary_rel, store)) WITHOUT ROWID")
-    # The status groups by these columns in this order, so it reads the index alone.
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_status "
-                 "ON media_replicas(store, key_version, state, verified_at)")
+                 + ", ".join(f"{name} {kind}" for name, kind in _ADDED_COLUMNS)
+                 + ", PRIMARY KEY (binary_rel, store)) WITHOUT ROWID")
+    have = {row[1] for row in conn.execute("PRAGMA table_info(media_replicas)")}
+    healed = [(name, kind) for name, kind in _ADDED_COLUMNS if name not in have]
+    for name, kind in healed:
+        conn.execute(f"ALTER TABLE media_replicas ADD COLUMN {name} {kind}")
+    # The status groups by these columns in this order, so it reads the index alone. An index of an earlier release
+    # lacks the check columns, so it is replaced.
+    wanted = [row[2] for row in conn.execute("PRAGMA index_info(media_replicas_status)")]
+    if wanted and tuple(wanted) != _STATUS_INDEX_COLUMNS:
+        conn.execute("DROP INDEX media_replicas_status")
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_status ON media_replicas("
+                 + ", ".join(_STATUS_INDEX_COLUMNS) + ")")
+    # A check round takes the replicas checked longest ago first, and a sample those proved by decryption longest ago
+    # first, each as one range read in index order with no sort. The literal in the partial index is the one the
+    # queries below repeat: SQLite uses a partial index only when the query states the same condition.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_due ON media_replicas(store, checked_at) "
+                 f"WHERE state <> '{QUARANTINED}'")
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_sample ON media_replicas("
+                 "store, key_version, sample_month, decrypted_at) "
+                 f"WHERE state <> '{QUARANTINED}'")
+    # The quarantined rows, which the findings list reads in path order.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_findings ON media_replicas(binary_rel, store) "
+                 f"WHERE state = '{QUARANTINED}'")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
-    if existed is None:
+    if existed is None or healed:
+        # A fresh table has no rows to trust, and a healed one has no sizes until a rebuild writes them.
         conn.execute("DELETE FROM media_replica_census")
     # Every rebuild takes the next number. A row carries the number of the rebuild that last confirmed it, or of the
     # one running when a publication wrote it, so "stale" never depends on a wall clock that can step backwards.
@@ -72,13 +126,22 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_queue ("
                  "store TEXT NOT NULL, binary_rel TEXT NOT NULL, state TEXT NOT NULL, code TEXT, "
                  "attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
-                 "PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
+                 f"kind TEXT NOT NULL DEFAULT '{REPLICATE}', PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
+    if "kind" not in {row[1] for row in conn.execute("PRAGMA table_info(media_replica_queue)")}:
+        conn.execute(f"ALTER TABLE media_replica_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '{REPLICATE}'")
     # The drain's pick is `ORDER BY store, binary_rel` among the pending rows, so this order reads it with no sort;
     # `retry_at` only filters.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replica_queue_pick ON media_replica_queue(state, store, binary_rel)")
     # What the worker last saw of each store that has a cheap check, so a status never reads a store.
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_reach ("
                  "store TEXT PRIMARY KEY, reachable INTEGER NOT NULL, observed_at REAL NOT NULL)")
+    # The replicas and bytes each store held at the last rebuild: what a check round sizes its byte budget from.
+    conn.execute("CREATE TABLE IF NOT EXISTS media_replica_store_totals ("
+                 "store TEXT PRIMARY KEY, replicas INTEGER NOT NULL, bytes INTEGER NOT NULL)")
+    # The ciphertext bytes that sampled checks downloaded from each store in each UTC calendar month (YYYYMM).
+    conn.execute("CREATE TABLE IF NOT EXISTS media_replica_samples ("
+                 "store TEXT NOT NULL, month INTEGER NOT NULL, bytes INTEGER NOT NULL, "
+                 "PRIMARY KEY (store, month)) WITHOUT ROWID")
     # The random id that the owner's declaration recorded for each filesystem store's marker.
     conn.execute("CREATE TABLE IF NOT EXISTS media_store_ids (store TEXT PRIMARY KEY, store_id TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_key_exports ("
@@ -93,14 +156,24 @@ def _iso(value: float | None) -> str | None:
 
 
 def _upsert(seen: str) -> str:
-    """The statement that writes one row; `seen` is the SQL that gives the row's generation."""
-    return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, verified_at, state, seen) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?, {seen}) ON CONFLICT(binary_rel, store) DO UPDATE SET "
+    """The statement that writes one row; `seen` is the SQL that gives the row's generation.
+
+    A row for the same object and version keeps its upload time and its check results, a quarantine included. A new
+    version is a new replica: it starts unchecked and unquarantined.
+    """
+    unchanged = "media_replicas.object = excluded.object AND media_replicas.version = excluded.version"
+
+    def keep(column: str, fresh: str) -> str:
+        return f"{column} = CASE WHEN {unchanged} THEN media_replicas.{column} ELSE {fresh} END"
+
+    return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, seen) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, {seen}) ON CONFLICT(binary_rel, store) DO UPDATE SET "
             "object = excluded.object, version = excluded.version, key_version = excluded.key_version, "
-            "state = excluded.state, seen = excluded.seen, "
-            "verified_at = CASE WHEN media_replicas.object = excluded.object "
-            "AND media_replicas.version = excluded.version THEN COALESCE(excluded.verified_at, "
-            "media_replicas.verified_at) ELSE excluded.verified_at END")
+            "size = excluded.size, seen = excluded.seen, "
+            f"verified_at = CASE WHEN {unchanged} THEN COALESCE(excluded.verified_at, media_replicas.verified_at) "
+            "ELSE excluded.verified_at END, "
+            + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
+            + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0"))
 
 
 #: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
@@ -113,7 +186,34 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
     """Note a replica that a binding now lists. `verified_at` is its upload time; None when this write does not know it."""
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
         conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
-                                         replica.key_version, verified_at, UPLOAD_VERIFIED))
+                                         replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED))
+
+
+def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *, level: str, failure: str) -> None:
+    """Mark `replica` quarantined: the `level` of the check that failed, and why. Nothing trusts it from now on.
+
+    The row is written first when the table does not know the store's replica (a publication whose write was lost), so
+    a finding is never dropped for want of a row. A row that names another version is left alone: it is a newer
+    replica, not the one that failed. The same write queues the new copy that the worker makes.
+    """
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
+                     "state, seen) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM media_replica_generation "
+                     "WHERE id = 1)) ON CONFLICT(binary_rel, store) DO NOTHING",
+                     (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
+                      replica.ciphertext_size, UPLOAD_VERIFIED))
+        changed = conn.execute(
+            "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ? "
+            "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
+            (QUARANTINED, level, failure, time.time(), binary_rel, replica.store, replica.object,
+             replica.version)).rowcount
+        if changed:
+            conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?) "
+                         "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
+                         "code = NULL, attempts = 0, retry_at = 0",
+                         (replica.store, binary_rel, PENDING, RECOPY))
+    if changed:
+        wake()
 
 
 def _replicas_of(snapshot: originals.OriginalSnapshot) -> Iterator[originals.StoredObject]:
@@ -146,6 +246,7 @@ def rebuild(vault: Path) -> int:
         media_store.skip_unknown_original(error)
 
     written = 0
+    totals: dict[str, list[int]] = {}  # per store: replicas and ciphertext bytes, for the check budget
     batch: list[tuple] = []
 
     def flush() -> None:
@@ -156,14 +257,23 @@ def rebuild(vault: Path) -> int:
     for snapshot in foreground_priority.yielding(media_store.bound_originals(vault, unconfirmed=skip)):
         relative = snapshot.path.relative_to(vault).as_posix()
         for replica in _replicas_of(snapshot):
-            batch.append((relative, replica.store, replica.object, replica.version, replica.key_version, None,
-                          UPLOAD_VERIFIED, generation))
+            batch.append((relative, replica.store, replica.object, replica.version, replica.key_version,
+                          replica.ciphertext_size, None, UPLOAD_VERIFIED, generation))
+            held = totals.setdefault(replica.store, [0, 0])
+            held[0] += 1
+            held[1] += replica.ciphertext_size
             written += 1
         if len(batch) >= _SCAN_BATCH:
             flush()
     flush()
     with closing(ledger._connect()) as conn, conn:
         conn.execute("DELETE FROM media_replicas WHERE seen < ?", (generation,))
+        conn.execute("DELETE FROM media_replica_store_totals")
+        conn.executemany("INSERT INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
+                         [(store, held[0], held[1]) for store, held in totals.items()])
+        # A new copy that had no verified source may have one now: the original came back, or another replica did.
+        conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
+                     "WHERE state = ? AND kind = ?", (PENDING, REFUSED, RECOPY))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -331,8 +441,8 @@ def status(vault: Path) -> dict[str, object]:
             groups = conn.execute(
                 "SELECT store, key_version, state, COUNT(*) AS replicas, COUNT(verified_at) AS timed, "
                 "MIN(verified_at) AS oldest FROM media_replicas GROUP BY store, key_version, state").fetchall()
-            queue = conn.execute("SELECT store, state, COUNT(*) AS n FROM media_replica_queue "
-                                 "GROUP BY store, state").fetchall()
+            queue = conn.execute("SELECT store, state, COUNT(*) AS n FROM media_replica_queue WHERE kind = ? "
+                                 "GROUP BY store, state", (REPLICATE,)).fetchall()
             reach = _observations(conn)
     except (sqlite3.Error, OSError) as error:
         return _unknown(f"the replica state cannot be read: {type(error).__name__}")
@@ -508,11 +618,13 @@ def request(vault: Path, store: str) -> dict[str, int]:
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
         active = conn.execute(
             "SELECT 1 FROM media_replica_demands WHERE store = ? AND (scanned_at IS NULL OR EXISTS "
-            "(SELECT 1 FROM media_replica_queue WHERE state = ? AND store = ?))", (store, PENDING, store)).fetchone()
+            "(SELECT 1 FROM media_replica_queue WHERE state = ? AND store = ? AND kind = ?))",
+            (store, PENDING, store, REPLICATE)).fetchone()
         if active is None:
-            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ?", (store, DONE))
+            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ? AND kind = ?",
+                         (store, DONE, REPLICATE))
             conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
-                         "WHERE store = ? AND state = ?", (PENDING, store, REFUSED))
+                         "WHERE store = ? AND state = ? AND kind = ?", (PENDING, store, REFUSED, REPLICATE))
             conn.execute("INSERT INTO media_replica_demands(store, requested_at, scanned_at) VALUES (?, ?, NULL) "
                          "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, scanned_at = NULL",
                          (store, now))
@@ -524,7 +636,8 @@ def progress(vault: Path, store: str) -> dict[str, object]:
     """The counts of one store's copy queue: queued, copied, refused and remaining, and whether the scan finished."""
     with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
         counts = {row["state"]: row["n"] for row in conn.execute(
-            "SELECT state, COUNT(*) AS n FROM media_replica_queue WHERE store = ? GROUP BY state", (store,))}
+            "SELECT state, COUNT(*) AS n FROM media_replica_queue WHERE store = ? AND kind = ? GROUP BY state",
+            (store, REPLICATE))}
         scanned = conn.execute("SELECT scanned_at FROM media_replica_demands WHERE store = ?", (store,)).fetchone()
     return {"store": store, "queued": sum(counts.values()), "copied": counts.get(DONE, 0),
             "refused": counts.get(REFUSED, 0), "remaining": counts.get(PENDING, 0),
@@ -566,7 +679,7 @@ def scan(vault: Path, store: str) -> int:
 def _pick(paused: set[str]) -> str:
     """The query for the next pending original outside the paused stores: `(state, store, binary_rel)` order, no sort."""
     skipped = f" AND store NOT IN ({', '.join('?' for _ in paused)})" if paused else ""
-    return ("SELECT store, binary_rel, attempts FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
+    return ("SELECT store, binary_rel, attempts, kind FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
             + skipped + " ORDER BY store, binary_rel LIMIT 1")
 
 
@@ -631,10 +744,11 @@ def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | Non
 
 
 _observed: dict[Path, float] = {}
+_checked: dict[Path, float] = {}  # when each vault last ran a check round
 
 
 def work(vault: Path, *, deadline: float | None = None) -> bool:
-    """One bounded unit of background work: a rebuild, a scan or a drain; True when it did something."""
+    """One bounded unit of background work: a rebuild, a scan, a drain or a check round; True when it did something."""
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True:
@@ -651,7 +765,142 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
     if waiting:
         scan(vault, waiting[0])
         return True
-    return drain(vault, deadline=deadline) > 0
+    if drain(vault, deadline=deadline) > 0:
+        return True
+    if time.monotonic() - _checked.get(vault, -_CHECK_INTERVAL) < _CHECK_INTERVAL:
+        return False
+    _checked[vault] = time.monotonic()
+    return check(vault) > 0
+
+
+# --- scheduled checks --------------------------------------------------------------------------------
+
+
+def check_cycle() -> float:
+    """Seconds in which every replica is checked once; the operator's setting, 30 days by default."""
+    from . import original_fixity
+
+    return original_fixity.setting("EXOMEM_REPLICA_CHECK_CYCLE_DAYS", DEFAULT_CHECK_CYCLE_DAYS) * 86400.0
+
+
+def check_read_rate() -> float:
+    """The cap on the bytes per second that content checks may make a store read."""
+    from . import original_fixity
+
+    return original_fixity.setting("EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND", DEFAULT_CHECK_READ_MIB_PER_SECOND) * 1024**2
+
+
+def scheduled_level(entry: originals.StoreEntry) -> str | None:
+    """The check that a store's descriptor allows: content when its `head` recomputes, presence when it does not.
+
+    A descriptor that does not state it, or a store that is not usable, gets none: a check of unknown strength would
+    report a proof that it cannot name. The decision reads the descriptor value and never a store's or adapter's name.
+    """
+    if not entry.available or entry.head_recomputes is None:
+        return None
+    return CONTENT if entry.head_recomputes else PRESENCE
+
+
+_BINDING_UNREADABLE = (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
+
+
+def _listed(vault: Path, binary_rel: str, row: sqlite3.Row) -> originals.StoredObject | None:
+    """The entry that the binding lists for the row's store now; the table follows the binding when they differ.
+
+    None when the binding lists no replica in the store, or cannot be read: the next rebuild drops such a row.
+    """
+    try:
+        snapshot = originals.original_state(vault, binary_rel)
+    except _BINDING_UNREADABLE:
+        return None
+    entry = next((found for found in _replicas_of(snapshot) if found.store == row["store"]), None)
+    if entry is not None and (entry.object, entry.version) != (row["object"], row["version"]):
+        record(vault, binary_rel, entry, verified_at=None)  # a newer version, which starts unchecked
+    return entry
+
+
+def _passed(vault: Path, binary_rel: str, replica: originals.StoredObject, level: str) -> None:
+    """Record a check that matched. A replica that was quarantined meanwhile stays so."""
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET checked_at = ?, level = ?, failure = NULL "
+                     "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+                     f"AND state <> '{QUARANTINED}'",
+                     (time.time(), level, binary_rel, replica.store, replica.object, replica.version))
+
+
+#: The replicas of a store checked longest ago, never-checked first, that the cycle has made due: a range of
+#: `media_replicas_due` in its own order, so a pick reads `LIMIT` rows whatever the table holds.
+_DUE = ("SELECT binary_rel, store, object, version FROM media_replicas "
+        f"WHERE store = ? AND state <> '{QUARANTINED}' AND checked_at <= ? ORDER BY checked_at LIMIT ?")
+
+
+def _due(ledger: MediaJobStore, store: str, cycle: float, limit: int) -> list[sqlite3.Row]:
+    with closing(ledger._connect(readonly=True)) as conn:
+        return conn.execute(_DUE, (store, time.time() - cycle, limit)).fetchall()
+
+
+def _store_budget(ledger: MediaJobStore, store: str, cycle: float) -> tuple[int, int]:
+    """The replicas and the bytes that one round may check in `store`: its share of the cycle, as of the last rebuild."""
+    from . import original_fixity
+
+    with closing(ledger._connect(readonly=True)) as conn:
+        held = conn.execute("SELECT replicas, bytes FROM media_replica_store_totals WHERE store = ?", (store,)).fetchone()
+    replicas, size = (held["replicas"], held["bytes"]) if held is not None else (0, 0)
+    return (max(_CHECK_FLOOR_ROWS, math.ceil(replicas * _CHECK_INTERVAL / cycle)),
+            original_fixity.budget_for([size], interval=_CHECK_INTERVAL, cycle=cycle))
+
+
+def check(vault: Path, *, deadline: float | None = None) -> int:
+    """One bounded round of scheduled checks over every store whose descriptor allows one; return the replicas checked.
+
+    Each store takes the replicas checked longest ago first, within its share of the cycle (replicas, and for a content
+    check bytes under the read-rate cap) and within the round's time. It holds no vault guard: a check reads a store and
+    writes one derived row. A store that does not answer as itself changes no row and is tried again on a later round.
+    """
+    from . import media_store
+
+    vault = Path(vault).resolve()
+    config = originals.configuration(vault)
+    if config is None or config.get("enabled") is not True:
+        return 0
+    ledger = MediaJobStore(vault)
+    cycle, rate = check_cycle(), check_read_rate()
+    limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
+    checked, due = 0, 0.0  # `due` is when the read-rate cap lets the next content check start
+    for name, entry in originals.store_entries(config).items():
+        level = scheduled_level(entry)
+        if level is None:
+            continue
+        if (answer := media_store.store_reachable(vault, name)) is not None:
+            _note_reach(vault, name, answer)
+        if answer is False:
+            continue
+        rows, budget = _store_budget(ledger, name, cycle)
+        spent = 0
+        for row in _due(ledger, name, cycle, min(rows, _CHECK_BATCH)):
+            if time.monotonic() >= limit or (level == CONTENT and spent >= budget):
+                break
+            foreground_priority.yield_to_foreground()
+            replica = _listed(vault, row["binary_rel"], row)
+            if replica is None:
+                continue
+            try:
+                failure = media_store.check_replica(vault, replica)
+            except (media_store.MediaStoreError, ValueError):
+                break  # The store cannot answer now: unavailable is no proof of loss, so no row changes.
+            if failure is None:
+                _passed(vault, row["binary_rel"], replica, level)
+            else:
+                quarantine(vault, row["binary_rel"], replica, level=level, failure=failure)
+            checked += 1
+            if level == CONTENT:
+                spent += replica.ciphertext_size
+                now = time.monotonic()
+                due = max(due, now) + replica.ciphertext_size / rate
+                if due >= limit:
+                    break  # The cap would hold the worker past the round: the next round goes on.
+                foreground_priority.wait_for_retry(max(0.0, due - now))
+    return checked
 
 
 # --- the thread -------------------------------------------------------------------------------------

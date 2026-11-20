@@ -422,6 +422,7 @@ def test_a_publication_made_during_a_rebuild_survives_it_whatever_the_clock_says
 def test_a_retry_after_a_lost_upload_reply_reuses_the_replica_name(vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     """A fresh name per attempt would leave a landed first attempt under a name that no binding lists."""
     monkeypatch.setattr(media_replicas, "_RETRY_SECONDS", 0)
+    monkeypatch.setattr(media_replicas, "check", lambda *args, **kwargs: 0)  # a check round would count as work and retry at once
     original = _preserved(vault)
     _offload(vault, original)
     upload = media_store.FilesystemStore.upload
@@ -654,3 +655,164 @@ def test_replicate_is_the_owner_s_and_reports_progress_while_status_shows_the_re
             writer_lease.invoke_command(command, vault, operation="replicate", store=MIRROR)
     assert "replicas" not in listing
     assert other.value.code == "MEDIA_OWNER_ONLY"
+
+
+# --- verify-stored-replicas: the check columns ---------------------------------------------------------
+
+
+def _replica_row(vault: Path, store: str = MIRROR) -> sqlite3.Row:
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        ledger.row_factory = sqlite3.Row
+        return ledger.execute("SELECT * FROM media_replicas WHERE store = ?", (store,)).fetchone()
+
+
+def _replicated(vault: Path) -> tuple[str, originals.StoredObject]:
+    """One evicted original with a replica in the mirror: its binding path and that replica's entry."""
+    original = _preserved(vault)
+    _offload(vault, original)
+    _replicate_all(vault)
+    snapshot = originals.original_state(vault, original)
+    return original.relative_to(vault).as_posix(), next(entry for entry in snapshot.replicas if entry.store == MIRROR)
+
+
+def test_a_rebuild_keeps_the_quarantine_of_a_replica_whose_entry_is_unchanged(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A rebuild that forgot the finding would show the owner two safe copies when one is known bad."""
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="digest_mismatch")
+
+    media_replicas.rebuild(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.CONTENT,
+                                                            "digest_mismatch")
+
+
+def test_a_new_version_of_a_replica_starts_unchecked_and_unquarantined(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The copy that replaces a bad replica is a different object: it must not inherit the bad one's verdict."""
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="digest_mismatch")
+    newer = originals.StoredObject(1, MIRROR, replica.key_version, replica.object, "newer-version",
+                                   replica.ciphertext_size, replica.ciphertext_sha256)
+
+    media_replicas.record(vault, relative, newer, verified_at=5.0)
+
+    row = _replica_row(vault)
+    assert (row["version"], row["state"], row["level"], row["failure"], row["checked_at"]) == (
+        "newer-version", media_replicas.UPLOAD_VERIFIED, None, None, 0)
+
+
+def test_quarantining_an_entry_that_the_table_already_replaced_leaves_the_newer_replica_alone(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A check that finished after a re-copy published must not condemn the copy that replaced its subject."""
+    relative, replica = _replicated(vault)
+    newer = originals.StoredObject(1, MIRROR, replica.key_version, replica.object, "newer-version",
+                                   replica.ciphertext_size, replica.ciphertext_sha256)
+    media_replicas.record(vault, relative, newer, verified_at=5.0)
+
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="absent")
+
+    row = _replica_row(vault)
+    assert (row["version"], row["state"]) == ("newer-version", media_replicas.UPLOAD_VERIFIED)
+
+
+def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_rows(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """An upgrade that met the old table with `no such column` would stop the replica worker for good."""
+    relative, replica = _replicated(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("DROP TABLE media_replicas")
+        ledger.execute("DROP TABLE media_replica_queue")
+        ledger.execute("CREATE TABLE media_replicas (binary_rel TEXT NOT NULL, store TEXT NOT NULL, object TEXT NOT NULL, "
+                       "version TEXT NOT NULL, key_version TEXT NOT NULL, verified_at REAL, state TEXT NOT NULL, "
+                       "seen INTEGER NOT NULL, PRIMARY KEY (binary_rel, store)) WITHOUT ROWID")
+        ledger.execute("INSERT INTO media_replicas VALUES (?, ?, ?, ?, '1', 7.0, 'verified-at-upload', 1)",
+                       (relative, MIRROR, replica.object, replica.version))
+        ledger.execute("CREATE TABLE media_replica_queue (store TEXT NOT NULL, binary_rel TEXT NOT NULL, state TEXT NOT NULL, "
+                       "code TEXT, attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
+                       "PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
+        media_replicas.initialize(ledger)
+
+    row = _replica_row(vault)
+    assert (row["verified_at"], row["state"], row["checked_at"], row["level"], row["size"]) == (
+        7.0, media_replicas.UPLOAD_VERIFIED, 0, None, 0)
+    assert media_replicas.status(vault)["state"] == "unknown"  # no sizes until the next rebuild writes them
+
+
+# --- verify-stored-replicas: the check round -----------------------------------------------------------
+
+
+def _check_levels(vault: Path) -> dict[str, object]:
+    """Replicate one evicted original into the mirror, run one check round, and read the mirror's row."""
+    _replicated(vault)
+    media_replicas.rebuild(vault)
+    media_replicas.check(vault)
+    row = _replica_row(vault)
+    return {"state": row["state"], "level": row["level"], "checked": row["checked_at"] > 0}
+
+
+@pytest.mark.parametrize(("descriptor", "level"), [
+    ({"head_recomputes": True}, media_replicas.CONTENT),
+    ({"head_recomputes": False}, media_replicas.PRESENCE),
+])
+def test_a_check_proves_what_the_descriptor_says_the_store_can_prove(
+        vault: Path, selected_store, tmp_path: Path, descriptor: dict[str, bool], level: str) -> None:
+    """A store that only echoes the digest it was given must never be reported as content-verified."""
+    _declare(vault, selected_store, tmp_path / "mirror", **descriptor)
+
+    assert _check_levels(vault) == {"state": media_replicas.UPLOAD_VERIFIED, "level": level, "checked": True}
+
+
+def test_a_store_with_no_declared_descriptor_is_never_checked(vault: Path, selected_store) -> None:
+    """A Cloud cell's single store declares no `stores` list: a check of unknown strength would claim a proof."""
+    _offload(vault, _preserved(vault))
+    media_replicas.rebuild(vault)
+
+    assert media_replicas.check(vault) == 0
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT checked_at, level FROM media_replicas").fetchall() == [(0.0, None)]
+
+
+def test_a_store_that_does_not_answer_as_itself_changes_no_replica_when_its_check_is_due(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """An unmounted NAS reads as an empty store; treating that as absence would quarantine every replica on it."""
+    _replicated(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET checked_at = 0, level = NULL")  # due, as a month from now would be
+    (mirrored / media_store.STORE_MARKER).unlink()
+
+    media_replicas.check(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["level"], row["checked_at"]) == (media_replicas.UPLOAD_VERIFIED, None, 0)
+
+
+def test_a_check_round_takes_the_replicas_checked_longest_ago_first_and_stops_at_its_share_of_the_cycle(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round that checked the same replicas every time would leave the rest of the store unchecked for good."""
+    for category in ("a", "b", "c"):
+        _offload(vault, _preserved(vault, category=category))
+    _replicate_all(vault)
+    media_replicas.rebuild(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        paths = [row[0] for row in ledger.execute("SELECT binary_rel FROM media_replicas WHERE store = ? ORDER BY binary_rel", (MIRROR,))]
+        for age, path in enumerate(paths):  # the second path has waited longest
+            ledger.execute("UPDATE media_replicas SET checked_at = ? WHERE binary_rel = ? AND store = ?",
+                           (100.0 + (age - 1) ** 2, path, MIRROR))
+    monkeypatch.setattr(media_replicas, "_CHECK_FLOOR_ROWS", 1)  # one replica per round, as a large store's share is
+
+    media_replicas.check(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        checked = dict(ledger.execute("SELECT binary_rel, checked_at > 1000 FROM media_replicas WHERE store = ?", (MIRROR,)))
+    assert [checked[path] for path in paths] == [0, 1, 0]
+
+
+def test_a_check_pick_reads_the_due_index_in_order_with_no_sort(vault: Path, selected_store, mirrored: Path) -> None:
+    """A sort of a million rows for every pick would make each round cost the size of the store."""
+    _replicated(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DUE, (MIRROR, 0.0, 8)))
+    assert "USING INDEX media_replicas_due" in plan and "TEMP B-TREE" not in plan

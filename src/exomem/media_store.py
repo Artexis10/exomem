@@ -96,6 +96,14 @@ class ObjectTooLarge(MediaStoreError):
         self.size = size
 
 
+class ReplicaMismatch(MediaStoreError):
+    """A store holds the version, and its size or digest is not the one the binding records: damage, never an outage."""
+
+    def __init__(self, failure: str):
+        super().__init__("MEDIA_ORIGINAL_UNVERIFIED", "the pinned ciphertext differs")
+        self.failure = failure
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectHead:
     size: int
@@ -1304,9 +1312,55 @@ def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
         head = store.head(reference.object, reference.version)
-    if head is not None and (head.size, head.sha256) != (reference.ciphertext_size, reference.ciphertext_sha256):
-        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the pinned ciphertext differs")
+    if head is not None and head.size != reference.ciphertext_size:
+        raise ReplicaMismatch("size_mismatch")
+    if head is not None and head.sha256 != reference.ciphertext_sha256:
+        raise ReplicaMismatch("digest_mismatch")
     return head
+
+
+def check_replica(vault: Path, replica: StoredObject) -> str | None:
+    """Ask the replica's store about its version: None when it matches the entry, else why it does not.
+
+    The answers are `absent`, `condemned`, `size_mismatch` and `digest_mismatch`. A store that cannot answer, or does not
+    answer as itself, raises `MEDIA_STORE_UNAVAILABLE`: that is no finding, and the caller keeps what it had.
+    """
+    backend = store_for(vault, replica.store)
+    if isinstance(backend, FilesystemStore):
+        backend.require_identity()
+    try:
+        head = _verified_head(backend, replica)
+    except ReplicaMismatch as mismatch:
+        return mismatch.failure
+    if head is None:
+        return "absent"
+    # A condemned version still reads until the bucket rule deletes it, and nothing may rely on it (collect-released-media D5).
+    return "condemned" if head.condemned else None
+
+
+class _NullSink:
+    """A sink that drops what it is given: the decrypt pass already hashes the plaintext, and a sample keeps none of it."""
+
+    def write(self, chunk: bytes) -> int:
+        return len(chunk)
+
+    def flush(self) -> None:
+        return None
+
+
+def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> str | None:
+    """Download and decrypt `replica` and hash its plaintext against `expected`: None when it matches, else why not.
+
+    The answers are `plaintext_mismatch` and `decrypt_failed` (the ciphertext or its authenticated decryption failed). An
+    unavailable store raises `MEDIA_STORE_UNAVAILABLE`.
+    """
+    try:
+        head = write_stored_original(vault, replica, _NullSink(), store=replica.store)
+    except MediaStoreError as error:
+        if error.code != "MEDIA_ORIGINAL_UNVERIFIED":
+            raise
+        return "decrypt_failed"
+    return None if head == expected else "plaintext_mismatch"
 
 
 def _confirmed(store: Store, reference: StoredObject) -> bool:
