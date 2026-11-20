@@ -16,6 +16,7 @@ import pytest
 from conftest import initialize_vault_state_offline
 
 from exomem import media_processing, readiness, server_runtime
+from exomem.collection_store.connection import CollectionStoreError
 from exomem.governance import projection_runtime
 
 
@@ -449,6 +450,8 @@ def test_local_runtime_activation_waits_for_liveness_and_starts_once(
     uploads_resumed = threading.Event()
 
     class Watcher:
+        seeds_recall_projections = True
+
         def wait_until_seeded(self, timeout=None) -> bool:
             calls.append("watcher-seed:wait")
             seed_started.set()
@@ -536,6 +539,8 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     managed_at_compute: list[bool] = []
 
     class Watcher:
+        seeds_recall_projections = True
+
         def wait_until_seeded(self, timeout=None) -> bool:
             calls.append("watcher-seed:wait")
             observed_timeouts.append(timeout)
@@ -596,6 +601,8 @@ def test_store_mode_activation_keeps_its_importer_when_the_first_sweep_outlasts_
     managed_at_compute: list[bool] = []
 
     class Watcher:
+        seeds_recall_projections = False  # it carries an importer: its first pass is the whole-vault sweep
+
         def wait_until_seeded(self, timeout=None) -> bool:
             calls.append("watcher-seed:wait")
             return False  # the sweep is still hashing pages when the wait ends
@@ -609,7 +616,11 @@ def test_store_mode_activation_keeps_its_importer_when_the_first_sweep_outlasts_
         def stop(self) -> None:
             calls.append("watcher-stop")
 
-    monkeypatch.setattr("exomem.vault_store.mode.store_mode_active", lambda _root: True)
+    def unreadable_store(_root) -> bool:
+        raise CollectionStoreError("COLLECTION_STORE_BUSY", "the store is busy")
+
+    # The wait asks the watcher, not the store, so a store that cannot be read ends nothing here.
+    monkeypatch.setattr("exomem.vault_store.mode.store_mode_active", unreadable_store)
     monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: Watcher())
     monkeypatch.setattr(
         server_runtime,
@@ -1442,6 +1453,7 @@ def test_a_service_started_with_the_dreamer_off_starts_it_when_switched_on(
     # `fx.build` seeded freshness as the watcher does; a stand-in that says so
     # keeps activation from revoking it.
     watcher = SimpleNamespace(
+        seeds_recall_projections=True,
         wait_until_seeded=lambda timeout: True,
         arm_optional_recovery=lambda: None,
         stop=lambda: None,
