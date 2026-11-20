@@ -115,6 +115,9 @@ def loopback_mcp(
         "EXOMEM_GITHUB_USERNAME": login,
         "EXOMEM_GITHUB_USER_ID": str(user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_root,
+        # The production upload configuration, on a fresh token per unit: `transfer_artifact`
+        # must not answer UPLOAD_DISABLED. The value never enters the run record.
+        "EXOMEM_UPLOAD_TOKEN": secrets.token_urlsafe(32),
         **({"EXOMEM_OWNER_OAUTH_SUBJECT": f"github:{user_id}"} if remote_owner else {}),
     }
     token = mint(
@@ -141,6 +144,8 @@ def loopback_mcp(
                 str(port),
             ],
             env=env,
+            # The unit root holds no `.env`; the caller's directory may, and the server loads it over `env`.
+            cwd=root,
             stdout=sink,
             stderr=subprocess.STDOUT,
             start_new_session=True,

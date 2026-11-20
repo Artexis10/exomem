@@ -23,6 +23,8 @@ arm's own writer, sends one user turn to Claude Code in print mode (or to the Op
 - ``write_receipt``: the tool results the session saw. Every receipt of a ``tools`` call that came before the
   session's first ``before`` call contains ``contains`` (true when the session made no such call), so a note
   written before the row has to carry the product's pointer to the Record that is still owed.
+- ``sources_added``: the Sources the session added on top of ``sources_before`` number exactly ``equals``,
+  whatever their bytes — an edited copy of a case file counts too.
 
 A case may declare ``files`` (built into the work directory at unit time, see ``fixtures.py``),
 ``seed_sources`` (captured as Sources before the session), ``seed_collections`` (Records collections created
@@ -35,7 +37,9 @@ reachable; the shipped default applies when absent) and ``"transport": "http"``,
 loopback HTTP (``server.py``): a long-lived server that the Claude actor's first turn waits to be warm, and
 the only transport over which an agent can send a file's bytes (a case with ``files`` also gets the handoff
 tools). Stdio is the default. ``"remote_owner": true`` makes the loopback sign-in act as the vault's owner,
-which the arm needs to serve a routed collection's declared method to it. Both actors begin only once
+which the arm needs to serve a routed collection's declared method to it. ``"git": true`` makes the work
+directory a repository with every fixture committed, so a case can ask the agent to work on a repository file
+without that counting as a handed file. Both actors begin only once
 ``recall_context`` answers without an ``index_warming`` abstention (``warmup.py``); the unit records
 ``warm_seconds``, and a server that does not warm in time makes the unit unknown. An arm whose manifest does
 not parse ``capture`` is seeded without the declaration and the unit records ``capture_supported: false``.
@@ -85,7 +89,6 @@ from functools import partial
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
-    DEFAULT_MAX_TURNS,
     Arm,
     JourneySetupError,
     build_turn_argv,
@@ -123,6 +126,8 @@ CASES_DIR = Path(__file__).parent / "cases"
 ARM_SIDE = Path(__file__).with_name("arm_side.py")
 ARM_SIDE_TIMEOUT_SECONDS = 300
 SESSION_TIMEOUT_SECONDS = 900
+#: A handed-file custody turn costs 5-6 tool calls and a 2026-11-17 unit hit the 12-turn cap.
+INCIDENT_MAX_TURNS = 20
 JUDGE_TIMEOUT_SECONDS = 300
 SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
 #: The checks this runner implements; a case's `pass` names a subset.
@@ -132,6 +137,7 @@ CHECKS = (
     "judge",
     "collection_row",
     "write_receipt",
+    "sources_added",
     *SOURCE_CHECKS,
 )
 TRANSPORTS = ("stdio", "http")
@@ -210,6 +216,10 @@ def validate_case(case: dict) -> None:
             )
     if "source_count" in rule and type(rule["source_count"].get("equals")) is not int:
         raise SystemExit(f"case {case['id']}: source_count needs an integer `equals`")
+    if "sources_added" in rule and type(rule["sources_added"].get("equals")) is not int:
+        raise SystemExit(f"case {case['id']}: sources_added needs an integer `equals`")
+    if "git" in case and type(case["git"]) is not bool:
+        raise SystemExit(f"case {case['id']}: `git` must be true or false")
     validate_collections(case)
 
 
@@ -324,6 +334,8 @@ def run_arm_side(
         [sys.executable, str(ARM_SIDE), *args],
         input=stdin,
         env=child_env(root, arm, arm_env),
+        # The unit root holds no `.env`; the caller's directory may, and product code loads it over `env`.
+        cwd=root,
         capture_output=True,
         text=True,
         timeout=ARM_SIDE_TIMEOUT_SECONDS,
@@ -379,6 +391,14 @@ def current_source(facts: dict, fixtures: dict[str, str], spec: dict) -> bool | 
     if not current:
         return spec.get("if_none", False)
     return all(condition_holds(row["frontmatter"], c) for row in current for c in spec["where"])
+
+
+def sources_added(facts: dict, before: list[str], spec: dict) -> bool:
+    """The Sources the session added — rows not in ``sources_before`` — number exactly ``equals``.
+
+    Every added Source counts whatever its bytes: an edited copy of a case file is still a Source.
+    """
+    return len([row for row in facts["sources"] if row["path"] not in before]) == spec["equals"]
 
 
 def compiled_with_backlinks(facts: dict, fixtures: dict[str, str], names: list[str]) -> bool | None:
@@ -540,9 +560,32 @@ def init_event(stdout: str) -> dict:
 def reads_sources(case: dict) -> bool:
     """Whether the case's checks need the vault's Sources, before and after the session."""
     rule = case["pass"]
-    return any(name in rule for name in SOURCE_CHECKS) or bool(
-        rule.get("judge", {}).get("include_sources")
+    return (
+        "sources_added" in rule
+        or any(name in rule for name in SOURCE_CHECKS)
+        or bool(rule.get("judge", {}).get("include_sources"))
     )
+
+
+def init_repo(work: Path) -> None:
+    """Make the unit's work directory a git repository with every fixture committed.
+
+    ``GIT_CONFIG_GLOBAL=/dev/null`` and ``GIT_CONFIG_NOSYSTEM=1`` keep a developer's own config and
+    hooks out; the commit's identity comes from ``-c`` flags, not config.
+    """
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(work),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    identity = ["-c", "user.name=bench", "-c", "user.email=bench@invalid"]
+    for argv in (
+        ["git", "init", "-q"],
+        ["git", *identity, "add", "-A"],
+        ["git", *identity, "commit", "-q", "-m", "fixtures"],
+    ):
+        subprocess.run(argv, cwd=work, env=env, check=True, capture_output=True)  # noqa: S603 - fixed argv
 
 
 def collection_paths(rule: dict) -> list[str]:
@@ -567,6 +610,9 @@ def seed_unit(
         "transport": "http" if http else "stdio",
         "fixtures": build_files(case.get("files", {}), work),
     }
+    if case.get("git"):
+        init_repo(work)
+        record["git"] = True
     if "prominence" in case:
         # The arm's own preference path: its server and its hooks read the same pinned config file.
         record["capture_prominence"] = arm_side("prominence", case["prominence"])
@@ -814,6 +860,10 @@ def run_unit(
         facts = run_arm_side(arm, root, "sources", vault, arm_env=arm_env)
         saved = session_sources(facts, record["sources_before"])
         extra["session_sources"] = saved
+        if "sources_added" in rule:
+            checks["sources_added"] = sources_added(
+                facts, record["sources_before"], rule["sources_added"]
+            )
         for name in SOURCE_CHECKS:
             if name in rule:
                 checks[name] = SOURCE_CHECK_FUNCTIONS[name](facts, record["fixtures"], rule[name])
@@ -916,7 +966,7 @@ def main(argv: list[str] | None = None) -> None:
         "--max-turns",
         type=int,
         default=None,
-        help=f"default: {DEFAULT_MAX_TURNS} (claude), {openai_actor.MAX_TURNS} (openai)",
+        help=f"default: {INCIDENT_MAX_TURNS} (claude), {openai_actor.MAX_TURNS} (openai)",
     )
     parser.add_argument("--run-root", type=Path, required=True)
     # A held-out set lives outside the repository, so no prompt, fixture or iterating session sees it.
@@ -924,7 +974,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     model = args.model or (ACTOR_MODEL if args.actor == "claude" else openai_actor.OPENAI_MODEL)
     max_turns = args.max_turns or (
-        DEFAULT_MAX_TURNS if args.actor == "claude" else openai_actor.MAX_TURNS
+        INCIDENT_MAX_TURNS if args.actor == "claude" else openai_actor.MAX_TURNS
     )
     if args.actor == "openai":
         openai_actor.require_sdk(os.environ)

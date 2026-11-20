@@ -627,7 +627,7 @@ class SaveSource(Wire):
     tags: list[str] | None = None
     why: str | None = None
     document_form: str | None = Field(default=None, description="The form of this record of the work, as an open slug such as abstract.")
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only.")
     detail: Detail | None = _DETAIL
 
 

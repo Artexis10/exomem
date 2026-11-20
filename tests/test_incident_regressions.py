@@ -226,3 +226,72 @@ def test_a_case_that_would_pass_every_run_is_refused(tmp_path, monkeypatch):
 def test_an_unknown_case_id_is_refused():
     with pytest.raises(SystemExit, match="no case with id"):
         incidents.load_cases(["no-such-case"])
+
+
+def test_load_cases_loads_the_handed_file_custody_cases():
+    cases = incidents.load_cases(["repository-file-to-fix", "named-file-to-ignore"])
+    assert [case["id"] for case in cases] == ["repository-file-to-fix", "named-file-to-ignore"]
+
+
+@pytest.mark.parametrize(
+    ("patch", "match"),
+    [
+        ({"git": "yes"}, "`git` must be true or false"),
+        ({"pass": {"sources_added": {"equals": "0"}}}, "sources_added needs an integer `equals`"),
+    ],
+)
+def test_validate_case_refuses_a_bad_git_or_sources_added(patch, match):
+    case = {"id": "bad", "prompt": "turn", "pass": {"called_any": ["search_memory"]}, **patch}
+    with pytest.raises(SystemExit, match=match):
+        incidents.validate_case(case)
+
+
+def test_git_setup_commits_the_case_files_with_no_global_config(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "retry_settings.py").write_text("RETRY_DELAY = 5\n", encoding="utf-8")
+    (work / "notes.txt").write_text("a note\n", encoding="utf-8")
+    broken = tmp_path / "broken.gitconfig"
+    broken.write_text(
+        "[user]\nname = WRONG\nemail = wrong@invalid\n[core]\nhooksPath = /nonexistent-hooks\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(broken))
+    incidents.init_repo(work)
+    files = subprocess.run(
+        ["git", "ls-files"], cwd=work, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert sorted(files) == ["notes.txt", "retry_settings.py"]
+    author = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert author == "bench <bench@invalid>"
+
+
+def test_sources_added_counts_only_the_session_sources(monkeypatch, tmp_path):
+    case = {"id": "added", "prompt": "turn", "pass": {"sources_added": {"equals": 1}}}
+    record = {
+        "sources_before": ["Knowledge Base/Sources/before.md"],
+        "fixtures": {},
+        "transport": "stdio",
+    }
+    monkeypatch.setattr(incidents, "seed_unit", lambda *args, **kwargs: (None, dict(record), tmp_path))
+    played = {"fault": None, "tools": [], "calls": [], "extra": {}}
+    monkeypatch.setitem(incidents.PLAYERS, "claude", lambda *args, **kwargs: played)
+    facts = {
+        "sources": [
+            {"path": "Knowledge Base/Sources/before.md", "frontmatter": {}},
+            {"path": "Knowledge Base/Sources/new.md", "frontmatter": {}},
+        ],
+        "citing": [],
+    }
+    monkeypatch.setattr(incidents, "run_arm_side", lambda *args, **kwargs: facts)
+    result = incidents.run_unit(
+        case, tmp_path, tmp_path / "unit", judge=None, model="m", executable="e", max_turns=1
+    )
+    assert result["checks"]["sources_added"] is True
+    assert result["passed"] is True

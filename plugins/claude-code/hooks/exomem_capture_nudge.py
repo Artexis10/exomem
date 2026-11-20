@@ -155,7 +155,7 @@ _KB_WRITES = (
 #: A connected vault need not contain a readable copy of the shipped references.
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Per live policy: no transcripts; supersede_note supersedes a "
+    "[Exomem capture check] Per live policy: no chat transcripts; supersede_note supersedes a "
     "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
     'Rules: Exomem skill or read_instructions.'
