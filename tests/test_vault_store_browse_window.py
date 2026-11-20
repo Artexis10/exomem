@@ -356,6 +356,57 @@ def test_a_relation_browse_over_several_chunks_lists_each_page_once(vault, route
     assert windowed[("relation, insight", 6)] == [f"{NOTES}/Link-05.md", f"{NOTES}/Link-13.md"]
 
 
+def test_a_frame_of_an_excluded_parent_is_listed_at_its_own_date(vault, routes, monkeypatch):  # noqa: F811
+    """A browse that leaves out the newest page. The store's rows still group the frame under its
+    parent, which the access policy has since excluded; the live rule reports the frame as a page of
+    its own, dated after every note, so that a short limit must list it first. The parent is the
+    oldest page, so the window reaches it last, or never, once a filter drops it."""
+    parent = f"Knowledge Base/{EXCLUDED}/Clip-Seven.mp4"
+    pages = {HUB: page("Hub", updated="2026-01-01")}
+    for index in range(10):
+        pages[f"{NOTES}/Note-{index:02d}.md"] = page(
+            f"Note {index}", updated=f"2026-03-{10 + index}"
+        )
+    pages.update(
+        [
+            video(parent, "2026-01-01"),
+            frame(
+                f"{NOTES}/Clip-Seven.mp4",
+                "scene-000-004.000",
+                4.0,
+                "2026-04-01",
+                kind="insight",
+                parent_media=parent,
+                body="It follows [[Hub]].",
+            ),
+        ]
+    )
+    write_files(vault, pages)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    (vault / "Knowledge Base/_access.yaml").write_bytes(ACCESS_POLICY)
+    newest = f"{NOTES}/Clip-Seven.mp4.frames/scene-000-004.000.jpg.md"
+    cells = {
+        "no filter": {},
+        "types=insight": {"types": ["insight"]},
+        "relation_of hub": {"relation_of": HUB},
+    }
+
+    def run():
+        return {
+            (name, limit): paths_of(browse(vault, nullcontext, limit, cell))
+            for name, cell in cells.items()
+            for limit in (1, 3, 100)
+        }
+
+    windowed = run()
+    assert windowed[("no filter", 1)] == windowed[("relation_of hub", 1)] == [newest]
+    assert windowed[("types=insight", 3)] == [newest]
+    assert routes == [], "the window must answer every cell, or this comparison proves nothing"
+    declined_window(monkeypatch)
+    assert windowed == run()
+
+
 def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):
     """A browse that stops short of its limit, or lists a page that failed to hydrate, when the
     window has pages left to read: the window refills from the next pages as the exhaustive route."""

@@ -26,7 +26,7 @@ from functools import partial, wraps
 from inspect import signature as inspect_signature
 from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     call_spans,
@@ -6031,19 +6031,18 @@ class _BrowseWindowDeclined(Exception):
     """The window cannot answer this browse exactly. The exhaustive route answers it instead."""
 
 
-@dataclass
-class _BrowseOrder:
-    """Emitted pages in reporting order, with what the hit of each is built from.
+class _Emitted(NamedTuple):
+    """A page to report, with what its hit is built from.
 
-    `first` names the candidate that gives an emitted page its excerpt, `frames` the child that
-    gives it a scene frame, and `metadata` holds the rows of both. The window route fills the three
-    as it reads chunks, so each is complete for every emitted page it has yielded.
+    `first` names the candidate that gives the page its excerpt, `frame` is the metadata of the
+    child that gives it a scene frame (None for no frame), and `metadata` holds the rows of `path`
+    and `first`, which the hydrated pages must still match.
     """
 
-    emitted: Iterator[str]
-    first: dict[str, str]
-    frames: dict[str, Any]
-    metadata: dict[str, Any]
+    path: str
+    first: str
+    frame: Any | None
+    metadata: Mapping[str, Any]
 
 
 def _browse_window(
@@ -6094,7 +6093,7 @@ def _window_chunks(
     size: int,
     freshness_key: tuple[int, int, str] | None,
 ) -> Iterator[tuple[list[Any], dict[str, list[Any]]]]:
-    """The index walk: each chunk is emitted-page rows, newest first, and their in-scope children."""
+    """The index walk: each chunk is page rows, newest first, with the in-scope children of any that have some."""
     from . import lexstore
 
     after = None
@@ -6167,7 +6166,9 @@ def _keyed_chunks(
 ) -> Iterator[tuple[list[Any], dict[str, list[Any]]]]:
     """The keyed walk, for a relation filter: the rows of `members` and their parents, by key.
 
-    The members bound the read, so it is read whole and ordered here; chunks are cut from it.
+    The members bound the read, so it is read whole and ordered here; chunks are cut from it. A
+    member in scope is placed at its own key and as a child of its parent when that parent has a
+    view, as the index walk lists them; the rule that reports it decides which.
     """
     from . import lexstore
 
@@ -6200,20 +6201,19 @@ def _keyed_chunks(
         # parent of one: the catalogue is behind the projection that named it. A plan has already
         # dropped such an identity, as it only matches the catalogue's own rows.
         raise RetrievalIndexWarming(site="browse_ordering_incomplete")
-    emitted: dict[str, Any] = {}
+    placed: dict[str, Any] = {}
     children: dict[str, list[Any]] = {}
     for path in members:
         row = rows.get(path)
         if row is None or not row.in_scope:
             continue
-        # A parent that has a view takes its children's hits, so a child belongs to its group.
+        placed[path] = row
         parent = rows.get(row.parent) if row.parent else None
-        group = parent if parent is not None and parent.has_view else row
-        emitted[group.path] = group
-        if group is not row:
-            children.setdefault(group.path, []).append(row)
+        if parent is not None and parent.has_view:
+            placed[parent.path] = parent
+            children.setdefault(parent.path, []).append(row)
     ordered = sorted(
-        emitted.values(), key=lambda row: _browse_order_key(row.path, row.updated), reverse=True
+        placed.values(), key=lambda row: _browse_order_key(row.path, row.updated), reverse=True
     )
     start = 0
     while start < len(ordered):
@@ -6232,17 +6232,17 @@ def _window_order(
     freshness_key: tuple[int, int, str] | None,
     pending: Any,
     proven: AbstractSet[str],
-) -> _BrowseOrder:
+) -> Iterator[_Emitted]:
     """Emitted pages newest first, read a chunk at a time, with the exhaustive route's grouping.
 
-    A chunk holds the pages that a catalogue row may be reported as, in the key order that the hits
-    are in, and every candidate of each (the page itself and its in-scope children). The chunk's
-    candidates are decided by the same rule as the exhaustive route's, through the same metadata
-    read, so a page is decoded only when the window reaches it. `members` is the relation and
-    admission set: a row outside it is not a candidate and is never decoded, so a withheld child's
-    excerpt and frame never reach a visible parent's hit.
+    A chunk holds the rows of pages that may be reported, in the key order that the hits are in, and
+    every candidate of each (the page itself and its in-scope children). Each candidate is reported
+    as the page that the shared emission rule names, from the same metadata read as the exhaustive
+    route's, so a page is decoded only when the window reaches it. A candidate that the rule reports
+    as another page is skipped here: that page is listed at its own key and takes it there. `members` is the relation and admission set: a row outside it is not a
+    candidate and is never decoded, so a withheld child's excerpt and frame never reach a visible
+    parent's hit.
     """
-    order = _BrowseOrder(iter(()), {}, {}, {})
     size = max(limit, 1)
     chunks = (
         _keyed_chunks(
@@ -6252,82 +6252,63 @@ def _window_order(
         else _window_chunks(vault_root, window, scope=scope, size=size, freshness_key=freshness_key)
     )
     plan = window.plan
-
-    def emit() -> Iterator[str]:
-        for emitted_rows, children in chunks:
-            groups: dict[str, list[Any]] = {}
-            for emitted in emitted_rows:
-                candidates = [emitted] if emitted.in_scope else []
-                candidates += children.get(emitted.path, [])
-                candidates = [
-                    row
-                    for row in candidates
-                    if (members is None or row.path in members) and (row.own or row.via_parent)
-                ]
-                if candidates:
-                    groups[emitted.path] = candidates
-            if not groups:
-                continue
-            keys = {row.path: row.updated for rows in groups.values() for row in rows}
-            metadata = _managed_page_metadata(
+    for emitted_rows, children in chunks:
+        groups: dict[str, list[Any]] = {}
+        for emitted in emitted_rows:
+            candidates = [emitted] if emitted.in_scope else []
+            candidates += children.get(emitted.path, [])
+            candidates = [
+                row
+                for row in candidates
+                if (members is None or row.path in members) and (row.own or row.via_parent)
+            ]
+            if candidates:
+                groups[emitted.path] = candidates
+        if not groups:
+            continue
+        keys = {row.path: row.updated for rows in groups.values() for row in rows}
+        metadata = _managed_page_metadata(
+            vault_root,
+            set(keys),
+            scope=scope,
+            freshness_key=freshness_key,
+            pending=pending,
+            include_units=plan is not None and plan.has_unit_predicate,
+        )
+        read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
+        if any(metadata[rel].updated != updated for rel, updated in read.items()):
+            raise RetrievalIndexWarming(site="browse_ordering_stale")
+        eligible = (
+            None
+            if plan is None
+            else _metadata_eligible_filter_paths(
                 vault_root,
-                set(keys),
-                scope=scope,
-                freshness_key=freshness_key,
-                pending=pending,
-                include_units=plan is not None and plan.has_unit_predicate,
+                plan=plan,
+                candidate_parent_paths=set(keys),
+                metadata=metadata,
+                proven=proven,
             )
-            read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
-            if any(metadata[rel].updated != updated for rel, updated in read.items()):
-                raise RetrievalIndexWarming(site="browse_ordering_stale")
-            eligible = (
-                None
-                if plan is None
-                else _metadata_eligible_filter_paths(
-                    vault_root,
-                    plan=plan,
-                    candidate_parent_paths=set(keys),
-                    metadata=metadata,
-                    proven=proven,
-                )
-            )
-            emitted_as = _emission_rule(vault_root, metadata, proven)
-            first: dict[str, str] = {}
-            frames: dict[str, Any] = {}
-            for group, rows in groups.items():
-                for row in sorted(
-                    rows,
-                    key=lambda row: _browse_order_key(row.path, metadata[row.path].updated),
-                    reverse=True,
-                ):
-                    if eligible is not None and row.path not in eligible:
-                        continue
-                    emitted = emitted_as(row.path)
-                    if emitted is None:
-                        continue
-                    if emitted != group:
-                        # The row is reported as another page than the one this chunk read it for
-                        # (a child whose parent is not a recall candidate, or a parent that is a
-                        # child itself), so its place in the order is not the window's.
-                        raise _BrowseWindowDeclined(
-                            "emission differs from the catalogue's grouping"
-                        )
-                    first.setdefault(emitted, row.path)
-                    if (
-                        emitted != row.path
-                        and metadata[row.path].media_file
-                        and emitted not in frames
-                    ):
-                        frames[emitted] = metadata[row.path]
-            order.first.update(first)
-            order.frames.update(frames)
-            order.metadata.update(metadata)
-            yield from sorted(
-                first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
-            )
-
-    order.emitted = emit()
-    return order
+        )
+        emitted_as = _emission_rule(vault_root, metadata, proven)
+        first: dict[str, str] = {}
+        frames: dict[str, Any] = {}
+        for group, rows in groups.items():
+            for row in sorted(
+                rows,
+                key=lambda row: _browse_order_key(row.path, metadata[row.path].updated),
+                reverse=True,
+            ):
+                if eligible is not None and row.path not in eligible:
+                    continue
+                if emitted_as(row.path) != group:
+                    continue  # reported as another page, which takes it at its own key
+                first.setdefault(group, row.path)
+                if group != row.path and metadata[row.path].media_file and group not in frames:
+                    frames[group] = metadata[row.path]
+        for rel in sorted(
+            first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
+        ):
+            yield _Emitted(rel, first[rel], frames.get(rel), metadata)
 
 
 def _find_managed_browse(
@@ -6448,7 +6429,7 @@ def _find_managed_browse(
     )
     return _browse_hits(
         vault_root,
-        _BrowseOrder(iter(emitted_paths), first, frames, metadata),
+        (_Emitted(rel, first[rel], frames.get(rel), metadata) for rel in emitted_paths),
         filtered=eligible_paths is not None,
         **common,
     )
@@ -6456,7 +6437,7 @@ def _find_managed_browse(
 
 def _browse_hits(
     vault_root: Path,
-    order: _BrowseOrder,
+    order: Iterable[_Emitted],
     *,
     limit: int,
     filtered: bool,
@@ -6471,14 +6452,13 @@ def _browse_hits(
     select_pages: Callable[[list[str]], set[str]] | None,
 ) -> list[Hit]:
     """Hydrate the first `limit` emitted pages of `order`, refilling from it after a failed hydration."""
-    first, frames, metadata = order.first, order.frames, order.metadata
-    emitted_paths = order.emitted
+    emitted_pages = iter(order)
     if select_pages is not None:
         # Preserve the original lane limit and freeze mixed identities before
         # any canonical proof can fail. Missing selected groups do not refill.
-        head = list(islice(emitted_paths, limit))
-        selected_paths = select_pages(head)
-        emitted_paths = iter([path for path in head if path in selected_paths])
+        head = list(islice(emitted_pages, limit))
+        selected_paths = select_pages([item.path for item in head])
+        emitted_pages = iter([item for item in head if item.path in selected_paths])
     pages = page_memo if page_memo is not None else {}
 
     def resolve(path: str) -> ParsedPage | None:
@@ -6487,11 +6467,9 @@ def _browse_hits(
         return pages[path]
 
     hits: list[Hit] = []
-    for emitted in emitted_paths:
-        candidate = resolve(first[emitted])
-        page = (
-            candidate if first[emitted] == emitted else resolve(emitted)
-        )
+    for emitted in emitted_pages:
+        candidate = resolve(emitted.first)
+        page = candidate if emitted.first == emitted.path else resolve(emitted.path)
         if candidate is None or page is None:
             from . import lexstore
 
@@ -6501,7 +6479,7 @@ def _browse_hits(
                 continue
             raise RetrievalIndexWarming(site="browse_snapshot_unavailable")
         for current in (candidate, page):
-            expected = metadata[current.rel_path]
+            expected = emitted.metadata[current.rel_path]
             if (
                 _browse_order_key(current.rel_path, current.updated)
                 != _browse_order_key(current.rel_path, expected.updated)
@@ -6523,7 +6501,7 @@ def _browse_hits(
             if filtered:
                 raise RetrievalIndexWarming(site="browse_eligibility_stale")
             continue
-        frame = frames.get(emitted)
+        frame = emitted.frame
         hit = Hit(
             path=page.rel_path,
             type=page.page_type,

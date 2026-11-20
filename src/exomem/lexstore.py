@@ -4579,12 +4579,13 @@ def browse_window_result(
 ) -> CatalogQueryResult[list[BrowseRow] | None]:
     """The next `size` pages that a browse may report, newest first, from the browse index.
 
-    A page may be reported when it is in scope and reported as itself, or when it is the
-    emitted parent of an in-scope child. A page is listed when the plan's columns hold for it
-    (a superset of what the plan accepts), and each child's own claim is decided by the caller
-    from `browse_children_result`. `after` is the `(updated, path)` key of the last row of the
-    previous window. The value is None when the store has no browse index, so the caller
-    takes the exhaustive route.
+    A page may be reported when it is in scope, or when it is the emitted parent of an in-scope
+    child. Each such page is listed at its own key and only when the plan's columns hold for it (a
+    superset of what the plan accepts). Which page a row is reported as is the caller's rule, read
+    at request time, so a row is listed whatever its stored parent: the stored rows may lag the
+    live access policy. The children of a listed parent come from `browse_children_result`.
+    `after` is the `(updated, path)` key of the last row of the previous window. The value is None
+    when the store has no browse index, so the caller takes the exhaustive route.
     """
     if not _catalog_usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
@@ -4605,18 +4606,13 @@ def browse_window_result(
             listed = f"AND {own} "
             params.extend(plan_params)
         params.append(size)
-        usable_parent = (
-            "SELECT 1 FROM pages q WHERE q.path = r.emitted_parent_path "
-            "AND q.in_vault = 1 AND q.eligibility_view_json IS NOT NULL"
-        )
         return _browse_rows(
             conn.execute(
                 f"SELECT r.path, r.updated, r.emitted_parent_path, r.{col}, "
                 f"r.eligibility_view_json IS NOT NULL, {own}, {via}, "
                 f"EXISTS (SELECT 1 FROM pages c WHERE c.emitted_parent_path = r.path AND c.{col} = 1) "
                 f"FROM pages r WHERE r.in_vault = 1 {keyset}{listed}"
-                f"AND ((r.{col} = 1 AND (r.emitted_parent_path IS NULL OR NOT EXISTS ({usable_parent}))) "
-                "OR (r.eligibility_view_json IS NOT NULL AND EXISTS ("
+                f"AND (r.{col} = 1 OR (r.eligibility_view_json IS NOT NULL AND EXISTS ("
                 f"SELECT 1 FROM pages c WHERE c.emitted_parent_path = r.path AND c.{col} = 1))) "
                 "ORDER BY r.updated DESC, r.path DESC LIMIT ?",
                 params,
