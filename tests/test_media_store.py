@@ -4806,3 +4806,20 @@ def test_a_suffixless_upload_of_a_pooled_archive_is_not_charged_to_the_allowance
 
     assert media_store.upload_refusal(vault, 5_000, "LICENSE", "source") is None
     assert media_store.upload_refusal(vault, 5_000, "scan.pdf", "source") is not None
+
+
+def test_an_unreadable_pool_marker_admits_a_suffixless_upload_as_unknown(vault: Path, selected_store, monkeypatch):
+    """Defect: the pool marker read raises a held-filesystem error that the admission check did not catch, so an
+    unreadable marker failed the upload instead of admitting it as unknown."""
+    from exomem import held_fs, media_store, original_pool
+
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 1_000}}}))
+
+    def unreadable(_vault):
+        raise held_fs.HeldFsError("IO_REFUSED", "the marker cannot be read")
+
+    monkeypatch.setattr(original_pool, "enabled", unreadable)
+
+    assert media_store.upload_refusal(vault, 5_000, "LICENSE", "source") is None

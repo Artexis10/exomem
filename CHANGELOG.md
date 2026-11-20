@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.192.0](https://github.com/Artexis10/exomem/compare/v0.191.0...v0.192.0) (2026-11-20)
+
+
+### Features
+
+* **recall:** carry the person's recorded positions into maps recall ([#2921](https://github.com/Artexis10/exomem/issues/2921)) ([56a0ff0](https://github.com/Artexis10/exomem/commit/56a0ff0c853bcd0a456bfb4293471eebc378d1be))
+
 ## [0.191.0](https://github.com/Artexis10/exomem/compare/v0.190.0...v0.191.0) (2026-11-20)
 
 
