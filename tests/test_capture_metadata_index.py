@@ -202,6 +202,35 @@ def test_page_read_shows_the_position_only_to_a_caller_who_may_download_the_orig
     assert json.dumps(page, default=str).count("60.175") == (2 if sees_position else 0)
 
 
+SPELLINGS = [
+    pytest.param([("capture_lat:", '"capture_lat":'), ("capture_lon:", '"capture_lon":')], id="quoted-keys"),
+    pytest.param([("capture_lat:", "capture_lat :"), ("capture_lon:", "capture_lon :")], id="spaced-keys"),
+    pytest.param([('camera_make: "Acme"', 'camera_make: "Acme\\q"')], id="unparseable-frontmatter"),
+]
+
+
+@pytest.mark.parametrize("respelled", SPELLINGS)
+def test_a_restricted_raw_read_shows_no_position_however_the_page_spells_it(vault, photos, respelled):
+    """Catches raw text that keeps a position the parsed page no longer shows: a key the line check does not
+    recognise, or frontmatter that does not parse, so the page reads as having none to withhold."""
+    sidecar = vault / photos["helsinki"][1]
+    text = sidecar.read_text(encoding="utf-8")
+    for old, new in respelled:
+        assert old in text
+        text = text.replace(old, new)
+    sidecar.write_text(text, encoding="utf-8")
+    _govern(vault, pages=6, originals=5)
+    _reset(vault)
+
+    with library_scope():
+        owner = commands.op_get(vault, photos["helsinki"][1], include_raw=True)
+    with request_scope(EXTERNAL):
+        external = commands.op_get(vault, photos["helsinki"][1], include_raw=True)
+
+    assert "60.175" in owner["content"]
+    assert not [digits for digits in ("60.175", "24.9375") if digits in json.dumps(external, default=str)]
+
+
 def test_search_hits_carry_no_coordinates_for_anyone(vault, photos):
     _govern(vault, pages=6, originals=6)
     _reset(vault)
@@ -394,3 +423,15 @@ def test_a_store_catalogue_built_before_the_capture_columns_reads_as_not_current
         assert kinds == {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}
         indexes = {row[1] for row in catalogue.execute("PRAGMA index_list(pages)")}
         assert {"pages_capture_day", "pages_capture_lat", "pages_capture_lon"} <= indexes
+
+
+@pytest.mark.parametrize("coordinate", [0.00005, -0.00003])
+def test_a_position_that_python_prints_in_scientific_notation_stays_a_number_in_the_sidecar(coordinate):
+    """Catches a coordinate written as `5e-05`, which YAML reads as text: the page then has no position to filter."""
+    from exomem.vault import parse_frontmatter
+
+    text = preserve.set_capture_fields("---\ntitle: x\n---\nbody\n", CaptureFacts(lat=coordinate, lon=coordinate))
+
+    stated = parse_frontmatter(text, custody=True)[0]
+
+    assert (stated["capture_lat"], stated["capture_lon"]) == (coordinate, coordinate)

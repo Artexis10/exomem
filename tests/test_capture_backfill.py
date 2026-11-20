@@ -6,23 +6,28 @@ Every case runs on a disposable vault with photos built in the test.
 from __future__ import annotations
 
 import io
+import json
 import re
 from pathlib import Path
 
 import pytest
 import test_media_store
+from test_capture_metadata import _dng, _extract_into_sidecar
+from test_capture_metadata_index import EXTERNAL, _govern, _reset
 
 from exomem import (
     artifact_lifecycle,
     capture_backfill,
     capture_metadata,
+    commands,
     media_store,
     original_conversion,
     preserve,
     prior_extraction,
 )
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
-from exomem.governance.principal import library_scope
+from exomem.governance.principal import library_scope, request_scope
 
 pytestmark = pytest.mark.frame_codecs
 
@@ -33,10 +38,17 @@ CAPTURE_LINE = re.compile(r"(?m)^(?:" + "|".join(capture_metadata.FIELDS) + r"):
 HELSINKI = {1: "N", 2: (60.0, 10.0, 30.0), 3: "E", 4: (24.0, 56.0, 15.0)}
 
 
-def _jpeg(*, taken: str | None = None, gps: dict[int, object] | None = None, size=(64, 48)) -> bytes:
+def _jpeg(
+    *, taken: str | None = None, gps: dict[int, object] | None = None, size=(64, 48),
+    make: bytes | None = None, model: bytes | None = None,
+) -> bytes:
     from PIL import Image
 
     exif = Image.Exif()
+    if make is not None:
+        exif[0x010F] = make
+    if model is not None:
+        exif[0x0110] = model
     if taken is not None:
         exif.get_ifd(0x8769)[0x9003] = taken
     for tag, value in (gps or {}).items():
@@ -46,11 +58,14 @@ def _jpeg(*, taken: str | None = None, gps: dict[int, object] | None = None, siz
     return out.getvalue()
 
 
-def _file(vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.") -> tuple[str, str]:
+def _file(
+    vault: Path, name: str, data: bytes, *, text: str = "A harbour at dusk.", extension: str = "jpg"
+) -> tuple[str, str]:
     """A photo filed and extracted before capture metadata existed: its page has text and no capture fields."""
     with library_scope():
         filed = preserve.preserve_bytes(
-            vault, scope="Photos", category="image", filename=f"{name}.jpg", data=data, content_type="image/jpeg"
+            vault, scope="Photos", category="image", filename=f"{name}.{extension}", data=data,
+            content_type="image/jpeg",
         )
         preserve.update_sidecar_extraction(vault, vault / filed.sidecar_path, text=text, engine="ocr")
     return filed.path, filed.sidecar_path
@@ -190,3 +205,54 @@ def test_only_the_owner_may_run_the_backfill(vault):
 
     assert refused.value.code == "MAINTENANCE_OWNER_REQUIRED"
     assert (vault / page).read_bytes() == before
+
+
+def test_a_hostile_camera_name_keeps_every_sidecar_write_valid_and_a_restricted_read_positionless(
+    vault, tmp_path, monkeypatch
+):
+    """Catches camera text that breaks the sidecar's YAML: the page then reads as no frontmatter at all,
+    so a caller who may not see its position is handed the raw lines."""
+    backslash = bytes([92])  # `\n` in a regex replacement template reads as a newline: a second write breaks the line
+    photo = tmp_path / "hostile.jpg"
+    photo.write_bytes(_jpeg(
+        taken="2024:06:01 14:03:22", gps=HELSINKI, model=b'\x9b"q"',
+        make=b"Acme\xe2\x84\xa2\xe2\x80\xa8" + backslash + b"nCorp\xf0\x9f\x93\xb7\xef\xbf\xbe",
+    ))
+    stated = {
+        "camera_make": "Acme\u2122\u2028" + chr(92) + "nCorp\U0001f4f7\ufffe", "camera_model": '"q"',
+        "capture_lat": 60.175, "capture_lon": 24.9375,
+    }
+
+    text = _extract_into_sidecar(vault, monkeypatch, photo, category="image", media_type="image")
+    page = next(vault.rglob("hostile*.md")).relative_to(vault).as_posix()
+
+    assert {k: v for k, v in vault_module.parse_frontmatter(text, custody=True)[0].items() if k in stated} == stated
+    assert _backfill(vault)["already_current"] == 1  # a second write over the same lines must change nothing
+
+    (vault / page).write_text(CAPTURE_LINE.sub("", text), encoding="utf-8")
+    _run(vault)  # the backfill's own write
+
+    written = (vault / page).read_text(encoding="utf-8")
+    assert {k: v for k, v in vault_module.parse_frontmatter(written, custody=True)[0].items() if k in stated} == stated
+    assert _backfill(vault)["already_current"] == 1
+
+    _govern(vault, pages=6, originals=5)
+    _reset(vault)
+    with request_scope(EXTERNAL):
+        shown = commands.op_get(vault, page, include_raw=True)
+    assert shown["frontmatter"]["camera_make"] == stated["camera_make"]
+    assert not [digits for digits in ("60.175", "24.9375") if digits in json.dumps(shown, default=str)]
+
+
+def test_a_camera_raw_on_a_host_without_the_raw_decoder_is_skipped_not_counted_as_stating_nothing(vault, monkeypatch):
+    """Catches a backfill that reads a missing decoder as a library of photos that state nothing."""
+    import importlib.util
+
+    _original, page = _file(vault, "shot", _dng({306: "2023:07:04 09:08:07"}), extension="dng")
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "rawpy" else real(name, *a))
+
+    preview = _backfill(vault)
+
+    assert (preview["would_update"], preview["no_capture_metadata"]) == (0, 0)
+    assert preview["skipped"] == {capture_backfill.READER_UNAVAILABLE: 1}

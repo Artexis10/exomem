@@ -117,8 +117,9 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
 def read_raw_facts(path: Path) -> tuple[datetime | None, int, int] | None:
     """A DNG's capture timestamp and stored size, read without demosaicing; None for any other file.
 
-    LibRaw's timestamp is the raw's capture time. It carries no UTC offset, and LibRaw takes it from
-    the original capture time when the file records one. The size is the stored grid: no orientation applied.
+    LibRaw's timestamp carries no UTC offset. It parses DateTime, DateTimeOriginal and DateTimeDigitized
+    in turn and keeps the last that it reads, so a raw that records only a modification time reports
+    that as its timestamp. The size is the stored grid: no orientation applied.
     """
     from .media_types import RAW_EXTS
 

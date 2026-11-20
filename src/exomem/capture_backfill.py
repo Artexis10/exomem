@@ -136,7 +136,7 @@ def _plan_page(root: Path, plan: _Plan, rel: str, text: str, snapshot: Any) -> N
     if (reason := access.writable_reason(root, rel)) is not None:
         plan.skip(rel, reason)
         return
-    if not capture_metadata.available(kind):
+    if not capture_metadata.available(kind, snapshot.path):
         plan.skip(rel, READER_UNAVAILABLE)
         return
     with _local_view(snapshot) as view:

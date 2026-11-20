@@ -11,15 +11,17 @@ The sidecar records the result as frontmatter fields (`FIELDS`). The position fi
 from __future__ import annotations
 
 import importlib.util
-import json
 import logging
 import math
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +62,7 @@ _EXIF_TIME = "%Y:%m:%d %H:%M:%S"
 # A field's format, not its meaning: an ISO local time with an optional UTC offset.
 _TIME_FORMAT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?")
 _EXIF_OFFSET = re.compile(r"([+-])(\d{2}):(\d{2})")
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")  # the C0 and C1 control characters
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +89,12 @@ class CaptureFacts:
         return {name: values[name] for name in FIELDS if values[name] is not None}  # type: ignore[misc]
 
     def frontmatter(self) -> dict[str, str]:
-        """The stated values as frontmatter text. Strings are always quoted, so YAML keeps them strings."""
-        return {
-            name: json.dumps(value, ensure_ascii=False) if isinstance(value, str) else repr(value)
-            for name, value in self.fields().items()
-        }
+        """The stated values as frontmatter text that YAML reads back as the same values.
+
+        A string is always quoted, in ASCII only, so no character of it can end the line or break the
+        parse. A coordinate is written in fixed-point: Python's `5e-05` reads back as text in YAML.
+        """
+        return {name: _render(value) for name, value in self.fields().items()}
 
     def as_payload(self) -> dict[str, str | int | float]:
         return self.fields()
@@ -112,6 +115,16 @@ class CaptureFacts:
 
     def __bool__(self) -> bool:
         return bool(self.fields())
+
+
+def _render(value: str | int | float) -> str:
+    if isinstance(value, str):
+        # YAML's own emitter, double-quoted and ASCII-only: JSON's `\ud83d\ude00` pairs break YAML for a character beyond the BMP.
+        return yaml.safe_dump(value, default_style='"', allow_unicode=False, width=sys.maxsize).rstrip("\n")
+    if isinstance(value, float):
+        text = f"{value:.6f}".rstrip("0")  # `_number` rounds a coordinate to six places
+        return text + "0" if text.endswith(".") else text
+    return str(value)
 
 
 def without_position(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
@@ -137,14 +150,19 @@ def coordinate(field: str, value: object) -> float | None:
     return float(value)
 
 
-def available(media_type: str) -> bool:
-    """Whether this host has the library that decodes `media_type`.
+def available(media_type: str, original: Path | str) -> bool:
+    """Whether this host has the library that decodes `original`, a file of kind `media_type`.
 
     `read` answers "states nothing" for a decoder that is missing as it does for a file with no
     metadata, which suits an extraction that goes on. A backfill asks first, so that it never reads
-    a missing decoder as a library of photos that state nothing.
+    a missing decoder as a library of photos that state nothing. A camera raw needs `rawpy` as well.
     """
-    return importlib.util.find_spec("av" if media_type == "video" else "PIL") is not None
+    from .media_types import RAW_EXTS
+
+    needed = ["av"] if media_type == "video" else ["PIL"]
+    if media_type == "image" and Path(original).suffix.lower() in RAW_EXTS:
+        needed.append("rawpy")
+    return all(importlib.util.find_spec(library) is not None for library in needed)
 
 
 def read(path: Path, media_type: str) -> CaptureFacts | None:
@@ -248,7 +266,17 @@ def _coordinate(value: Any, ref: Any, signs: tuple[str, str], limit: float) -> f
 
 
 def _camera(exif: Any) -> tuple[str | None, str | None]:
-    return _text(exif.get(_MAKE)), _text(exif.get(_MODEL))
+    return _text(_utf8_first(exif.get(_MAKE))), _text(_utf8_first(exif.get(_MODEL)))
+
+
+def _utf8_first(value: object) -> object:
+    """EXIF text as the camera wrote it. Pillow decodes it as latin-1, but cameras write UTF-8: undo that, and keep the latin-1 text when the bytes are not UTF-8."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return value.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        return value
 
 
 # ---------------------------------------------------------------- video

@@ -8643,14 +8643,18 @@ def withhold_position(
     """`page` as a caller who may not download its original reads it: with no recorded position.
 
     The position is dropped from the frontmatter and from the raw text, after the page's own release
-    decision has validated them, so every surface that renders a released page shows the same page.
+    decision has validated them, so every surface that renders a released page shows the same page. A raw
+    text that cannot be shown without its position, because its frontmatter does not parse or spells the
+    field in a way the removal misses, is withheld whole: this control fails closed.
     """
+    from .. import preserve
+
     frontmatter = page.get("frontmatter")
     raw = page.get("content")
     fields = frontmatter if isinstance(frontmatter, dict) else (
         vault.parse_frontmatter(raw)[0] if isinstance(raw, str) else {}
     )
-    if not capture_metadata.carries_position(fields):
+    if not capture_metadata.carries_position(fields) and not (isinstance(raw, str) and preserve.states_position(raw)):
         return page
     allowed = original_download_filter(vault_root, principal=principal, purpose=purpose)
     if allowed is None or allowed(originals.bound_path(fields)):
@@ -8659,9 +8663,11 @@ def withhold_position(
     if isinstance(frontmatter, Mapping):
         out["frontmatter"] = capture_metadata.without_position(frontmatter)
     if isinstance(raw, str):
-        from .. import preserve
-
-        out["content"] = preserve.without_position_fields(raw)
+        shown = preserve.without_position_fields(raw)
+        if shown is None:
+            del out["content"]
+        else:
+            out["content"] = shown
     return out
 
 

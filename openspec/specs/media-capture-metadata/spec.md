@@ -15,7 +15,7 @@ Image and video extraction SHALL record each of these values in the sidecar fron
 - camera make and model (`camera_make`, `camera_model`);
 - pixel dimensions (`pixel_width`, `pixel_height`).
 
-For images, the capture time SHALL come only from the EXIF original capture time and its offset field. It SHALL NOT come from the file's modification time, which scanners and editors set, or from the generic EXIF date-time field. For a RAW file, the capture time is the RAW reader's timestamp. For a video, the capture time SHALL be the QuickTime creation date with its local offset when the file has one. Otherwise it SHALL be the container's UTC creation time, ending in `Z`, with the capture date taken in UTC and `capture_date_basis` set to `utc`. A GPS block that the file marks void, or whose references are missing or invalid, SHALL count as no position. A value that the file does not state SHALL be absent, never zero, empty or a default date. The extraction write SHALL record these fields together with the extracted text.
+For images, the capture time SHALL come only from the EXIF original capture time and its offset field. It SHALL NOT come from the file's modification time, which scanners and editors set, or from the generic EXIF date-time field. For a RAW file, the capture time is the RAW reader's timestamp, which the reader may take from the generic date-time field when the file records no original capture time. For a video, the capture time SHALL be the QuickTime creation date with its local offset when the file has one. Otherwise it SHALL be the container's UTC creation time, ending in `Z`, with the capture date taken in UTC and `capture_date_basis` set to `utc`. A GPS block that the file marks void, or whose references are missing or invalid, SHALL count as no position. A value that the file does not state SHALL be absent, never zero, empty or a default date. Camera make and model SHALL be read as UTF-8 text when the bytes are UTF-8, cleaned of control characters and bounded in length. Every value SHALL be written so that the sidecar's frontmatter stays valid YAML whatever the file contains, and a coordinate SHALL be written as a plain decimal number. The extraction write SHALL record these fields together with the extracted text.
 
 #### Scenario: A phone photo with an offset
 
@@ -56,6 +56,11 @@ The release check SHALL be evaluated per original, from the original that the pa
 
 - **WHEN** a caller who may read a photo's page but not download its original reads that page
 - **THEN** the page shows the capture date and camera but no position
+
+#### Scenario: Raw text that cannot be shown without its position
+
+- **WHEN** that caller reads a sidecar's raw text, and removing the position fields leaves a position in it or the frontmatter does not parse
+- **THEN** the raw text is withheld whole, and no position appears on any surface
 
 #### Scenario: A probing filter
 

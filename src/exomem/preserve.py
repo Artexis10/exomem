@@ -61,6 +61,7 @@ from .vault import (
     ContentHashMismatchError,
     DeferredGraphCompletion,
     DefiniteNoEffect,
+    FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
@@ -1963,9 +1964,24 @@ def set_capture_fields(content: str, capture: CaptureFacts) -> str:
     return content
 
 
-def without_position_fields(content: str) -> str:
-    """`content` as a page with no recorded position reads: the position fields removed, nothing else."""
-    return _remove_frontmatter_fields(content, lambda key: key in capture_metadata.LOCATION_FIELDS)
+def without_position_fields(content: str) -> str | None:
+    """`content` as a page with no recorded position reads: the position fields removed, nothing else.
+
+    The lines are removed by their key, so a key spelled another way (quoted, spaced) survives. A text
+    that still states a position afterwards has no safe form to show, and the answer is `None`.
+    """
+    stripped = _remove_frontmatter_fields(content, lambda key: key in capture_metadata.LOCATION_FIELDS)
+    return None if states_position(stripped) else stripped
+
+
+def states_position(content: str) -> bool:
+    """Whether the page text states a position, or has frontmatter too damaged to prove that it states none."""
+    try:
+        fields = parse_frontmatter(content, custody=True)[0]
+    except FrontmatterError:
+        # An unparseable block cannot be shown to hold no position, so its text decides, by the field names.
+        return any(name in content for name in capture_metadata.LOCATION_FIELDS)
+    return capture_metadata.carries_position(fields)
 
 
 def render_capture_block(before: str, capture: CaptureFacts) -> str:
@@ -2333,7 +2349,8 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     head, body = content[:end], content[end:]
     pattern = re.compile(rf"(?m)^{re.escape(field)}:.*$")
     if pattern.search(head):
-        head = pattern.sub(f"{field}: {value}", head, count=1)
+        line = f"{field}: {value}"
+        head = pattern.sub(lambda _match: line, head, count=1)  # a callable: a backslash in a value is no template escape
     else:
         head = head.rstrip("\n") + f"\n{field}: {value}"
     updated = head + body

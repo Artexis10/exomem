@@ -152,3 +152,10 @@ When a field is withheld from the caller for a page, every structured filter SHA
 - **WHEN** a caller who may not read a photo's original filters on that photo's position through a frontmatter pointer with `$exists: true`
 - **THEN** the photo does not match
 - **AND** the same filter with `$exists: false` matches it
+
+#### Scenario: A lone complement of a withheld position on the managed route
+
+- **WHEN** a caller who may not read a photo's original sends a managed route a filter whose only position test is a complement, such as `$not` over a position range, with no exact bound beside it
+- **THEN** the route refuses it with the typed `UNSUPPORTED_FILTER_FIELD` refusal that it gives any shape that no maintained index can evaluate exactly
+- **AND** the refusal follows from the filter and the caller alone, so every page gets the same refusal and it reveals nothing about any photo
+- **AND** the in-memory evaluation of the same filter still reads the withheld position as missing
