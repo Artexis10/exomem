@@ -36,3 +36,11 @@ When `save_source` stores supplied text rather than an uploaded original, its ou
 #### Scenario: Compiling a custody Source clears it
 - **WHEN** a live note cites a Source marked `custody_only: true`
 - **THEN** the Source appears in neither `custody_source` nor `unprocessed_source`
+
+### Requirement: A Source upload step names the held send
+
+When `upload_files` with lane `source` issues an unheld upload step, its reply SHALL carry a `next_action` that tells an agent holding the file to call again with `expected_sha256`, so the send is held and `save_source` takes the document's title, kind and url. It SHALL say that a POST to the unheld step stores the file at once under its file name, with no url and no duplicate check.
+
+#### Scenario: An agent asks for an upload without a digest
+- **WHEN** an agent calls `upload_files` with lane `source` and no `expected_sha256` on a server with an upload token
+- **THEN** the reply carries the upload step and a `next_action` that names `expected_sha256` and `save_source`

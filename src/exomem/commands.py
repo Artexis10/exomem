@@ -10010,6 +10010,14 @@ def op_transfer_artifact(
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
+        if lane == "source":
+            # The unheld send is for a person or device that holds the file. It stores at once under the file name,
+            # with no url, identity check or duplicate check; the held send lets save_source carry all of them.
+            handoff["next_action"] = (
+                "If you hold the file, take its SHA-256 and call upload_files again with expected_sha256: that send "
+                "is held, and save_source then takes the document's own title, its source_kind and url. A POST to "
+                "this upload_url stores the file at once under its file name, with no url and no duplicate check."
+            )
     return handoff
 
 
