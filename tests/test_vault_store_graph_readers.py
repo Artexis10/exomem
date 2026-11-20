@@ -55,6 +55,7 @@ from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
 from exomem.governance import egress, lifecycle, page_admission
+from exomem.governance import policy as policy_module
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
@@ -1679,6 +1680,56 @@ def test_the_store_read_warm_up_stops_between_batches_when_it_is_stopped(stored,
     with pytest.raises(foreground_priority.BulkCancelled), foreground_priority.cancellable(stop):
         warmup.warm_store_reads(stored)
     assert len(batches) == 1, "it read one batch and no more"
+
+
+def test_a_policy_that_changes_during_the_store_read_warm_up_owns_the_memo_after_it(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the warm-up fills every batch under the policy it loaded at its start, so after a policy
+    change its later batches replace the scope sets that requests filled under the live policy.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    scope = stored / "Knowledge Base/_Governance/scopes/secret.yaml"
+    batches = []
+    scopes_many = page_admission.scopes_many
+
+    def changes_the_policy_after_a_batch(*args, **kwargs):
+        found = scopes_many(*args, **kwargs)
+        if not batches:
+            scope.write_text(scope.read_text().replace("cohort-0", "cohort-1"))
+        batches.append(args[1])
+        return found
+
+    monkeypatch.setattr(page_admission, "scopes_many", changes_the_policy_after_a_batch)
+    warmup.warm_store_reads(stored)
+    assert len(batches) > 1, "later batches ran after the change, or this test proves nothing"
+    live = policy_module.load(stored).fingerprint
+    assert live in page_admission._SCOPE_MEMOS[str(stored)].header, "the memo that the pass leaves is the live policy's"
+
+
+def test_the_store_read_warm_up_waits_for_foreground_work_before_each_name_it_groups(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the name grouping runs in one stretch, so a request that arrives during a start waits
+    behind a pass that grows with the vault (0.3 s of CPU at 50,000 pages).
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    events = []
+    yield_to_foreground = foreground_priority.yield_to_foreground
+    look_up = epistemic_graph._link_candidates_for_key
+
+    def yields(*args, **kwargs):
+        events.append("yield")
+        return yield_to_foreground(*args, **kwargs)
+
+    def looks_up(*args, **kwargs):
+        events.append("name")
+        return look_up(*args, **kwargs)
+
+    monkeypatch.setattr(foreground_priority, "yield_to_foreground", yields)
+    monkeypatch.setattr(epistemic_graph, "_link_candidates_for_key", looks_up)
+    warmup.warm_store_reads(stored)
+    assert events.count("name") > 1, "the pass groups several names, or this test proves nothing"
+    assert all(before == "yield" for before, name in zip(events, events[1:], strict=False) if name == "name"), events
 
 
 @pytest.mark.parametrize("caller", ["owner", "few withheld"])

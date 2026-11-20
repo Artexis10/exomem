@@ -427,14 +427,15 @@ def warm_method_unit_statistics(vault_root: Path, *, deadline: float) -> None:
 
 
 def warm_store_reads(vault_root: Path) -> None:
-    """Fill what a store-mode vault's first restricted read would fill: the ownership of every stored
-    page, the scope set of every page with simple selector facts under the live policy, and the name
-    groups of the recall resolver. Reads only.
+    """Fill what a store-mode vault's first restricted read would fill: the ownership of every
+    stored page, the scope set of every page with simple selector facts under the live policy, and
+    the name groups of the recall resolver. Reads only.
 
-    Each is a process-wide memo keyed by its whole input, so a commit or a policy change drops what it
-    changes, and a request that runs meanwhile reads the same answers, only faster. Each batch is its
-    own store request and waits for foreground work first, so no request queues behind this step; a
-    stop from `foreground_priority` ends it between batches. A vault that reads files has nothing here.
+    Each is a process-wide memo keyed by its whole input, so a commit or a policy change drops what
+    it changes, and a request that runs meanwhile reads the same answers, only faster. Each batch is
+    its own store request and waits for foreground work first, as does each name that is grouped, so
+    no request queues behind this step; a stop from `foreground_priority` ends it between them. A
+    vault that reads files has nothing here.
     """
     from . import epistemic_graph, find
     from .governance import page_admission
@@ -446,17 +447,20 @@ def warm_store_reads(vault_root: Path) -> None:
         return
     with read.snapshot(root) as view:
         paths = [page.path for page in view.pages()]
-    policy = policy_module.load(root)
-    for start in range(0, len(paths), read.KEYS_PER_QUERY):
-        foreground_priority.yield_to_foreground()
-        batch = paths[start:start + read.KEYS_PER_QUERY]
-        with read.request_snapshot(root):
-            page_admission.scopes_many(root, batch, policy)
-    try:
-        epistemic_graph.warm_homonyms(root, foreground_priority.check_cancelled)
-    except find.RetrievalIndexWarming:
-        # No recall resolver yet: the first restricted read groups the names itself, as it does today.
-        return
+    # `bulk()` holds the pass to its progress floor: steady requests cannot park it for good.
+    with foreground_priority.bulk():
+        for start in range(0, len(paths), read.KEYS_PER_QUERY):
+            foreground_priority.yield_to_foreground()
+            batch = paths[start:start + read.KEYS_PER_QUERY]
+            # The live policy for each batch: a batch filled under a policy that changed mid-pass
+            # would replace the scope sets that requests filled under the new one.
+            with read.request_snapshot(root):
+                page_admission.scopes_many(root, batch, policy_module.load(root))
+        try:
+            epistemic_graph.warm_homonyms(root, foreground_priority.yield_to_foreground)
+        except find.RetrievalIndexWarming:
+            # No recall resolver yet: the first restricted read groups the names itself, as now.
+            return
 
 
 def warm_all(vault_root: Path) -> dict[str, float]:
