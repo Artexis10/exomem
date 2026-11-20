@@ -12,8 +12,9 @@ from __future__ import annotations
 #: advance and one fan-out, so a larger batch costs fewer advances; a smaller one keeps the hold short.
 BATCH_RESULT_LIMIT = 16
 
-#: Staging stops for the batch after this long inside one hold, so a slow page cannot grow the hold
-#: with every result behind it. The staged results commit; the rest stay pending for the next batch.
+#: A batch stops taking more work after this long inside one hold, so a slow page cannot grow the hold
+#: with every item behind it. Publication commits what it staged and leaves the rest pending; a
+#: multi-path reprocess request queues what it reached and takes a second hold for the rest.
 BATCH_HOLD_SECONDS = 3.0
 
 #: Foreground writes must have been quiet this long before a batch takes the boundary. A foreground

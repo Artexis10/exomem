@@ -10171,35 +10171,26 @@ def _process_media(
                 "remediation": remediation,
             }
 
-        results: list[dict[str, object]] = []
-        for index, (binary, relative) in enumerate(selected_paths):
-            if index:
-                # Each path re-takes the boundary; a keyed write that arrived
-                # meanwhile gets it first, so a long batch slows but never
-                # starves one.
-                manager.yield_to_waiting_writes(vault_root)
+        def run_one(binary: Path, relative: str, guard) -> dict[str, object]:
+            """One path's row; `guard` is the boundary hold its commits take."""
             try:
                 result = _run_media_operation(
-                    vault_root, binary, operation, language, multilingual, _commit_guard
+                    vault_root, binary, operation, language, multilingual, guard
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
             except media_processing.MediaProcessingError as error:
-                results.append(failure_row(relative, error.code))
-                continue
+                return failure_row(relative, error.code)
             except ValueError as error:
                 if str(error).partition(":")[0] != "WRITE_REFUSED":
                     raise
-                results.append(failure_row(relative, "WRITE_REFUSED"))
-                continue
+                return failure_row(relative, "WRITE_REFUSED")
             except FileNotFoundError:
-                results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
-                continue
+                return failure_row(relative, "MEDIA_NOT_FOUND")
             state = media_jobs.tool_job_state(vault_root, result.state, result.job_id)
             terminal_row = terminal_job_row(relative, state)
             if terminal_row is not None:
-                results.append(terminal_row)
-                continue
+                return terminal_row
             row: dict[str, object] = {
                 "path": relative,
                 "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
@@ -10211,7 +10202,52 @@ def _process_media(
             }
             if result.document_container is not None:
                 row["document_container"] = result.document_container
-            results.append(row)
+            return row
+
+        def run_held_chunk(chunk: list[tuple[Path, str]]) -> list[dict[str, object]]:
+            """Queue paths of `chunk` under one hold, stopping once the hold has lasted its cap.
+
+            A reprocess request queues paths whose transcript is already complete, which changes
+            only the machine-local job store. One hold is one commit-generation advance, where a
+            hold per path advanced it twice for each. Returns the rows of the paths it took.
+            """
+            from . import media_publication
+            from .vault_store import media as store_media
+
+            rows: list[dict[str, object]] = []
+
+            def unit() -> None:
+                deadline = time.monotonic() + media_publication.BATCH_HOLD_SECONDS
+                for binary, relative in chunk:
+                    # The hold is already ours, so a path's own commit step takes no second one.
+                    rows.append(run_one(binary, relative, nullcontext))
+                    if time.monotonic() >= deadline:
+                        return
+
+            store_media.holding_boundary(
+                vault_root, f"process_media_{operation}_commit", unit, _commit_guard
+            )
+            return rows
+
+        results: list[dict[str, object]] = []
+        if operation == "reprocess":
+            remaining = list(selected_paths)
+            while remaining:
+                if results:
+                    # A keyed write that arrived meanwhile takes the boundary before the next
+                    # hold, so a long request slows but never starves one.
+                    manager.yield_to_waiting_writes(vault_root)
+                taken = run_held_chunk(remaining)
+                results.extend(taken)
+                remaining = remaining[len(taken):]
+        else:
+            for index, (binary, relative) in enumerate(selected_paths):
+                if index:
+                    # Each path re-takes the boundary; a keyed write that arrived
+                    # meanwhile gets it first, so a long batch slows but never
+                    # starves one.
+                    manager.yield_to_waiting_writes(vault_root)
+                results.append(run_one(binary, relative, _commit_guard))
         return {
             "operation": operation,
             "paths": [relative for _, relative in selected_paths],

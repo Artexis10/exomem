@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    commands,
     deferred_index,
     epistemic_graph,
     extract,
@@ -259,3 +260,24 @@ def test_the_next_batch_waits_out_the_spacing_so_media_advances_the_generation_a
     worker._last_batch_at = media_worker._clock() - (media_publication.MIN_BATCH_SPACING_SECONDS + 1.0)
     assert worker._drain_parent_results(gated=True) is True
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
+
+
+def test_a_multi_path_reprocess_request_queues_all_paths_under_one_hold(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A 16-path reprocess call took the boundary and advanced the generation twice for each path."""
+    _speech_engine(monkeypatch)
+    names = [f"batch-{index}.mp3" for index in range(6)]
+    pairs = _preserve_recordings(vault, names)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    _transcribe_all(vault, [binary for binary, _sidecar in pairs], worker)
+    paths = [binary.relative_to(vault).as_posix() for binary, _sidecar in pairs]
+    caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+
+    result = commands.op_process_media(vault, paths=paths, operation="reprocess", language="et")
+
+    assert [row["path"] for row in result["results"]] == paths
+    assert {row["outcome"] for row in result["results"]} == {"reprocessed"}
+    assert _advances_by_operation(caplog) == {"process_media_reprocess_commit": 1}
+    queued = {job["path"] for job in media_jobs.status(vault)["jobs"]}
+    assert queued == set(paths)
