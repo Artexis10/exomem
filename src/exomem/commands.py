@@ -10029,11 +10029,9 @@ def op_process_media(
     """Check governed media; retry after remediation; extract again; replicate originals.
 
     Status reads; other operations change extraction state. Extraction normally runs
-    automatically. Reprocess keeps the old text on a prior page. Replicate is for the
-    vault owner: it queues a verified encrypted replica of every original in the
-    declared store `store`, which a background worker makes, and returns the counts
-    queued, copied, refused and remaining. A repeat while the copy runs changes
-    nothing: read the counts in status.
+    automatically. Reprocess keeps the old text on a prior page. Replicate (owner
+    only) queues an encrypted replica of every original in store `store` and returns
+    the queue counts; a repeat while it runs changes nothing.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work.
