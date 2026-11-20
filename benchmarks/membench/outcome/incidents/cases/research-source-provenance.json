@@ -108,6 +108,35 @@
       }
     },
     {
+      "id": "mislabelled-source-corrected",
+      "about": "A Source already holds a doctoral thesis summary saved as the article the thesis cites, with that article's DOI as its url. When the person asks for the record to be put right, no current Source of the file may keep that DOI.",
+      "transport": "http",
+      "files": [
+        "repository-hit.pdf"
+      ],
+      "seed_sources": [
+        {
+          "file": "repository-hit.pdf",
+          "title": "Valdoren and Quillfeather 2015, Seasonal switching of subglacial drainage routes",
+          "source_kind": "article",
+          "url": "https://doi.org/10.5555/glx.2015.0112"
+        }
+      ],
+      "prompt": "A while ago I saved repository-hit.pdf in my sources as Valdoren and Quillfeather's 2015 article \"Seasonal switching of subglacial drainage routes\". A colleague says that file isn't the article at all. Can you check what it really is and put the record right?",
+      "pass": {
+        "current_source": {
+          "file": "repository-hit.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "10.5555/glx.2015.0112"
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "misleading-doi",
       "about": "The user gives a DOI that differs from the one the PDF prints. The saved Source's url must carry the DOI the document prints.",
       "transport": "http",
