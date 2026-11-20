@@ -28,7 +28,7 @@ A keyed write's place in the arrival-order queue SHALL end when its attempt hold
 
 ### Requirement: Media publication lands in whole bounded batches
 
-The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending, and the supervisor SHALL then publish its results one at a time, so no result is lost or published twice. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
+The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending. The next batch SHALL then be smaller, down to one result, so that a result that cannot publish ends up alone and is set aside while the others publish, and no result is lost or published twice. A result that fails while it is staged SHALL be set aside without failing the batch. A refused boundary SHALL leave the batch pending, whole, and SHALL NOT start a hold for each result. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
 
 #### Scenario: A batch of results takes one hold and advances the generation once
 
@@ -40,9 +40,23 @@ The media supervisor SHALL publish the durable results it drains as one batch un
 #### Scenario: A failed batch rolls back and loses nothing
 
 - **WHEN** the commit of a batch fails for one result
-- **THEN** no sidecar of the batch changes
-- **AND** the supervisor publishes the results again one at a time
-- **AND** each result publishes once, and only the failing result stays pending
+- **THEN** no sidecar of the batch changes and every result stays pending
+- **AND** the next batches shrink until the failing result is alone, and that result is set aside
+- **AND** the other results publish once each
+- **AND** the set-aside result publishes once it has waited the progress floor and can commit
+
+#### Scenario: A result that cannot be staged costs the others no second hold
+
+- **WHEN** one result of a batch fails while it is staged
+- **THEN** the other results commit in the same hold, with one advance
+- **AND** the failing result stays pending and is set aside
+
+#### Scenario: A refused boundary leaves the batch pending
+
+- **WHEN** the boundary is refused as busy for a batch of several results
+- **THEN** no hold runs and no result changes
+- **AND** the supervisor makes one attempt for the batch, not one for each result
+- **AND** the next pass publishes the whole batch
 
 #### Scenario: A reprocess that creates a page completes the graph incrementally
 
@@ -53,7 +67,7 @@ The media supervisor SHALL publish the durable results it drains as one batch un
 
 ### Requirement: Media publication waits for a quiet foreground gap
 
-The media supervisor SHALL take the boundary for a batch only after foreground writes have been quiet for a fixed gap, as the foreground activity signal reports, and not within a fixed spacing of its previous batch. A result that has waited longer than a progress floor SHALL publish at the next opportunity even when foreground writes never pause. A deferred publication SHALL stay durable and visible: `process_media status` SHALL report the pending publication count and the age of the oldest pending result. Every budget SHALL be defined in one module.
+The media supervisor SHALL take the boundary for a batch only after foreground writes have been quiet for a fixed gap, as the foreground activity signal reports, and not within a fixed spacing of its previous hold. Any hold that ran SHALL set the spacing, whether it staged results or not and whether it committed or rolled back. A result that has waited longer than a progress floor SHALL publish at the next opportunity even when foreground writes never pause. The floor SHALL count from the later of the oldest result and the previous hold, so a result that cannot publish opens it once per floor, not on every pass. A deferred publication SHALL stay durable and visible: `process_media status` SHALL report the pending publication count and the age of the oldest pending result, and SHALL report the count as unknown when the queue cannot be read. Every budget SHALL be defined in one module.
 
 #### Scenario: Foreground activity defers a batch
 
@@ -72,12 +86,18 @@ The media supervisor SHALL take the boundary for a batch only after foreground w
 - **WHEN** a batch committed less than the fixed spacing ago
 - **THEN** the supervisor defers the next batch until the spacing has passed
 
-### Requirement: A multi-path reprocess request queues under one hold
+### Requirement: A reprocess request queues without advancing the commit generation
 
-A `process_media reprocess` request over several paths SHALL queue the paths whose transcript is complete under one boundary hold, advancing the commit generation once for that hold, up to a time cap, and SHALL yield to waiting writes between holds. A path that needs a sidecar commit SHALL commit it with its own hold, so no index or graph fan-out runs inside the shared hold.
+A `process_media reprocess` request SHALL plan each path, including the hash of its file and the hydration of an evicted original, outside any vault mutation boundary hold. A path whose transcript is complete SHALL queue its job under a hold that does not advance the commit generation, because the job store is machine-local and no stored content changes. A path that needs a sidecar commit SHALL commit it under its own hold, which advances the generation as any canonical write does, and its index and graph fan-out SHALL run after that hold. The request SHALL yield to waiting writes between paths.
 
-#### Scenario: Six completed paths queue with one advance
+#### Scenario: Six completed paths queue without an advance
 
 - **WHEN** a reprocess request names six paths that have complete transcripts
-- **THEN** the request advances the commit generation once
+- **THEN** the request does not advance the commit generation
 - **AND** every path has its job queued
+
+#### Scenario: Planning runs outside the boundary
+
+- **WHEN** a reprocess request names paths with complete transcripts and a path that has no page yet
+- **THEN** no file is hashed or hydrated while the boundary is held
+- **AND** only the path that commits a new page advances the commit generation
