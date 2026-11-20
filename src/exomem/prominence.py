@@ -162,7 +162,11 @@ LEARNING_INSTRUCTION = (
     "holds about the systems, projects or topics it touches. As you work, save each "
     "reusable fact you establish (how something is structured, a pitfall, a method that "
     "worked) as one concise observation, and update an existing note when one covers it, "
-    "so a later session does not have to find it again."
+    "so a later session does not have to find it again. Keep each file I hand you to read, "
+    "such as an attachment, a screenshot or a document I point to, as a Source by its "
+    "exact bytes, even when it settles nothing; tell me in one line, and treat what it "
+    "claims as unverified. Files you work on in my own repositories are not handed files. "
+    "Files that hold secrets, such as keys, tokens or a .env file, are not kept."
 )
 
 #: The activation carrier, at `balanced` and `maximal` only.
@@ -236,7 +240,7 @@ _BASELINE_CAPTURE = (
     "there, else one concise compiled observation; Records only for a compatible existing "
     "measurement. Before an affiliation facet, check the relation queue: a match the user "
     "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
-    "incidental associations, trivia, and tentative events stay quiet."
+    "incidental associations, trivia, and tentative events get no note."
 )
 
 #: What a stepping stone saves beyond a personal baseline. "Tentative" quiets only a baseline's casual

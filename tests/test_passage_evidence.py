@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
 import numpy as np
 import pytest
 from fastmcp import Client
@@ -397,6 +399,151 @@ def test_tag_eligibility_precedes_selection_and_fills_limit(vault, passage_tools
     }
 
 
+def test_a_tag_change_reaches_the_next_tagged_passage_search(vault, passage_tools):
+    """A tagged search answered before the edit must not keep a Source the edit untagged."""
+    call, _encoder = passage_tools
+    for key in ("kept", "retagged"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey {key}",
+                "source_kind": "session",
+                "tags": ["readers"],
+                "options": {"passages": [{"key": key, "text": f"lantern {key}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {
+        "query": "lantern", "limit": 2, "tags": ["readers"], "options": {"result_level": "passage"}
+    }
+    before = call("search_memory", request)
+    assert {hit["passage_key"] for hit in before["hits"]} == {"kept", "retagged"}, before
+    retagged = memory_refs.resolve_identifier_read_only(
+        vault, next(hit["ref"] for hit in before["hits"] if hit["passage_key"] == "retagged")
+    )
+
+    # Sources are append-only for agents, so the owner retags the file in an editor.
+    fields, body, _ = vault_module.parse_frontmatter((vault / retagged).read_text())
+    fields["tags"] = ["writers"]
+    (vault / retagged).write_text(
+        "---\n" + vault_module.serialize_frontmatter(fields) + "\n---\n\n" + body
+    )
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+
+    after = call("search_memory", request)
+    assert "error" not in after, after
+    assert [hit["passage_key"] for hit in after["hits"]] == ["kept"], after
+
+
+def test_a_second_tag_filter_gets_its_own_passage_answer(vault, passage_tools):
+    """The eligible set of one filter must never answer another filter at the same corpus state."""
+    call, _encoder = passage_tools
+    for tag in ("readers", "writers"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey for {tag}",
+                "source_kind": "session",
+                "tags": [tag],
+                "options": {"passages": [{"key": tag, "text": f"lantern for {tag}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    for tag in ("readers", "writers"):
+        reply = call(
+            "search_memory",
+            {"query": "lantern", "limit": 2, "tags": [tag], "options": {"result_level": "passage"}},
+        )
+        assert "error" not in reply, reply
+        assert [hit["passage_key"] for hit in reply["hits"]] == [tag], reply
+
+
+def test_a_restricted_caller_after_an_owner_search_sees_only_its_admitted_passages(
+    vault, passage_tools
+):
+    """A set answered for the owner must not stand in for a narrower caller's admission."""
+    from exomem.governance.principal import owner_principal, request_scope
+
+    call, _encoder = passage_tools
+    for key in ("shared", "withheld"):
+        saved = call(
+            "save_source",
+            {
+                "title": f"Survey {key}",
+                "source_kind": "session",
+                "tags": ["readers"],
+                "options": {"passages": [{"key": key, "text": f"lantern {key}"}]},
+            },
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 2, "tags": ["readers"], "result_level": "passage"}
+    with request_scope(owner_principal()):
+        owner = find.find(vault, **request)
+        assert {hit["passage_key"] for hit in owner["hits"]} == {"shared", "withheld"}, owner
+        withheld = memory_refs.resolve_identifier_read_only(
+            vault, next(hit["ref"] for hit in owner["hits"] if hit["passage_key"] == "withheld")
+        )
+        restricted = find.find(vault, **request, admit_path=lambda path: path != withheld)
+    assert [hit["passage_key"] for hit in restricted["hits"]] == ["shared"], restricted
+
+
+def test_an_eligible_set_read_before_an_erasure_cutoff_is_not_served_after_it(vault, monkeypatch):
+    """An erasure removes catalogue rows before it advances the cutoff, so the corpus checkpoint
+    alone cannot prove that a set read earlier still holds."""
+    from exomem import source_custody, structured_filters, writer_lease
+
+    publish_reference(vault)
+    current = {"paths": {"Sources/erased.md", "Sources/kept.md"}}
+    monkeypatch.setattr(
+        find, "_managed_eligible_filter_paths", lambda *args, **kwargs: set(current["paths"])
+    )
+    plan = structured_filters.compile_filter(
+        None, shortcuts=structured_filters.FilterShortcuts(tags=("readers",))
+    )
+
+    def eligible():
+        snapshot = find.FreshnessSnapshot(vault, require_live_recall=True)
+        return find._reusable_eligible_filter_paths(
+            vault, scope="vault", plan=plan, snapshot=snapshot
+        )
+
+    assert eligible() == {"Sources/erased.md", "Sources/kept.md"}
+    current["paths"] = {"Sources/kept.md"}
+    with writer_lease.active_manager().mutation_guard(vault):
+        assert source_custody.advance_retirement_generation(vault)
+    assert eligible() == {"Sources/kept.md"}
+
+
+def test_a_unit_filter_is_resolved_for_every_passage_search(vault, monkeypatch):
+    """A unit filter's matches follow the selected interpretation, which no part of the cache's
+    proof names, so a reused set could keep a unit that no longer matches."""
+    from exomem import structured_filters
+
+    publish_reference(vault)
+    current = {"paths": {"Sources/first.md"}}
+    monkeypatch.setattr(
+        find, "_managed_eligible_filter_paths", lambda *args, **kwargs: set(current["paths"])
+    )
+    plan = structured_filters.compile_filter({"unit.tags": {"$contains": "readers"}})
+
+    def eligible():
+        snapshot = find.FreshnessSnapshot(vault, require_live_recall=True)
+        return find._reusable_eligible_filter_paths(
+            vault, scope="vault", plan=plan, snapshot=snapshot
+        )
+
+    assert eligible() == {"Sources/first.md"}
+    current["paths"] = {"Sources/second.md"}
+    assert eligible() == {"Sources/second.md"}
+
+
 @pytest.mark.parametrize("anchor_state", ["visible", "tombstoned", "revoked"])
 def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     vault, passage_tools, monkeypatch, anchor_state
@@ -773,18 +920,27 @@ def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_t
     assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
 
 
-def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools):
+def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools, monkeypatch):
     """The capture's overlap check encoded title-prefixed paragraphs that the index could not
     reuse, so every passage of a capture was encoded twice."""
     from collections import Counter
 
-    from exomem import page_names, passage_evidence
+    from exomem import corpus_aware, page_names, passage_evidence
 
     call, encoder = passage_tools
     earlier = call("save_source", {"title": "Earlier record", "source_kind": "session", "detail": "full",
                                    "content": "The harbour keeps one lantern lit."})
     assert "error" not in earlier, earlier
     embeddings.index_incremental(vault)  # The overlap check scores against an index with vectors.
+    # add() swallows a failed sweep, so a capture that no longer sweeps would still encode once.
+    sweeps: list[dict[str, float]] = []
+    sweep = corpus_aware._best_cosine_per_file
+
+    def recording_sweep(*args, **kwargs):
+        sweeps.append(sweep(*args, **kwargs))
+        return sweeps[-1]
+
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", recording_sweep)
     passages = [passage for passage in _mixed_passages("once") if not passage["key"].endswith("/long")]
     saved = call("save_source", {"title": "Encoded once", "source_kind": "session", "detail": "full",
                                  "options": {"source_identity": {"system": "archive", "record_id": "once",
@@ -801,6 +957,7 @@ def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools
     encoded = Counter(encoder.texts)
     assert {text: encoded[text] for text in cut} == dict.fromkeys(cut, 1)
     assert not [text for text in encoder.texts if text.startswith("Encoded once")]
+    assert any(page_names.resolve_page(vault, earlier["id"]) in scores for scores in sweeps), sweeps
 
 
 def test_a_source_of_hundreds_of_declared_passages_is_indexed_within_the_preparation_budget(
@@ -841,8 +998,11 @@ def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
 
 
 @pytest.mark.parametrize("mismatch", ["count", "keys", "texts"])
-def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, mismatch):
+def test_inconsistent_declaration_is_withheld_and_counted(vault, passage_tools, monkeypatch, mismatch):
     """A count or body mismatch must not bind an indexed vector to the wrong caller record."""
+    # The capture starts a background graph rebuild whose vault walk can land after the rewrite
+    # below; that unpublishes the corpus, and the search is refused before it reads the declaration.
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
     call, _encoder = passage_tools
     saved = commands.op_capture_source(
         vault,
@@ -979,6 +1139,56 @@ def test_full_model_admission_refuses_passage_request_without_encoding(passage_t
         finally:
             release.set()
         holder.result()
+
+
+def test_abandoned_passage_search_stops_before_it_encodes(vault, passage_tools, monkeypatch):
+    """A caller that times out must end its search, not leave it running unseen in its admission slot."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    walking, caller_left = threading.Event(), threading.Event()
+    walk = find._managed_eligible_filter_paths
+
+    def walk_that_outlasts_its_caller(*args, **kwargs):
+        walking.set()
+        deadline = time.monotonic() + 10
+        while not caller_left.is_set() and time.monotonic() < deadline:
+            try:
+                # The serving host's cancel scope is where a departed caller is recorded.
+                anyio.from_thread.check_cancelled()
+            except asyncio.CancelledError:
+                caller_left.set()
+            time.sleep(0.01)
+        return walk(*args, **kwargs)
+
+    monkeypatch.setattr(find, "_managed_eligible_filter_paths", walk_that_outlasts_its_caller)
+    mcp = server.build_server(require_auth=False)
+    before = len(encoder.texts)
+
+    async def search_then_leave():
+        async with Client(mcp) as client:
+            async with anyio.create_task_group() as caller:
+                caller.start_soon(
+                    client.call_tool,
+                    "search_memory",
+                    {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+                )
+                assert await anyio.to_thread.run_sync(walking.wait, 10)
+                caller.cancel_scope.cancel()
+
+    asyncio.run(search_then_leave())
+    assert caller_left.is_set()
+    assert encoder.texts[before:] == []
 
 
 def test_non_owner_cannot_bypass_passage_authority_with_an_admission_predicate(

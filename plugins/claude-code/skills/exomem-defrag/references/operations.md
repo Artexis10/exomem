@@ -33,7 +33,7 @@ interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative events stay quiet. Do not create an Entity, collection, or
+metrics, and tentative events get no note. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
 `proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
@@ -596,6 +596,9 @@ cannot be undone.
   proof-bearing artifacts. Same handle shape either way. Use one call for the
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
+  When you keep a handed file only for safekeeping and nothing in it warrants a
+  note, pass `options.custody_only: true`; the reply says so, and a later note
+  that cites it takes it off the custody list.
 
 - **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token

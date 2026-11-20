@@ -248,6 +248,16 @@ _RECALL_PATH_CACHE: OrderedDict[
 ] = OrderedDict()
 _RECALL_PATH_CACHE_LOCK = threading.Lock()
 _RECALL_PATH_CACHE_SIZE = 32
+# The eligible set of a filter plan, one entry per vault, scope and plan, kept with
+# the proof of every input that decides it (`_eligibility_proof`). A repeated plan
+# at one corpus state then costs no catalogue read and no admission pass.
+_ELIGIBLE_CACHE: OrderedDict[
+    tuple[Path, str, str], tuple[tuple, frozenset[str]]
+] = OrderedDict()
+_ELIGIBLE_CACHE_LOCK = threading.Lock()
+_ELIGIBLE_CACHE_SIZE = 32
+# Paths that all entries hold together: about 15 MB of path strings at most.
+_ELIGIBLE_CACHE_PATHS = 100_000
 MAX_RERANK_CANDIDATES = 300
 #: Why a reranker that cannot judge across languages is skipped, by the way
 #: fusion saw the request cross scripts (`find_candidates.CROSSING_*`).
@@ -2046,12 +2056,7 @@ def find(
     # (`unit_filters`), and the graph by the `relation_filter` flag that `dimension_edges` sets: a
     # cached answer from a graph that has since gone stale is not current.
     dimension_edges = dimension_lookups is not None and dimension_lookups.needs_edges
-    filter_key = json.dumps(
-        requested_plan.to_dict(),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    filter_key = _filter_plan_key(requested_plan)
     effective_result_level = structured_filters.resolve_result_level(
         result_level,
         requested_plan,
@@ -5540,12 +5545,77 @@ def _managed_eligible_filter_paths(
         include_units=plan.has_unit_predicate,
     )
     return _metadata_eligible_filter_paths(
-        vault_root,
         plan=plan,
         candidate_parent_paths=candidate_parents,
         metadata=metadata,
-        proven=snapshot.proven_recall_paths(scope),
+        emitted_as=_emission_rule(vault_root, metadata, snapshot.proven_recall_paths(scope)),
     )
+
+
+def _filter_plan_key(plan: structured_filters.FilterPlan) -> str:
+    """The identity of a plan's filter, for a cache key."""
+    return json.dumps(plan.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _reusable_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+    snapshot: FreshnessSnapshot,
+) -> AbstractSet[str]:
+    """`_managed_eligible_filter_paths` with no pending overlay, reused while its inputs hold.
+
+    The set is the plan's, before any caller's admission: every caller narrows it with its own
+    admission after this, so a set computed for one caller never widens another's. A reused set is
+    the cached frozenset itself, so callers read it and never change it. A plan with a
+    unit predicate is resolved every time, because its units follow a selected interpretation that
+    no identity in the proof names.
+    """
+    proof = None if plan.has_unit_predicate else _eligibility_proof(vault_root, scope, snapshot)
+    if proof is None:
+        return _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
+    key = (vault_root.absolute(), scope, _filter_plan_key(plan))
+    with _ELIGIBLE_CACHE_LOCK:
+        cached = _ELIGIBLE_CACHE.get(key)
+        if cached is not None and cached[0] == proof:
+            _ELIGIBLE_CACHE.move_to_end(key)
+            return cached[1]
+    eligible = _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
+    # Captured before the read and checked before the insert, as for every reusable cache: a set
+    # read across a Source erasure or a corpus change is answered but never stored.
+    if len(eligible) <= _ELIGIBLE_CACHE_PATHS and _eligibility_proof(
+        vault_root, scope, snapshot
+    ) == proof:
+        frozen = frozenset(eligible)
+        with _ELIGIBLE_CACHE_LOCK:
+            _ELIGIBLE_CACHE[key] = (proof, frozen)
+            _ELIGIBLE_CACHE.move_to_end(key)
+            held = sum(len(paths) for _proof, paths in _ELIGIBLE_CACHE.values())
+            while len(_ELIGIBLE_CACHE) > _ELIGIBLE_CACHE_SIZE or held > _ELIGIBLE_CACHE_PATHS:
+                held -= len(_ELIGIBLE_CACHE.popitem(last=False)[1][1])
+    return eligible
+
+
+def _eligibility_proof(
+    vault_root: Path, scope: str, snapshot: FreshnessSnapshot
+) -> tuple | None:
+    """What decides a plan's eligible set besides the plan, or None when it cannot be proven now.
+
+    The recall checkpoint names the corpus generation and the recall and access policies that
+    admitted it, and the catalogue rows are read at it; the catalogue identity names how those rows
+    were parsed; the retirement generation moves when a Source erasure has removed its rows. A
+    checkpoint that a filesystem event has overtaken, or an unreadable generation, proves nothing.
+    """
+    from . import lexstore
+
+    retired_through = source_custody.retirement_generation(vault_root)
+    checkpoint = snapshot.recall_checkpoint(scope)
+    if retired_through is None or not freshness.recall_checkpoint_is_current(
+        vault_root, scope, checkpoint
+    ):
+        return None
+    return checkpoint, lexstore.catalog_semantic_identity(vault_root), retired_through
 
 
 def _managed_page_metadata(
@@ -5697,62 +5767,46 @@ def _emission_rule(
     caller may not see, is dropped. A child is reported as its emitted parent when that parent has a
     view and is a recall candidate, else as itself; the page it is reported as must be visible too.
     `proven` holds the paths that the catalogue's projection already admitted for recall; the
-    symlink and access walk runs only for the others.
+    symlink and access walk runs only for the others, once per path, in one
+    `recall_policy.admitted_among` batch over the rows of `metadata`, which applies the access policy.
     """
-    from . import access
 
-    seen: dict[str, bool] = {}
+    def viewed(rel: str | None) -> bool:
+        row = metadata.get(rel) if rel is not None else None
+        return row is not None and row.view is not None
+
+    admitted = recall_policy.admitted_among(
+        vault_root, (rel for rel in metadata if viewed(rel) and rel not in proven)
+    )
+
+    def recall_admitted(rel: str) -> bool:
+        return rel in proven or rel in admitted
 
     def visible(rel: str) -> bool:
-        if rel not in seen:
-            row = metadata.get(rel)
-            seen[rel] = bool(
-                row is not None
-                and row.view is not None
-                and (
-                    rel in proven
-                    or (
-                        recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                        and access.is_indexable(vault_root, rel)
-                    )
-                )
-            )
-        return seen[rel]
+        return viewed(rel) and recall_admitted(rel)
 
     def emitted_as(rel: str) -> str | None:
         if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
             return None
-        row = metadata[rel]
-        parent = metadata.get(row.parent)
-        emitted = (
-            row.parent
-            if parent is not None
-            and parent.view is not None
-            and (
-                row.parent in proven
-                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
-            )
-            else rel
-        )
+        parent = metadata[rel].parent
+        emitted = parent if viewed(parent) and recall_admitted(parent) else rel
         return emitted if visible(emitted) else None
 
     return emitted_as
 
 
 def _metadata_eligible_filter_paths(
-    vault_root: Path,
     *,
     plan: structured_filters.FilterPlan,
     candidate_parent_paths: set[str],
     metadata: dict[str, Any],
-    proven: AbstractSet[str] = frozenset(),
+    emitted_as: Callable[[str], str | None],
 ) -> set[str]:
     """Canonical filter evaluation over index views, including parent collapse.
 
-    `proven` holds the paths the catalogue's projection already admitted for
-    recall; the symlink and access walk runs only for the others.
+    `emitted_as` is the caller's `_emission_rule` over the same `metadata`, so a caller that also
+    groups rows by it admits each row once.
     """
-    emitted_as = _emission_rule(vault_root, metadata, proven)
     eligible: set[str] = set()
     matches: dict[str, bool] = {}
     for rel in candidate_parent_paths:
@@ -6280,18 +6334,17 @@ def _window_order(
         read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
         if any(metadata[rel].updated != updated for rel, updated in read.items()):
             raise RetrievalIndexWarming(site="browse_ordering_stale")
+        emitted_as = _emission_rule(vault_root, metadata, proven)
         eligible = (
             None
             if plan is None
             else _metadata_eligible_filter_paths(
-                vault_root,
                 plan=plan,
                 candidate_parent_paths=set(keys),
                 metadata=metadata,
-                proven=proven,
+                emitted_as=emitted_as,
             )
         )
-        emitted_as = _emission_rule(vault_root, metadata, proven)
         first: dict[str, str] = {}
         frames: dict[str, str] = {}
         for group, rows in groups.items():
@@ -9546,6 +9599,8 @@ def unload_ram_caches(
         _FIND_CACHE_CHECKPOINTS.clear()
     with _RECALL_PATH_CACHE_LOCK:
         _RECALL_PATH_CACHE.clear()
+    with _ELIGIBLE_CACHE_LOCK:
+        _ELIGIBLE_CACHE.clear()
     # Tiny (bounded at 32 paths), but this seam means "drop everything
     # rebuildable", and a memo left behind by an otherwise-complete eviction is
     # the kind of exception that later reads as an oversight.

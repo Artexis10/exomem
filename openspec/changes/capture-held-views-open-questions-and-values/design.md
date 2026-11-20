@@ -29,7 +29,7 @@ The full rule is one sentence in the activation `capture_policy` block, after th
 
 ### The block has a hard budget
 
-The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 176 characters and brings the longest to 1,597, so 3 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 176 characters and brings the longest to 1,598, so 2 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
 
 ### An open question is not doubt about an event
 
@@ -52,4 +52,4 @@ The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and 
 
 - The model may now save material that was mid-thought. The classes say "held" and "left open" and keep the exclusion of exploration and tangents. The real-model probe includes a control for that.
 - Measured on fresh blind cases, the served text cuts saves of material that must stay unwritten sharply, while an open question about whether something happened is saved less often than before: the served sentence has no room for that tie-breaker. The next change moves the full predicate out of the capped block and restores it.
-- The activation block has 3 characters left. The next addition must shorten something deliberately.
+- The activation block has 2 characters left. The next addition must shorten something deliberately.

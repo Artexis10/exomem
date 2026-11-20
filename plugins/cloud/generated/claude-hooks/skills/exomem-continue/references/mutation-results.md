@@ -40,6 +40,8 @@ carry the codes and reasons. A result whose status is
 that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
+When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds
+` (kept for custody only)` and the Source's frontmatter records `custody_only: true`.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
 your next call can take: the `title` and short `id` of each page written (`pages` when
 several), the hashes a guarded write takes, any
@@ -153,8 +155,10 @@ written — the content-hash and page guards can still refuse. `opening` holds t
 `declared_dois` and `printed_dois` list the DOIs found. Compare the opening text with
 the work the person asked for. On `conflict` or `not_shown`, the sentence in the reply
 names the finding, and `next_action` is the correction call when this connection may record
-corrections; otherwise it asks you to tell the person which value is wrong. Call `save_source` with no
-files, the same `title`, the right `url` and
+corrections; otherwise it asks you to tell the person which value is wrong. When the document shows
+one DOI, the call names it: correct the Source then, unless the opening text shows a work that cites
+that DOI, and tell the person. Call `save_source` with no files, the document's own `title`, the right
+`url` and
 `options.correction = {supersedes: <ref>, expected_hash: <the page's content hash>, reason}`. The
 correction keeps the stored original, writes one successor Source and leaves the first
 page unchanged. Take the content hash from `read_page` on the Source's ref just before

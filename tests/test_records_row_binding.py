@@ -115,3 +115,32 @@ def test_a_withheld_row_id_is_refused_like_an_absent_one(store, tmp_path, monkey
     assert [row["title"] for row in query["rows"]] == ["Allowed"]
     assert bound == {"item_key": KEY, "expected_item_version": query["rows"][0]["item_version"],
                      "expected_container_hash": query["snapshot"]}
+
+
+def test_a_record_id_is_refused_as_one_only_for_a_row_the_caller_may_read(store, tmp_path, monkeypatch):
+    """`record_id` names a row but no version of it: a reader is told which id edits, anyone else hears no row."""
+    create(store)
+    store.append_record(CID, item={"title": "Allowed"}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Protected"}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths=f"Records/**/{OTHER}.md")
+    scope_id = next(iter(policy.load(store.root).scopes))
+    config = tmp_path / "host-boundary.json"
+    config.write_text(json.dumps({"version": 1, "default_denied_scope_ids": [scope_id], "clients": [{
+        "issuer": "urn:fixture:issuer", "client_id": "configured-client", "denied_scope_ids": [scope_id]}]}))
+    monkeypatch.setenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG", str(config))
+    limited_owner = RequestPrincipal(
+        "owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=ClientBinding("urn:fixture:issuer", "configured-client"),
+        origin_session=OriginSessionBinding("fixture-session", "fixture-generation", "fixture-audience"))
+    nobody = "44444444-4444-4444-8444-444444444444"
+
+    def refusal(record_id):
+        with request_scope(limited_owner), preview_store(store.root, store.handle), pytest.raises(OpError) as error:
+            record_memory(store.root, "update", collection=CID, item_id=record_id, changes={"title": "x"}, why="try")
+        return error.value.code, error.value.details, str(error.value).replace(record_id, "<id>")
+
+    code, _details, message = refusal(KEY)
+    assert code == "ITEM_ID_IS_KEY"
+    assert "record_id" in message and "`id`" in message
+    assert refusal(OTHER) == refusal(nobody)
+    assert refusal(OTHER)[0] == "ITEM_NOT_FOUND"
