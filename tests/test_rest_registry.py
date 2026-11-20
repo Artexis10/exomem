@@ -1120,7 +1120,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
     assert command.surfaces == frozenset({"mcp", "rest", "cli"})
     assert command.cli_writes is True
     operation_param = next(param for param in command.params if param.name == "operation")
-    expected_operations = ("process", "status", "retry", "reprocess")
+    expected_operations = ("process", "status", "retry", "reprocess", "replicate")
     assert get_args(get_type_hints(command.leaf)["operation"]) == expected_operations
     assert operation_param.choices == expected_operations
 
@@ -1141,7 +1141,7 @@ def test_process_media_has_one_generated_registry_rest_and_openapi_contract(
         "requestBody"
     ]["content"]["application/json"]["schema"]
     assert set(schema["properties"]) == {
-        "path", "paths", "operation", "language", "multilingual", "response_detail",
+        "path", "paths", "operation", "language", "multilingual", "store", "response_detail",
     }
     assert schema["properties"]["response_detail"]["enum"] == [
         "compact",

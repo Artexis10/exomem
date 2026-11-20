@@ -798,6 +798,7 @@
             "media.process",
             "media.retry",
             "media.reprocess",
+            "media.replicate",
             "review.set_family",
             "review.set_envelope",
             "review.decide_vocabulary",
