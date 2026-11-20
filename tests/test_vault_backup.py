@@ -1,8 +1,9 @@
 """The personal vault backup, driven end to end against a real restic and a disposable repository.
 
 Each test builds a throwaway vault, points the backup config at a repository under the test's temporary folder,
-and injects damage on disk. The data is invented. A test that needs restic fails in CI when it is missing and
-skips elsewhere with the install hint, so a green local run never means the restic tests were quietly absent.
+and injects damage on disk. The data is invented. A test that needs restic fails where `EXOMEM_REQUIRE_RESTIC`
+is set (the CI job that installs it) and skips elsewhere with the install hint, so a green run in the job that
+installs restic never means the restic tests were quietly absent.
 """
 
 from __future__ import annotations
@@ -33,8 +34,8 @@ NOTE_PATH = "Knowledge Base/Notes/tidal-gauge.md"
 def restic_binary() -> str:
     found = shutil.which("restic")
     if found is None:
-        if os.environ.get("CI"):
-            pytest.fail("restic is not on PATH: CI installs the pinned release with scripts/ci-install-restic.sh")
+        if os.environ.get("EXOMEM_REQUIRE_RESTIC"):
+            pytest.fail("restic is not on PATH: the core-tests job installs the pinned release with scripts/ci-install-restic.sh")
         pytest.skip("restic is not on PATH; run scripts/ci-install-restic.sh or install restic >= 0.17.1")
     return found
 
