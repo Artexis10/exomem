@@ -63,9 +63,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   preferences, one-off activity, incidental associations, trivial metrics, and
   tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
-  observed events. A question the work leaves open is saved as an open question,
-  and the values a task settled are saved as values, never as a pointer to a
-  working file. Eligibility never creates an Entity, collection, or
+  observed events. Eligibility never creates an Entity, collection, or
   schema: a new Entity or your own affiliation edge follows `proactive_capture`;
   accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
@@ -134,6 +132,12 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
   written as an event — say so in a note field if the manifest offers one — and
   elapsed time is never an outcome.
+- A **held view, an open question, or a settled value** is a landing too, and the
+  baseline rule that tentative events stay quiet does not govern it. Save
+  a view someone holds attributed to its holder, with its uncertainty, not as fact;
+  a question the work leaves open, as an open question; the values a task settled
+  (times, prices, terms, contacts, limits) in full, never as a pointer to a working
+  file. Mid-thought exploration still stays quiet.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 

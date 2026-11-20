@@ -2,7 +2,7 @@
 
 `prominence.py` holds the capture doctrine that two carriers serve. Bootstrap serves it as the `balanced` and `maximal` capture text. The activation packet serves it again, every turn, as the `capture_policy` block, so a client that never reads the bootstrap still receives it. The hook renders that block under a cap of 1,600 characters. Above the cap it keeps only the block's first sentence, which is the live disposition and none of the capture rules.
 
-The shared `_BASELINE_CAPTURE` sentence ends "tentative claims stay quiet". It sits next to the stable-preference classes, so it reads as a general rule. The `balanced` text also excludes "unresolved questions" in general. Together they teach an agent to leave unsaved any material that is not settled. The skill scaffold already says the opposite: "Durable interpretations may be preserved with explicit attribution and uncertainty."
+The shared `_BASELINE_CAPTURE` sentence ends "tentative claims stay quiet". It sits next to the stable-preference classes, so it reads as a general rule. The `balanced` text also excludes "unresolved questions" in general. Together they teach an agent to leave unsaved any material that is not settled. The skill scaffold already allows a held view to be saved with explicit attribution and uncertainty.
 
 ## Goals / Non-Goals
 
@@ -19,7 +19,7 @@ The shared `_BASELINE_CAPTURE` sentence ends "tentative claims stay quiet". It s
 
 ### Scope the quiet rule instead of removing it
 
-Casual tentative claims about a person ("I might switch gyms") stay quiet, so the rule stays. The served text narrows it to "tentative events", the word the scaffold already uses. The words have the same length, so the bootstrap core grows by no bytes.
+Casual tentative claims about a person ("I might switch gyms") stay quiet, so the rule stays. The served text narrows it to "tentative events", the word the scaffold already uses. The words have the same length, so the bootstrap core grows by no bytes. The served baseline list therefore says "tentative events" (a same-length swap, because the core is at its ceiling), while the spec says "tentative personal claims". The baseline eligibility test already keeps an unsettled personal claim out.
 
 ### The full rule rides the activation block
 
@@ -33,7 +33,7 @@ The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `
 
 ### The copyable instruction blocks stay within their caps
 
-The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and `QUICKSTART.md` carry the same quiet rule, and a hookless client pastes them first. A same-length swap to "tentative events stay quiet" aligns them. The `balanced` block also drops its "or open questions" exclusion, which only shortens it. Each block stays within its byte cap (1,500; 1,490 for the `QUICKSTART.md` block). The blocks do not carry the three classes: the blocks stay within their caps, and the bootstrap and the activation block carry the classes.
+The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and `QUICKSTART.md` carry the same quiet rule, and a hookless client pastes them first. A same-length swap to "tentative events stay quiet" aligns them. The `balanced` block also drops its "or open questions" exclusion, which only shortens it. Each block stays within the 1,500-byte cap; the `QUICKSTART.md` block is 1,489. The blocks do not carry the three classes: the blocks stay within their caps, and the bootstrap and the activation block carry the classes.
 
 ### Sources
 

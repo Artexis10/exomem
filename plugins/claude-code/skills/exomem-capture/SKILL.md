@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: e7e6adc7f2750eb8781b1a8969884c8ab5b658eea1716512ac7330c864bbd480
+  skill_contract: 84f2e5e3ab4320f05f2a2bacc9dd0661bf9c7a8560a5672f2831d9347a1e0608
   version: "0.1.0"
 ---
 
@@ -79,9 +79,7 @@ uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
 metrics, and tentative events stay quiet. Durable interpretations retain explicit
-attribution and uncertainty rather than becoming established facts. A question the
-work leaves open is saved as an open question, and the values a task settled are
-saved as values, never as a pointer to a working file. Eligibility never creates an Entity,
+attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
@@ -92,7 +90,10 @@ Before choosing a destination, partition the exchange into independently reusabl
 objects by retrieval question, subject/domain, temporal episode, and epistemic
 role. Reuse current relevant recall and resolve each meaningful cluster against
 canonical homes. The open note has no priority; keep details within one coherent
-scope together. Preserve durable hypotheses as attributed, uncertain claims.
+scope together. Preserve durable hypotheses as attributed, uncertain claims. At a
+stepping stone also save a held view (attributed, with its uncertainty, not as fact),
+a question left open (as an open question), and settled values (in full, not file
+pointers).
 Perform one completeness/destination review for the whole write plan, not a new
 review after every write. During development, repository/specification artifacts
 carry transient progress; capture reusable decisions and verified milestones.

@@ -4,15 +4,15 @@
 
 At a stepping stone, the capture predicate SHALL include three classes besides the durable conclusion, the recurring entity and the executed method:
 
-- a view someone holds, such as an interpretation or a working hypothesis, saved attributed to its holder with its uncertainty and never as an established fact;
+- a held view, which is a view someone holds, such as an interpretation or a working hypothesis, saved attributed to its holder with its uncertainty and never as an established fact;
 - a question the work leaves open, saved as an open question;
 - the concrete values a task settled, such as times, prices, terms, contacts and limits, saved in full and never as a pointer to a working file.
 
-The activation `capture_policy` block, at every disposition except `off`, and every scaffold surface that teaches capture SHALL carry the three classes. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten.
+The activation `capture_policy` block, at every disposition except `off`, SHALL carry the three classes. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten.
 
-#### Scenario: A held interpretation is saved attributed, with its uncertainty
+#### Scenario: A held view is saved attributed, with its uncertainty
 
-- **WHEN** a task ends with a working interpretation that the evidence does not settle, held by the user or by the agent
+- **WHEN** a task ends with a view that the evidence does not settle, held by the user or by the agent
 - **THEN** the agent saves it at the stepping stone, attributed to its holder
 - **AND** the saved text states its uncertainty and does not present it as an established fact
 

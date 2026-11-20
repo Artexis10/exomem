@@ -1,6 +1,6 @@
 ## Why
 
-An outcome evaluation found that connected agents lost work at capture in two ways. They saved a pointer to a working file instead of the values in it, and the file was gone later. They also never saved an open question or a held working interpretation.
+An outcome evaluation found that connected agents lost work at capture in two ways. They saved a pointer to a working file instead of the values in it, and the file was gone later. They also never saved an open question or a held view.
 
 The cause is scope. The rule "tentative claims stay quiet" belongs to personal baseline capture, which covers casual statements such as "I might switch gyms". Exomem serves it unscoped, in the bootstrap core and in the per-turn capture policy. Agents read it as "never save anything tentative".
 
@@ -8,7 +8,7 @@ The cause is scope. The rule "tentative claims stay quiet" belongs to personal b
 
 - Scope the rule to what it governs. The served text says "tentative events stay quiet", as the scaffold already does. The baseline requirement says "tentative personal claims" and states that it governs personal baseline context only.
 - Add three classes to the stepping-stone capture predicate:
-  - a held interpretation or working hypothesis, attributed to its holder with its uncertainty, never as an established fact;
+  - a held view, such as an interpretation or working hypothesis, attributed to its holder with its uncertainty, never as an established fact;
   - a question the work leaves open, saved as an open question;
   - the concrete values a task settled (times, prices, terms, contacts, limits), stated in full, never as a pointer to a working file.
 - Serve the three classes in the per-turn activation `capture_policy` block, which every client receives, and in the skill scaffold. The `balanced` bootstrap capture text gets one short clause for the open question.
