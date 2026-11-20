@@ -16,11 +16,10 @@
 
 - [x] 3.1 Wait until recall stops abstaining with `index_warming`, and count a unit that starts while warming as a harness fault.
 - [x] 3.2 Raise the actor's turn cap to 20 and use the production upload configuration.
-- [ ] 3.3 Add the two negative cases and a held-out positive written outside the iterating session.
-  - negatives landed in cases/handed-file-custody.json; held-out positive still to be written outside the iterating session
+- [x] 3.3 Add the two negative cases and a held-out positive written outside the iterating session. The negatives are in `cases/handed-file-custody.json`; a separate author wrote the held-out positive outside the repository on 2026-11-20.
 
 ## 4. Proof and delivery
 
 - [ ] 4.1 Run base against changed on real models and record the per-case result against the ship bar.
 - [ ] 4.2 If the bar is missed, build the Stop-hook custody check and run again.
-- [ ] 4.3 Regenerate derived artifacts, including the plugin and cloud plugin, and run the public-artifact privacy gate.
+- [x] 4.3 Regenerate derived artifacts, including the plugin and cloud plugin, and run the public-artifact privacy gate.
