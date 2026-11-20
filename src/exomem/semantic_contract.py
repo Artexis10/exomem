@@ -3882,10 +3882,12 @@ def build_corpus_context_with_census(
     decision. A restricted caller's admissions are collected in their own
     disclosure boundary: they shape this context, not the caller's receipt.
 
-    The enrichment memo holds the enrichment of every page, the same for every
-    caller. A caller that a filter or a writer view restricts takes its own
-    context from it, with each page it may not see at its raw state, and that
-    context is never kept.
+    The enrichment memo holds the enrichment of every page. Only a build that
+    enriches every page writes it, and only when no caller lacks an admission that
+    the build had (a dependency of "unavailable" is never written). A restricted
+    caller never writes it and never enriches a page it may not see. It reads the
+    memo when it can validate it, with each such page at its raw state. When it
+    cannot, it enriches the pages it may see and keeps nothing.
     """
     from .governance import egress
 
@@ -3931,19 +3933,18 @@ def build_corpus_context_with_census(
         reused = memo[3] if memo is not None else {}
         # A filter decides every page: as one set, under one snapshot.
         admitted = None if visible is None else egress.admitted(visible, context.pages)
-        # Under the memo every page is enriched, withheld or not: what the memo keeps is the same for
-        # every caller, and the restricted caller's own view is cut from it below. Without the memo only
-        # the pages the caller may see are enriched.
-        enrich_all = memo_key is not None
+        withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
+        # A page this caller may not see keeps its raw state and is enriched by no one on its behalf:
+        # nothing it enriches reaches the caller's context, and the memo only ever holds a build of every page.
         states = {
             path: (
-                reused[path]
+                state
+                if path in withheld
+                else reused[path]
                 if previous.get(path) is state
                 else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
                                        language=language_registry, require_status=False,
                                        definitions_selection=selection)
-                if enrich_all or admitted is None or path in admitted
-                else state
             )
             for path, state in context.pages.items()
         }
@@ -4016,34 +4017,27 @@ def build_corpus_context_with_census(
         return _context_from_state_map(
             root, states, corpus_registry, identity, writer_visibility=writer_visibility,
         ), census
+    if withheld or memo_key is None:
+        # This caller's context is its own: cut from the owner's memo when it validates it, else built in
+        # full, and never kept.
+        return derive(states, writer_visibility, patching=memo[2] if memo is not None else None), census
     if memo is not None and memo[0] is context:
         enriched = memo[2]
     else:
         # The shared enrichment stands for no caller: it carries no writer view.
-        enriched = derive(states, None if memo_key is not None else writer_visibility,
-                          patching=memo[2] if memo is not None else None)
-    if memo_key is not None:
-        if memo is None or memo[0] is not context:
+        enriched = derive(states, None, patching=memo[2] if memo is not None else None)
+        # The reused states keep this basis object, so record the dependency it will have once a
+        # later read loads it.
+        dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
+        # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
+        # match it, so it is no enrichment to share, and it must not replace one that others can.
+        if "unavailable" not in (dependency[0][0], dependency[1][0]):
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
                 if cached is not None and cached[1] is context:
-                    _ENRICHED_CONTEXT_MEMO[memo_key] = (
-                        context,
-                        # The reused states keep this basis object, so record the
-                        # dependency it will have once a later read loads it.
-                        (basis.dependency, type_basis.loaded_dependency(), definitions, supplied),
-                        enriched,
-                        states,
-                    )
-        # A page this caller may not see keeps its raw state, so nothing a withheld page enriches
-        # reaches the caller's context. That context is the caller's alone: it is never kept in
-        # the memo, which every caller reads.
-        withheld = {path for path in states if admitted is not None and path not in admitted}
-        if withheld:
-            view = {path: context.pages[path] if path in withheld else state for path, state in states.items()}
-            enriched = derive(view, writer_visibility, patching=enriched)
-        elif writer_visibility is not None:
-            enriched = replace(enriched, writer_visibility=writer_visibility)
+                    _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
+    if writer_visibility is not None:
+        enriched = replace(enriched, writer_visibility=writer_visibility)
     return enriched, census
 
 

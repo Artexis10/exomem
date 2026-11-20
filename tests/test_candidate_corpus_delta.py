@@ -112,35 +112,61 @@ def test_a_candidate_page_joins_the_corpus_as_a_full_derivation_would_have_it(kb
             assert patched.relation_facts != before.relation_facts, case
 
 
-def test_a_restricted_callers_corpus_is_a_full_filtered_build_and_the_shared_memo_stays_unfiltered(
-    kb, corpus_cache_on, monkeypatch
-):
-    """Defect that this guards: the enrichment that every caller reads is kept with what a restricted caller
-    was shown, or a page that caller may not see enriches into its corpus. A restricted caller's corpus is
-    the one that a full build for it gives, its withheld page at its raw state, whether the shared memo was
-    filled by it or by anyone else and whether a page changed since; the memo holds the enrichment of every
-    page and no caller's view, and the owner's corpus is the one that a full build for the owner gives."""
-    seed(kb)
-    secret = f"{NOTES}/secret.md"
-    secret_page = page("Secret", "- [claim] Withheld. ^w\n\n## Relations\n- supports [[Target]]\n", tags="secret")
-    kb.add(secret, secret_page)
-    restrict_external(kb.root, "tags: [secret]")
-    memo_key = (semantic_contract._corpus_cache_key(kb.root), False)
+#: A policy, the page it withholds and its tags. A selector that reads frontmatter leaves an external caller
+#: unable to admit the vault's type overlay, as the owner does, so it cannot reuse what the owner enriched. A selector
+#: of folders leaves it able to.
+RESTRICTIONS = {
+    "by tag": ("tags: [secret]", f"{NOTES}/secret.md", "secret", False),
+    "by folder": (f'paths: ["{NOTES}/Secret/**"]', f"{NOTES}/Secret/secret.md", None, True),
+}
 
-    with request_scope(EXTERNAL):
-        filled_by_restricted = kb.build()
-    shared = semantic_contract._ENRICHED_CONTEXT_MEMO[memo_key][2]
+
+@pytest.mark.parametrize("restriction", RESTRICTIONS)
+def test_a_restricted_callers_corpus_is_a_full_filtered_build_and_the_owners_memo_stands(
+    kb, corpus_cache_on, monkeypatch, restriction
+):
+    """Defect that this guards: a page that a restricted caller may not see enriches into its corpus, or the
+    caller's build overwrites the enrichment that the owner's builds share, so the next owner build enriches
+    every page again. A restricted caller's corpus is the one that a full build for it gives, its withheld
+    page at its raw state, whether it reuses the owner's memo or cannot, and whether a page changed since;
+    the memo keeps the owner's enrichment and the owner's corpus is the one that a full build gives."""
+    selector, secret, tags, reuses_the_owners_memo = RESTRICTIONS[restriction]
+    seed(kb)
+    secret_page = page("Secret", "- [claim] Withheld. ^w\n\n## Relations\n- supports [[Target]]\n", tags=tags)
+    kb.add(secret, secret_page)
+    restrict_external(kb.root, selector)
+    memo_key = (semantic_contract._corpus_cache_key(kb.root), False)
+    enriched = []
+    enrich = semantic_contract.enrich_page_state
+    monkeypatch.setattr(
+        semantic_contract, "enrich_page_state",
+        lambda root, state, *args, **kwargs: enriched.append(state.path) or enrich(root, state, *args, **kwargs),
+    )
+
+    kb.build()
+    kept = semantic_contract._ENRICHED_CONTEXT_MEMO[memo_key]
     raw = semantic_contract._build_corpus_context_with_census(kb.root)[0].pages[secret]
-    assert filled_by_restricted.pages[secret] == raw
-    assert shared.pages[secret] != raw and shared.writer_visibility is None
-    assert shared is not filled_by_restricted
+    assert kept[2].pages[secret] != raw and kept[2].writer_visibility is None
+
+    enriched.clear()
+    with request_scope(EXTERNAL):
+        restricted = kb.build()
+    assert restricted.pages[secret] == raw
+    assert restricted is not kept[2] and kept is semantic_contract._ENRICHED_CONTEXT_MEMO[memo_key]
+    # A caller that can validate the owner's memo enriches nothing; one that cannot enriches only what it may see.
+    assert (enriched == []) if reuses_the_owners_memo else (secret not in enriched and enriched), enriched
 
     # A page changes, the withheld one too: the memo is patched, and the restricted caller's corpus with it.
     kb.add(f"{NOTES}/target.md", page("Target", "- [claim] Reworded ^claim\n"))
     kb.add(secret, secret_page.replace("Withheld.", "Withheld again."))
+    enriched.clear()
     with request_scope(EXTERNAL):
         restricted = kb.build()
+    assert secret not in enriched
+    enriched.clear()
     owner = kb.build()
+    # The owner's build patches what changed and enriches no other page, whatever the restricted caller built.
+    assert sorted(enriched) == sorted([f"{NOTES}/target.md", secret]), enriched
 
     monkeypatch.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
     with request_scope(EXTERNAL):
