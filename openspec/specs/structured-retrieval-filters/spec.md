@@ -2,6 +2,7 @@
 
 ## Purpose
 Accept the governed unit metadata `unit.verdict` as a closed string filter field and `unit.check_by` as a typed date field, so ordered comparisons answer due-by questions and non-date operands are rejected.
+
 ## Requirements
 
 ### Requirement: Governed Unit Metadata Is Filterable
@@ -141,3 +142,13 @@ The filter compiler SHALL validate namespace, RFC 6901 pointer, reserved field, 
 #### Scenario: Filter cannot bypass excluded scope
 - **WHEN** an expression names metadata present only in an excluded subtree
 - **THEN** no excluded identity becomes eligible or visible through hits, counts, explanations, or errors
+
+### Requirement: A withheld field reads as missing in every filter
+
+When a field is withheld from the caller for a page, every structured filter SHALL evaluate that field as missing for that page. This includes reserved fields, generic frontmatter-pointer filters and `$exists`. The withholding SHALL be decided per page before the filter is evaluated. A filter on a withheld field SHALL NOT change the result count, the ranking or the error that the caller sees, compared with the same page lacking the field.
+
+#### Scenario: A pointer filter on a withheld position
+
+- **WHEN** a caller who may not read a photo's original filters on that photo's position through a frontmatter pointer with `$exists: true`
+- **THEN** the photo does not match
+- **AND** the same filter with `$exists: false` matches it
