@@ -449,10 +449,16 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop
         return 0
     try:
         # SQLite opens every file first, so no descriptor outside SQLite ever touches a live database (see
-        # `_has_sqlite_header`). A file that SQLite refuses as no database is copied whole. SQLite reads an empty
-        # file as an empty database and would stage one, so an empty file is staged as an empty file, unopened.
-        if source.stat().st_size == 0:
+        # `_has_sqlite_header`). A file that SQLite refuses as no database is copied whole. SQLite reads a file of 0
+        # or 1 bytes as an empty database (its unix layer reports a 1-byte file as empty) and would stage a new one.
+        # A database holds at least one page, so such a file is no database: an empty one is staged unopened, and a
+        # 1-byte one is copied whole.
+        size = source.stat().st_size
+        if size == 0:
             target.touch(mode=0o600, exist_ok=False)
+            return 1
+        if size == 1:
+            _copy_whole(source, target)
             return 1
         try:
             intact = _copy_sqlite(source, target)

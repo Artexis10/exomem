@@ -668,6 +668,17 @@ def test_staging_keeps_the_locks_of_the_service_s_own_open_connection(vault: Pat
         service.close()
 
 
+def test_staging_copies_a_one_byte_file_as_it_is(vault: Path, tmp_path: Path) -> None:
+    # SQLite reads a 1-byte file as an empty database, so a staging that asked SQLite first would back up the
+    # media worker's lock file, or any 1-byte state file, as a new 4 KB database and report nothing.
+    (_state_dir(vault) / ".media-worker.lock").write_bytes(b"0")
+
+    staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+
+    assert staged >= 1 and findings == []
+    assert (tmp_path / "stage" / ".media-worker.lock").read_bytes() == b"0"
+
+
 def test_a_stop_ends_staging_instead_of_finishing_every_file(vault: Path, tmp_path: Path) -> None:
     _state_dir(vault)
     (_state_dir(vault) / ".review-state.json").write_text("{}")
