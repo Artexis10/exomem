@@ -208,21 +208,22 @@ def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | 
     """The step that replaces a Source whose url may not name its document: a metadata-only correction.
 
     `page_hash` is the guard the call names; None asks the agent to read the page's hash first. When `check`
-    is a `conflict` whose document shows exactly one DOI, the call names that DOI and asks for the correction
-    now: the person gave the url, the document gives the DOI, and the correction keeps the first version.
+    is a `conflict` whose document shows exactly one DOI (`_shown_dois`), the call names that DOI and asks for
+    the correction when the opening text shows the document is that work. A document that shows two DOIs,
+    such as a stale template DOI in its metadata and its own DOI on its first page, gets the comparison instead.
     """
     guard = f'"{page_hash}"' if page_hash else "<the page's content hash from read_page>"
     tail = (
         f'options.correction = {{"supersedes": "{ref}", "expected_hash": {guard}, "reason": "<what was wrong>"}}; '
         "the stored original is kept and nothing is uploaded again."
     )
-    shown = _shown_dois(check) if check and check.get("state") == CONFLICT else []
+    shown = _shown_dois(check) if check and check.get("state") == CONFLICT else ()
     if len(shown) == 1:
         return (
-            f"Unless the opening text shows a different work that cites {shown[0]}, correct the Source now, even "
-            "when the person gave the url, then tell them what changed: call save_source again with no files, the "
-            "document's own title, "
-            f'url "https://doi.org/{shown[0]}" and {tail}'
+            f"If the opening text shows this document is the work {shown[0]} names, correct the Source now, even "
+            "when the person gave the url, and tell them what changed: call save_source again with no files, the "
+            f'document\'s own title, url "https://doi.org/{shown[0]}" and {tail} '
+            "Otherwise tell the person which value is wrong."
         )
     return (
         "Compare the Source's opening text with its url. If the url is wrong, call save_source again with no "
@@ -230,13 +231,17 @@ def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | 
     )
 
 
-def _shown_dois(check: Mapping[str, Any]) -> list[str]:
-    """The DOIs the document itself shows: its metadata's when it declares any, else its first page's."""
+def _shown_dois(check: Mapping[str, Any]) -> tuple[str, ...]:
+    """The distinct DOIs the document shows, declared before printed, compared without case.
+
+    Metadata can carry a stale or template DOI, so neither field alone names the document's own DOI.
+    """
+    found: dict[str, None] = {}
     for key in ("declared_dois", "printed_dois"):
         value = check.get(key)
-        if isinstance(value, list) and value:
-            return [str(item) for item in value]
-    return []
+        if isinstance(value, list):
+            found.update(dict.fromkeys(str(item).lower() for item in value))
+    return tuple(found)
 
 
 def is_pdf(filename: str) -> bool:

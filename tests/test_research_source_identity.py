@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from _identity_pdf import make_pdf, nested_forms_pdf, raw_info_pdf, text_bomb_pdf
+from _identity_pdf import make_pdf, nested_forms_pdf, raw_info_pdf, text_bomb_pdf, xmp_with_doi
 
 from exomem import (
     client_artifacts,
@@ -199,6 +199,25 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     # The OpenAI-compatible search keeps string metadata only, so it carries the successor as JSON.
     result = next(result for result in commands.op_search(vault, query="harbour lanterns")["results"] if result["id"] == predecessor_page)
     assert json.loads(result["metadata"]["corrected_by"])["path"] == successor["page"]
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_template_doi_in_the_metadata_is_never_offered_as_the_corrected_url(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Publisher tools can leave a template DOI in XMP. Metadata outranks print, so the state is `conflict`,
+    # yet the url names the DOI page 1 prints: a directive to the template DOI would overwrite a correct url.
+    page = "Meltwater pulses in alpine basins. Published at https://doi.org/10.5555/paper.2021.0042"
+    pdf = make_pdf(tmp_path / "paper.pdf", [page], xmp=xmp_with_doi("10.5555/template.0001"))
+    _stage(monkeypatch, tmp_path, pdf)
+
+    reply = _save_pdf(vault, source_schema, url="https://doi.org/10.5555/paper.2021.0042")
+
+    assert reply["files"][0]["identity"]["state"] == "conflict"
+    assert "10.5555/template.0001" not in reply["next_action"]
+    # The maintenance sweep offers the same call, so it must not correct the Source to the template DOI either.
+    [finding] = _findings(vault)
+    assert "10.5555/template.0001" not in finding.proposed_fix
 
 
 # --- the correction route: guards and what it leaves behind ----------------------------------------
