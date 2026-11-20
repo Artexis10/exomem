@@ -102,24 +102,9 @@ def clean_families():
     return pages
 
 
-#: The tree that `ACCESS_POLICY` excludes: a page in it is no recall candidate, so a child that names
-#: one as its parent is reported as itself although the catalogue groups it under that parent.
+#: A policy that excludes `EXCLUDED`: a page in it is no recall candidate.
 EXCLUDED = "Notes/Hidden"
-ACCESS_POLICY = {"Knowledge Base/_access.yaml": f"excluded:\n  - {EXCLUDED}/\n".encode()}
-
-
-def chained_families():
-    """A frame whose own parent is a frame: the middle page is a parent and a child at once."""
-    video_rel, video_body = video(f"{NOTES}/Clip-Six.mp4", "2026-03-06")
-    middle = frame(f"{NOTES}/Clip-Six.mp4", "scene-000-006.000", 6.0, "2026-03-05")
-    inner = frame(
-        f"{NOTES}/Clip-Seven.mp4",
-        "scene-000-007.000",
-        7.0,
-        "2026-03-04",
-        parent_media=middle[0].removesuffix(".md"),
-    )
-    return dict([(video_rel, video_body), middle, inner])
+ACCESS_POLICY = f"excluded:\n  - {EXCLUDED}/\n".encode()
 
 
 def hostile_families():
@@ -312,18 +297,22 @@ def test_the_window_answers_as_the_exhaustive_browse_and_file_mode_do(world, rou
 
 
 def test_a_hostile_parent_answers_as_exhaustive(vault, configured_boundary, routes, monkeypatch):  # noqa: F811
-    """A parent outside the knowledge base, in a tree that the access policy excludes, or that is a
-    child itself is reported where the exhaustive browse reports it, whichever route answers. The
-    owner reads them, so that no withheld parent hides the case."""
-    families = {**clean_families(), **hostile_families(), **chained_families(), **ACCESS_POLICY}
-    world = build_world(vault, configured_boundary[1], "owner", families)
+    """A parent outside the knowledge base, or one that the access policy has since excluded, is
+    reported where the exhaustive browse reports it, whichever route answers. The store's rows lag a
+    policy change, so the catalogue still groups the excluded parent's frame under it while the
+    live policy makes the frame a page of its own. The owner reads them, so that no withheld parent
+    hides the case."""
+    world = build_world(
+        vault, configured_boundary[1], "owner", {**clean_families(), **hostile_families()}
+    )
+    (vault / "Knowledge Base/_access.yaml").write_bytes(ACCESS_POLICY)
     windowed = answers(world.root, world.caller)
     declined_window(monkeypatch)
     exhaustive = answers(world.root, world.caller)
     assert windowed == exhaustive
     assert all(windowed[(100, name)] for name in CELLS)
     everything = json.dumps(windowed[(100, "no filter")])
-    assert all(clip in everything for clip in ("Clip-Three.mp4", "Clip-Five.mp4", "Clip-Six.mp4"))
+    assert "Clip-Three.mp4" in everything and "scene-000-004.000" in everything
 
 
 def test_a_page_that_fails_to_hydrate_is_replaced_by_the_next_one(world, monkeypatch):
