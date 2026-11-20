@@ -1064,6 +1064,7 @@ class EligibilityPlan:
 
         def drives(node: EligibilityExpr) -> bool:
             if isinstance(node, AxisTest):
+                # nosemgrep: ep-word-membership -- AxisTest's closed op literals that an index range scan can answer.
                 return node.axis in INDEX_CAPTURE_AXES and node.op in {"range", "eq", "in"}
             if isinstance(node, (EligibilityAll, EligibilityAny)):
                 return any(drives(child) for child in node.children)
