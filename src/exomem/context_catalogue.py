@@ -934,7 +934,7 @@ class _Fold:
         for rel in ordered[len(to_fold):]:
             self.pending[rel] = PENDING_DEFERRED
             self.deferred += 1
-        for rel in to_fold:
+        for rel in foreground_priority.yielding_in_bulk(to_fold):
             foreground_priority.check_cancelled()
             self._fold_path(rel)
         self._mirror_other_anchors()
@@ -1609,7 +1609,11 @@ def _advance_delta(
         from . import epistemic_graph
 
         background = fold == FOLD_BACKGROUND
-        with call_spans.span("recall.working_set.catalogue.fold", {}) as measured:
+        # The span counts a background fold's waits for requests as work; `waited_ms` takes them apart.
+        with (
+            call_spans.span("recall.working_set.catalogue.fold", {}) as measured,
+            foreground_priority.recording_waits(measured),
+        ):
             result = catalogue.update(
                 delta.changed,
                 delta.deleted,
@@ -1670,7 +1674,10 @@ def _fold_all(root: Path, freshness_stamp: str) -> dict[str, Any]:
     """
     key = root.absolute()
     checkpoint = freshness.consumer_checkpoint(root, "kb") if freshness.is_live(root, "kb") else None
-    with call_spans.span("recall.working_set.catalogue.fold", {}) as measured:
+    with (
+        call_spans.span("recall.working_set.catalogue.fold", {}) as measured,
+        foreground_priority.recording_waits(measured),
+    ):
         result = ContextCatalogue(root).update(freshness_stamp=freshness_stamp or None, fill_tags=True)
         _measure_fold(measured, result)
     if checkpoint is not None and not result.get("unavailable"):

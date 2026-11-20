@@ -2135,8 +2135,7 @@ class StoreServer:
                 # another request runs (``foreground_priority``), holding no boundary and no store
                 # checkout, so a handoff or a publication never waits on it. A store request ends
                 # the wait (``call``), and the step then ends after one batch (``_aside``).
-                with foreground_priority.bulk(budget=rebuild):
-                    foreground_priority.yield_to_foreground()
+                foreground_priority.give_way(rebuild)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 outcome = derived_rows.step(self.root, writer, aside=self._aside)
                 self._derived_handle = writer.handle

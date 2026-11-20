@@ -14,11 +14,12 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from exomem import call_spans, request_budget, reserved_paths, writer_lease
+from exomem import call_spans, foreground_priority, request_budget, reserved_paths, writer_lease
 
 CALLERS = 8
 
@@ -427,6 +428,96 @@ def test_c5_a_failed_build_releases_the_flight_and_never_hangs_a_follower(
     assert reserved_paths.identity_catalogue_ready(vault_root) is True
 
 
+@pytest.mark.parametrize("budgeted", [False, True], ids=["background-follower", "request-follower"])
+def test_a_stopped_leader_is_not_a_failure_its_followers_inherit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    budgeted: bool,
+) -> None:
+    """A stoppable pass can lead the cold build, and its stop ends only that pass. A follower
+    with no request budget, that is not stoppable or is another pass with its own stop, builds
+    in the leader's place and gets the catalogue it got before the walk had cancellation points:
+    neither the leader's cancellation nor a refusal. A follower on a request budget never walks
+    past its deadline; it gets the typed unavailable outcome it gets when its wait runs out."""
+
+    vault_root = _vault(tmp_path)
+    _manager(tmp_path, monkeypatch)
+
+    stop = threading.Event()
+    build_entered = threading.Event()
+    follower_parked = threading.Event()
+    release_build = threading.Event()
+    walks = 0
+    original_from_vault = reserved_paths.IdentityCatalogue.from_vault.__func__
+
+    def held_from_vault(
+        cls: type[reserved_paths.IdentityCatalogue], root: Path
+    ) -> reserved_paths.IdentityCatalogue:
+        nonlocal walks
+        walks += 1
+        build_entered.set()
+        assert release_build.wait(20)
+        return original_from_vault(cls, root)
+
+    monkeypatch.setattr(
+        reserved_paths.IdentityCatalogue, "from_vault", classmethod(held_from_vault)
+    )
+    flight_wait = reserved_paths._await_baseline_flight
+
+    def counted_wait(flight, timeout: float):
+        follower_parked.set()
+        return flight_wait(flight, timeout)
+
+    monkeypatch.setattr(reserved_paths, "_await_baseline_flight", counted_wait)
+
+    leader_outcome: list[BaseException] = []
+    follower_outcome: list[BaseException] = []
+    follower_built: list[reserved_paths.IdentityCatalogue] = []
+
+    def lead() -> None:
+        try:
+            with foreground_priority.bulk(stop=stop):
+                reserved_paths._baseline_identity_catalogue(vault_root)
+        except BaseException as error:  # noqa: BLE001 - the leader's stop is the case under test
+            leader_outcome.append(error)
+
+    def follow() -> None:
+        # Long enough that the follower is still inside its wait when the leader ends.
+        seconds = request_budget.DELIVERY_RESERVE_SECONDS + reserved_paths._FOLLOWER_GUARD_RESERVE_SECONDS + 5.0
+        token = request_budget.set_current(request_budget.RequestBudget(seconds=seconds) if budgeted else None)
+        try:
+            with foreground_priority.bulk():
+                follower_built.append(reserved_paths._baseline_identity_catalogue(vault_root))
+        except BaseException as error:  # noqa: BLE001 - what a follower is handed is the case under test
+            follower_outcome.append(error)
+        finally:
+            request_budget.reset_current(token)
+
+    leader = threading.Thread(target=lead, name="catalogue-leader", daemon=True)
+    leader.start()
+    assert build_entered.wait(20)
+    follower = threading.Thread(target=follow, name="catalogue-follower", daemon=True)
+    follower.start()
+    assert follower_parked.wait(20)
+    stop.set()
+    release_build.set()
+    leader.join(20)
+    follower.join(20)
+
+    assert not leader.is_alive() and not follower.is_alive()
+    assert [type(error) for error in leader_outcome] == [foreground_priority.BulkCancelled]
+    if budgeted:
+        assert follower_built == []
+        assert [type(error) for error in follower_outcome] == [reserved_paths.ReservedPathLeafError]
+        assert str(follower_outcome[0]) == "CAPABILITY_UNAVAILABLE"
+        assert walks == 1  # the leader's only: a request never walks past its own deadline
+        return
+    assert follower_outcome == []
+    assert len(follower_built) == 1 and follower_built[0].generation is not None
+    assert walks == 2
+    assert reserved_paths._baseline_identity_catalogue(vault_root) is follower_built[0]
+
+
 def test_every_non_nested_build_path_stamps_the_token_its_scan_validated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -580,6 +671,34 @@ def test_warm_scheduler_builds_off_the_calling_thread_and_returns_first(
     assert build_threads == ["exomem-identity-catalogue-warm"]
     assert caller not in build_threads
     assert builds == 1
+    assert reserved_paths.identity_catalogue_ready(vault_root) is True
+
+
+def test_the_warm_waits_for_a_request_and_a_request_joining_it_does_not_wait_out_the_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk is the 12 s stall the warm exists to take off requests, but it shares the
+    interpreter with them, so it pauses for one in flight. A request that needs its result
+    joins the build and must not count as the request the build waits for."""
+
+    vault_root = _vault(tmp_path)
+    _manager(tmp_path, monkeypatch)
+
+    with foreground_priority.foreground():
+        reserved_paths.schedule_identity_catalogue_warm(vault_root)
+        warm = _warm_thread()
+        assert warm is not None
+        time.sleep(0.3)
+        ready_beside_a_request = reserved_paths.identity_catalogue_ready(vault_root)
+        started = time.monotonic()
+        joined = reserved_paths._baseline_identity_catalogue(vault_root)
+        waited = time.monotonic() - started
+    warm.join(20)
+
+    assert ready_beside_a_request is False
+    assert waited < foreground_priority.MAX_YIELD_SECONDS / 2, waited
+    assert joined.generation is not None
     assert reserved_paths.identity_catalogue_ready(vault_root) is True
 
 

@@ -22,6 +22,7 @@ from exomem import (
     embeddings,
     epistemic_graph,
     file_watcher,
+    foreground_priority,
     freshness,
     lexstore,
     media_processing,
@@ -932,6 +933,39 @@ def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.Mo
         t.join(timeout=2)
 
 
+def test_a_flush_waits_for_a_request_in_flight_and_still_dispatches_the_batch(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ups, _dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault, debounce_seconds=0.05)
+    a = vault / "Knowledge Base" / "Notes" / "a.md"
+    b = vault / "Knowledge Base" / "Notes" / "b.md"
+    a.parent.mkdir(parents=True, exist_ok=True)
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("# B\n", encoding="utf-8")
+    # A first flush loads what a flush imports, so the one under test takes milliseconds.
+    w._record(a, deleted=False)
+    w._flush()
+    assert ups == [[a]]
+    t = threading.Thread(target=w._run_dispatch, daemon=True)
+    t.start()
+    try:
+        with foreground_priority.foreground():
+            w._record(b, deleted=False)
+            time.sleep(0.3)
+            flushed_beside_a_request = list(ups)
+        deadline = time.monotonic() + _FLUSH_VALVE_SECONDS
+        while len(ups) < 2 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        w._stop.set()
+        w._wake.set()
+        t.join(timeout=2)
+
+    assert flushed_beside_a_request == [[a]]
+    assert ups == [[a], [b]]
+
+
 def test_file_watcher_reads_policy_without_restart(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     w = file_watcher.FileWatcher(vault)
@@ -1570,6 +1604,28 @@ def test_reconcile_dispatches_drift_delta_to_fanout(vault, monkeypatch: pytest.M
     assert calls["delete"] == []
     # bm25 corpus pre-warmed for both scopes off the query path.
     assert calls["warm"] == ["kb", "vault"]
+
+
+def test_reconcile_waits_for_a_request_in_flight_and_dispatches_the_same_delta(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))  # a missed watchdog event
+    periodic = threading.Thread(target=lambda: w._reconcile_once(seed=False), daemon=True)
+
+    with foreground_priority.foreground():
+        periodic.start()
+        time.sleep(0.3)
+        dispatched_beside_a_request = list(calls["inbound"])
+    periodic.join(timeout=30)
+
+    assert dispatched_beside_a_request == []
+    assert calls["inbound"] == [([_vault_rel(vault, target)], [])]
 
 
 def test_quiet_reconcile_defers_embedding_and_skips_bm25_warm(
