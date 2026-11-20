@@ -10,6 +10,7 @@ The sidecar records the result as frontmatter fields (`FIELDS`). The position fi
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import math
@@ -41,6 +42,9 @@ LOCATION_FIELDS: frozenset[str] = frozenset({CAPTURE_LAT, CAPTURE_LON})  # nosem
 
 #: A video container that records only a UTC creation time gives a UTC date, not a local one.
 BASIS_UTC = "utc"
+
+#: The extraction kinds that `media_types` assigns and whose files can state a capture.
+KINDS: frozenset[str] = frozenset({"image", "video"})  # nosemgrep: ep-word-set -- closed extraction kinds of the media registry
 
 TEXT_LIMIT = 128
 SIDE_LIMIT = 1_000_000
@@ -131,6 +135,16 @@ def coordinate(field: str, value: object) -> float | None:
     if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > limit:
         return None
     return float(value)
+
+
+def available(media_type: str) -> bool:
+    """Whether this host has the library that decodes `media_type`.
+
+    `read` answers "states nothing" for a decoder that is missing as it does for a file with no
+    metadata, which suits an extraction that goes on. A backfill asks first, so that it never reads
+    a missing decoder as a library of photos that state nothing.
+    """
+    return importlib.util.find_spec("av" if media_type == "video" else "PIL") is not None
 
 
 def read(path: Path, media_type: str) -> CaptureFacts | None:

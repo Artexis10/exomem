@@ -6732,6 +6732,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "fix": "dry-run-default",
         "reconcile": "dry-run-opt-in",
         "backfill-ids": "dry-run-default",
+        "capture-metadata": "dry-run-default",
         "convert-originals": "dry-run-default",
         "maintenance-job": "structure",
         "maintenance-job-cancel": "mutation",

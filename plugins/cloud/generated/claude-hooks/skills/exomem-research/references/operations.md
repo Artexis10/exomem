@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `list_review_items` and `decide_review_item` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `inspect_memory` and `manage_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids`, `reconcile` or `convert-originals` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids`, `capture-metadata`, `reconcile` or `convert-originals` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `inspect_memory` and `manage_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless

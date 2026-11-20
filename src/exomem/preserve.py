@@ -1971,16 +1971,22 @@ def without_position_fields(content: str) -> str:
 def render_capture_block(before: str, capture: CaptureFacts) -> str:
     """The owner backfill's write: `before` with only its capture block replaced.
 
-    A sidecar whose preserved notes have no machine-owned boundary is refused, as an extraction write is:
-    the backfill leaves such a page to its owner rather than guess.
+    A page that already holds exactly that block comes back as it is. A sidecar whose preserved notes
+    have no machine-owned boundary is refused when the write would change it, as an extraction write
+    is: the backfill leaves such a page to its owner rather than guess.
     """
-    if _has_ambiguous_legacy_preserved_notes(with_newline(before, "\n")):
+    newline = document_newline(before)
+    text = with_newline(before, "\n")
+    updated = set_capture_fields(text, capture)
+    if updated == text:
+        return before
+    if _has_ambiguous_legacy_preserved_notes(text):
         raise PreserveError(
             code="AMBIGUOUS_SIDECAR_BOUNDARY",
             missing=[],
             reason="unmarked nonempty preserved notes have no machine-owned boundary",
         )
-    return set_capture_fields(before, capture)
+    return with_newline(updated, newline)
 
 
 #: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
