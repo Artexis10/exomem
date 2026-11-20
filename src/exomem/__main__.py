@@ -50,11 +50,12 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -93,49 +94,6 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
     return tuple(introduced)
 
 
-# Subcommands `_dispatch_main` routes explicitly, before falling through to
-# `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
-# command gets its own log file; `serve` configures server-role logging
-# itself from `server.run()`, so it is deliberately excluded here.
-# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
-_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "setup",
-        "init",
-        "reclaim-schema",
-        "install-skill",
-        "package-skills",
-        "personalize",
-        "install-hook",
-        "demo",
-        "studio",
-        "tui",
-        "doctor",
-        "install-info",
-        "auth",
-        "attach",
-        "status",
-        "warm",
-        "mode",
-        "dreamer",
-        "prominence",
-        "backfill-media",
-        "index",
-        "enroll-speaker",
-        "list-speakers",
-        "remove-speaker",
-        "trace",
-        "logs",
-        "lease",
-        "governance-schema",
-        "relations",
-        "collections",
-        "store-mode",
-        "import",
-    }
-)
-
-
 def _is_cli_only_invocation(raw: list[str]) -> bool:
     """Whether `raw` routes to a one-shot CLI command rather than `serve`."""
     if not raw or raw[0].startswith("-"):
@@ -147,23 +105,18 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
     return raw[0] in _simple_cli_action_names()
 
 
+# The backup Job's commands, which `main` runs before it loads the CLI, the server framework or the native
+# runtime: each bounds itself in seconds on one CPU.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_LEAN_COMMANDS: frozenset[str] = frozenset(
+    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw[:1] == ["cell-media-census"]:
-        # The backup Job bounds this command in seconds on one CPU, and it reads one file, so it loads no CLI,
-        # server framework or native runtime.
-        from .cell_media_census import main as census_main
-
-        return census_main(raw[1:])
-    if raw[:1] == ["cell-media-manifest"]:
-        # The backup Job runs this on a read-only clone: it reads the vault and the media ledger, nothing more.
-        from .media_manifest import main as manifest_main
-
-        return manifest_main(raw[1:])
-    if raw[:1] == ["cell-media-collect"]:
-        from .media_collect import main as collect_main
-
-        return collect_main(raw[1:])
+    if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()
@@ -248,99 +201,8 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
 
 
 def _dispatch_main(raw: list[str]) -> int:
-    if raw and raw[0] == "setup":
-        from .setup_wizard import setup_main
-
-        return setup_main(raw[1:])
-    if raw and raw[0] == "init":
-        return _init_main(raw[1:])
-    if raw and raw[0] == "reclaim-schema":
-        return _reclaim_schema_main(raw[1:])
-    if raw and raw[0] == "install-skill":
-        return _install_skill_main(raw[1:])
-    if raw and raw[0] == "package-skills":
-        return _package_skills_main(raw[1:])
-    if raw and raw[0] == "personalize":
-        from .personalize import personalize_main
-
-        return personalize_main(raw[1:])
-    if raw and raw[0] == "install-hook":
-        return _install_hook_main(raw[1:])
-    if raw and raw[0] == "demo":
-        from .demo import main as demo_main
-
-        return demo_main(raw[1:])
-    if raw and raw[0] == "studio":
-        return _studio_main(raw[1:])
-    if raw and raw[0] == "tui":
-        return _tui_main(raw[1:])
-    if raw and raw[0] == "doctor":
-        return _doctor_main(raw[1:])
-    if raw and raw[0] == "install-info":
-        return _install_info_main(raw[1:])
-    if raw and raw[0] == "auth":
-        return _auth_main(raw[1:])
-    if raw and raw[0] == "attach":
-        return _attach_main(raw[1:])
-    if raw and raw[0] == "status":
-        return _status_main(raw[1:])
-    if raw and raw[0] == "warm":
-        return _warm_main(raw[1:])
-    if raw and raw[0] == "mode":
-        return _mode_main(raw[1:])
-    if raw and raw[0] == "dreamer":
-        return _dreamer_main(raw[1:])
-    if raw and raw[0] == "prominence":
-        return _prominence_main(raw[1:])
-    if raw and raw[0] == "backfill-media":
-        return _backfill_media_main(raw[1:])
-    if raw and raw[0] == "index":
-        return _index_main(raw[1:])
-    if raw and raw[0] == "enroll-speaker":
-        return _enroll_speaker_main(raw[1:])
-    if raw and raw[0] == "list-speakers":
-        return _list_speakers_main(raw[1:])
-    if raw and raw[0] == "remove-speaker":
-        return _remove_speaker_main(raw[1:])
-    if raw and raw[0] == "trace":
-        return _trace_main(raw[1:])
-    if raw and raw[0] == "logs":
-        return _logs_main(raw[1:])
-    if raw and raw[0] == "lease":
-        return _lease_main(raw[1:])
-    if raw and raw[0] == "governance-schema":
-        return _governance_schema_main(raw[1:])
-    if raw and raw[0] == "relations":
-        return _relations_main(raw[1:])
-    if raw and raw[0] == "collections":
-        return _collections_main(raw[1:])
-    if raw and raw[0] == "store-mode":
-        return _store_mode_main(raw[1:])
-    if raw and raw[0] == "import":
-        from .local_import import main as local_import_main
-        return local_import_main(raw[1:])
-    if raw and raw[0] == "cloud":
-        if raw[1:2] == ["export"]:
-            from .cloud_export_client import main as cloud_export_main
-            return cloud_export_main(raw[2:])
-        if raw[1:2] == ["download"]:
-            from .cloud_download_client import main as cloud_download_main
-            return cloud_download_main(raw[2:])
-        from .cloud_import_client import main as cloud_main
-        return cloud_main(raw[1:])
-    if raw and raw[0] == "cell-import":
-        from .cloud_import_job import main as import_main
-        return import_main(raw[1:])
-    if raw and raw[0] == "cell-export":
-        from .cloud_export import main as export_main
-        return export_main(raw[1:])
-    if raw and raw[0] == "cell-init":
-        return _cell_init_main(raw[1:])
-    # `exomem activate "<turn>"` — the spelled-out contract for the context
-    # compiler. A thin alias over the registry command so there is exactly one
-    # leaf; the long form `exomem activate_context` keeps working.
-    if raw and raw[0] == "activate":
-        return _activate_main(raw[1:])
+    if raw and raw[0] in _COMMANDS:
+        return _run_command(raw[0], raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -364,7 +226,24 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
-def _load_cwd_dotenv() -> None:
+class _DotenvConflict(Exception):
+    """The working-directory `.env` would replace exported values; a credential write must not guess."""
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(", ".join(keys))
+        self.keys = keys
+
+
+def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
+    return (
+        f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        "to a different value than this process's environment, so it is unclear which "
+        "deployment to act on. Unset those variables, remove them from the .env, or run "
+        "from a directory without that .env."
+    )
+
+
+def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     """Load the operator's cwd `.env`, as the local CLI always has.
 
     Never in a cloud cell: its environment is the pod spec, and "no `.env`
@@ -373,6 +252,11 @@ def _load_cwd_dotenv() -> None:
     example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
     configuration just because an operator ran a command from inside it --
     the same guard `server_runtime` applies to the service's own load.
+
+    The `.env` still wins over exported values. A command that writes
+    credentials or sessions passes `refuse_conflicts`: when the `.env` would
+    replace an exported value with a different one, it stops instead of
+    acting on a store the operator did not name. Other commands warn.
     """
     from . import cloud_cell
 
@@ -383,8 +267,21 @@ def _load_cwd_dotenv() -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 
+    # Names only: the values may be secrets.
+    replaced = sorted(
+        key
+        for key, value in dotenv_values(dotenv_path).items()
+        if value is not None and key in os.environ and os.environ[key] != value
+    )
+    if replaced and refuse_conflicts:
+        raise _DotenvConflict(replaced)
+    if replaced:
+        print(
+            f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
+            file=sys.stderr,
+        )
     load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
@@ -395,7 +292,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    _load_cwd_dotenv()
+    _load_cwd_dotenv(refuse_conflicts=True)
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -485,7 +382,11 @@ def _issue_local_main(args: argparse.Namespace) -> int:
     if output.exists() or output.is_symlink():
         print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
         return 2
-    _load_cwd_dotenv()
+    try:
+        _load_cwd_dotenv(refuse_conflicts=True)
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message("auth issue-local", conflict), file=sys.stderr)
+        return 2
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -589,6 +490,9 @@ def _auth_main(argv: list[str]) -> int:
 
     try:
         authority = _build_auth_session_authority()
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message(f"auth {args.command}", conflict), file=sys.stderr)
+        return 2
     except (SessionStoreUnavailable, OSError):
         print(
             "session authority unavailable; check storage configuration and connectivity",
@@ -1226,7 +1130,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1263,10 +1167,12 @@ def _backfill_media_main(argv: list[str]) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from . import backfill, state_migration
+    from .vault_store import cli_fence
 
     # Ordinary CLI entry is a read-only placement gate. Legacy state must be
     # moved by the explicit offline maintenance command before stores open.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("backfill-media", Path(args.vault).expanduser())
 
     backfill.backfill_media(
         Path(args.vault).expanduser(),
@@ -1288,21 +1194,21 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        f"it never wipes the sidecar first. Covers {kb_prefix()} by default, or "
-        f"the whole vault with --scope vault (so notes outside {kb_prefix()} "
+        f"it never wipes the sidecar first. Covers {managed_join('')} by default, or "
+        f"the whole vault with --scope vault (so notes outside {managed_join('')} "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope",
         choices=("kb", "vault"),
         default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        f"'vault' indexes the whole vault, not just {kb_prefix()}.",
+        f"'vault' indexes the whole vault, not just {managed_join('')}.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1335,10 +1241,12 @@ def _index_main(argv: list[str]) -> int:
     # Contending is never the right move, so make it unrepresentable.
     from . import graph_sync as _graph_sync
     from . import state_migration
+    from .vault_store import cli_fence
 
     # Placement must resolve before even the graph-owner probe reads its
     # coordination state.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("index", Path(args.vault).expanduser())
 
     owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
     if owner is not None:
@@ -1646,12 +1554,12 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status, state_migration
+    from . import layout_report, resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
@@ -1662,6 +1570,8 @@ def _status_main(argv: list[str]) -> int:
 
         # The records' own answer: it opens the store only when the manifest says store mode.
         status["vault_store"] = store_mode.status(vault_root)
+        # A layout that cannot be read is a state in the report, so status never refuses on it.
+        status["layout"] = layout_report.report(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1674,6 +1584,10 @@ def _status_main(argv: list[str]) -> int:
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
             print(f"  vault_store: {status['vault_store']}")
+        if "layout" in status:
+            print(f"  layout: {status['layout']['outcome']}")
+            if status["layout"]["remedy"]:
+                print(f"    fix: {status['layout']['remedy']}")
     return 0
 
 
@@ -1726,7 +1640,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -1803,7 +1717,7 @@ def _relations_main(argv: list[str]) -> int:
         "--vault",
         default=None,
         help=(
-            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            f"vault root containing '{managed_join('')}'; reads its snapshot locally "
             "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
         ),
     )
@@ -1876,6 +1790,9 @@ def _relations_main(argv: list[str]) -> int:
                 )
             vault_root = Path(vault).expanduser()
             served_by = "local-snapshot"
+            from .vault_store import cli_fence
+
+            cli_fence.require("relations", vault_root)
             # A terminal on the owner's machine reading its own sidecar is the
             # owner-local caller, the one audience a governed vault serves.
             from .collection_store import ownership
@@ -1972,8 +1889,10 @@ def _warm_main(argv: list[str]) -> int:
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
         from . import state_migration
+        from .vault_store import cli_fence
 
         state_migration.require_vault_state_ready(vault_root)
+        cli_fence.require("warm", vault_root)
 
     # Which models this install can actually load. The reranker and the torch
     # CLIP are sentence-transformers models, so the `embeddings-onnx` lane
@@ -2097,7 +2016,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2130,7 +2049,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2159,7 +2078,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2491,7 +2410,7 @@ def _collections_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2503,7 +2422,9 @@ def _collections_main(argv: list[str]) -> int:
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
     from .structured_collections import CollectionError
+    from .vault_store import cli_fence
 
+    cli_fence.require(f"collections {args.command}", Path(args.vault))
     try:
         if args.command == "backup":
             result = owner.backup(
@@ -2582,7 +2503,7 @@ def _store_mode_main(argv: list[str]) -> int:
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
             "collection store and back. Behind the vault-store-v1 release gate; vault files are "
-            "never rewritten by a migration."
+            "never rewritten by a migration. `relayout --plan` reads the vault and writes nothing."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -2627,11 +2548,25 @@ def _store_mode_main(argv: list[str]) -> int:
         "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
     )
     release.add_argument("--why", help="reason for the release (required with --apply)")
-    for command in (status, migrate, rollback, release):
+    relayout = subcommands.add_parser(
+        "relayout",
+        help="plan the move of the managed folder's content to the vault root; the plan reads "
+        "the vault and writes nothing",
+    )
+    relayout.add_argument(
+        "--plan",
+        action="store_true",
+        required=True,
+        help="print the plan: outcome, counts, alternatives and samples of each listing",
+    )
+    relayout.add_argument(
+        "--full", action="store_true", help="list every entry instead of the first 20 of each listing"
+    )
+    for command in (status, migrate, rollback, release, relayout):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2651,7 +2586,7 @@ def _store_mode_main(argv: list[str]) -> int:
         )
         return 2
 
-    from . import state_migration
+    from . import relayout, state_migration
     from .cli_ops import OpError
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
@@ -2673,14 +2608,16 @@ def _store_mode_main(argv: list[str]) -> int:
                     if applying
                     else store_release.dry_run(root)
                 )
+            elif args.command == "relayout":
+                result = relayout.render(relayout.plan(root), full=args.full)
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
-        print(json.dumps(result, sort_keys=args.command != "release"))
+        # A release and a relayout plan lead with their outcome sentence, so their keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command not in ("release", "relayout")))
     except (
         CollectionStoreError,
         OpError,
@@ -2906,6 +2843,14 @@ def _governance_schema_main(argv: list[str]) -> int:
             "--vault must name an existing absolute vault root",
             as_json=as_json,
         )
+        return 1
+
+    from .vault_store import cli_fence
+
+    try:
+        cli_fence.require(f"governance-schema {args.command}", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        _governance_schema_print_error(refused.code, refused.reason, as_json=as_json)
         return 1
 
     from .governance import authorization_custody, schema_downmigration, schema_migration
@@ -3237,7 +3182,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
         prog="exomem reclaim-schema",
         description=(
             f"Remove the superseded copy of the shipped schema from "
-            f"{kb_prefix()}_Schema/ once it has been redeployed to .exomem/schema/."
+            f"{managed_join('_Schema/')} once it has been redeployed to .exomem/schema/."
         ),
     )
     parser.add_argument(
@@ -3253,8 +3198,10 @@ def _reclaim_schema_main(argv: list[str]) -> int:
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
+    cli_fence.require("reclaim-schema", vault)
     try:
         report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
     except OpError as error:
@@ -3268,11 +3215,11 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     verb = "Removed" if report["applied"] else "Would remove"
     print(f"{verb} {len(report['removed'])} file(s), {report['reclaimed_kb']} KB:")
     for relative in report["removed"]:
-        print(f"  {kb_prefix()}_Schema/{relative}")
+        print(f"  {managed_join(f'_Schema/{relative}')}")
     if report["declined"]:
         print(f"Kept {len(report['declined'])} file(s):")
         for entry in report["declined"]:
-            print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
+            print(f"  {managed_join('_Schema/')}{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
     return 0
@@ -3308,11 +3255,19 @@ def _cell_init_main(argv: list[str]) -> int:
         return 1
 
     from . import cell_init, cloud_cell, privacy_log
+    from .vault_store import cli_fence
 
     # The same content redaction the server installs (design D3 "Output"): a
     # failure below must never let a query- or path-shaped detail escape
     # through a log line this process emits before it exits.
     privacy_log.install_hosted_log_redaction()
+
+    try:
+        cli_fence.require("cell-init", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        # The refusal's code is a fixed code, and the step names where it stopped.
+        _cell_init_failure_line(refused.code, "vault_store")
+        return 1
 
     try:
         # `/data/host` (design D3.1) is enforced only inside a real cloud
@@ -3347,7 +3302,7 @@ def _cell_init_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description=f"Bootstrap a fresh {kb_dirname()} scaffold into a vault.",
+        description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -3356,14 +3311,16 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help=f"Overlay the scaffold even if {kb_prefix()} exists (existing files kept).",
+        help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
     )
     args = parser.parse_args(argv)
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
+    cli_fence.require("init", Path(vault))
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
@@ -3372,15 +3329,20 @@ def _init_main(argv: list[str]) -> int:
     except OpError as error:
         print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
-    print(f"Initialized {kb_dirname()} at {report['kb']}")
+    print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
+    if (storage := report.get("original_storage")) is not None:
+        if storage["layout"] == "shared":
+            print("  Originals are stored once, however many filings share their bytes.")
+        else:
+            print(f"  {storage['action']}")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: "
+        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
-    print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
+    print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
     print(
         "  4. For low-resource mode: exomem mode quiet; inspect with "
         "exomem status --resources --json."
@@ -3495,6 +3457,10 @@ def _package_skills_main(argv: list[str]) -> int:
     # Personalized packaging is explicit.  A configured runtime vault must never
     # silently turn the default public package command into a private build.
     vault = Path(args.vault) if args.vault else None
+    if vault is not None:
+        from .vault_store import cli_fence
+
+        cli_fence.require("package-skills", vault)
     try:
         report = package_module.package_skills(
             Path(args.out) if args.out else None,
@@ -3768,7 +3734,7 @@ def _activate_main(argv: list[str]) -> int:
         "--max-chars",
         type=int,
         default=None,
-        help="character ceiling for the packet (default 4000, clamped to 500..8000)",
+        help="character ceiling for the packet (default 6000, clamped to 500..8000)",
     )
     parser.add_argument("--purpose", default=None, help="declared purpose for this request")
     parser.add_argument(
@@ -4777,7 +4743,7 @@ def _print_adopt_human(result: dict) -> None:
         f"{totals.get('dirs', 0)} folders"
     )
     if governance.get("kb_present"):
-        print(f"  Governed layer: {governance.get('governed_path') or kb_prefix()}")
+        print(f"  Governed layer: {governance.get('governed_path') or managed_join('')}")
     else:
         print("  Governed layer: not initialized yet")
     print("  Originals: untouched; non-KB files stay read-only input.")
@@ -5044,7 +5010,7 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
                 print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
             return 1
 
-    parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
+    parser = _CLIParser(prog="kb", description=f"Query and write the local {managed_root_rel()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]
@@ -5156,6 +5122,155 @@ def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     else:
         _print_human(result, op=cmd.name)
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
+
+
+def _setup_main(argv: list[str]) -> int:
+    from .setup_wizard import setup_main
+
+    return setup_main(argv)
+
+
+def _personalize_main(argv: list[str]) -> int:
+    from .personalize import personalize_main
+
+    return personalize_main(argv)
+
+
+def _demo_main(argv: list[str]) -> int:
+    from .demo import main as demo_main
+
+    return demo_main(argv)
+
+
+def _import_main(argv: list[str]) -> int:
+    from .local_import import main as local_import_main
+
+    return local_import_main(argv)
+
+
+def _cloud_main(argv: list[str]) -> int:
+    if argv[:1] == ["export"]:
+        from .cloud_export_client import main as cloud_export_main
+
+        return cloud_export_main(argv[1:])
+    if argv[:1] == ["download"]:
+        from .cloud_download_client import main as cloud_download_main
+
+        return cloud_download_main(argv[1:])
+    from .cloud_import_client import main as cloud_main
+
+    return cloud_main(argv)
+
+
+def _cell_import_main(argv: list[str]) -> int:
+    from .cloud_import_job import main as import_main
+
+    return import_main(argv)
+
+
+def _cell_export_main(argv: list[str]) -> int:
+    from .cloud_export import main as export_main
+
+    return export_main(argv)
+
+
+def _cell_media_census_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_census import main as census_main
+
+    return census_main(argv)
+
+
+def _cell_media_manifest_main(argv: list[str]) -> int:
+    # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
+    from .media_manifest import main as manifest_main
+
+    return manifest_main(argv)
+
+
+def _cell_media_collect_main(argv: list[str]) -> int:
+    from .media_collect import main as collect_main
+
+    return collect_main(argv)
+
+
+#: One entry per subcommand that `_dispatch_main` routes before the registry path. `vault_store/cli_fence.py`
+#: declares what each one touches, and its handler refuses a store-mode vault where it resolves the vault.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_COMMANDS: dict[str, Callable[[list[str]], int]] = {
+    "setup": _setup_main,
+    "init": _init_main,
+    "reclaim-schema": _reclaim_schema_main,
+    "install-skill": _install_skill_main,
+    "package-skills": _package_skills_main,
+    "personalize": _personalize_main,
+    "install-hook": _install_hook_main,
+    "demo": _demo_main,
+    "studio": _studio_main,
+    "tui": _tui_main,
+    "doctor": _doctor_main,
+    "install-info": _install_info_main,
+    "auth": _auth_main,
+    "attach": _attach_main,
+    "status": _status_main,
+    "warm": _warm_main,
+    "mode": _mode_main,
+    "dreamer": _dreamer_main,
+    "prominence": _prominence_main,
+    "backfill-media": _backfill_media_main,
+    "index": _index_main,
+    "enroll-speaker": _enroll_speaker_main,
+    "list-speakers": _list_speakers_main,
+    "remove-speaker": _remove_speaker_main,
+    "trace": _trace_main,
+    "logs": _logs_main,
+    "lease": _lease_main,
+    "governance-schema": _governance_schema_main,
+    "relations": _relations_main,
+    "collections": _collections_main,
+    "store-mode": _store_mode_main,
+    "import": _import_main,
+    "cloud": _cloud_main,
+    "cell-import": _cell_import_main,
+    "cell-export": _cell_export_main,
+    "cell-init": _cell_init_main,
+    "cell-media-census": _cell_media_census_main,
+    "cell-media-manifest": _cell_media_manifest_main,
+    "cell-media-collect": _cell_media_collect_main,
+    # A thin alias over the registry command, so there is exactly one leaf; the long form
+    # `exomem activate_context` keeps working.
+    "activate": _activate_main,
+}
+
+# The table entries that never configured the one-shot CLI log file: the cloud client, the cell jobs and the
+# `activate` alias. Every other entry gets `process="cli"` logging, and `serve` configures its own from `server.run()`.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_WITHOUT_CLI_LOG: frozenset[str] = frozenset(
+    {
+        "cloud",
+        "cell-import",
+        "cell-export",
+        "cell-init",
+        "cell-media-census",
+        "cell-media-manifest",
+        "cell-media-collect",
+        "activate",
+    }
+)
+# Subcommands `_dispatch_main` routes explicitly, before falling through to `_serve_main`: all of `_COMMANDS`
+# but those. `_is_cli_only_invocation` reads it at call time.
+_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(_COMMANDS) - _WITHOUT_CLI_LOG
+
+
+def _run_command(name: str, argv: list[str]) -> int:
+    """Run one table entry, and report a store-mode refusal as one line instead of a traceback."""
+    from .vault_store import cli_fence
+
+    try:
+        return _COMMANDS[name](argv)
+    except cli_fence.StoreFenceRefusal as refused:
+        print(f"Error [{refused.code}]: {refused.reason}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from typing import Any
 
 from . import held_fs, state_paths
 from .collection_store import schema as store_schema
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel
 
 log = logging.getLogger("exomem.state_migration")
 
@@ -52,13 +52,18 @@ COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
 #: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
 #: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
 VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
-# This ID names the closed private-upload cancellation format.
+# These IDs name the closed original-storage and private-upload formats.
+SHARED_ORIGINALS_COMPATIBILITY_ID = "shared-originals-v1"
 HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID = "held-upload-cancellation-v1"
+# The manifest key a new vault's creator sets; the first service start with launcher support activates the
+# shared layout and removes it. Releases that predate it ignore the key, as they ignore any unknown key.
+_SHARED_ORIGINALS_INTENT = "shared_originals_intent"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
     "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-    VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
+    HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
 })
 
 
@@ -269,8 +274,8 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
         CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-        VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
-        *store_schema.compatibility_ids(),
+        VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
+        HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -441,6 +446,54 @@ def record_vault_store_compatibility(
                      drop=frozenset() if active else ids)
 
 
+def record_shared_originals_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool], lock_timeout: float | None = None,
+) -> None:
+    """Enroll before pool publication; the caller proves lifecycle custody.
+
+    A serving caller passes `lock_timeout` and gets `TimeoutError` under contention.
+    """
+    _record_optional(vault_root, authority_check, add=frozenset({SHARED_ORIGINALS_COMPATIBILITY_ID}),
+                     lock_timeout=lock_timeout)
+
+
+def record_shared_originals_intent(vault_root: Path, *, authority: object) -> None:
+    """Record that a genuinely new vault starts in shared original storage.
+
+    Only a vault's creator calls this, under its offline authority. The intent is no format: the vault keeps
+    ordinary storage, which every release reads, until a service start that proves launcher support activates
+    the shared layout and clears the intent. A release that predates the intent ignores it.
+    """
+    _require_offline_authority(authority)
+    root = Path(vault_root)
+    state_dir = state_paths.vault_state_dir(root)
+    with _migration_lock(state_dir):
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("a new vault records its original storage once its state is complete")
+        if manifest.get(_SHARED_ORIGINALS_INTENT) is not True:
+            manifest[_SHARED_ORIGINALS_INTENT] = True
+            _write_manifest(state_dir, manifest)
+
+
+def shared_originals_intent(vault_root: Path) -> bool:
+    """Whether the vault's state records that it starts in shared original storage at its first capable start."""
+    manifest = _load_manifest(state_paths.vault_state_dir(vault_root), vault_root=vault_root)
+    return manifest is not None and manifest.get(_SHARED_ORIGINALS_INTENT) is True
+
+
+def clear_shared_originals_intent(
+    vault_root: Path, *, authority_check: Callable[[], bool], lock_timeout: float | None = None,
+) -> None:
+    """Retire the intent once the shared layout is active; the caller proves lifecycle custody."""
+    with _collection_store_manifest(
+        vault_root, authority_check, "intent retirement", lock_timeout=lock_timeout,
+    ) as (state_dir, manifest):
+        if _SHARED_ORIGINALS_INTENT in manifest:
+            del manifest[_SHARED_ORIGINALS_INTENT]
+            _write_manifest(state_dir, manifest)
+
+
 def record_held_upload_cancellation_compatibility(
     vault_root: Path, *, authority_check: Callable[[], bool], active: bool,
     lock_timeout: float | None = None,
@@ -509,7 +562,7 @@ def scan_vault_state(vault_root: Path) -> dict[str, tuple[Path, ...]]:
 
     from . import reserved_paths
 
-    kb = Path(vault_root) / kb_dirname()
+    kb = managed_root(Path(vault_root))
     external = frozenset(_descriptor_ids())
     found: dict[str, list[Path]] = {}
     try:
@@ -598,7 +651,7 @@ def _assert_descriptor_upgrade_destination_proven(
     if not destination_is_proven:
         representative = destinations[0]
         raise StatePlacementConflict(
-            Path(vault_root) / kb_dirname() / representative.name,
+            managed_root(Path(vault_root)) / representative.name,
             representative,
             f"descriptor {descriptor_id!r} has external members not established "
             "by published proof or matching legacy source",
@@ -876,6 +929,26 @@ def restore_connector_boundary_offline(vault_root: Path, *, authority: object, r
     ))
 
 
+def restore_shared_originals_offline(vault_root: Path, *, authority: object) -> None:
+    """Re-enrol a restored archive whose canonical pool marker the caller has read, before anything serves it.
+
+    The archive carries the marker but not the state manifest, so without this an earlier release would open
+    the restored archive and find its pooled originals absent.
+    """
+    _require_offline_authority(authority)
+    root = Path(vault_root)
+    state_dir = state_paths.vault_state_dir(root)
+    with _migration_lock(state_dir):
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("restored shared originals require complete state")
+        if SHARED_ORIGINALS_COMPATIBILITY_ID not in manifest["descriptors"]:
+            manifest["descriptors"] = sorted([*manifest["descriptors"], SHARED_ORIGINALS_COMPATIBILITY_ID])
+            _write_manifest(state_dir, manifest)
+        with _RESOLUTION_LOCK:
+            _RESOLUTION_CACHE.pop(_cache_key(root, state_dir), None)
+
+
 def migrate_vault_state_offline(
     vault_root: Path,
     *,
@@ -908,7 +981,7 @@ def migrate_vault_state_offline(
         resolution = _resolve_locked(vault_root, state_dir)
     if resolution.dual_state:
         raise StatePlacementConflict(
-            vault_root / kb_dirname(),
+            managed_root(vault_root),
             state_dir,
             "a complete manifest has legacy in-vault duplicates",
         )
@@ -936,7 +1009,7 @@ def _resolve_locked(vault_root: Path, state_dir: Path) -> StateResolution:
     if manifest is None:
         if _external_state_present(state_dir):
             raise StatePlacementConflict(
-                vault_root / kb_dirname(),
+                managed_root(vault_root),
                 state_dir,
                 "the external root has no migration manifest",
             )
@@ -1073,13 +1146,13 @@ def _move_family(
         removed_tree = False
         for member in members:
             if member.is_dir() and not member.is_symlink():
-                relative = f"{kb_dirname()}/{member.name}"
+                relative = managed_join(member.name)
                 removed_tree = _remove_empty_tree(filesystem, relative) or removed_tree
         # Fence the top-level legacy namespace on every published-family
         # replay, including when a prior unlink succeeded but its parent flush
         # failed and the tree is not visible on this retry.  Only after this
         # durable absence proof may the family advance to complete.
-        kb_parent_result = filesystem.parent(kb_dirname(), access="flush")
+        kb_parent_result = filesystem.parent(managed_root_rel(), access="flush")
         if not kb_parent_result.ok:
             raise OSError("state migration cannot retain the legacy state root")
         with kb_parent_result.require() as kb_parent:
@@ -1101,7 +1174,7 @@ def _family_source_files(
     member: Path,
 ) -> tuple[Path, ...]:
     if member.is_dir() and not member.is_symlink():
-        relative = f"{kb_dirname()}/{member.name}"
+        relative = managed_join(member.name)
         parent_result = filesystem.parent(relative)
         if not parent_result.ok:
             if parent_result.error is not None and parent_result.error.code == "MISSING":
@@ -1127,7 +1200,7 @@ def _publish_source_file(
     source_relative: Path,
 ) -> dict[str, Any]:
     parent_relative = source_relative.parent.as_posix()
-    held_parent = kb_dirname()
+    held_parent = managed_root_rel()
     if parent_relative != ".":
         held_parent = f"{held_parent}/{parent_relative}"
     parent_result = filesystem.parent(held_parent)
@@ -1158,7 +1231,7 @@ def _publish_source_file(
                     _discard(destination)
                 if existed:
                     raise StatePlacementConflict(
-                        vault_root / kb_dirname() / source_relative,
+                        managed_root(vault_root) / source_relative,
                         destination,
                         "the two copies differ",
                     )
@@ -1242,10 +1315,10 @@ def _delete_published_member(
             Path(MANIFEST_NAME), "published member proof is invalid"
         )
     source = str(record["source"])
-    _contained_member_path(Path(vault_root) / kb_dirname(), source)
+    _contained_member_path(managed_root(Path(vault_root)), source)
     relative = Path(*PurePosixPath(source).parts)
     parent_relative = relative.parent.as_posix()
-    held_parent = kb_dirname()
+    held_parent = managed_root_rel()
     if parent_relative != ".":
         held_parent = f"{held_parent}/{parent_relative}"
     parent_result = filesystem.parent(held_parent, access="flush")
@@ -1442,6 +1515,8 @@ def _validate_manifest(
         raise StateMigrationManifestError(path, "descriptor set is invalid")
     if payload.get("state") not in _MANIFEST_STATES:
         raise StateMigrationManifestError(path, "migration state is invalid")
+    if _SHARED_ORIGINALS_INTENT in payload and payload[_SHARED_ORIGINALS_INTENT] is not True:
+        raise StateMigrationManifestError(path, "shared-originals intent is invalid")
     families = payload.get("families")
     if not isinstance(families, dict):
         raise StateMigrationManifestError(path, "family states are invalid")
@@ -1486,7 +1561,7 @@ def _validate_manifest(
         if (
             not _is_hex64(rollback["event_id"])
             or not all(_is_hex64(rollback[key]) for key in ("plan_digest", "target_digest", "d0"))
-            or rollback["legacy_path"] != f"{kb_dirname()}/.governance.sqlite"
+            or rollback["legacy_path"] != f"{managed_join('')}.governance.sqlite"
             or rollback["stage_leaf"] != f".governance-v3-rollback-{rollback['event_id']}.sqlite"
             or not isinstance(rollback["timestamp"], int)
             or isinstance(rollback["timestamp"], bool)
@@ -1575,7 +1650,7 @@ def _valid_rollback_endpoint_path(instance_id: object, value: object) -> bool:
         return False
     if not isinstance(value, str):
         return False
-    prefix = f"{kb_dirname()}/_Governance/events/{instance_id}/"
+    prefix = managed_join(f"_Governance/events/{instance_id}/")
     leaf = value.removeprefix(prefix)
     return (
         value.startswith(prefix)
@@ -1782,7 +1857,7 @@ class GovernanceRollbackSession:
         marker = {
             "operation": operation, "event_id": event_id, "phase": "prepared",
             "plan_digest": plan_digest, "target_digest": target_digest, "timestamp": timestamp,
-            "d0": d0, "legacy_path": f"{kb_dirname()}/.governance.sqlite",
+            "d0": d0, "legacy_path": f"{managed_join('')}.governance.sqlite",
             "stage_leaf": f".governance-v3-rollback-{event_id}.sqlite",
             "backup_reference": backup_reference, "backup_plan_digest": backup_plan_digest,
             "source_store_digest": source_store_digest,
@@ -2063,7 +2138,7 @@ def _retained_legacy_governance_file(
     if not acquired.ok:
         raise StateMigrationOfflineRequired("legacy governance store cannot be retained")
     with acquired.require() as filesystem:
-        parent_result = filesystem.parent(kb_dirname(), access="read")
+        parent_result = filesystem.parent(managed_root_rel(), access="read")
         if not parent_result.ok:
             raise StateMigrationOfflineRequired("legacy governance parent cannot be retained")
         with parent_result.require() as parent:
@@ -2217,7 +2292,7 @@ def _remove_legacy_governance_family(
     if not acquired.ok:
         raise StateMigrationOfflineRequired("legacy governance family cannot be retained")
     with acquired.require() as filesystem:
-        parent_result = filesystem.parent(kb_dirname(), access="flush")
+        parent_result = filesystem.parent(managed_root_rel(), access="flush")
         if not parent_result.ok:
             raise StateMigrationOfflineRequired("legacy governance parent cannot be retained")
         with parent_result.require() as parent:
@@ -2255,7 +2330,7 @@ def _remove_legacy_governance_residue(vault_root: Path) -> None:
     if not acquired.ok:
         raise StateMigrationOfflineRequired("legacy governance residue cannot be retained")
     with acquired.require() as filesystem:
-        parent_result = filesystem.parent(kb_dirname(), access="flush")
+        parent_result = filesystem.parent(managed_root_rel(), access="flush")
         if not parent_result.ok:
             raise StateMigrationOfflineRequired("legacy governance parent cannot be retained")
         with parent_result.require() as parent:
@@ -2277,7 +2352,7 @@ def _remove_legacy_governance_residue(vault_root: Path) -> None:
 
 
 def _legacy_governance_family_present(vault_root: Path) -> bool:
-    kb = Path(vault_root) / kb_dirname()
+    kb = managed_root(Path(vault_root))
     for leaf in (
         ".governance.sqlite",
         ".governance.sqlite-wal",
@@ -2468,7 +2543,7 @@ def _adopt_governance_store_from_vault_offline_impl(vault_root: Path) -> StateRe
 
 
 def _adopt_remove_file(filesystem: held_fs.HeldFilesystem, leaf: str) -> None:
-    parent_result = filesystem.parent(kb_dirname(), access="flush")
+    parent_result = filesystem.parent(managed_root_rel(), access="flush")
     if not parent_result.ok:
         raise OSError("adopt-state cannot retain the KB directory")
     with parent_result.require() as parent:
@@ -2487,7 +2562,7 @@ def _adopt_remove_file(filesystem: held_fs.HeldFilesystem, leaf: str) -> None:
 
 
 def _adopt_remove_tree(filesystem: held_fs.HeldFilesystem, tree: Path) -> None:
-    relative = f"{kb_dirname()}/{tree.name}"
+    relative = managed_join(tree.name)
     parent_result = filesystem.parent(relative)
     if not parent_result.ok:
         if parent_result.error is not None and parent_result.error.code == "MISSING":
@@ -2517,5 +2592,5 @@ def _adopt_remove_tree(filesystem: held_fs.HeldFilesystem, tree: Path) -> None:
             flushed = filesystem.flush_directory(parent)
             if not flushed.ok:
                 raise OSError("adopt-state could not flush a state-tree parent")
-    relative = f"{kb_dirname()}/{tree.name}"
+    relative = managed_join(tree.name)
     _remove_empty_tree(filesystem, relative)

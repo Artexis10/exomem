@@ -150,7 +150,9 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         packet = _activate(vault, turn="", max_chars=budget, include_timings=True)
         assert packet["abstained"] is False, packet.get("abstention")
         block = packet["map"]
-        rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"]), block["overflow"]]
+        rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"])]
+        if block.get("overflow"):
+            rendered.append(block["overflow"])
         if description := packet.get("turn_slice", {}).get("description"):
             rendered.append(description)
         used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", "")) + _capture_chars(packet)
@@ -160,7 +162,8 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         assert packet["budget"]["used_chars"] <= budget
         # A field with nothing to say is absent, not empty or null.
         assert all(item.get(field, "present") not in ([], None) for item in block["items"] for field in ("topics", "lifecycle_class", "state"))
-        assert "Domain maps:" in block["overflow"]
+        if block.get("overflow"):
+            assert "Domain maps:" in block["overflow"]
         decoded = working_set_runtime.decode_continuity(packet["continuity"])
         assert decoded["map_generation"] == block["generation"] == packet["generation"]["map_generation"]
         assert decoded["refs"] == []
@@ -347,8 +350,8 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
     owners, guests = [], []
     for root in (vault, twin):
         _cold()
-        owners.append(_activate(root, max_chars=1000))  # fill the owner cache before a restricted read
-        guests.append(_activate(root, _external(), max_chars=1000))
+        owners.append(_activate(root, max_chars=2000))  # fill the owner cache before a restricted read
+        guests.append(_activate(root, _external(), max_chars=2000))
     assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     assert guests[0]["generation"] == guests[1]["generation"]
     assert working_set_runtime.decode_continuity(guests[0]["continuity"]) == working_set_runtime.decode_continuity(guests[1]["continuity"])

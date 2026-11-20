@@ -147,41 +147,124 @@ def test_cli_file_handle_validation_is_bounded_and_content_free(files: str) -> N
     assert "signature" not in error.value.message
 
 
-def test_compact_terminal_keeps_bounded_failure_for_malformed_artifact_rows() -> None:
+def _stored_row(**overrides) -> dict:
+    return {
+        "file_id": "file-one",
+        "outcome": "stored",
+        "stored_path": "Knowledge Base/Evidence/case/raw/proof.bin",
+        "size": 11,
+        "hash": "a" * 64,
+        "hash_algorithm": "sha256",
+        "content_type": "application/octet-stream",
+        "media_id": None,
+        "warnings": [],
+        **overrides,
+    }
+
+
+def _terminal(row: dict, summary: dict) -> dict:
+    from exomem.mutation_terminal import committed_terminal
+
+    return committed_terminal(
+        {"files": [row], "summary": summary},
+        request_id="request",
+        receipt_id="receipt",
+        idempotency_key=None,
+    )
+
+
+def _compact_batch(row: dict, summary: dict) -> dict:
+    from exomem.mutation_terminal import project_terminal
+
+    return project_terminal(_terminal(row, summary), outcome_verb="saved")
+
+
+def test_a_stored_file_with_a_malformed_identity_field_is_not_reported_as_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bytes are committed, so a receipt field that does not read is named, never a failure."""
+    with caplog.at_level("WARNING", logger="exomem.mutation_terminal"):
+        compact = _compact_batch(_stored_row(size=True), {"stored": True, "failed": 0})
+
+    [row] = compact["files"]
+    assert row["outcome"] == "stored"
+    assert row["unverified_fields"] == ["size"]
+    assert "size" not in row and row["hash"] == "a" * 64
+    assert compact["summary"] == {"stored": 1, "failed": 0}
+    assert compact["user_summary"].startswith("Saved -> Knowledge Base/Evidence/case/raw/proof.bin")
+    assert "fields=size" in caplog.text
+
+
+def test_an_over_long_warning_trims_to_the_bound_and_keeps_the_stored_file_stored() -> None:
+    warnings = ["x" * 301] + [f"advisory {number}" for number in range(9)]
+
+    summary = {"stored": 1, "failed": 0}
+
+    [row] = _compact_batch(_stored_row(warnings=warnings), summary)["files"]
+
+    assert row["outcome"] == "stored" and "unverified_fields" not in row
+    assert row["warnings"] == ["x" * 300] + [f"advisory {number}" for number in range(7)]
+    assert row["warnings_omitted"] == 2
+    # The count a caller can trust still covers every warning the write raised.
+    assert _terminal(_stored_row(warnings=warnings), summary)["warnings_count"] == 10
+
+
+@pytest.mark.parametrize("unnamed_first", [False, True], ids=["unnamed-second", "unnamed-first"])
+def test_a_batch_sentence_counts_a_stored_file_whose_path_did_not_read(unnamed_first: bool) -> None:
     from exomem.mutation_terminal import committed_terminal, project_terminal
 
+    unnamed = _stored_row(file_id="file-two", stored_path=None)
+    rows = [unnamed, _stored_row()] if unnamed_first else [_stored_row(), unnamed]
+    terminal = committed_terminal(
+        {"files": rows, "summary": {"stored": 2, "failed": 0}},
+        request_id="request",
+        receipt_id="receipt",
+        idempotency_key=None,
+    )
+
+    compact = project_terminal(terminal, outcome_verb="saved")
+
+    assert compact["summary"] == {"stored": 2, "failed": 0}
+    assert compact["files"][0 if unnamed_first else 1]["unverified_fields"] == ["stored_path"]
+    # Two files were saved, so the sentence says two. The readable path leads in either row order.
+    assert compact["user_summary"].startswith(
+        "Saved 2 files -> Knowledge Base/Evidence/case/raw/proof.bin and 1 more"
+    )
+
+
+def test_a_partial_batch_sentence_leads_with_a_readable_path_when_the_unnamed_file_is_first() -> None:
+    from exomem.mutation_terminal import committed_terminal, project_terminal
+
+    failed = {"file_id": "file-three", "outcome": "failed", "code": "FETCH_FAILED", "reason": "download refused"}
     terminal = committed_terminal(
         {
-            "files": [
-                {
-                    "file_id": "file-one",
-                    "outcome": "stored",
-                    "stored_path": "Knowledge Base/Evidence/case/raw/proof.bin",
-                    "size": True,
-                    "hash": "a" * 64,
-                    "hash_algorithm": "sha256",
-                    "content_type": "application/octet-stream",
-                    "media_id": None,
-                    "warnings": ["x" * 301],
-                }
-            ],
-            "summary": {"stored": True, "failed": 0},
+            "files": [_stored_row(file_id="file-two", stored_path=None), _stored_row(), failed],
+            "summary": {"stored": 2, "failed": 1},
         },
         request_id="request",
         receipt_id="receipt",
         idempotency_key=None,
     )
 
-    compact = project_terminal(terminal)
-    assert compact["files"] == [
-        {
-            "file_id": "file-one",
-            "outcome": "failed",
-            "code": "INVALID_ARTIFACT_RECEIPT",
-            "reason": "artifact result was invalid",
-        }
-    ]
-    assert compact["summary"] == {"stored": 0, "failed": 1}
+    compact = project_terminal(terminal, outcome_verb="saved")
+
+    assert compact["user_summary"].startswith(
+        "Saved 2 of 3 files -> Knowledge Base/Evidence/case/raw/proof.bin and 1 more; 1 file could not be saved"
+    )
+
+
+def test_a_sentence_names_a_lone_stored_file_by_its_id_when_its_path_did_not_read() -> None:
+    compact = _compact_batch(_stored_row(stored_path=None), {"stored": 1, "failed": 0})
+
+    assert compact["user_summary"].startswith("Saved -> file-one")
+
+
+def test_a_warnings_value_that_is_not_a_list_is_named_not_dropped() -> None:
+    [row] = _compact_batch(_stored_row(warnings="one advisory"), {"stored": 1, "failed": 0})["files"]
+
+    assert row["outcome"] == "stored"
+    assert row["unverified_fields"] == ["warnings"]
+    assert "warnings" not in row
 
 
 def test_client_artifact_url_validation_never_returns_the_signed_url() -> None:
@@ -2784,3 +2867,45 @@ def test_a_cell_keeps_the_broker_cap_and_fixed_deadlines(monkeypatch: pytest.Mon
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert client_artifacts.fetch_budget() == client_artifacts.FetchBudget()
+
+
+@pytest.mark.usefixtures("duplicate_index")
+def test_a_retried_adoption_of_a_pooled_hand_over_replays_instead_of_refusing_to_verify(
+    vault: Path, source_schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catches a replay that re-reads the logical path: a pooled original has no file there, so the retry of a
+    stored hand-over is refused ADOPTION_REPLAY_UNVERIFIABLE and the client reports a stored file as lost."""
+    import hashlib
+
+    from exomem import artifact_lifecycle, client_artifacts, media_processing, original_pool
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    payload = b"synthetic hand-over bytes"
+    monkeypatch.setattr(
+        client_artifacts, "stage_artifact", lambda file, _budget, **_kwargs: _staged(tmp_path, file["file_id"], "brief.bin", payload)
+    )
+    monkeypatch.setattr(media_processing, "classify_media", lambda _path: None)
+
+    def hand_over() -> dict:
+        return client_artifacts.capture_source_artifacts(
+            vault,
+            source_schema=source_schema,
+            title="Reasoning input",
+            source_type="research-report",
+            files=[{"download_url": "https://files.example/brief", "file_id": "offer"}],
+            adoption={"key": "brief:pooled", "trigger": "handed_over", "selected_file_id": "offer"},
+        )
+
+    stored = hand_over()["files"][0]
+    assert not (vault / stored["stored_path"]).exists()
+
+    retried = hand_over()["files"][0]
+
+    assert retried["outcome"] == "replayed", retried
+    assert retried["stored_path"] == stored["stored_path"]
+
+    damaged = original_pool.object_path(vault, hashlib.sha256(payload).hexdigest())
+    damaged.chmod(0o600)
+    damaged.write_bytes(b"synthetic hand-over BYTES")  # the same size, as bit rot leaves it
+    assert hand_over()["files"][0]["code"] == "ADOPTION_REPLAY_UNVERIFIABLE"

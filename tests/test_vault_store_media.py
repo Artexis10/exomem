@@ -14,7 +14,6 @@ import contextlib
 import logging
 import os
 import sqlite3
-import sys
 import threading
 import types
 
@@ -52,10 +51,6 @@ coordinator_url = importer_suite.coordinator_url
 vault = importer_suite.vault
 stored = importer_suite.stored
 selected_store = media_store_suite.selected_store
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 PICTURE = f"{NOTES}/plain.png"
 PICTURE_BYTES = b"\x89PNG plain"
@@ -480,6 +475,37 @@ def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and
 
     assert restored.imported == [] and media_state(stored, PICTURE) == before
     assert before["held"] == []
+
+
+def test_trash_retirement_tracks_the_authoritative_companion_before_markdown_projection(
+    stored, selected_store, store_thread
+):
+    """Disk-only retirement validation loses a stored companion or rejects a legitimate stored edit."""
+    import json
+
+    from exomem import delete_file, originals, trash_metadata
+    from exomem.vault import PlannedWrite
+
+    settling = importer.Importer(stored, run=store_thread.run)
+    (stored / PICTURE).write_bytes(PICTURE_BYTES)
+    settling.import_paths([PICTURE])
+    assert _offload(stored, stored / PICTURE) is not None
+    results = []
+    store_thread.run(lambda _writer: results.append(delete_file.delete_file(stored, path=PICTURE, confirm=True)))
+    trashed = results[0]
+    companion = originals.sidecar_path(stored / PICTURE)
+    before = read.owned_bytes(stored, companion.relative_to(stored).as_posix()).decode("utf-8")
+    assert not originals.sidecar_path(stored / trashed.trash_path).exists()
+    store_thread.run(lambda writer: batch.commit_batch(
+        writer, [PlannedWrite(companion, before + "\nAn updated stored observation.\n")], vault_root=stored,
+    ))
+
+    metadata = json.loads((stored / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).read_bytes())
+    current = read.owned_bytes(stored, companion.relative_to(stored).as_posix())
+    assert metadata["original_retirement"]["after"] == sha(current)
+    assert media_store.drain_census(stored) == (0, 0)
+    with media_store.open_original(stored, trashed.trash_path) as source:
+        assert source.stream.read() == PICTURE_BYTES
 
 
 def test_a_media_result_that_lands_while_the_store_is_busy_commits_on_the_store_thread(

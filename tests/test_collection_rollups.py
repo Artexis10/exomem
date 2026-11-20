@@ -273,10 +273,11 @@ def test_failed_write_rolls_back_bucket_updates_with_its_rows(store, monkeypatch
     load(store, [exercise(record) for record in iter_exercises(12)])
     before, result = canonical(store), reduce(store, request(ops=("count", "sum", "max", "latest")))
 
-    def refuse(manifest):
+    def refuse(self, manifest):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "authority lost at commit")
 
-    monkeypatch.setattr(store, "_precommit", refuse)
+    # A record write runs its leaf on the Source phase's writer, so the refusal patches the class.
+    monkeypatch.setattr(type(store), "_precommit", refuse)
     with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
         store.append_record(CID, item={"id": "late", "start": "2026-03-01T08:00:00+00:00", "calories": 5000},
                             why="observe")

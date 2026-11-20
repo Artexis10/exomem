@@ -52,7 +52,7 @@ from exomem import (
     semantic_writes,
 )
 from exomem import find as find_module
-from exomem.vault import kb_dirname
+from exomem.kbdir import kb_dirname
 
 pytestmark = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="SQLite build lacks FTS5"
@@ -313,7 +313,13 @@ def test_reconciliation_waits_for_a_governed_writes_freshness_publication(
 
     def publish_delta(root, **kwargs):
         result = original_publish(root, **kwargs)
-        if threading.current_thread() is writer_thread and vault / _ALPHA in kwargs.get("changed", ()):
+        # The write's freshness publication runs on the caller's thread or,
+        # under a held boundary, on the dedicated self-write publish worker —
+        # the same receipt, wherever it lands.
+        if (
+            threading.current_thread() is writer_thread
+            or threading.current_thread().name == "exomem-self-write-publish"
+        ) and vault / _ALPHA in kwargs.get("changed", ()):
             phases.append("receipt_published")
         return result
 

@@ -12,7 +12,6 @@ import hashlib
 import json
 import os
 import sqlite3
-import sys
 from collections import Counter
 from contextlib import closing
 
@@ -55,15 +54,13 @@ from exomem.vault_store import (
     write,
 )
 
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
-
 # The fixtures of the suites that build this vault, re-exported by assignment: a test that takes one
 # is then no redefinition of an import.
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
 MOVED = "Knowledge Base/Notes/Gamma Moved.md"
+#: Gamma's bytes after a move: its lineage entry naming the path it left is the only change.
+MOVED_TEXT = GAMMA_TEXT.replace("type: note\n", f"type: note\nmoved_from:\n- path: {GAMMA}\n")
 EPSILON = "Knowledge Base/Notes/Epsilon.md"
 EPSILON_TEXT = "---\ntitle: Epsilon\ntype: note\n---\n# Epsilon\n\nThe ledger is in [[Gamma]].\n"
 
@@ -113,7 +110,7 @@ def test_a_move_carries_the_rows_and_rewrites_a_stored_linker_without_writing_ma
     result = move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
     assert result.files_touched == [DELTA]
-    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert read.owned_bytes(served, MOVED) == MOVED_TEXT.encode()
     assert not read.page_exists(served, GAMMA)
     assert b"[[Gamma Moved]]" in read.owned_bytes(served, DELTA)
     assert store_rows(served, "SELECT 1 FROM pages WHERE path = ?", GAMMA) == []
@@ -345,11 +342,10 @@ def test_a_validated_move_names_the_hashes_that_its_commit_then_writes(served):
     move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
     after = {entry["path"]: entry.get("content_hash") for entry in validation.after}
     assert after[DELTA] == hashlib.sha256(read.owned_bytes(served, DELTA)).hexdigest()
+    assert after[MOVED] == hashlib.sha256(read.owned_bytes(served, MOVED)).hexdigest()
     renamed = {entry["path"]: entry for entry in validation.rename_after}
-    assert (
-        renamed[MOVED]["content_hash"]
-        == hashlib.sha256(read.owned_bytes(served, MOVED)).hexdigest()
-    )
+    # Right after the rename the page still holds its source bytes; its lineage entry follows.
+    assert renamed[MOVED]["content_hash"] == hashlib.sha256(GAMMA_TEXT.encode()).hexdigest()
     assert renamed[GAMMA] == {"path": GAMMA, "absent": True}
 
 
@@ -364,7 +360,7 @@ def test_a_governed_page_moves_through_the_store_with_no_tombstone_or_receipt(se
     assert revision(served) == start
     move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
-    assert read.owned_bytes(served, MOVED) == GAMMA_TEXT.encode()
+    assert read.owned_bytes(served, MOVED) == MOVED_TEXT.encode()
     assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
     assert not list((served / "Knowledge Base/_Governance").rglob("*.json"))
     assert receipts.event_records(served) == []
@@ -502,8 +498,10 @@ HARBOUR = "Knowledge Base/Projects/Harbour"
 FOLDER_PAGES = int(os.environ.get("EXOMEM_LIFECYCLE_DRILL_PAGES", "40"))
 
 
-def store_folder(root, pages, folder=HARBOUR):
-    """A folder of stored pages with no files, each linking to the first one inside the folder."""
+def store_folder(root, pages, folder=HARBOUR, related=False):
+    """A folder of stored pages with no files, each linking to the first one inside the folder.
+
+    With ``related``, each page after the first also authors a typed relation to the first."""
     paths = [f"{folder}/Log {n:03d}.md" for n in range(pages)]
     vault_module.batch_atomic_write(
         [
@@ -511,7 +509,8 @@ def store_folder(root, pages, folder=HARBOUR):
                 root,
                 path,
                 f"---\ntitle: Log {n:03d}\ntype: note\n---\n# Log {n:03d}\n\n"
-                f"Tide reading {n}, after [[Log 000]].\n",
+                f"Tide reading {n}, after [[Log 000]].\n"
+                + ("\n## Relations\n- relates_to [[Log 000]]\n" if related and n else ""),
                 create_only=True,
             )
             for n, path in enumerate(paths)
@@ -750,3 +749,105 @@ def test_a_folder_trashs_store_reads_do_not_grow_with_its_pages(served, monkeypa
     many = reads_for_one_trash("Knowledge Base/Projects/Many", 30)
 
     assert few == many
+
+
+def test_a_folder_recoverys_store_reads_do_not_grow_with_its_pages(served, monkeypatch):
+    """A folder recovery that resolves each derived page's note type through its own store reader:
+    its cost grows with the folder, and each page's type may read another revision of the registry."""
+    opened = []
+    real = connection.store_reader
+
+    def counting(*arguments, **keywords):
+        opened.append(1)
+        return real(*arguments, **keywords)
+
+    def reads_for_one_recovery(folder, pages):
+        store_folder(served, pages, folder=folder)
+        trashed = delete_directory.delete_directory(
+            served, path=folder, confirm=True, recursive=True
+        )
+        opened.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(connection, "store_reader", counting)
+            recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+        return len(opened)
+
+    few = reads_for_one_recovery("Knowledge Base/Projects/Few", 2)
+    many = reads_for_one_recovery("Knowledge Base/Projects/Many", 30)
+
+    assert few == many
+
+
+@pytest.mark.parametrize("mode", ["file", "store"])
+def test_a_folder_recovery_judges_the_links_between_its_pages_the_same_in_both_modes(
+    request, monkeypatch, mode
+):
+    """A folder recovery on a governed vault resolves each recovered page's relation to a sibling that the
+    same recovery restores, in store mode as in file mode (the siblings hold deletion tombstones as the
+    pages are judged)."""
+    root = request.getfixturevalue("vault" if mode == "file" else "served")
+    pages = store_folder(root, 4, related=True)
+    govern(root, f"{HARBOUR}/**")
+    trashed = delete_directory.delete_directory(root, path=HARBOUR, confirm=True, recursive=True)
+    judged = {}
+    real = semantic_contract.writer_authored_facts
+
+    def recording(page, corpus):
+        facts = real(page, corpus)
+        judged[page.path] = sorted(
+            (fact.raw_target, fact.target_status, fact.resolved_target_path) for fact in facts
+        )
+        return facts
+
+    monkeypatch.setattr(semantic_contract, "writer_authored_facts", recording)
+    recover_from_trash.recover_from_trash(root, trash_path=trashed.trash_path)
+
+    assert {path: judged[path] for path in pages} == {
+        path: [] if path == pages[0] else [("Log 000", "resolved", pages[0])] for path in pages
+    }
+
+
+def test_a_folder_recoverys_whole_corpus_rebuilds_do_not_grow_with_its_pages(served, monkeypatch):
+    """A folder recovery that rebuilds the corpus's link resolver or its identity census for each page it
+    judges: its cost grows with the square of the folder, 235 ms a page at 4096 pages."""
+    resolvers = []
+    censuses = []
+    real_resolver = vault_module.WikilinkResolver.from_entries.__func__
+    real_census = semantic_contract.StableIdentityCensus.__post_init__
+
+    def counting_resolver(cls, *arguments, **keywords):
+        resolvers.append(1)
+        return real_resolver(cls, *arguments, **keywords)
+
+    def counting_census(self):
+        censuses.append(1)
+        return real_census(self)
+
+    def rebuilds_for_one_recovery(folder, pages):
+        store_folder(served, pages, folder=folder)
+        trashed = delete_directory.delete_directory(
+            served, path=folder, confirm=True, recursive=True
+        )
+        resolvers.clear()
+        censuses.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(
+                vault_module.WikilinkResolver, "from_entries", classmethod(counting_resolver)
+            )
+            patched.setattr(semantic_contract.StableIdentityCensus, "__post_init__", counting_census)
+            recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+        return len(resolvers), len(censuses)
+
+    few = rebuilds_for_one_recovery("Knowledge Base/Projects/Few", 2)
+    many = rebuilds_for_one_recovery("Knowledge Base/Projects/Many", 30)
+
+    assert few == many
+
+
+def test_the_owner_judges_links_over_the_whole_corpus_in_a_bound_store_and_a_restricted_writer_does_not(served):
+    """A bound store hands every caller a release filter, the owner's too, so link resolution took the
+    restricted branch for the owner (a resolver built over the filtered corpus for each page it judged)
+    where file mode takes the owner's: `writer_link_visibility` is `None` for the owner."""
+    assert vault_module.writer_link_visibility(served) is None
+    with request_scope(most_restrictive_principal(surface="rest")):
+        assert vault_module.writer_link_visibility(served) is not None

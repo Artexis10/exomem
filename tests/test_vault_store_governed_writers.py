@@ -9,9 +9,10 @@ where it was.
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
+import io
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -26,9 +27,11 @@ from test_vault_store_migration import BETA, vault  # noqa: F401
 from test_vault_store_write_path import planned, revision, store_rows
 
 from exomem import (
+    adopt,
     delete_directory,
     delete_file,
     embeddings,
+    preserve,
     recover_from_trash,
     reserved_paths,
 )
@@ -39,6 +42,7 @@ from exomem.governance import (
     authorization_custody,
     catalog_publication,
     companion_backfill,
+    companions,
     lifecycle,
     projection_store,
     receipts,
@@ -50,10 +54,6 @@ from exomem.governance.recovery import reconcile_governance_operations
 from exomem.governance.tool import GovernanceCrash, GovernanceError, op_govern_memory
 from exomem.vault_store import availability, read
 from exomem.vault_store import write as store_write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
@@ -465,6 +465,55 @@ def test_a_backfill_that_the_store_refuses_records_nothing_and_the_next_commit_l
     assert b"governance_companion:" in read.owned_bytes(served, SECRET_PAGE)
 
 
+DATASET = "Knowledge Base/Data/private.json"
+DATASET_BYTES = b'[{"secret":true}]\n'
+DATASET_CARD = "Knowledge Base/Notes/Datasets/private.md"
+DATASET_CARD_TEXT = (
+    "---\ntype: dataset\ntitle: Private data\n"
+    f"data_file: {DATASET}\nformat: json\ntags: [page-only]\n---\n\nExisting dataset notes.\n"
+)
+
+
+@pytest.mark.parametrize("projected", [False, True])
+def test_a_dataset_backfill_finds_its_card_in_the_store_whether_or_not_a_file_projects_it(
+    served, projected
+):
+    """A dataset backfill that lists its card from the files: a card that only the store holds is
+    missing, and a card that a file projects reads as a binding that changed after review."""
+    (served / DATASET).parent.mkdir(parents=True, exist_ok=True)
+    (served / DATASET).write_bytes(DATASET_BYTES)
+    vault_module.batch_atomic_write(
+        [planned(served, DATASET_CARD, DATASET_CARD_TEXT, create_only=True)],
+        vault_root=served,
+        post_commit_fanout=False,
+    )
+    if projected:
+        (served / DATASET_CARD).parent.mkdir(parents=True, exist_ok=True)
+        (served / DATASET_CARD).write_text(DATASET_CARD_TEXT, encoding="utf-8")
+    payload = {
+        "version": 1,
+        "artifact_class": "dataset",
+        "artifact_path": DATASET,
+        "expected_artifact_sha256": hashlib.sha256(DATASET_BYTES).hexdigest(),
+        "expected_artifact_size": len(DATASET_BYTES),
+        "expected_companion_path": DATASET_CARD,
+        "expected_companion_sha256": hashlib.sha256(DATASET_CARD_TEXT.encode()).hexdigest(),
+        "format": "json",
+        "semantics": {
+            "projects": ["client-a"],
+            "tags": ["confidential"],
+            "types": ["source"],
+            "classes": ["pii"],
+        },
+    }
+
+    preview = backfill(served, "preview", payload, now=300.0)
+    backfill(served, "commit", payload, proposal_id=preview["proposal_id"], now=301.0)
+
+    assert b"governance_companion:" in read.owned_bytes(served, DATASET_CARD)
+    assert companions.classify(served, DATASET).tags == ("confidential",)
+
+
 def test_a_backfill_planned_before_the_companion_changed_in_the_store_refuses_as_stale(served):
     """A backfill that commits over a companion the store changed after the owner's review,
     because a stored page has no file identity to bind."""
@@ -535,3 +584,30 @@ def test_a_folder_trash_on_a_governed_vault_reads_the_store_alike_for_any_size(s
     assert reads_for_one_trash("Knowledge Base/Projects/Few", 2) == reads_for_one_trash(
         "Knowledge Base/Projects/Many", 30
     )
+
+
+def test_a_preserve_logs_into_a_stored_log_that_no_file_projects_yet(served):
+    """A preserve that reads the disk for the log tells the person that the log is missing and
+    writes no entry, though the store holds it."""
+    (served / LOG).unlink()
+    assert read.owned_bytes(served, LOG) is not None
+
+    result = preserve.preserve_stream(
+        served, scope="Examples", category="Documents", filename="tide.txt",
+        stream=io.BytesIO(b"A neutral tide reading."), content_type="text/plain",
+    )
+
+    assert not [warning for warning in result.warnings if "log.md" in warning]
+    assert b"Mobile preserve via exomem" in read.owned_bytes(served, LOG)
+
+
+def test_a_saved_adoption_manifest_logs_into_a_stored_log_that_no_file_projects_yet(served):
+    """A manifest save that reads the disk for the log tells the person that the log is missing and
+    writes no entry, though the store holds it."""
+    (served / LOG).unlink()
+    assert read.owned_bytes(served, LOG) is not None
+
+    report = adopt.adopt(served, mode="save-manifest", today=dt.date(2026, 7, 7))
+
+    assert not [warning for warning in report["manifest"]["warnings"] if "log.md" in warning]
+    assert b"Saved existing-vault adoption manifest" in read.owned_bytes(served, LOG)

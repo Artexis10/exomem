@@ -245,6 +245,17 @@ def continua_character_class() -> str:
     )
 
 
+@lru_cache(maxsize=1)
+def _continua_pattern() -> re.Pattern[str]:
+    # A character class over the declared code-point blocks: block membership, not meaning.
+    return re.compile(f"[{continua_character_class()}]")
+
+
+def contains_scriptio_continua(text: str) -> bool:
+    """True when any character of `text` is in a declared unspaced block, scanned in C."""
+    return _continua_pattern().search(text) is not None
+
+
 _LETTER_SCRIPT_BOUNDS = {
     script: (tuple(start for start, _end in blocks), tuple(end for _start, end in blocks))
     for script, blocks in LETTER_SCRIPT_BLOCKS.items()

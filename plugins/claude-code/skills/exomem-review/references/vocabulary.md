@@ -61,6 +61,22 @@ Report a committed promotion with its subject, key, meaning, and returned restor
 route. If `state="pending_review"` and `saved` is null, report the queued item and
 that the registry remains unchanged. A refusal or invalid proposal is not a save.
 
+## Recorded positions
+
+Recall carries a unit as the person's recorded position only when its category
+or its kind has the trait `position`. The shipped `preference` category has it.
+A position category holds a view the person stated, and its text names them.
+Words such as "my position" in a unit's text do not make it a position.
+
+1. Capture a view that the person states as theirs under a category with the trait, within the live engagement policy.
+2. Record your own analysis under a category without the trait.
+3. Keep their wording and qualifier, and put the date in the context slot: `- [preference] The owner prefers a slow cool for celadon; not proven (2026-03-02)`.
+4. To mark a category as holding positions, propose `traits: [position]` on it through the save steps above.
+5. For a shipped category, propose only `traits`; its description and aliases stay fixed.
+6. Read the preview findings before you save; a trait outside the closed set is refused with `unknown_trait`.
+
+The next turn whose leads reach that page then carries the unit in the `positions` block.
+
 ## Topic carriers
 
 A `topic-carriers` entry files the pages of one project key, folder or tag under

@@ -28,7 +28,9 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
+from itertools import chain
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from .. import held_fs, memory_refs, planning, record_formats, records, vault
 from .. import structured_collections as collections
@@ -552,6 +554,7 @@ class Observation:
     stat: str | None
     raw: bytes | None = None
     refusal: tuple = ()
+    native_version: held_fs.FileVersion | None = None
 
     @property
     def own(self) -> bool:
@@ -628,22 +631,113 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     before = file.version()
                     if row["path"] not in force and unchanged(writer.connection, row, before):
                         continue
-                    raw = fs.read(file, max_bytes=_read_bound(row)).require()
-                    if file.version() != before:
-                        raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
+                    _, raw = _read_native(fs, file, _read_bound(row), before=before)
             except (held_fs.HeldFsError, OSError) as error:
                 if errors is not None:
                     errors(row["collection_id"], row["path"], getattr(error, "code", "IO_ERROR"))
                 continue
-            found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw))
+            found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw,
+                                     native_version=before))
     return found
+
+
+@dataclass(frozen=True)
+class NativeInput:
+    """Detached bytes and exact native version; no open file or SQL resource crosses phases."""
+
+    projection_path: str
+    path: str
+    token: str | None
+    slot: str | int
+    # These are the native observation protocol's closed outcomes, not content classifications.
+    state: Literal["present", "absent", "unavailable"]
+    version: held_fs.FileVersion | None = None
+    raw: bytes | None = None
+
+
+@dataclass(frozen=True)
+class NativeInputs:
+    values: tuple[NativeInput, ...]
+    complete: bool
+
+
+def dependency_inputs(root, projections, *, observations=(), limit=512, byte_limit=8 * 1024 * 1024) -> NativeInputs:
+    """Read a bounded preservation window through the existing native observer.
+
+    The caller supplies detached projection rows after closing SQL. Unobserved recovery
+    slots stay unavailable for preservation; this window never claims their absence.
+    """
+    found, complete, consumed = [], True, 0
+    observed = {value.path: value for value in observations}
+    with ExitStack() as stack:
+        fs = stack.enter_context(held_fs.acquire(root).require())
+        parents = {}
+        for projection in projections:
+            path = projection["path"]
+            try:
+                for native_path, token, slot in _dependency_paths(projection):
+                    if len(found) >= limit or consumed >= byte_limit:
+                        return NativeInputs(tuple(found), False)
+                    prior = observed.get(native_path) if slot == "offline" else None
+                    if prior is not None and prior.raw is not None and prior.native_version is not None:
+                        if consumed + len(prior.raw) > byte_limit:
+                            return NativeInputs(tuple(found), False)
+                        value = NativeInput(path, native_path, token, slot, "present", prior.native_version, prior.raw)
+                    else:
+                        try:
+                            opened = _open_view(fs, stack, parents, native_path)
+                            if opened is None:
+                                value = NativeInput(path, native_path, token, slot, "absent")
+                            else:
+                                with opened as file:
+                                    version, raw = _read_native(fs, file, byte_limit - consumed)
+                                value = NativeInput(path, native_path, token, slot, "present", version, raw)
+                        except (held_fs.HeldFsError, OSError):
+                            value = NativeInput(path, native_path, token, slot, "unavailable")
+                    consumed += len(value.raw or b"")
+                    complete = complete and value.state != "unavailable"
+                    found.append(value)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                complete = False
+    return NativeInputs(tuple(found), complete)
+
+
+def _dependency_paths(projection):
+    path = projection["path"]
+    yield path, None, "offline"
+    descriptor = json.loads(projection.get("install_json") or "null")
+    if descriptor is None:
+        return
+    for source in chain((descriptor,), descriptor.get("preserved", ())):
+        # The publication protocol owns two asides and one stage per token.
+        for slot in range(3):
+            leaf = (views.ASIDE_PREFIX + source["token"] + f"-{slot}" if slot < 2
+                    else views.STAGE_PREFIX + source["token"])
+            # Held paths stay POSIX-style; `str(Path(...))` joins with backslashes on Windows.
+            yield PurePosixPath(path).parent.joinpath(leaf).as_posix(), source["token"], slot
+
+
+def _read_native(fs, file, bound, *, before=None):
+    before = file.version() if before is None else before
+    raw = fs.read(file, max_bytes=bound).require()
+    if file.version() != before:
+        raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
+    return before, raw
+
+
+def _read_render(fs, file, *, before=None):
+    """Read a view the store rendered, or its aside or stage copy, whole.
+
+    A kind's parser bound limits untrusted owner edits; the history and summary renderers grow pages
+    past it, so applying it here would strand those pages unpublished."""
+    return _read_native(fs, file, None, before=before)
 
 
 def _open_view(fs, stack, parents, path):
     """The view's file as a context manager, or None when it or its directory is missing.
 
     ``parents`` keeps each directory opened on ``stack``, so a window opens it once."""
-    relative = str(Path(path).parent)
+    relative = held_fs.split_relative(path)[0]
     if relative not in parents:
         opened = fs.parent(relative)
         if not opened.ok and opened.error.code != "MISSING":

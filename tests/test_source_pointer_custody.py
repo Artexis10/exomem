@@ -259,7 +259,7 @@ def test_a_stale_pointer_is_repaired_in_place_and_the_revert_restores_it(vault: 
     front = _frontmatter(vault, card)
     assert front["data_file"] == new
     assert front["source_type"] == "dataset-export"
-    assert front["reclassified_from"][-1]["pointer"] == {"data_file": old}
+    assert front["moved_from"][-1]["pointer"] == {"data_file": old}
     assert front["classification_history"]["events"][-1]["pointer"]["after"] == {"data_file": new}
     assert (vault / card).read_text(encoding="utf-8").split("---\n\n", 1)[1] == body_before
     assert _drift(vault) == []
@@ -268,7 +268,7 @@ def test_a_stale_pointer_is_repaired_in_place_and_the_revert_restores_it(vault: 
 
     assert reverted.repointed == ("data_file",)
     assert _frontmatter(vault, card)["data_file"] == old
-    assert "reclassified_from" not in _frontmatter(vault, card)
+    assert "moved_from" not in _frontmatter(vault, card)
     assert [f.meta["field"] for f in _drift(vault)] == ["data_file"]
 
 

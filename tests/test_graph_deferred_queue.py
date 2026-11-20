@@ -808,7 +808,7 @@ _DECLARED_GENERATION_RECORDING_SITES = {
 #: the seam that forwards to one, and is enumerated so its callers have to
 #: declare themselves rather than hide one level up.
 _GENERATION_RECORDING_CALLEES = frozenset(
-    {"add_graph", "add_graph_receipts", "_record_graph_repair_demand"}
+    {"add_graph", "add_graph_receipts", "_record_graph_repair_demand", "record_graph_debt_generation"}
 )
 
 
@@ -863,6 +863,7 @@ def _generation_recording_sites() -> dict[str, str]:
     for definition in (
         "deferred_index.py::add_graph",
         "deferred_index.py::add_graph_receipts",
+        "deferred_index.py::record_graph_debt_generation",
     ):
         found.pop(definition, None)
     return found
@@ -1149,6 +1150,57 @@ def test_a_split_checkpoint_converges_through_one_covering_drain_not_a_whole_vau
     assert deferred_index.list_graph_paths(vault) == []
     monkeypatch.setattr(EpistemicGraphIndex, "_rebuild_all_pass", real_pass)
     assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+def _retire_settled_record(root: Path) -> graph_sync.GraphSyncCheckpoint:
+    """Write and drain one page, then retire it from the acknowledged record as an erase does."""
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(root / PAGE_C, _page("C", "C is a plain claim."))],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    _seed_live_freshness(root)
+    index_sync.drain_graph_work(root)
+    named = graph_sync.read_checkpoint(root)
+    assert named is not None and _acknowledged(root) == named.generation
+    successor = graph_sync.forget_settled_path(root, PAGE_C)
+    assert successor is not None and successor.changes_no_input
+    assert PAGE_C not in graph_sync.checkpoint_path(root).read_text(encoding="utf-8")
+    return successor
+
+
+def test_a_record_that_names_no_page_is_acknowledged_without_a_whole_vault_pass(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """No receipt is queued for it, so only the drain's covering pass over no page can acknowledge it."""
+    successor = _retire_settled_record(vault)
+    assert not EpistemicGraphIndex(vault).available()
+    whole_vault_passes.clear()
+
+    graph_drain._work_once(vault)
+
+    assert whole_vault_passes == []
+    assert _acknowledged(vault) == successor.generation
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_write_before_that_acknowledgement_still_repairs_per_path(
+    vault: Path, whole_vault_passes: list[str]
+) -> None:
+    """The write's predecessor probe asks for the skipped generation; an unrecorded one reads as a lineage gap."""
+    successor = _retire_settled_record(vault)
+    whole_vault_passes.clear()
+
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(vault / PAGE_A, _page("A", "A is revised against [[queue-b]]."))],
+        vault_root=vault,
+    )
+    index_sync.drain_graph_work(vault)
+
+    assert whole_vault_passes == []
+    assert _acknowledged(vault) == successor.generation + 1
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
 
 
 # --- A drain derives rows only from bytes its resolver has seen -----------------

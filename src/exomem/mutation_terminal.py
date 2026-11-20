@@ -9,9 +9,17 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, cast
 
-from . import capabilities, cloud_cell, operation_entries, page_ids, relation_registry
+from . import (
+    capabilities,
+    cloud_cell,
+    document_identity,
+    operation_entries,
+    page_ids,
+    relation_registry,
+    source_result_attribution,
+)
 from . import curation as curation_module
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_split
 from .operation_entries import OutcomeVerb
 
 log = logging.getLogger(__name__)
@@ -225,6 +233,8 @@ _OPERATIONAL_KEYS = frozenset(
         "graph_sync_checkpoint",
         "graph_sync_remediation",
         "vocabulary_sync",
+        # The paths of the append-only pages a move repointed; the reply names them by title.
+        "pointer_repointed_paths",
     }
 )
 
@@ -251,6 +261,8 @@ _MAX_WARNING_CHARS = 300
 _MAX_RELATION_ADVISORY_LABELS = 8
 _MAX_RELATION_ADVISORY_EXAMPLES = 5
 _MAX_RELATION_ADVISORY_LABEL_CHARS = 128
+#: How many repointed append-only pages compact names; the summary's count covers the rest.
+_MAX_REPOINTED_PAGES = 8
 
 
 def _operation_id(result: Any) -> str | None:
@@ -281,7 +293,9 @@ def _operation_id(result: Any) -> str | None:
 
 def _without_graph_rebuild_handoff(result: Any) -> Any:
     if isinstance(result, Mapping) and "_graph_rebuild_handoff" in result:
-        return {key: value for key, value in result.items() if key != "_graph_rebuild_handoff"}
+        return source_result_attribution.carry(result, {
+            key: value for key, value in result.items() if key != "_graph_rebuild_handoff"
+        })
     return result
 
 
@@ -307,7 +321,7 @@ def _warning_count(result: Any) -> int:
     artifact_receipt = _artifact_receipt_projection(result)
     if artifact_receipt:
         return sum(
-            len(item.get("warnings", []))
+            len(item.get("warnings", [])) + item.get("warnings_omitted", 0)
             for item in artifact_receipt["files"]
             if item["outcome"] == "stored"
         )
@@ -323,6 +337,20 @@ def _warning_count(result: Any) -> int:
             return len(source_warnings)
         return 1 if source_warnings else 0
     return 0
+
+
+def _carry_source_terminal(leaf: Any, terminal: dict[str, Any]) -> None:
+    if not source_result_attribution.active():
+        return
+    projection = _path_projection(leaf)
+    source_result_attribution.carry(projection, terminal)
+    artifact_receipt = _artifact_receipt_projection(leaf)
+    if artifact_receipt:
+        refs = source_result_attribution.recipe(artifact_receipt).sources
+    else:
+        refs = source_result_attribution.recipe(_warning_texts(leaf, has_artifact_receipt=False)).sources
+    if refs:
+        source_result_attribution.bind(terminal, refs, paths=(("warnings_count",),), action="count")
 
 
 def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
@@ -358,6 +386,15 @@ def _warning_texts(result: Any, *, has_artifact_receipt: bool) -> list[str]:
             candidates = [source_warnings]
         else:
             return []
+    out = _bounded_warnings(candidates)
+    owner = result if result.get("warnings") else result.get("source")
+    if isinstance(owner, Mapping):
+        source_result_attribution.carry(owner, out, moves={("warnings",): ()})
+    return out
+
+
+def _bounded_warnings(candidates: Sequence[Any]) -> list[str]:
+    """The first `_MAX_WARNINGS` warnings, each cut to `_MAX_WARNING_CHARS`."""
     return [
         (warning if isinstance(warning, str) else str(warning))[:_MAX_WARNING_CHARS]
         for warning in candidates[:_MAX_WARNINGS]
@@ -372,15 +409,20 @@ def _path_projection(result: Any) -> dict[str, Any]:
     if artifact_receipt:
         # Only what this call stored. A duplicate names a path an earlier call
         # committed; reporting it here would claim this mutation wrote it.
-        paths = [
-            item["stored_path"]
-            for item in artifact_receipt["files"]
-            if _artifact_state(item) == "stored"
-        ]
+        stored = [(index, item) for index, item in enumerate(artifact_receipt["files"])
+                  if _artifact_state(item) == "stored" and "stored_path" in item]
+        paths = [item["stored_path"] for _index, item in stored]
         if len(paths) == 1:
-            return {"path": paths[0]}
+            return source_result_attribution.carry(artifact_receipt, {"path": paths[0]}, moves={
+                ("files", stored[0][0]): ("path",),
+                ("files", stored[0][0], "stored_path"): ("path",),
+            })
         if paths:
-            return {"paths": paths}
+            moves = {}
+            for ordinal, (index, _item) in enumerate(stored):
+                moves[("files", index)] = ("paths", ordinal)
+                moves[("files", index, "stored_path")] = ("paths", ordinal)
+            return source_result_attribution.carry(artifact_receipt, {"paths": paths}, moves=moves)
     path = result.get("path")
     if isinstance(path, str):
         return {"path": path}
@@ -405,7 +447,7 @@ def _path_projection(result: Any) -> dict[str, Any]:
             return {"paths": list(written)}
     source = result.get("source")
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
-        return {"path": source["path"]}
+        return source_result_attribution.carry(source, {"path": source["path"]}, moves={("path",): ("path",)})
     manifest = result.get("manifest")
     if isinstance(manifest, Mapping) and isinstance(manifest.get("path"), str):
         return {"path": manifest["path"]}
@@ -497,7 +539,7 @@ def _media_result_projection(result: Any) -> dict[str, Any]:
         return (
             isinstance(value, str)
             and 0 < len(value) <= 2048
-            and value.startswith(kb_prefix())
+            and managed_split(value) is not None
             and "\\" not in value
             and "\x00" not in value
         )
@@ -627,6 +669,7 @@ def settled_media_terminal(
     terminal.update(_path_projection(leaf_result))
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -641,7 +684,7 @@ def is_reused_capture(leaf_result: Any) -> bool:
 
 def as_reused(result: Mapping[str, Any]) -> dict[str, Any]:
     """`result` marked as a reuse that wrote nothing, which `is_reused_capture` reads: it settles and never commits."""
-    return {**result, "mutated": False, "capture_outcome": "reused"}
+    return source_result_attribution.carry(result, {**result, "mutated": False, "capture_outcome": "reused"})
 
 
 def reused_capture_terminal(
@@ -674,6 +717,7 @@ def reused_capture_terminal(
     terminal.update(_path_projection(leaf_result))
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -854,46 +898,51 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         if not isinstance(item, Mapping) or not string(item.get("file_id"), limit=256):
             projected.append(invalid_row(item, index))
             continue
-        # `outcome` mirrors `state` for one release, so `already_stored` arrives
-        # as `stored`; the state itself has to survive the projection or a
-        # compact client cannot tell a fresh commit from a duplicate.
-        if "state" in item and item["state"] not in _ARTIFACT_STATES:
+        outcome = item.get("outcome")
+        if outcome not in {"stored", "replayed"} and "state" in item and item["state"] not in _ARTIFACT_STATES:
             projected.append(invalid_row(item, index))
             continue
-        outcome = item.get("outcome")
         if outcome in {"stored", "replayed"}:
-            if not (
-                string(item.get("stored_path"), limit=2048)
-                and nonnegative_int(item.get("size"))
-                and sha256(item.get("hash"))
-                and item.get("hash_algorithm") == "sha256"
-                and string(item.get("content_type"), limit=255, allow_none=True)
-                and string(item.get("media_id"), limit=512, allow_none=True)
-                and isinstance(item.get("warnings"), list)
-                and len(item["warnings"]) <= 8
-                and all(string(warning, limit=300) for warning in item["warnings"])
+            # This call or an earlier one committed the bytes, so no unreadable field turns the row into
+            # a failure. A field that does not read is left out and named in `unverified_fields`. The row
+            # keeps its own state (stored, already_stored, replayed): what happened to the file and how
+            # much of its receipt reads are two facts, and one `state` value would have to blur them.
+            unverified: list[str] = []
+            row = {"file_id": item["file_id"], "outcome": outcome}
+            # The receipt's own fields (a closed set the artifact receipt contract fixes), each with the check it must
+            # pass. `outcome` mirrors `state` for one release, so `already_stored` arrives as `stored`; the
+            # state has to survive the projection or a compact client cannot tell a fresh commit from a duplicate.
+            for field, readable in (
+                ("state", "state" not in item or item["state"] in _ARTIFACT_STATES),
+                ("stored_path", string(item.get("stored_path"), limit=2048)),
+                ("size", nonnegative_int(item.get("size"))),
+                ("hash", sha256(item.get("hash"))),
+                ("hash_algorithm", item.get("hash_algorithm") == "sha256"),
+                ("content_type", string(item.get("content_type"), limit=255, allow_none=True)),
+                ("media_id", string(item.get("media_id"), limit=512, allow_none=True)),
             ):
-                projected.append(invalid_row(item, index))
-                continue
-            row = {
-                key: item[key]
-                for key in (
-                    "file_id",
-                    "outcome",
-                    "state",
-                    "stored_path",
-                    "size",
-                    "hash",
-                    "hash_algorithm",
-                    "media_id",
-                    "content_type",
-                    "warnings",
-                )
-                if key in item
-            }
+                if not readable:
+                    unverified.append(field)
+                elif field in item:
+                    row[field] = item[field]
+            if "warnings" in item:
+                # Advisory, like a structure suggestion: trimmed to the bound, never a reason to drop the row.
+                if isinstance(item["warnings"], list):
+                    row["warnings"] = _bounded_warnings(item["warnings"])
+                    if len(item["warnings"]) > _MAX_WARNINGS:
+                        row["warnings_omitted"] = len(item["warnings"]) - _MAX_WARNINGS
+                else:
+                    unverified.append("warnings")
             for key in ("path", "page", "ref"):
                 if key in item and string(item[key], limit=2048):
                     row[key] = item[key]
+            if "identity" in item:
+                if (identity := document_identity.reply_block(item["identity"])) is None:
+                    unverified.append("identity")
+                else:
+                    row["identity"] = identity
+            if isinstance(item.get("correctable"), bool):
+                row["correctable"] = item["correctable"]
             container = item.get("document_container")
             if isinstance(container, Mapping):
                 # These scalar fields are the bounded container-inspection receipt protocol.
@@ -908,30 +957,29 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 }
             earlier_copy = _duplicate_outcome_projection(item)
             if earlier_copy is None:
-                projected.append(invalid_row(item, index))
-                continue
-            row.update(earlier_copy)
+                # Names the pointer; its families and `fields_not_applied` travel with it.
+                unverified.append("duplicate_of")
+            else:
+                row.update(earlier_copy)
             if "archive" in item:
-                archive = archive_receipt(item["archive"])
-                if archive is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["archive"] = archive
+                if (archive := archive_receipt(item["archive"])) is None:
+                    unverified.append("archive")
+                else:
+                    row["archive"] = archive
             if "transcription" in item:
-                recorded = transcription(item["transcription"])
-                if recorded is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["transcription"] = recorded
+                if (recorded := transcription(item["transcription"])) is None:
+                    unverified.append("transcription")
+                else:
+                    row["transcription"] = recorded
             if "adoption" in item:
-                receipt = adoption_receipt(item["adoption"], item)
-                if receipt is None:
-                    projected.append(invalid_row(item, index))
-                    continue
-                row["adoption"] = receipt
+                if (receipt := adoption_receipt(item["adoption"], item)) is None:
+                    unverified.append("adoption")
+                else:
+                    row["adoption"] = receipt
             elif outcome == "replayed":
-                projected.append(invalid_row(item, index))
-                continue
+                unverified.append("adoption")
+            if unverified:
+                row["unverified_fields"] = unverified
         elif outcome == "unselected":
             row = {"file_id": item["file_id"], "outcome": "unselected"}
         elif (
@@ -984,11 +1032,11 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                 projected_summary["already_stored"] = raw_already_stored
             if raw_omitted is not None:
                 projected_summary["omitted"] = raw_omitted
-            return {"files": projected, "summary": projected_summary}
+            return source_result_attribution.carry(result, {"files": projected, "summary": projected_summary})
         recomputed = {"stored": counts["stored"], "failed": counts["failed"]}
         if counts["already_stored"] or raw_already_stored is not None:
             recomputed["already_stored"] = counts["already_stored"]
-        return {"files": projected, "summary": recomputed}
+        return source_result_attribution.carry(result, {"files": projected, "summary": recomputed})
     projected_summary: dict[str, int] = {}
     for outcome in ("stored", "already_stored", "replayed", "failed", "unselected"):
         value = summary.get(outcome)
@@ -1002,7 +1050,7 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
         if not nonnegative_int(omitted):
             return {}
         projected_summary["omitted"] = omitted
-    return {"files": projected, "summary": projected_summary}
+    return source_result_attribution.carry(result, {"files": projected, "summary": projected_summary})
 
 
 #: Bounds on the advisory structural suggestion compact may carry. Same posture as
@@ -1027,6 +1075,7 @@ _ROUTING_OPTIONAL_KEYS = frozenset(
         "instruction",
         "question",
         "missing_fields",
+        "method",
     }
 )
 _ROUTING_DISPOSITIONS = frozenset({"file", "ask", "hold", "append_occurrence"})
@@ -1060,6 +1109,9 @@ _MAX_UNCLASSIFIED_FOLDERS = 4
 #: advisory, so `tests/test_note_cohesion.py` writes it on every tool shape against
 #: this bound. It only stops a malformed payload from widening the wire.
 _MAX_COHESION_QUESTION_CHARS = 800
+#: The same bound for the ownership question: 400 tokens at four characters a token, the
+#: proxy the spec's token limit is checked against. A longer question drops the advisory.
+_MAX_OWNERSHIP_QUESTION_CHARS = 1600
 
 
 def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
@@ -1087,19 +1139,40 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
             continue
         projected = _structure_suggestion_kind_projection(value)
         if projected is not None:
-            return projected
+            return source_result_attribution.carry(container, projected, moves={("structure_suggestion",): ()})
     return None
 
 
 def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
     from .note_cohesion import KIND as note_cohesion_kind
+    from .ownership_review import KIND as ownership_kind
 
     kind = value.get("kind")
     if kind == _SOURCE_CLASSIFICATION_KIND:
         return _source_classification_projection(value)
     if kind == note_cohesion_kind:
         return _note_cohesion_projection(value)
+    if kind == ownership_kind:
+        return _ownership_projection(value)
     return None
+
+
+def _review_identity(value: Mapping[str, Any]) -> tuple[str, str] | None:
+    """The validated `(ref, fingerprint)` of the review item a suggestion names, or None."""
+    from . import review_state
+
+    try:
+        ref = review_state.review_ref(review_state.parse_review_ref(str(value.get("ref") or "")))
+    except ValueError:
+        return None
+    fingerprint = value.get("fingerprint")
+    if (
+        not isinstance(fingerprint, str)
+        or len(fingerprint) != 24
+        or any(char not in "0123456789abcdef" for char in fingerprint)
+    ):
+        return None
+    return ref, fingerprint
 
 
 def _source_classification_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1126,7 +1199,6 @@ def _source_classification_projection(value: Mapping[str, Any]) -> dict[str, Any
 
 def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
     """The question a compiled write asks: three counts, the item's identity, the text."""
-    from . import review_state
     from .note_cohesion import BASE_STEP_UNITS, KIND
 
     units = value.get("units")
@@ -1136,17 +1208,10 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
         return None
     if not (step >= BASE_STEP_UNITS and units >= step and following > step):
         return None
-    try:
-        ref = review_state.review_ref(review_state.parse_review_ref(str(value.get("ref") or "")))
-    except ValueError:
+    identity = _review_identity(value)
+    if identity is None:
         return None
-    fingerprint = value.get("fingerprint")
-    if (
-        not isinstance(fingerprint, str)
-        or len(fingerprint) != 24
-        or any(char not in "0123456789abcdef" for char in fingerprint)
-    ):
-        return None
+    ref, fingerprint = identity
     question = value.get("question")
     if not isinstance(question, str) or not 0 < len(question) <= _MAX_COHESION_QUESTION_CHARS:
         return None
@@ -1157,6 +1222,27 @@ def _note_cohesion_projection(value: Mapping[str, Any]) -> dict[str, Any] | None
         "units": units,
         "step_units": step,
         "next_step_units": following,
+        "ref": ref,
+        "fingerprint": fingerprint,
+        "id": item_id({"ref": ref, "fingerprint": fingerprint}),
+        "question": question,
+    }
+
+
+def _ownership_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The question a written page asks about its home: the item's identity and the text."""
+    from .ownership_review import KIND
+    from .review_ids import item_id
+
+    identity = _review_identity(value)
+    if identity is None:
+        return None
+    ref, fingerprint = identity
+    question = value.get("question")
+    if not isinstance(question, str) or not 0 < len(question) <= _MAX_OWNERSHIP_QUESTION_CHARS:
+        return None
+    return {
+        "kind": KIND,
         "ref": ref,
         "fingerprint": fingerprint,
         "id": item_id({"ref": ref, "fingerprint": fingerprint}),
@@ -1187,7 +1273,7 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         if not (
             isinstance(collection, str)
             and 0 < len(collection) <= _MAX_ROUTING_COLLECTION_CHARS
-            and collection.startswith("Knowledge Base/Records/")
+            and collection.startswith(managed_join("Records/"))
             and collection.endswith("/_collection.md")
             and ".." not in collection.split("/")
         ):
@@ -1210,6 +1296,9 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         disposition = _routing_disposition_projection(value, collection)
         if disposition is None:
             continue
+        method = _routing_method_projection(value["method"]) if "method" in value else {}
+        if method is None:
+            continue
         return {
             "collection": collection,
             "title": title,
@@ -1218,8 +1307,27 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
             "natural_key": list(natural_key),
             "strength": strength,
             **disposition,
+            **method,
         }
     return None
+
+
+def _routing_method_projection(value: Any) -> dict[str, Any] | None:
+    """The page a routed collection declares as its capture method; None when malformed.
+
+    A path bound limits the ref, which is a memory ref or, for a page that holds no id, a vault path.
+    """
+    if not isinstance(value, Mapping) or set(value) != {"title", "read_ref"}:
+        return None
+    title, read_ref = value["title"], value["read_ref"]
+    if not (
+        isinstance(title, str)
+        and 0 < len(title) <= _MAX_ROUTING_TITLE_CHARS
+        and isinstance(read_ref, str)
+        and 0 < len(read_ref) <= _MAX_ROUTING_COLLECTION_CHARS
+    ):
+        return None
+    return {"method": {"title": title, "read_ref": read_ref}}
 
 
 def _routing_disposition_projection(
@@ -1603,11 +1711,13 @@ def _without_leaf_advisory(result: Any, advisory_key: str) -> Any:
             and isinstance(value, Mapping)
             and (advisory_key in value)
         ):
-            stripped[key] = {inner: value[inner] for inner in value if inner != advisory_key}
+            stripped[key] = source_result_attribution.carry(value, {
+                inner: value[inner] for inner in value if inner != advisory_key
+            })
             changed = True
             continue
         stripped[key] = value
-    return stripped if changed else result
+    return source_result_attribution.carry(result, stripped) if changed else result
 
 
 def _without_advisory_due_state(result: Any) -> Any:
@@ -1666,7 +1776,8 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
         if not isinstance(routes, (list, tuple)):
             return out
         paths: list[str] = []
-        for route in routes[:source_coverage.COMPILATION_SOURCES_LISTED]:
+        ordinals: list[int] = []
+        for index, route in enumerate(routes[:source_coverage.COMPILATION_SOURCES_LISTED]):
             args = route.get("args") if isinstance(route, Mapping) else None
             path = args.get("path") if isinstance(args, Mapping) else None
             if (
@@ -1675,10 +1786,16 @@ def _semantic_compilation_projection(leaf: Any) -> dict[str, Any] | None:
                 and isinstance(path, str) and 0 < len(path) <= source_coverage.COMPILATION_PATH_CHARS
             ):
                 paths.append(path)
+                ordinals.append(index)
         out = source_coverage.compilation_routes(paths)
         if block.get("truncated") is True or len(paths) < len(routes):
             out["truncated"] = True
-        return out
+        moves = {}
+        for ordinal, index in enumerate(ordinals):
+            # Both route arrays use the producer's same Source order; rejected rows change the output ordinal.
+            moves[("full_source_reads", index)] = ("full_source_reads", ordinal)
+            moves[("preparation_route", "args", "sources", index)] = ("preparation_route", "args", "sources", ordinal)
+        return source_result_attribution.carry(block, out, moves=moves)
     return None
 
 
@@ -1852,15 +1969,15 @@ def _without_relation_advisory_context(result: Any) -> Any:
             changed = True
             continue
         if isinstance(value, Mapping) and "_relation_advisory_context" in value:
-            stripped[key] = {
+            stripped[key] = source_result_attribution.carry(value, {
                 inner: value[inner]
                 for inner in value
                 if inner != "_relation_advisory_context"
-            }
+            })
             changed = True
             continue
         stripped[key] = value
-    return stripped if changed else result
+    return source_result_attribution.carry(result, stripped) if changed else result
 
 
 #: A write's vocabulary receipt: at most this many lines of at most this many characters.
@@ -1930,6 +2047,7 @@ def committed_terminal(
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -1998,7 +2116,7 @@ def with_fast_acknowledgement(
     ):
         raise ValueError("applicable advisory acknowledgement requires one stable result ref")
 
-    frozen = dict(terminal)
+    frozen = source_result_attribution.carry(terminal, dict(terminal))
     frozen["derived_sync"] = derived_sync
     if components:
         frozen["derived_sync_components"] = list(components)
@@ -2034,7 +2152,7 @@ def as_replay(terminal: Any) -> Any:
     """
     if not isinstance(terminal, Mapping) or terminal.get("_terminal") != _TERMINAL_MARKER:
         return terminal
-    return {**terminal, "replayed": True}
+    return source_result_attribution.carry(terminal, {**terminal, "replayed": True})
 
 
 def replayed_terminal(
@@ -2077,6 +2195,7 @@ def replayed_terminal(
     )
     if idempotency_key is not None:
         terminal["idempotency_key"] = idempotency_key
+    _carry_source_terminal(leaf_result, terminal)
     return terminal
 
 
@@ -2151,19 +2270,28 @@ def _batch_rows(
 ) -> list[tuple[str, str]]:
     """One (state, path) pair per attempted file of a batch, read from the projected rows.
 
-    The projections, never the raw leaf: a malformed row is already a `failed` row there, so the
-    sentence cannot claim more than the rows the agent reads. `replayed` is a file an earlier call
-    committed, so it counts with `already_stored`. `unselected` files were never attempted.
+    The projections, never the raw leaf: a row whose receipt did not read keeps its state there and
+    names the fields in `unverified_fields`, so the sentence cannot claim more than the rows the agent
+    reads. A stored row whose path did not read is named by its `file_id`. `replayed` is a file an
+    earlier call committed, so it counts with `already_stored`. `unselected` files were never attempted.
     A media row is `failed` or it was accepted; the media contract has no duplicate state.
     One file written alone has no rows; its stored leaf says `already_stored` when the bytes were
     already there, and names the earlier copy it resolved to.
     """
-    rows = []
+    named: list[tuple[str, str]] = []
+    unnamed: list[tuple[str, str]] = []
     for item in artifact_receipt.get("files", ()):
         state = _artifact_state(item)
         state = "already_stored" if state == "replayed" else state
         if state in _ARTIFACT_STATES:
-            rows.append((state, item.get("stored_path", "")))
+            # A row whose path did not read still names the file by the id the caller gave it. Those rows
+            # follow the rows with a path, in their own order, so a sentence leads with a path whatever
+            # the order of the files.
+            if item.get("stored_path"):
+                named.append((state, item["stored_path"]))
+            else:
+                unnamed.append((state, item.get("file_id", "")))
+    rows = named + unnamed
     for item in media.get("media_results", ()):
         rows.append(("failed" if item["outcome"] == "failed" else "stored", item["path"]))
     if (
@@ -2212,6 +2340,57 @@ def _partial_batch_summary(verb: OutcomeVerb, rows: Sequence[tuple[str, str]]) -
     return f"Nothing new {verb}; {len(already)} already {verb}, {lost}"
 
 
+def _identity_findings(artifact_receipt: Mapping[str, Any]) -> list[tuple[Mapping[str, Any], str]]:
+    """Each stored file row whose identity check found a conflict or no DOI, with its finding sentence."""
+    found: list[tuple[Mapping[str, Any], str]] = []
+    for row in artifact_receipt.get("files", ()):
+        block = row.get("identity")
+        if (
+            block is not None
+            and row.get("outcome") in {"stored", "replayed"}
+            and (sentence := document_identity.finding(block)) is not None
+        ):
+            found.append((row, sentence))
+    return found
+
+
+def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
+    """The metadata-only correction call that fixes a Source whose url does not match its document."""
+    # No page hash rides the receipt: processing rewrites the page after capture, so the guard a correction
+    # names comes from read_page, which gives the current hash.
+    ref = row.get("ref")
+    if row.get("correctable") is False:
+        return "Compare the opening text with the url, then tell the person which one is wrong."
+    if not ref:
+        return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
+    more = f" The other {flagged - 1} flagged files carry their own ref." if flagged > 1 else ""
+    return document_identity.correction_call(str(ref), None) + more
+
+
+#: The records dispositions that leave a canonical Record to write: filing, a recurrence, or a
+#: question for the user. `hold` defers to review by policy, so it adds nothing to the outcome.
+_UNFILED_DISPOSITIONS = frozenset({"file", "append_occurrence", "ask"})
+
+
+def _unfiled_record_clause(records_routing: Mapping[str, Any] | None) -> str:
+    """'; not filed in <collection>' when this write's own routing says a Record is still owed.
+
+    An agent that wrote only a supporting note told the user the incident was filed; the sentence
+    it repeats now says which canonical home still lacks the Record.
+    """
+    if not records_routing or records_routing.get("disposition") not in _UNFILED_DISPOSITIONS:
+        return ""
+    return f"; not filed in {records_routing['title']}"
+
+
+def _unfiled_record_step(records_routing: Mapping[str, Any] | None) -> str | None:
+    """The disposition's own instruction or question, as the reply's next step."""
+    if not records_routing or records_routing.get("disposition") not in _UNFILED_DISPOSITIONS:
+        return None
+    step = records_routing.get("question") if records_routing["disposition"] == "ask" else records_routing.get("instruction")
+    return step if isinstance(step, str) and step else None
+
+
 def _user_summary(
     result: Mapping[str, Any], verb: OutcomeVerb | None, batch: Sequence[tuple[str, str]] = ()
 ) -> str | None:
@@ -2242,6 +2421,12 @@ def _user_summary(
         names = [item for item in paths if isinstance(item, str)]
     else:
         names = []
+    # A stored row whose path did not read is in the batch rows, named by its `file_id`, but not in `paths`.
+    # The sentence counts the files the rows say were stored, so it never reads as fewer than `summary.stored`.
+    # `_batch_rows` lists the rows with a path first, so the ids of the unnamed files follow the paths.
+    stored_rows = [name for state, name in batch if state == "stored"]
+    if len(stored_rows) > len(names):
+        names = stored_rows
     if not names:
         return head
     if verb == "moved" and len(names) == 2:
@@ -2251,6 +2436,19 @@ def _user_summary(
         # A replacement stores `paths` as [old, new]. The person now has the new page, so it leads.
         return f"{head} -> {names[1]}, was {names[0]}"
     return _lead(head, names)
+
+
+def _pointer_repointed(leaf: Any) -> list[Mapping[str, Any]]:
+    """The append-only pages whose links a move or reclassification repointed, title first."""
+    pages = leaf.get("pointer_repointed") if isinstance(leaf, Mapping) else None
+    if not isinstance(pages, list):
+        return []
+    return [
+        page for page in pages
+        if isinstance(page, Mapping)
+        and isinstance(page.get("title"), str)
+        and isinstance(page.get("path"), str)
+    ]
 
 
 def _stated_outcome(leaf: Any) -> str | None:
@@ -2302,6 +2500,12 @@ def project_terminal(
     # value goes to `diagnostics.operational`.
     leaf_owned: frozenset[str] = frozenset()
     artifact_receipt = _artifact_receipt_projection(leaf)
+    for item in artifact_receipt.get("files", ()):
+        if item.get("unverified_fields"):
+            log.warning(
+                "artifact receipt row is stored but its fields did not read: file_id=%s fields=%s",
+                item["file_id"], ",".join(item["unverified_fields"]),
+            )
     media_projection = _media_result_projection(leaf)
     # A media batch whose rows did not project gives no per-file states, and its `paths`
     # include failed files, so no sentence is safer than one that claims them all.
@@ -2324,15 +2528,36 @@ def project_terminal(
     stated_outcome = _stated_outcome(leaf)
     if user_summary is not None and stated_outcome is not None:
         user_summary = stated_outcome
+    records_routing = _records_routing_projection(leaf)
     if user_summary is not None:
         # Named at render time from the deployment, so a replay of the stored terminal reads the
         # same. Two connectors can present one display name; the sentence says which store it was.
-        compact["user_summary"] = f"{user_summary} ({cloud_cell.store_identity()['name']})"
+        compact["user_summary"] = (
+            f"{user_summary}{_unfiled_record_clause(records_routing)} "
+            f"({cloud_cell.store_identity()['name']})"
+        )
         # An update that dropped relations says so where the person reads, with the repair.
         if isinstance(leaf, Mapping) and leaf.get("relations_dropped") and isinstance(
             leaf.get("outcome"), str
         ):
             compact["user_summary"] += f". {leaf['outcome']}"
+    flagged = _identity_findings(artifact_receipt)
+    if flagged and "user_summary" in compact:
+        compact["user_summary"] += f". {flagged[0][1]}"
+        if len(flagged) > 1:
+            compact["user_summary"] += f" (and {len(flagged) - 1} more files have a finding)"
+    repointed = _pointer_repointed(leaf)
+    if repointed:
+        # An append-only page changed only in its links; the person hears it, the agent sees which.
+        if "user_summary" in compact:
+            pages = "page" if len(repointed) == 1 else "pages"
+            compact["user_summary"] += (
+                f". Repointed the links to it in {len(repointed)} append-only {pages}"
+            )
+        compact["pointer_repointed"] = [
+            page["title"] for page in repointed[:_MAX_REPOINTED_PAGES]
+        ]
+        compact["pointer_repointed_paths"] = [page["path"] for page in repointed]
     compact.update({key: result[key] for key in _ENVELOPE_KEYS if key in result})
     if "idempotency_key" in result:
         compact["idempotency_key"] = result["idempotency_key"]
@@ -2458,6 +2683,7 @@ def project_terminal(
             # The agent tells the person how many items the run left unstored because those bytes were already stored.
             compact["skipped_duplicates"] = apply_result["skipped_duplicates"]
     compact.update(artifact_receipt)
+    source_result_attribution.carry(artifact_receipt, compact)
     if isinstance(leaf, Mapping) and leaf.get("state") == "already_stored":
         # A file handed over alone has no row; its outcome names the earlier copy and what it did not take.
         compact.update(_duplicate_outcome_projection(leaf) or {})
@@ -2533,7 +2759,6 @@ def project_terminal(
     structure_suggestion = _structure_suggestion_projection(leaf)
     if structure_suggestion is not None:
         compact["structure_suggestion"] = structure_suggestion
-    records_routing = _records_routing_projection(leaf)
     if records_routing is not None:
         compact["records_routing"] = records_routing
     entity_candidate = _entity_candidate_projection(leaf)
@@ -2588,12 +2813,35 @@ def project_terminal(
     warnings = _warning_texts(leaf, has_artifact_receipt=bool(artifact_receipt))
     if warnings:
         compact["warnings"] = warnings
+    compact.pop("source_projection", None)
+    for container in (result, leaf):
+        marker = container.get("source_projection") if isinstance(container, Mapping) else None
+        # Source retirement owns this content-free result marker protocol.
+        if (
+            isinstance(marker, Mapping)
+            and set(marker) == {"state", "reason"}  # nosemgrep: ep-word-set -- the fixed Source-result marker fields.
+            and marker.get("state") in ("partial", "unavailable")
+            and marker.get("reason") == "source_retired"
+        ):
+            compact["source_projection"] = {"state": marker["state"], "reason": marker["reason"]}
+            break
+    source_result_attribution.carry(result, compact)
+    source_result_attribution.carry(leaf, compact)
+    if "user_summary" in compact:
+        refs = source_result_attribution.recipe(artifact_receipt or _path_projection(leaf)).sources
+        if refs:
+            source_result_attribution.bind(compact, refs, paths=(("user_summary",),))
+    if flagged:
+        compact["next_action"] = _correction_next_action(flagged[0][0], len(flagged))
+    elif (filing_step := _unfiled_record_step(records_routing)) is not None:
+        compact.setdefault("next_action", filing_step)
     reply, operational = _agent_reply(
         compact,
         result,
         capture_sweep=capture_sweep,
         warnings_listed_per_file=bool(artifact_receipt),
         leaf_owned=leaf_owned,
+        replaces_sweep_ask=bool(flagged),
     )
     if detail == "full":
         derived_diagnostics = result.get("_derived_diagnostics")
@@ -2606,7 +2854,7 @@ def project_terminal(
                 ),
             }
         elif isinstance(leaf, Mapping):
-            reply["diagnostics"] = {"operational": operational, **leaf}
+            reply["diagnostics"] = source_result_attribution.carry(leaf, {"operational": operational, **leaf})
         else:
             reply["diagnostics"] = {"operational": operational, "leaf_result": leaf}
         if capture_sweep is not None:
@@ -2623,6 +2871,7 @@ def _agent_reply(
     capture_sweep: Mapping[str, Any] | None,
     warnings_listed_per_file: bool,
     leaf_owned: frozenset[str],
+    replaces_sweep_ask: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Split the projected write reply into what the agent reads and what operators read.
 
@@ -2646,9 +2895,12 @@ def _agent_reply(
         # A write's own step (a guarded write waiting for review) is a sentence; the sweep's ask
         # follows it in the same `next_action`, so neither is lost. A step that is one closed
         # protocol value (a curation run's `resume`, `apply`) takes no prose, so the ask sits
-        # beside it. The check is the value's shape, one token, not its meaning.
+        # beside it. The check is the value's shape, one token, not its meaning. An identity
+        # finding's correction is the one step the agent takes first, so it carries no ask.
         own_step = reply.get("next_action")
-        if not isinstance(own_step, str):
+        if replaces_sweep_ask:
+            pass
+        elif not isinstance(own_step, str):
             reply["next_action"] = CAPTURE_SWEEP_NEXT
         elif len(own_step.split()) == 1:
             reply["capture_next"] = CAPTURE_SWEEP_NEXT
@@ -2679,10 +2931,12 @@ def _agent_reply(
     source = reply.get("source")
     if "capture_outcome" in reply and isinstance(source, Mapping) and "path" in source:
         # One identifier for the stored source: the path, which every read accepts.
-        reply["source"] = {"path": source["path"]}
+        reply["source"] = source_result_attribution.carry(source, {"path": source["path"]})
     if not reply:
         # A committed write that has no outcome verb and no receipt would otherwise answer `{}`.
         reply["user_summary"] = "Done."
+    source_result_attribution.carry(wide, reply)
+    source_result_attribution.carry(wide, operational)
     return reply, operational
 
 

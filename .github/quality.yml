@@ -190,8 +190,11 @@ shellcheck: {}
 # or XML, on added lines in product code. An ERROR fails only on an added line; a
 # WARNING is listed for the reviewer. Vocabulary cluster slices add their rules to one
 # repository rule file listed under `rules` when the first one lands.
+# The repository rules refuse a new `kb_dirname()` or `kb_prefix()` call, and a new string literal that
+# names the default managed-root folder, outside kbdir.py.
 semgrep:
   paths: ["src/exomem"]
+  rules: [".github/semgrep/managed-root.yml"]
 
 test_jobs:
   - "structural recall (system SQLite)"

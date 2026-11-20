@@ -214,3 +214,163 @@ For a new capture that carries a URL, `capture_source` SHALL look up, in the sam
 
 - **WHEN** the only other Source with that URL is withheld from the caller
 - **THEN** the result equals the result of a vault without that Source
+
+### Requirement: A capture may declare passages with caller keys
+
+`capture_source` SHALL accept optional `passages`: an ordered list of objects, each with `key` and `text`.
+`passages` and `content` SHALL exclude each other.
+The capture SHALL render the Source body as the passage texts joined by one blank line, so that the Source reads as an ordinary text capture.
+The capture SHALL store each passage's text byte for byte as the caller sent it.
+The capture SHALL refuse, before any write:
+
+- more than 2,000 passages;
+- a key that is not a string of 1 to 128 bytes as UTF-8, or that repeats within the capture;
+- passage text that is empty, contains a blank line or a carriage return, or has white space at its start or end.
+
+Each refusal SHALL name the passage ordinal, the field and the limit or the correction.
+
+#### Scenario: Passages replace content
+
+- **WHEN** a caller supplies `passages` and no `content`
+- **THEN** the capture creates one Source whose body holds the passage texts in order
+
+#### Scenario: Both inputs are refused
+
+- **WHEN** a caller supplies `passages` and `content` together
+- **THEN** the capture refuses before any write and names both fields
+
+#### Scenario: A repeated key is refused
+
+- **WHEN** two passages of one capture have the same key
+- **THEN** the capture refuses before any write
+- **AND** the error names both passage ordinals and the field
+
+#### Scenario: Text that capture would have to change is refused
+
+- **WHEN** one passage's text ends with white space
+- **THEN** the capture refuses before any write
+- **AND** the error names the passage ordinal and tells the caller to trim the text
+
+### Requirement: Declared passages are original authored inputs
+
+The capture input digest SHALL cover each declared passage's key and text, in order.
+A repeated capture with the same identity and the same passages SHALL reuse the Source.
+A repeated capture with the same identity and different keys or texts SHALL be the same conflict as different text.
+
+#### Scenario: A retry reuses the Source
+
+- **WHEN** a caller repeats a capture with the same identity, keys and texts
+- **THEN** the capture returns the existing Source with `capture_outcome: reused`
+
+#### Scenario: A changed key conflicts
+
+- **WHEN** a caller repeats a capture with the same identity and one changed key
+- **THEN** the capture reports the identity conflict and changes nothing
+
+### Requirement: Explicit attempts bind exact authored input
+
+Optional capture attempts SHALL use fresh server-issued handles bound to exact typed authored input, Source identity and authenticated principal scope.
+The binding SHALL precede input-changing normalization and survive credential rotation.
+Reservation SHALL retain no capture content.
+Ordinary capture without an attempt SHALL retain its existing behavior.
+
+#### Scenario: Canonically equivalent strings differ
+
+- **WHEN** a reserved capture is submitted with different UTF-8 strings that Unicode normalization would equate
+- **THEN** input binding refuses it before canonical writes
+
+#### Scenario: A cell bearer rotates
+
+- **WHEN** the authenticated cell-service identity remains unchanged after bearer rotation
+- **THEN** its attempt remains bound to that same identity without requiring a gateway origin key
+
+### Requirement: Attempt admission and settlement share canonical exclusion
+
+Commit SHALL validate an existing attempt inside the actual non-borrowed canonical mutation boundary and retain it through terminal persistence.
+Settlement SHALL use that same boundary to close admission.
+Missing, expired, cancelled or consumed attempts MUST NOT recreate execution.
+Admission expiry MUST NOT cancel accepted execution.
+
+#### Scenario: A delayed request arrives after settlement
+
+- **WHEN** settlement closes an unused attempt before its delayed capture reaches the boundary
+- **THEN** the later capture refuses without a canonical write
+
+#### Scenario: Accepted execution outlives the caller
+
+- **WHEN** a capture holds the boundary after its caller stops waiting
+- **THEN** settlement reports pending or waits within its bounded admission policy
+- **AND** it cannot claim admission closed before that capture leaves the boundary
+
+#### Scenario: A nested callback settles its ancestor
+
+- **WHEN** an executing capture synchronously settles its own ticket, including through another nested capture
+- **THEN** settlement reports pending without cancelling the ancestor
+- **AND** inherited context on another thread does not impersonate ownership of the boundary
+
+### Requirement: Closure reports its actual custody scope
+
+Reservation and settlement SHALL identify observed cell, replica, persistent ledger instance and canonical-boundary identity.
+The consumer SHALL distinguish local admission closure from past capture outcome and current Source presence.
+Changed or unproved custody SHALL remain unknown.
+Settlement MUST NOT scan Sources or execute recovery capture to manufacture a terminal.
+
+#### Scenario: A terminal receipt is unavailable
+
+- **WHEN** the same authoritative scope closes an attempt without a retained success receipt
+- **THEN** admission is closed here and past outcome remains unknown
+- **AND** complete inventory supplies current Source state separately
+
+#### Scenario: The runtime ledger was replaced
+
+- **WHEN** a new database has a different ledger-instance identity
+- **THEN** settlement does not claim closure for a receipt from the earlier ledger
+
+#### Scenario: An earlier issuer remains alive but idle
+
+- **WHEN** settlement closes its attempt under the same canonical boundary and unchanged ledger scope
+- **THEN** a later request from that issuer cannot execute the closed attempt
+- **AND** closure requires no process-retirement assertion or newer lease token
+
+### Requirement: Protocol observations bypass generic replay
+
+Reservation, settlement and ticketed capture SHALL bypass explicit and implicit generic replay before saved-terminal lookup.
+They SHALL preserve ordinary authority, mutation fencing and terminal filtering.
+The protocol SHALL retain its own exact terminals and collect eligible history in indexed bounded batches without permanent identity tombstones.
+
+#### Scenario: A caller repeats a reservation request
+
+- **WHEN** a previous reservation was consumed or cancelled
+- **THEN** a new reservation call allocates a new handle rather than replaying the old one
+
+#### Scenario: A caller polls settlement with the same invocation key
+
+- **WHEN** an earlier settlement observed pending and the capture has since completed
+- **THEN** settlement observes the current state rather than replaying pending
+
+#### Scenario: Collected history no longer has a receipt
+
+- **WHEN** a closed attempt's retained row has been collected
+- **THEN** local closure remains provable under its unchanged authoritative scope
+- **AND** its past outcome remains unknown without recreating the attempt
+
+### Requirement: Explicit incarnation erasure closes old capture replay
+
+Owner-enabled erasure SHALL be an explicit exception to ordinary Source preservation. Old capture terminals MUST NOT replay a retired reference as a live Source. Fresh capture of its logical identity SHALL allocate a fresh reference. Erasure MUST NOT infer a correction or keep a permanent logical-identity tombstone.
+
+#### Scenario: Retired capture is retried
+- **WHEN** a caller repeats an earlier capture after that Source incarnation completes erasure
+- **THEN** a saved terminal cannot present the retired Source as live
+- **AND** a fresh admitted capture can create the logical identity with a new Source reference
+
+### Requirement: Capture settlement distinguishes admission from custody
+
+Settlement SHALL preserve its scoped admission and past-outcome guarantees while reporting custody completeness, owned allocations and attempt residue separately. Ordinary settlement MUST NOT destroy an uncertain capture's preserved original. Explicit cleanup SHALL retain unresolved custody beyond normal retry-cache expiry.
+
+#### Scenario: Capture outcome is unknown but allocation is known
+- **WHEN** a capture loses its terminal after allocating a Source reference
+- **THEN** settlement can report unknown past outcome and the proved owned allocation without claiming publication or absence
+
+#### Scenario: Ordinary settlement reports residue
+- **WHEN** a caller settles an interrupted attempt without requesting cleanup
+- **THEN** admission closes within its proved scope and retained original bytes remain available for recovery

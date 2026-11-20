@@ -707,10 +707,12 @@ def test_a_neighbour_keeps_its_origin_when_mapping_served_refs(evidence, lane) -
         title="Neighbour", text="A synthetic fact.", lifecycle="active", updated="",
         anchor=origin,
     )
-    items = [unit] if lane == "units" else working_set._graph_lane(
-        SimpleNamespace(id="example"),
-        anchors=[SimpleNamespace(ref=origin, path=origin, neighbourhood=[neighbour])],
-    )
+    items = [unit] if lane == "units" else [working_set.LaneItem(
+        role="example", level="page", ref=neighbour, path=neighbour,
+        title="Neighbour", text="", lifecycle="active", updated="",
+        anchor=origin, provenance={"source": "graph"},
+        why="refines (inbound): a synthetic connection.",
+    )]
     packet = working_set.build_packet(
         items=items, anchors=[{"ref": origin, "path": origin, "evidence": evidence}],
         roles=[{"id": "example", "lane": lane}], current_state=[], ambiguity=[],

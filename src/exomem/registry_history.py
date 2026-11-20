@@ -46,7 +46,7 @@ from typing import Any
 
 from . import held_fs
 from . import vault as vault_module
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ VERSION_RE = re.compile(r"^\d{8}T\d{12}Z-[0-9a-f]{8}$")
 
 
 def history_dir(vault_root: Path, stem: str) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "history" / stem
+    return managed_root(Path(vault_root)) / "_Schema" / "history" / stem
 
 
 def version_id(moment: dt.datetime, tag: str) -> str:

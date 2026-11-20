@@ -59,7 +59,14 @@ from . import find as find_module
 from . import vault as vault_module
 from .cli_ops import OpError
 from .find_types import ParsedPage
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import (
+    managed_form,
+    managed_join,
+    managed_relative,
+    managed_root,
+    managed_split,
+    managed_splitter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -611,6 +618,33 @@ def _connect_existing_owner_target(
                 except BaseException:
                     conn.close()
                     raise
+
+
+def holds_page(vault_root: Path, rel_path: str, *, source_hash: str, reference: str) -> bool | None:
+    """Whether the stored graph keeps a row of one page version, or None when it cannot be read.
+
+    Reads past the availability gates that make a refused snapshot look empty: an eraser needs
+    the stored rows. The version matters because a later page may reuse the path.
+    """
+    path = sidecar_path(vault_root)
+    if not path.exists():
+        return False
+    try:
+        conn = _connect_existing_owner_target(vault_root, path, readonly=True)
+        try:
+            # Each lookup leads with an indexed path: graph_nodes(path) and two primary keys.
+            # A page's edges are replaced with its nodes, so the version's nodes stand for them.
+            return conn.execute(
+                "SELECT 1 FROM graph_nodes WHERE path = ? AND source_hash = ? "
+                "UNION ALL SELECT 1 FROM graph_parent_refs WHERE path = ? AND parent_ref = ? "
+                "UNION ALL SELECT 1 FROM graph_dependency_coverage "
+                "WHERE source_path = ? AND source_hash = ? LIMIT 1",
+                (rel_path, source_hash, rel_path, reference, rel_path, source_hash),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+    except (OSError, RuntimeError, sqlite3.Error):
+        return None
 
 
 #: Everything SQLite can create beside a private rebuild.  A publication moves
@@ -2203,10 +2237,10 @@ def _dependency_lookup_keys(raw_target: str) -> set[str]:
     if not target:
         return set()
     keys = {target.casefold()}
-    if target.startswith(kb_prefix()):
-        keys.add(target.removeprefix(kb_prefix()).casefold())
+    if managed_split(target) is not None:
+        keys.add(managed_relative(target).casefold())
     else:
-        keys.add((kb_prefix() + target).casefold())
+        keys.add(managed_join(target).casefold())
     if "/" not in target:
         keys.add(target.casefold())
     return keys
@@ -4389,12 +4423,12 @@ class EpistemicGraphIndex:
             for rel, entry in rows.items()
             if entry != self._live_resolver_entry(resolver, rel)
         }
-        kb = self.vault_root / kb_dirname()
-        prefix = kb_prefix()
+        kb = managed_root(self.vault_root)
+        under = managed_splitter()
         listings: dict[Path, frozenset[str] | None] = {}
         for no_ext in resolver.full_paths:
             rel = f"{no_ext}.md"
-            if rel in rows or not rel.startswith(prefix):
+            if rel in rows or under(rel) is None:
                 continue
             if find_corpus.walk_md_admits(kb, self.vault_root / rel, listings):
                 differing.add(rel)
@@ -5874,11 +5908,11 @@ class EpistemicGraphIndex:
             str(path)
             for (path,) in conn.execute("SELECT path FROM graph_nodes WHERE kind = 'file'")
         }
-        prefix = kb_prefix()
+        under = managed_splitter()
         vanished = [
             rel
             for no_ext in resolver.full_paths
-            if (rel := f"{no_ext}.md").startswith(prefix)
+            if under(rel := f"{no_ext}.md") is not None
             and rel not in rows
             and not os.path.lexists(self.vault_root / rel)
         ]
@@ -5984,7 +6018,7 @@ class EpistemicGraphIndex:
     ) -> int:
         """Index every Knowledge Base page into ``conn`` without committing; return the count."""
         indexed = 0
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         type_basis = producer_type_basis(self.vault_root)
         registry_stamps = graph_registry_stamps(self.vault_root)
         if kb.is_dir():
@@ -6466,7 +6500,7 @@ class EpistemicGraphIndex:
 
         def candidates() -> Iterator[Path]:
             for path, in_vault, in_kb in vault_module.walk_vault_md_with_subtree(
-                self.vault_root, self.vault_root / kb_dirname()
+                self.vault_root, managed_root(self.vault_root)
             ):
                 walked[path] = (in_vault, in_kb)
                 yield path
@@ -6829,7 +6863,7 @@ class EpistemicGraphIndex:
         entries: dict[str, tuple[bool, str | None]] = {}
         for raw_path in delta.changed:
             rel = _vault_rel(self.vault_root, Path(raw_path))
-            if rel is None or not rel.startswith(kb_prefix()):
+            if rel is None or managed_split(rel) is None:
                 log.info(
                     "graph stored resolver proof declined reason=changed_path_outside_kb "
                     "changed_count=%d",
@@ -7959,7 +7993,7 @@ class EpistemicGraphIndex:
         conn = self._open_read_snapshot(require_current_projection=False)
         if conn is None:
             return None
-        kb = self.vault_root / kb_dirname()
+        kb = managed_root(self.vault_root)
         listings: dict[Path, frozenset[str] | None] = {}
         current: list[str] = []
         stale: list[str] = []
@@ -7985,7 +8019,7 @@ class EpistemicGraphIndex:
                 ).fetchone()
                 indexed = (
                     admitted
-                    and rel.startswith(kb_prefix())
+                    and managed_split(rel) is not None
                     and find_corpus.walk_md_admits(kb, path, listings)
                 )
                 if indexed:
@@ -8101,7 +8135,7 @@ class EpistemicGraphIndex:
             # A changed non-KB target that has no persisted file row cannot
             # supply its prior title. It may have removed an ambiguity, so the
             # graph cannot safely claim bounded topology recovery.
-            if not rel.startswith(kb_prefix()) and not indexed:
+            if managed_split(rel) is None and not indexed:
                 if opened_snapshot:
                     conn.rollback()
                 return None
@@ -8204,7 +8238,9 @@ class EpistemicGraphIndex:
             "indexed": (),
         }
         if not paths:
-            return report
+            committed = graph_sync.read_checkpoint(self.vault_root)
+            if committed is None or not committed.changes_no_input:
+                return report
         if not graph_enabled():
             return {**report, "disabled": 1}
         if not self.path.exists():
@@ -10266,7 +10302,7 @@ class EpistemicGraphIndex:
                 canonical = canonical_refs.get(rel)
                 if canonical is not None:
                     return canonical
-                if rel.startswith(f"{kb_dirname()}/Sources/"):
+                if rel.startswith(managed_join("Sources/")):
                     return context_refs.source_ref(rel)
                 return context_refs.vault_ref(rel)
             info = source_info.get(rel)
@@ -10281,7 +10317,7 @@ class EpistemicGraphIndex:
                     return memory_refs.memory_ref(str(exomem_id))
                 except ValueError:
                     pass
-            if rel.startswith(f"{kb_dirname()}/Sources/"):
+            if rel.startswith(managed_join("Sources/")):
                 return context_refs.source_ref(rel)
             return context_refs.vault_ref(rel)
 
@@ -11560,6 +11596,27 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
 #: `cache_token` while another reader's cold proof of the sidecar is running.
 UNPROVEN_TOKEN = ("unproven",)
 
+#: The `graph_meta` rows that name the graph's content: a closed set that the sidecar's own
+#: schema fixes.
+_CACHE_TOKEN_KEYS = (  # nosemgrep: ep-word-set -- graph_meta key names.
+    "schema_version", "extension_registry_hash", "generation", "instance",
+)
+
+
+def snapshot_cache_token(conn: sqlite3.Connection) -> tuple[str | None, ...] | None:
+    """`cache_token`'s values as the read transaction `conn` sees them, None without a generation.
+
+    Every write of graph rows bumps `generation` in its own transaction (`_bump_generation`),
+    so a reader that keeps a result of its transaction under this token reads again after any
+    write, however small. A store lend reports the store revision as `generation`.
+    """
+    from .vault_store import read as store_read
+
+    values = store_read.snapshot_identity(conn, _CACHE_TOKEN_KEYS)
+    if values.get("generation") is None:
+        return None
+    return tuple(values.get(key) for key in _CACHE_TOKEN_KEYS)
+
 
 def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     """`(schema_version, extension_registry_hash, generation, instance)` or None.
@@ -11594,22 +11651,17 @@ def cache_token(vault_root: Path, *, prove: bool | str = True) -> tuple | None:
     if conn is None:
         return UNPROVEN_TOKEN if outcome else None
     try:
+        marks = ", ".join("?" for _ in _CACHE_TOKEN_KEYS)
         values = dict(
             conn.execute(
-                "SELECT key, value FROM graph_meta WHERE key IN "
-                "('schema_version', 'extension_registry_hash', 'generation', 'instance')"
+                f"SELECT key, value FROM graph_meta WHERE key IN ({marks})", _CACHE_TOKEN_KEYS
             ).fetchall()
         )
     except sqlite3.Error:
         return None
     finally:
         conn.close()
-    return (
-        values.get("schema_version"),
-        values.get("extension_registry_hash"),
-        values.get("generation"),
-        values.get("instance"),
-    )
+    return tuple(values.get(key) for key in _CACHE_TOKEN_KEYS)
 
 
 def published_snapshot_token(conn: sqlite3.Connection) -> str:
@@ -12718,7 +12770,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
             code = "unproven"
         else:
             code = "not_current"
-        return [{"path": kb_prefix(), "refusal": code, "reason": _DRIFT_REFUSAL_REASONS[code]}]
+        return [{"path": managed_join(""), "refusal": code, "reason": _DRIFT_REFUSAL_REASONS[code]}]
     try:
         by_path = {
             node["path"]: node for node in idx._nodes_from_snapshot(conn) if node["kind"] == "file"
@@ -12728,7 +12780,7 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     from . import find_corpus
 
     drift: list[dict[str, Any]] = []
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     if not kb.is_dir() and not find_corpus.store_serves(vault_root):
         return drift
     disk_paths: set[str] = set()
@@ -13322,7 +13374,7 @@ def _body_wikilink_observations(
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         target_path = _page_rel(canonical)
-        if warning or not target_path.startswith(kb_prefix()) or target_path in seen:
+        if warning or managed_split(target_path) is None or target_path in seen:
             continue
         seen.add(target_path)
         out.append(
@@ -13485,8 +13537,8 @@ def _page_rel(path: str) -> str:
     cleaned = str(path).strip().strip("/")
     if not cleaned:
         return cleaned
-    if not cleaned.startswith(kb_prefix()) and "/" in cleaned:
-        cleaned = kb_prefix() + cleaned.removeprefix(kb_dirname() + "/")
+    if "/" in cleaned:
+        cleaned = managed_form(cleaned)
     return cleaned if cleaned.lower().endswith(".md") else cleaned + ".md"
 
 
@@ -14037,9 +14089,30 @@ def _neighbor_edges(
     relation_filter: set[str],
     *,
     limit: int,
+    end_types: frozenset[str] = frozenset(),
+    beyond: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], bool]:
+    """Up to `limit` edges touching `frontier` in edge-key order, and whether more remain.
+
+    With `end_types` a row counts only when the page at its far end has one of those page types
+    and is none of the pages in `beyond`, so rows that cannot reach a new page of the wanted kind
+    spend none of the limit.
+    """
     if not frontier:
         return [], False
+    sql, params = _neighbor_edges_query(frontier, relation_filter, end_types, beyond)
+    rows = conn.execute(sql + " LIMIT ?", (*params, limit + 1)).fetchall()
+    overflow = len(rows) > limit
+    return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
+
+
+def _neighbor_edges_query(
+    frontier: set[str],
+    relation_filter: set[str],
+    end_types: frozenset[str],
+    beyond: frozenset[str] = frozenset(),
+) -> tuple[str, list[Any]]:
+    """The statement and parameters of `_neighbor_edges`, in edge-key order and without a limit."""
     select = (
         "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
         "parent_relation, registry_status, registry_version, registry_hash, "
@@ -14054,12 +14127,41 @@ def _neighbor_edges(
         relation_placeholders = ",".join("?" for _ in relations)
         where += f" AND relation_type IN ({relation_placeholders})"
         params.extend(relations)
-    rows = conn.execute(
-        select + where + " ORDER BY edge_key LIMIT ?",
-        (*params, limit + 1),
+    if end_types:
+        kinds = sorted(end_types)
+        kind_placeholders = ",".join("?" for _ in kinds)
+        # The far page of a row: a source-side key reaches the page its `dst_page_key` names, and a
+        # destination-side key reaches the page that authored the row. Both are file nodes, whose
+        # stored page type is what a reader selects on. A far page in `beyond` (the caller's
+        # frontier pages) yields nothing new: a unit's own block row and a relation between two
+        # units of one page stay on their page, and a long note has hundreds of them.
+        pages = sorted(_file_key(path) for path in beyond)
+        near = (
+            f" AND far.node_key NOT IN ({','.join('?' for _ in pages)})" if pages else ""
+        )
+        far_kind = f"far.page_type IN ({kind_placeholders}){near}"
+        where += (
+            f" AND ((src_key IN ({placeholders}) AND EXISTS (SELECT 1 FROM graph_nodes AS far"
+            f" WHERE far.node_key = graph_edges.dst_page_key AND {far_kind}))"
+            f" OR (dst_key IN ({placeholders}) AND EXISTS (SELECT 1 FROM graph_nodes AS far"
+            f" WHERE far.node_key = 'file:' || graph_edges.source_path AND {far_kind})))"
+        )
+        params.extend([*keys, *kinds, *pages, *keys, *kinds, *pages])
+    return select + where + " ORDER BY edge_key", params
+
+
+def _rows_within(conn: sqlite3.Connection, frontier: set[str], limit: int) -> bool:
+    """Whether at most `limit` rows touch `frontier`: an indexed read that stops at one more."""
+    if not frontier:
+        return True
+    keys = sorted(frontier)
+    placeholders = ",".join("?" for _ in keys)
+    found = conn.execute(
+        "SELECT 1 FROM graph_edges"
+        f" WHERE src_key IN ({placeholders}) OR dst_key IN ({placeholders}) LIMIT ?",
+        (*keys, *keys, limit + 1),
     ).fetchall()
-    overflow = len(rows) > limit
-    return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
+    return len(found) <= limit
 
 
 #: Edge origins whose target a wikilink resolution chose. Frontmatter and
@@ -14122,7 +14224,7 @@ def _homonym_paths(
     maps drops it, so a kept entry describes exactly these maps. A resolver without a token is
     read again.
     """
-    key, publication, prefix = Path(vault_root), resolver.publication, kb_prefix()
+    key, publication, prefix = Path(vault_root), resolver.publication, managed_join("")
     cached = _HOMONYM_PATHS.get(key)
     if publication is not None and cached is not None and (
         cached.publication, cached.prefix
@@ -14138,6 +14240,14 @@ def _homonym_paths(
     if publication is not None and resolver.publication is publication:
         _HOMONYM_PATHS[key] = _Homonyms(publication, prefix, homonyms, groups)
     return homonyms
+
+
+def warm_homonyms(vault_root: Path, check: Callable[[], None]) -> None:
+    """Group the resident recall resolver's names, so a restricted reader's first request need not.
+
+    The groups hold nothing of a caller (see `_HOMONYM_PATHS`), so one pass serves every reader.
+    """
+    _homonym_paths(vault_root, find_module.recall_resolver_snapshot(vault_root), check)
 
 
 @contextmanager
@@ -14156,7 +14266,7 @@ def homonyms_across_patch(
     under one of those title keys. Every other name keeps its group. Without a kept entry for this
     publication the body runs alone, and the next reader groups the whole resolver.
     """
-    key, prefix = Path(vault_root), kb_prefix()
+    key, prefix = Path(vault_root), managed_join("")
     memo = _HOMONYM_PATHS.get(key)
     if memo is None or resolver.publication is None or (memo.publication, memo.prefix) != (
         resolver.publication, prefix,
@@ -14169,9 +14279,9 @@ def homonyms_across_patch(
     if memo.names_by_title is None:
         memo.names_by_title = _names_by_title(resolver)
     by_title = memo.names_by_title
-    names, titles = _names_a_patch_reaches(resolver, rels, prefix)
+    names, titles = _names_a_patch_reaches(resolver, rels)
     yield
-    after_names, after_titles = _names_a_patch_reaches(resolver, rels, prefix)
+    after_names, after_titles = _names_a_patch_reaches(resolver, rels)
     titles |= after_titles
     names |= after_names | titles
     for title in titles:
@@ -14224,7 +14334,7 @@ def _file_name(
 
 
 def _names_a_patch_reaches(
-    resolver: vault_module.WikilinkResolver, rels: list[str], prefix: str,
+    resolver: vault_module.WikilinkResolver, rels: list[str],
 ) -> tuple[set[str], set[str]]:
     """The names that a patch of ``rels`` reaches through the path maps and the stems, and the
     title keys of the touched keys' candidates, in ``resolver``'s maps."""
@@ -14232,7 +14342,7 @@ def _names_a_patch_reaches(
     titles: set[str] = set()
     for rel in rels:
         path_key = vault_module._wikilink_path_key(str(rel).replace("\\", "/").lstrip("/"))
-        names.update((path_key, path_key.removeprefix(prefix), path_key.rsplit("/", 1)[-1]))
+        names.update((path_key, managed_relative(path_key), path_key.rsplit("/", 1)[-1]))
         titles.update(
             candidate.title_key
             for candidate in resolver.candidates_by_key.get(path_key, ())
@@ -14247,7 +14357,7 @@ def _link_candidates_for_key(resolver: vault_module.WikilinkResolver, cleaned: s
         return set()
     found = {
         candidate
-        for candidate in (cleaned, kb_prefix() + cleaned)
+        for candidate in (cleaned, managed_join(cleaned))
         if candidate in resolver.full_paths
     }
     if "/" not in cleaned:
@@ -14790,7 +14900,12 @@ class GraphView:
             candidates = sorted(_link_candidates(self._shared_resolver(), raw_target))
             from .vault_store import read as store_read
 
-            if store_read.request_memo(self.vault_root) is not None:
+            if not self.reads_placeholders and len(candidates) < 2:
+                # Fewer than two candidates leave no count of seen ones strictly between none and
+                # all, so a reader of pages only needs no decision: the link resolves as it does
+                # over the whole vault.
+                changed = False
+            elif store_read.request_memo(self.vault_root) is not None:
                 verdicts = self._kept_many(candidates)
                 seen_count = sum(verdicts.values())
                 changed = (
@@ -15064,17 +15179,130 @@ class GraphView:
             if source != rel_path and self.target_changes(raw_target) and self.keep(source)
         }
 
+    def _visible_rows(
+        self,
+        frontier: set[str],
+        row_limit: int,
+        end_types: frozenset[str] = frozenset(),
+        beyond: frozenset[str] = frozenset(),
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Rows touching `frontier`, in edge-key order, whose other end the reader may see.
+
+        Takes at most `row_limit` rows, counting only rows whose far page has one of `end_types`
+        when it names any. A frontier with no more rows than that gives all of them.
+        Otherwise the rows come in batches and each batch's other ends are decided as one set before
+        its rows count, so the read stops after `row_limit` visible rows and costs what they cost,
+        not the frontier's degree. A link to a placeholder is no page, and a reader
+        that drops placeholders does not count it.
+        """
+        rows: list[dict[str, Any]] = []
+        if not frontier:
+            return rows, False
+        sql, params = _neighbor_edges_query(frontier, set(), end_types, beyond)
+        # One statement, read in batches: the rows are sorted once, so a frontier whose rows are
+        # mostly withheld costs one pass over them, not one sorted query per batch.
+        cursor = self.conn.execute(sql, params)
+        try:
+            return self._visible_batches(cursor, frontier, row_limit, rows)
+        finally:
+            cursor.close()
+
+    def _visible_batches(
+        self,
+        cursor: sqlite3.Cursor,
+        frontier: set[str],
+        row_limit: int,
+        rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        pending: list[Any] = []
+        first = True
+        while True:
+            # Take the rows still needed and one more, so the reader is decided for few more
+            # rows than the bound takes; the one more shows whether the bound cuts. A floor keeps
+            # a long run of withheld rows from costing one round of decisions each.
+            size = min(_VIEW_ROW_BATCH, max(row_limit - len(rows) + 1, _VIEW_ROW_FLOOR))
+            fetched = pending + cursor.fetchmany(size + 1 - len(pending))
+            more = len(fetched) > size
+            pending = fetched[size:]
+            batch = [_edge_row_to_dict(row) for row in fetched[:size]]
+            if first and not more and len(batch) <= row_limit:
+                # Within the bound whoever the reader may see: no row is cut, so no decision is
+                # needed to count them. Later steps drop what the reader may not see.
+                return batch, False
+            first = False
+            ends = sorted({
+                key for row in batch for key in (row["src_key"], row["dst_key"])
+                if key not in frontier and key not in self._node_paths
+            })
+            for start in range(0, len(ends), _VIEW_ROW_BATCH):
+                keys = ends[start : start + _VIEW_ROW_BATCH]
+                marks = ",".join("?" for _ in keys)
+                found = dict(self.conn.execute(
+                    f"SELECT node_key, path FROM graph_nodes WHERE node_key IN ({marks})", keys
+                ))
+                self._node_paths.update({key: found.get(key) for key in keys})
+            self.parents.admit(
+                path for key in ends if (path := self._node_paths[key]) is not None
+            )
+            for row in batch:
+                other = row["dst_key"] if row["src_key"] in frontier else row["src_key"]
+                if other not in frontier:
+                    path = self._node_paths[other]
+                    if (path is None and not self.reads_placeholders) or (
+                        path is not None and not self.parents.allowed(path)
+                    ):
+                        continue
+                if len(rows) == row_limit:
+                    return rows, True
+                rows.append(row)
+            if not more:
+                return rows, False
+
+    def rows_fit(self, frontier: set[str], row_limit: int) -> bool:
+        """Whether every row touching `frontier` fits `row_limit`, whoever may see the rows.
+
+        A bounded read of such a frontier cuts nothing, so a caller that splits its reads by
+        `end_types` to keep one kind from crowding out another has nothing to split.
+        """
+        return _rows_within(self.conn, frontier, row_limit)
+
     def neighbor_edges(
         self, frontier: set[str], *, limit: int,
         accept: Callable[[dict[str, Any]], bool] | None = None,
+        row_limit: int | None = None,
+        end_types: frozenset[str] = frozenset(),
+        beyond: frozenset[str] = frozenset(),
     ) -> tuple[list[dict[str, Any]], bool]:
         """Live edges touching `frontier`, interpreted before the inspection cap.
 
         SQL rows are transport; a candidate that is no fact in its page's
         selected interpretation spends no inspection slot. Optional exact-unit
         admission also precedes this cap, so withheld units cannot crowd it.
+
+        `row_limit` bounds the rows read before interpretation, for a reader whose frontier can
+        be a hub: the rows past it are never interpreted and the read reports the cut as overflow.
+        For a reader other than the owner a row counts only when its other end is a page the
+        reader may see, so a withheld page leaves the bound where a vault without it would. A
+        bounded read also decides the admission of its rows' source pages as one set, so a hub's
+        rows cost one store request per batch of pages, not one per page.
+
+        `end_types` names the page types that a row's far page must have to yield what the caller
+        wants. A bounded read then counts no other row, so `row_limit` cuts among rows that can
+        yield something and the rows of a hub that point at pages of no wanted type cannot crowd
+        them out. Such a row whose far page is one of the page paths in `beyond` counts neither,
+        so a page's rows to itself or to another page the caller already holds cannot crowd them.
         """
-        rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
+        if row_limit is None:
+            rows, overflow = _neighbor_edges(self.conn, frontier, set(), limit=_VIEW_ROW_LIMIT)
+        else:
+            row_limit = min(row_limit, _VIEW_ROW_LIMIT)
+            if self.keep is None:
+                rows, overflow = _neighbor_edges(
+                    self.conn, frontier, set(), limit=row_limit, end_types=end_types,
+                    beyond=beyond,
+                )
+            else:
+                rows, overflow = self._visible_rows(frontier, row_limit, end_types, beyond)
         if self.keep is not None:
             pages = {
                 path
@@ -15102,6 +15330,13 @@ class GraphView:
                         if edge["src_key"] in frontier or edge["dst_key"] in frontier:
                             by_key.setdefault(str(edge["edge_key"]), edge)
                 rows = [by_key[key] for key in sorted(by_key)]
+        if row_limit is not None:
+            # A page re-derived for the reader adds rows to the stored ones; the bound covers both.
+            if len(rows) > row_limit:
+                rows, overflow = rows[:row_limit], True
+            self.parents.prefetch(
+                str(row["source_path"]) for row in rows if row.get("source_path")
+            )
         live: list[dict[str, Any]] = []
         for row in rows:
             served = self.edge(row)
@@ -15115,6 +15350,11 @@ class GraphView:
 
 #: Rows a reader's view reads before re-applying the caller's inspection cap.
 _VIEW_ROW_LIMIT = 100_000
+#: Rows (and node keys) per statement of a reader's bounded read, under SQLite's variable limit.
+_VIEW_ROW_BATCH = 500
+#: Fewest rows one batch of a reader's bounded read asks for, so a run of withheld rows does not
+#: cost a query each.
+_VIEW_ROW_FLOOR = 64
 
 
 def _neighbor_rows(

@@ -316,3 +316,45 @@ def test_review_context_withholds_a_code_pushed_carrier_only_from_a_restricted_r
     assert (carrier in result["target"]["body"]) is (audience == "owner")
     if audience != "owner":
         assert "PRIVATE-ASSESSMENT" not in json.dumps(result, default=str)
+
+
+def test_review_context_reports_a_pooled_original_as_present(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches provenance rows that stat the logical path: a shared original keeps no file there, so a healthy
+    pooled original reads `exists: false` and an agent treats evidence that is stored as gone."""
+    import datetime as dt
+
+    from exomem import artifact_lifecycle, original_pool, preserve
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    filed = preserve.preserve_bytes(
+        vault, scope="Research", category="photos", filename="proof.png",
+        data=b"\x89PNG\r\n\x1a\nproof of the measurement", today=dt.date(2026, 7, 11),
+    )
+    assert not (vault / filed.path).exists()
+    never_filed = "Knowledge Base/Evidence/Research/photos/never-filed.png"
+    _write(
+        vault,
+        TARGET,
+        "---\ntype: insight\nstatus: active\nupdated: 2026-07-11\n"
+        f'evidence_file: ["{filed.path}", "{never_filed}"]\n---\n'
+        f"# Review target\n\n## Relations\n\n- research.echoes [[{RELATED.removesuffix('.md')}]]\n",
+    )
+    _write(
+        vault,
+        RELATED,
+        "---\ntype: insight\nstatus: active\n---\n# Related note\n\n## Relations\n\n"
+        f"- supports [[{TARGET.removesuffix('.md')}]]\n",
+    )
+    _write(
+        vault,
+        "Knowledge Base/log.md",
+        f"# Activity log\n\n## [2026-07-11] edit | {TARGET.removesuffix('.md')}\nAdded measured context.\n",
+    )
+    find_module.clear_cache()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    item = next(c for c in attention.activation(vault, limit=0).items if c.path == TARGET)
+
+    rows = review_context.assemble(vault, ref=item.ref, expected_fingerprint=item.fingerprint)["provenance"]["evidence"]
+
+    assert {row["path"]: row["exists"] for row in rows} == {filed.path: True, never_filed: False}

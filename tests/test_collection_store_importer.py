@@ -407,6 +407,39 @@ def test_batches_close_at_500_rows_or_4_mebibytes(tmp_path):
 # Lineage, authority and takeover
 
 
+def _shared_export(store, monkeypatch):
+    """The wearable export preserved in a shared archive, which keeps its bytes in the pool and no file at its path."""
+    import io
+
+    from conftest import initialize_vault_state_offline
+
+    from exomem import artifact_lifecycle, original_pool, preserve
+
+    data = ndjson(iter_exercises())
+    if not original_pool.enabled(store.root):
+        initialize_vault_state_offline(store.root, source="importer test vault")
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    if not original_pool.enabled(store.root):
+        original_pool.enable(store.root)
+    preserved = preserve.preserve(store.root, scope="wearable", category="export", filename="exercises.ndjson",
+                                  content_stream=io.BytesIO(data), max_stream_bytes=len(data))
+    assert not os.path.lexists(store.root / preserved.path)
+    return preserved.path
+
+
+def test_a_shared_archive_imports_a_preserved_export_that_no_file_holds_at_its_path(store, monkeypatch):
+    """A new archive pools a preserved NDJSON export, so an importer that opens its path refuses every import."""
+    setup(store, path="Knowledge Base/Evidence/wearable/unused/placeholder.ndjson")
+    source = _shared_export(store, monkeypatch)
+    preview = call(store, owner_principal(), mode="preview", source_ref=source, format="ndjson", mapping=MAPPING)
+    assert preview["source"]["bytes"] == len(ndjson(iter_exercises()))
+    job = start(store, source_ref=source)
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["rows"]["imported"]) == ("complete", len(valid(iter_exercises())))
+    assert count(store.connection) == len(valid(iter_exercises()))
+
+
 def test_job_binds_exact_source_receipt_and_target_lineage(store):
     """A job that re-resolves its source by path imports bytes it never bound."""
     setup(store)
@@ -1480,6 +1513,23 @@ def test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero(store,
     assert set(restarted["activity"].values()) == {None}
     assert (restarted["state"], restarted["rows"]["imported"]) == ("running", timed["rows"]["imported"])
     assert (restarted["resumable"], restarted["cancellable"]) == (False, True)
+
+
+def test_a_batch_whose_boundary_hold_is_unknown_makes_the_summed_wait_and_hold_unknown(store, monkeypatch):
+    """A sum that counts an unknown hold as zero reports less boundary time than the job spent."""
+    from exomem import mutation_lock
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    monkeypatch.setattr(mutation_lock, "last_mutation_timing", lambda coordinator=None: None)
+    run(store, max_batches=1)
+    activity = status(store, job)["activity"]
+    assert activity["timed_batches"] == 2
+    assert (activity["last_batch"]["wait_ms"], activity["last_batch"]["hold_ms"]) == (None, None)
+    assert (activity["timings_ms"]["wait"], activity["timings_ms"]["hold"]) == (None, None)
+    assert activity["timings_ms"]["read"] >= 0
 
 
 def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):

@@ -131,7 +131,7 @@ def test_carried_pages_share_one_role_schedule(domain_vault: Path, cued: bool) -
         expected = ["methods", *(role for role in expected if role != "methods")]
     assert [role["id"] for role in packet["roles"]] == expected
     assert {"role": "baseline", "reason": "role_limit"} in packet["missing"]
-    assert all(item["role"] in expected for item in packet["units"] + packet["pointers"])
+    assert all(item["role"] in {*expected, "connections"} for item in packet["units"] + packet["pointers"])
 
 
 @pytest.mark.parametrize("full_schedule", [False, True])
@@ -155,7 +155,9 @@ def test_beside_material_uses_remaining_roles_and_one_item_allowance(
 
     expected = ["identity", "constraints", "resources", "current_state"]
     expected += ["active_plans", "location"] if full_schedule else ["location", "material"]
-    assert [role["id"] for role in packet["roles"]] == expected
+    # The pointer-only `connections` lens runs beside the six and takes no slot.
+    assert [role["id"] for role in packet["roles"] if role["id"] != "connections"] == expected
+    assert "connections" in [role["id"] for role in packet["roles"]]
     material = [item for item in packet["units"] + packet["pointers"] if item["role"] == "material"]
     if full_schedule:
         assert material == []
@@ -164,7 +166,7 @@ def test_beside_material_uses_remaining_roles_and_one_item_allowance(
         assert len(material) == 3
         assert {"role": "material", "reason": "lane_truncated"} in packet["missing"]
     assert any("400 kg" in unit["text"] for unit in packet["units"])
-    assert all(item["role"] in expected for item in packet["units"] + packet["pointers"])
+    assert all(item["role"] in {*expected, "connections"} for item in packet["units"] + packet["pointers"])
 
 
 def test_beside_prose_is_a_requires_read_pointer(domain_vault: Path) -> None:

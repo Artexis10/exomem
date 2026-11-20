@@ -11,7 +11,6 @@ import gzip
 import hashlib
 import io
 import os
-import shlex
 import shutil
 import tarfile
 import types
@@ -21,6 +20,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from _curl_send import curl_request
 from fastmcp import Client, FastMCP
 from test_adoption_paging import PDF
 
@@ -99,29 +99,12 @@ class _Agent:
         return result.structured_content
 
     async def send(self, step: dict, archive: bytes) -> httpx.Response:
-        """Run the reply's `send` line: its headers, form fields and URL, with `<archive>` replaced by a real file."""
+        """Run the reply's `send` line with `<token>` and `<archive>` filled in, as its text tells the agent."""
         path = self.scratch / "archive.bin"
         path.write_bytes(archive)
-        words = iter(shlex.split(step["next"][0]["shell"].replace("<archive>", str(path))))
-        assert next(words) == "curl"
-        headers: dict[str, str] = {}
-        fields: dict[str, str] = {}
-        files: dict[str, tuple[str, bytes, str]] = {}
-        url = ""
-        for word in words:
-            if word == "-H":
-                name, _, value = next(words).partition(": ")
-                headers[name] = value
-            elif word == "-F":
-                name, _, value = next(words).partition("=")
-                if value.startswith("@"):
-                    files[name] = (path.name, Path(value[1:]).read_bytes(), "application/octet-stream")
-                else:
-                    fields[name] = value
-            elif word != "-sS":
-                url = word
+        url, request = curl_request(step["next"][0]["shell"], token=step["token"], archive=str(path))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.receiver)) as http:
-            return await http.post(url, headers=headers, data=fields, files=files)
+            return await http.post(url, **request)
 
     async def file(self, client: Client, **arguments) -> dict:
         """One `imports.file` call under its own idempotency key; returns the reply, or `{"refused": "CODE: message"}`."""
@@ -478,6 +461,25 @@ def test_the_import_lane_is_refused_on_exomem_cloud(agent):
         upload_handoff.prepare_upload(agent.vault, lane="import", expected_sha256="0" * 64)
 
     assert "UPLOAD_LANE_UNAVAILABLE" in str(refused.value) and "exomem cloud import" in str(refused.value)
+
+
+@pytest.mark.parametrize("lane", ["source", "evidence"])
+def test_a_digest_without_hold_gets_a_held_upload_instead_of_a_download_refusal(agent, lane):
+    """Catches `expected_sha256` on an upload lane falling into download recovery's INVALID_MODE."""
+
+    async def scenario():
+        async with agent.mcp() as client:
+            return await client.call_tool(
+                "upload_files", {"lane": lane, "expected_sha256": hashlib.sha256(b"photo").hexdigest()},
+                raise_on_error=False)
+
+    result = asyncio.run(scenario())
+
+    assert not result.is_error, result
+    step = result.structured_content
+    assert "error" not in step, step
+    assert (step["lane"], step["hold"], step["handoff_status"]) == (lane, True, "handoff_prepared")
+    assert step["committed"] is False
 
 
 @pytest.mark.parametrize("pack", [_tar, _zip], ids=["tar", "zip"])

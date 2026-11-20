@@ -137,9 +137,9 @@ def test_adoption_tree_has_the_same_corpus_treatment_as_the_governance_tree(
 
 
 def test_both_walkers_exclude_operational_state() -> None:
-    """The corpus walk and the full-vault walk use SEPARATE exclusion sets. A name
-    excluded from one and indexed by the other is a caller-selected bypass, so pin
-    both — this is the assertion that fails if someone adds a name to only one."""
+    """The full-vault walk's exclusion set extends the corpus walk's, and a name excluded
+    from either walk but indexed by the other is a caller-selected bypass, so pin both —
+    this is the assertion that fails if someone drops a name from the shared set."""
     from exomem import find_corpus
     from exomem import vault as vault_module
 

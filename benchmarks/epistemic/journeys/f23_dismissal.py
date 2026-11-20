@@ -83,7 +83,6 @@ SEED_RELATION_TARGET = "Knowledge Base/Entities/Concepts/Local First Knowledge"
 
 #: The page whose signal is dismissed, and the page whose signal must stay open.
 DISMISSED_TITLE = "f23 dismissal probe conclusion"
-DISMISSED_SLUG = "f23-dismissal-probe-conclusion"
 OPEN_TITLE = "f23 open probe conclusion"
 
 #: The reason code the dismissal carries. `quiet`/`off` require one and an item
@@ -306,12 +305,14 @@ def _listed_items(payload: Mapping[str, object]) -> tuple[Mapping[str, object], 
     return tuple(entry for entry in items if isinstance(entry, Mapping))
 
 
-def _probe_item(payload: Mapping[str, object]) -> Mapping[str, object]:
+def _probe_item(payload: Mapping[str, object], seeded: Mapping[str, object]) -> Mapping[str, object]:
+    """The listed item for the page the seed write reported, found by that page's own path."""
+    written = _envelope_data(seeded).get("path")
     for entry in _listed_items(payload):
-        if DISMISSED_SLUG in str(entry.get("path") or ""):
+        if written and entry.get("path") == written:
             return entry
     raise JourneyStepFailed(
-        f"the first review pass did not list {DISMISSED_SLUG}; there is nothing to dismiss, "
+        f"the first review pass did not list {DISMISSED_TITLE!r}; there is nothing to dismiss, "
         "so the episode cannot measure whether a dismissal is respected"
     )
 
@@ -344,7 +345,7 @@ def run_journey(
     captured["discovery"] = _run_json(
         envelope, vault, ("review", "--limit", "50", "--json"), name="discovery"
     )
-    probe = _probe_item(captured["discovery"])
+    probe = _probe_item(captured["discovery"], captured["seed-dismissed"])
     dismissed_key = _record_key(probe)
     captured["dismissal"] = _run_json(
         envelope,
@@ -548,7 +549,6 @@ __all__ = [
     "CAPTURE_SURFACES",
     "DEFAULT_PASSES",
     "DISMISSAL_REASON",
-    "DISMISSED_SLUG",
     "DISMISSED_TITLE",
     "Envelope",
     "EnvelopeNotDiscovered",

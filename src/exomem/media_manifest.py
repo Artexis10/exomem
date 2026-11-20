@@ -21,9 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import originals, runtime_resources
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .media_jobs import job_store_path
 from .vault import parse_frontmatter, read_frontmatter_header
+from .vault_store import cli_fence
 
 VERSION = 1
 # The format's closed census values: only a complete census may release a name or decide its reach.
@@ -115,7 +116,7 @@ def _references(vault: Path) -> frozenset[tuple[str, str]]:
     """
     references: set[tuple[str, str]] = set()
     failed = 0
-    pending = [vault / kb_dirname()]
+    pending = [managed_root(vault)]
     while pending:
         try:
             with os.scandir(pending.pop()) as listing:
@@ -162,10 +163,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     status = 0
     try:
+        cli_fence.require("cell-media-manifest", args.vault)
         manifest: Manifest | None = build(args.vault)
     except ManifestUnknown as unknown:
         print(f"the media manifest is unknown: {unknown}", file=sys.stderr)
         manifest = None
+    except cli_fence.StoreFenceRefusal as refused:
+        # An unknown manifest releases nothing: any fault here writes the unknown manifest, as the case below does.
+        print(f"the media manifest is unknown: {refused}", file=sys.stderr)
+        manifest, status = None, 1
     except Exception as error:  # noqa: BLE001 -- any fault still writes the unknown manifest, never an empty file
         print(f"the media manifest is unknown: the census failed with {type(error).__name__}", file=sys.stderr)
         manifest, status = None, 1

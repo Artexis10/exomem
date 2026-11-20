@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .. import activation_manifest, find_corpus, reserved_paths, state_migration, state_paths
 from .. import structured_collections as collections
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join
 from . import companions, membership, policy
 from .decisions import Decision, decide
 from .principal import OWNER_AUDIENCE, ClientBinding, RequestPrincipal
@@ -265,6 +265,19 @@ def cache_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | 
     current = snapshot(root, compiled)
     return (who.client_binding, who.origin_session, who.administrative_ingress,
             current.revision if current is not None else None)
+
+
+def ceiling_identity(root: Path, who: RequestPrincipal) -> tuple[str, ...] | None:
+    """The scopes the host ceiling denies `who`, sorted; None when the ceiling cannot be read.
+
+    Callers denied the same scopes see the same pages through the ceiling, whichever client or login they come by,
+    so a value kept per reader that must follow what the reader sees can key on this and outlive a login.
+    """
+    try:
+        current = snapshot(root)
+    except BoundaryUnavailable:
+        return None
+    return () if current is None else tuple(sorted(current.denied_scopes(who)))
 
 
 def admission_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | None = None) -> tuple:
@@ -625,7 +638,7 @@ def capture_folders(root: Path, *, tree: str | None = None) -> tuple[str, ...]:
 
 def _in_tree(path: str, tree: str) -> bool:
     """Whether `path` lies under `<knowledge base>/<tree>/`, under any portable spelling."""
-    return collections._portable_path_key(path).startswith(collections._portable_path_key(f"{kb_dirname()}/{tree}/"))
+    return collections._portable_path_key(path).startswith(collections._portable_path_key(managed_join(f"{tree}/")))
 
 
 def inbox_destination(root: Path, folder: str, leaf: str) -> str | None:
@@ -806,7 +819,7 @@ def require_write(
 
 
 def requirement_relative_path() -> str:
-    return f"{kb_dirname()}/{reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME}"
+    return managed_join(reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME)
 
 
 def parse_requirement(raw: bytes) -> dict:

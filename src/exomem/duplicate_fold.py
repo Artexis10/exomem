@@ -254,10 +254,31 @@ def _pair(
     binding that stopped holding (`CURATION_BINDING_STALE`).
     """
     kept, retired = _identical(canonical, copy, code=code)
-    for path, payload in ((canonical[0], kept), (copy[0], retired)):
+    members = ((canonical[0], kept), (copy[0], retired))
+    shared = [
+        path for path, payload in members
+        if payload.artifact_path is not None and fold_leaf.addressed(vault_root, payload.artifact_path, code) is not None
+    ]
+    if (why := shared_storage_refusal([path for path, _ in members], shared)) is not None:
+        raise fold_leaf.refuse(code, why)
+    for path, payload in members:
         if payload.artifact_path is not None and not duplicates.original_intact(vault_root, path, payload):
             raise fold_leaf.refuse(code, f"the original of {path!r} no longer hashes to the payload the page records")
     return kept, retired
+
+
+def shared_storage_refusal(paths: Sequence[str], shared: Sequence[str]) -> str | None:
+    """Why identical filings do not fold when some of `paths` keep their original in shared storage, or None.
+
+    `shared` lists the paths whose original is digest-addressed. A fold keeps the copy's page in place and trashes its
+    original file; a shared filing has no such file, and retiring its binding would bypass Trash, which alone records a
+    retirement. Identical filings that all share their object already store the bytes once, so folding frees nothing.
+    """
+    if not shared:
+        return None
+    if len(shared) == len(paths):
+        return "the filings already share one stored copy of their original, so keep each filing as it is: keeping them costs no extra space"
+    return f"the original of {shared[0]!r} lives in shared storage, which a fold cannot retire or keep yet, so keep each filing as it is"
 
 
 def pair_refusal(vault_root: Path, canonical: tuple[str, str], copy: tuple[str, str]) -> CurationError | None:

@@ -154,12 +154,13 @@ def each_file(root, paths):
     """Each vault file's bytes through the held vault root, one file at a time, or None when it is missing."""
     with held_fs.acquire(Path(root)).require() as fs:
         for path in paths:
-            parent = fs.parent(str(Path(path).parent))
+            parent_path, name = held_fs.split_relative(path)
+            parent = fs.parent(parent_path)
             if parent.error is not None and parent.error.code == "MISSING":
                 yield path, None
                 continue
             with parent.require() as directory:
-                opened = fs.file(directory, Path(path).name)
+                opened = fs.file(directory, name)
                 if opened.error is not None and opened.error.code == "MISSING":
                     raw = None
                 else:
@@ -285,11 +286,12 @@ def _remove(root, folder, archived):
             if _file_sha(folder / "files" / path) != sha:
                 raise CollectionStoreError("COLLECTION_CONVERSION_ARCHIVE_UNVERIFIED",
                                            f"the archived copy of {path} no longer verifies")
-            parent = fs.parent(str(Path(path).parent), access="mutate")
+            parent_path, name = held_fs.split_relative(path)
+            parent = fs.parent(parent_path, access="mutate")
             if parent.error is not None and parent.error.code == "MISSING":
                 continue
             with parent.require() as directory:
-                opened = fs.file(directory, Path(path).name, access="mutate")
+                opened = fs.file(directory, name, access="mutate")
                 if opened.error is not None and opened.error.code == "MISSING":
                     continue
                 with opened.require() as file:

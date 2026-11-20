@@ -20,6 +20,7 @@ inference so a voiceprint computed here matches one computed elsewhere (embeddin
 """
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import threading
@@ -75,6 +76,15 @@ def _disable_tf32() -> None:
 
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.set_float32_matmul_precision("highest")
+
+
+def installed() -> bool:
+    """True when the `[diarization]` extra's `speechbrain` can be found (importability is not
+    proven: a broken install still reports True). Never raises; a probe error reads as False."""
+    try:
+        return importlib.util.find_spec("speechbrain") is not None
+    except Exception:  # noqa: BLE001 — a diagnostics probe must never break the caller
+        return False
 
 
 def _load_voice_model():

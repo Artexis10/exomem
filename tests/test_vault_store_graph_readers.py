@@ -18,7 +18,7 @@ import sqlite3
 import sys
 import threading
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
@@ -43,22 +43,22 @@ from exomem import (
     delete_directory,
     epistemic_graph,
     find,
+    foreground_priority,
     graph_read_publication,
+    held_fs,
     lexstore,
     recover_from_trash,
     semantic_index,
+    warmup,
 )
 from exomem import vault as vaults
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview
-from exomem.governance import egress, lifecycle
+from exomem.governance import egress, lifecycle, page_admission
+from exomem.governance import policy as policy_module
 from exomem.governance.principal import library_scope, request_scope
 from exomem.vault_store import mode, ownership, read, rederive, targets, write
 from exomem.vocabulary import instances
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 INSIGHTS = "Knowledge Base/Notes/Insights"
 CLAIM = f"{INSIGHTS}/Lantern Claim.md"
@@ -176,15 +176,26 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
 
     Keep the graph test and the registry surface test on the same instrument. Repair seams
     record intent without starting a background repair against deliberately damaged files.
-    """
-    # The POSIX backend imports `posix`, so a module-level import would stop collection on Windows.
-    from exomem import _held_fs_posix
 
+    A page read through the held filesystem is recorded where every backend passes it: the `file`,
+    `children` and `enumerate` calls of the class that the vault uses. On Linux the backend's own
+    native calls are watched as well, which also sees a stat by name. Windows has no such seam, so
+    a by-name check that its backend makes inside a single call is not measured there.
+    """
     events = {name: [] for name in (
         "page_io", "sidecars", "snapshots", "snapshot_threads", "request_threads", "machinery",
     )}
 
     bases = (Path(root), Path(root).resolve())
+    with held_fs.acquire(Path(root)).require() as filesystem:
+        filesystem_type = type(filesystem)
+    #: The vault-relative folder of each held directory, from the `parent` call that made it.
+    folders = {}
+
+    def page_owned(rel):
+        if page_paths is not None:
+            return rel in page_paths
+        return rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
 
     def relative(path, dir_fd=None):
         """The call's vault-relative target, also through a descriptor or a held directory's descriptor.
@@ -207,15 +218,40 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
     def watching(real, operation):
         def watched(path, *arguments, **keywords):
             rel = relative(path, keywords.get("dir_fd"))
-            page_owned = (
-                rel in page_paths if page_paths is not None
-                else rel is not None and ownership.classify(rel) is ownership.Ownership.PAGE
-            )
-            if page_owned:
+            if page_owned(rel):
                 events["page_io"].append((operation, rel))
             return real(path, *arguments, **keywords)
 
         return watched
+
+    def held_parent(real):
+        def parent(self, relative, *arguments, **keywords):
+            held = real(self, relative, *arguments, **keywords)
+            if held.ok:
+                folders[id(held.value)] = relative
+            return held
+
+        return parent
+
+    def held_file(real):
+        def file(self, parent, leaf, *arguments, **keywords):
+            rel = PurePosixPath(folders.get(id(parent), ""), leaf).as_posix()
+            if page_owned(rel):
+                events["page_io"].append(("file", rel))
+            return real(self, parent, leaf, *arguments, **keywords)
+
+        return file
+
+    def held_listing(operation, real):
+        def listing(self, parent, *arguments, **keywords):
+            held = real(self, parent, *arguments, **keywords)
+            for record in held.value if held.ok else ():
+                rel = PurePosixPath(folders.get(id(parent), ""), record.relative_path).as_posix()
+                if page_owned(rel):
+                    events["page_io"].append((operation, rel))
+            return held
+
+        return listing
 
     real_reader = connection.store_reader
     real_connect = sqlite3.connect
@@ -254,22 +290,34 @@ def record_store_reads(root, monkeypatch, *, page_paths=None):
                 owner_module, name,
                 lambda *a, _name=name, **k: events["machinery"].append(_name),
             )
-        for owner_module, name in (
+        watched_calls = [
             (os, "stat"), (os, "lstat"), (os, "open"), (os, "scandir"),
             (builtins, "open"), (io, "open"),
+        ]
+        if os.name != "nt":
+            # The POSIX backend imports `posix`, so a module-level import would stop collection on
+            # Windows.
+            from exomem import _held_fs_posix
+
             # The held filesystem binds its own native calls, so patching `os` does not reach them.
             # Its `_open` stays: the capability probe requires it in `os.supports_dir_fd`, and on
             # Linux a held open below the root goes through openat2, watched below.
-            (_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir"),
-        ):
+            watched_calls += [(_held_fs_posix, "_stat"), (_held_fs_posix, "_scandir")]
+            real_openat2 = _held_fs_posix._linux_openat2
+            held_open = watching(
+                lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
+            )
+            patch.setattr(
+                _held_fs_posix, "_linux_openat2",
+                lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+            )
+        for owner_module, name in watched_calls:
             patch.setattr(owner_module, name, watching(getattr(owner_module, name), name))
-        real_openat2 = _held_fs_posix._linux_openat2
-        held_open = watching(
-            lambda name, parent, *rest, dir_fd: real_openat2(parent, name, *rest), "openat2"
-        )
+        patch.setattr(filesystem_type, "parent", held_parent(filesystem_type.parent))
+        patch.setattr(filesystem_type, "file", held_file(filesystem_type.file))
+        patch.setattr(filesystem_type, "children", held_listing("children", filesystem_type.children))
         patch.setattr(
-            _held_fs_posix, "_linux_openat2",
-            lambda parent, name, *rest: held_open(name, parent, *rest, dir_fd=parent),
+            filesystem_type, "enumerate", held_listing("enumerate", filesystem_type.enumerate)
         )
         patch.setattr(connection, "store_reader", counting)
         patch.setattr(read, "request_snapshot", requesting)
@@ -383,6 +431,44 @@ def test_a_graph_read_borrows_the_request_snapshot_and_hands_it_back_unchanged(
             with pytest.raises(sqlite3.OperationalError, match="user-defined function raised"):
                 view.connection.execute("SELECT exomem_probe()")
     assert read.current_revision(stored) == before + 1
+
+
+def test_a_nested_reader_with_its_own_deadline_gives_the_outer_readers_back_when_it_closes(
+    stored, writer  # noqa: F811
+):
+    """An inner reader that sets its own deadline replaces the outer reader's until the last lend
+    of the snapshot closes, so the outer reader runs under a deadline that is not its own."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    index = epistemic_graph.EpistemicGraphIndex(stored)
+    work = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100) SELECT SUM(x) FROM c"
+    with read.request_snapshot(stored):
+        outer = index._open_read_snapshot()
+        outer.set_progress_handler(lambda: 1, 1)  # the outer reader's deadline has passed
+        inner = index._open_read_snapshot()
+        inner.set_progress_handler(lambda: 0, 1)  # the inner reader has time left
+        assert inner.execute(work).fetchone()[0] == 5050
+        inner.close()
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            outer.execute(work).fetchall()
+        outer.close()
+
+
+def test_a_nested_readers_deadline_ends_with_its_lend_when_the_outer_reader_has_none(
+    stored, writer  # noqa: F811
+):
+    """An outer reader with no deadline must not be interrupted by an inner reader's one."""
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    index = epistemic_graph.EpistemicGraphIndex(stored)
+    work = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100) SELECT SUM(x) FROM c"
+    with read.request_snapshot(stored):
+        outer = index._open_read_snapshot()
+        inner = index._open_read_snapshot()
+        inner.set_progress_handler(lambda: 1, 1)  # the inner reader's deadline has passed
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            inner.execute(work).fetchall()
+        inner.close()
+        assert outer.execute(work).fetchone()[0] == 5050
+        outer.close()
 
 
 @pytest.mark.timeout(300)
@@ -1161,6 +1247,10 @@ def cpu_pressure():
         return None
 
 
+#: The function that evaluates the ownership rule once; a memoised `classify` calls it only on a miss.
+OWNERSHIP_RULE = "classify_by_rule"
+
+
 def admission_sample(root, caller, operation, anchor=CLAIM):
     """One graph-reader sample, including the scalar work hidden by an elapsed time.
 
@@ -1223,7 +1313,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                       counted("page_parses", find_corpus._parse_page_after_checkpoint))
         # Both safe_load and the vault's libyaml loader call this decoder entry.
         patch.setattr(yaml, "load", counted("yaml_decodes", yaml.load))
-        patch.setattr(ownership, "classify", counted("ownership_classifications", ownership.classify))
+        patch.setattr(ownership, OWNERSHIP_RULE,
+                      counted("ownership_classifications", getattr(ownership, OWNERSHIP_RULE)))
         patch.setattr(find, "_resolve_page", counted("page_hydrations", find._resolve_page))
         patch.setattr(lexstore.LexicalStore, "published_admitted_paths", published)
         patch.setattr(lexstore.LexicalStore, "_publish_verdicts", deciding_verdicts)
@@ -1257,7 +1348,8 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
     return {"ms": elapsed, "cpu_ms": cpu, "result_count": size, **counters,
-            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg(), "cpu_pressure_avg10": cpu_pressure()}
+            "distinct_classified": len(classified), "distinct_held_reads": len(held), "load": os.getloadavg() if hasattr(os, "getloadavg") else None,
+            "cpu_pressure_avg10": cpu_pressure()}
 
 
 def fitted_slope(samples):
@@ -1462,6 +1554,184 @@ def test_a_commit_and_the_next_restricted_read_look_up_only_the_names_it_touched
     assert during_commits[0] == during_commits[1], during_commits
 
 
+def a_restricted_hub(stored, writer, pages=20):  # noqa: F811
+    write.commit(writer, put(CLAIM, PAGES[CLAIM].encode()))
+    commit_linked(writer, pages)
+    restrict_external(stored, 'tags: ["cohort-0"]')
+
+
+def a_new_process_state():
+    """The memos a process fills as it serves, empty, as they are after a start."""
+    page_admission.forget_scopes()
+    ownership._classified.cache_clear()
+    epistemic_graph.forget_homonyms()
+
+
+def test_a_second_read_in_the_process_classifies_no_path(stored, writer):  # noqa: F811
+    """Defect: every request classifies the owner of each page it touches again, so the cost of a hub
+    request grows with the hub however warm the process is.
+
+    Ownership is a function of the path and of settings that no request changes.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    first = admission_sample(stored, "few withheld", "find")
+    second = admission_sample(stored, "few withheld", "find")
+    assert first["ownership_classifications"] > 0, "the first read classifies, or this test proves nothing"
+    assert second["ownership_classifications"] == 0, (first, second)
+    assert second["result_count"] == first["result_count"] > 0
+
+
+def hub_hits(root):
+    """The pages that a restricted caller's search filtered to the hub returns, in order."""
+    with library_scope(), request_scope(EXTERNAL):
+        return [getattr(hit, "path", None) or hit.parent_path for hit in GRAPH_CALLS["find relation_of"](root)]
+
+
+def test_a_warmed_service_decodes_no_subject_in_its_first_restricted_read(stored, writer):  # noqa: F811
+    """Defect: the first restricted read after a start decodes and evaluates every page's selector facts,
+    which the service could have done while it was idle.
+
+    The control read has no warm-up; it must decode, or a zero below proves nothing.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    control = admission_sample(stored, "few withheld", "find")
+    assert control["subject_decodes"] > 0, control
+    a_new_process_state()
+    warmup.warm_store_reads(stored)
+    served = admission_sample(stored, "few withheld", "find")
+    assert served["subject_decodes"] == 0 and served["membership_evaluations"] == 0, served
+    assert served["result_count"] == control["result_count"] > 0
+
+
+def test_a_warmed_service_groups_no_name_in_its_first_restricted_read(stored, writer):  # noqa: F811
+    """Defect: the first restricted read after a start groups every name of the recall resolver to find the
+    names that two pages share, which the service could have done while it was idle.
+
+    The control read has no warm-up; it must group, or a zero below proves nothing.
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    control = admission_sample(stored, "few withheld", "participants")
+    assert control["name_candidate_lookups"] > 0, control
+    a_new_process_state()
+    warmup.warm_store_reads(stored)
+    served = admission_sample(stored, "few withheld", "participants")
+    assert served["name_candidate_lookups"] == 0, served
+    assert served["result_count"] == control["result_count"] > 0
+
+
+def test_a_request_during_the_store_read_warm_up_gets_the_answer_it_gets_after_it(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the warm-up holds something that a request needs, or lets one read half-filled memos
+    differently, so a request that arrives during a start is refused, waits for the warm-up or answers otherwise.
+
+    The warm-up parks after its first batch, with later batches still to fill.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    expected = hub_hits(stored)
+    assert expected
+    a_new_process_state()
+    parked, resume, failures = threading.Event(), threading.Event(), []
+    scopes_many = page_admission.scopes_many
+
+    def parks_the_warm_up(*args, **kwargs):
+        found = scopes_many(*args, **kwargs)
+        if threading.current_thread().name == "store-read-warm-up":
+            parked.set()
+            assert resume.wait(60), "the request did not finish while the warm-up was parked"
+        return found
+
+    def warm_up():
+        try:
+            warmup.warm_store_reads(stored)
+        except BaseException as error:  # noqa: BLE001 - reported to the test thread
+            failures.append(error)
+
+    monkeypatch.setattr(page_admission, "scopes_many", parks_the_warm_up)
+    warming = threading.Thread(target=warm_up, name="store-read-warm-up")
+    warming.start()
+    try:
+        assert parked.wait(60), "the warm-up reached its first batch"
+        assert hub_hits(stored) == expected
+    finally:
+        resume.set()
+        warming.join(60)
+    assert not warming.is_alive() and not failures, failures
+    assert hub_hits(stored) == expected
+
+
+def test_the_store_read_warm_up_stops_between_batches_when_it_is_stopped(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: a warm-up that ignores the stop it was given keeps reading the store while the service
+    shuts down or hands over to its successor.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    stop, batches = threading.Event(), []
+    scopes_many = page_admission.scopes_many
+
+    def stops_after_a_batch(*args, **kwargs):
+        batches.append(args[1])
+        stop.set()
+        return scopes_many(*args, **kwargs)
+
+    monkeypatch.setattr(page_admission, "scopes_many", stops_after_a_batch)
+    with pytest.raises(foreground_priority.BulkCancelled), foreground_priority.cancellable(stop):
+        warmup.warm_store_reads(stored)
+    assert len(batches) == 1, "it read one batch and no more"
+
+
+def test_a_policy_that_changes_during_the_store_read_warm_up_owns_the_memo_after_it(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the warm-up fills every batch under the policy it loaded at its start, so after a policy
+    change its later batches replace the scope sets that requests filled under the live policy.
+    """
+    monkeypatch.setattr(read, "KEYS_PER_QUERY", 7)
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    scope = stored / "Knowledge Base/_Governance/scopes/secret.yaml"
+    batches = []
+    scopes_many = page_admission.scopes_many
+
+    def changes_the_policy_after_a_batch(*args, **kwargs):
+        found = scopes_many(*args, **kwargs)
+        if not batches:
+            scope.write_text(scope.read_text().replace("cohort-0", "cohort-1"))
+        batches.append(args[1])
+        return found
+
+    monkeypatch.setattr(page_admission, "scopes_many", changes_the_policy_after_a_batch)
+    warmup.warm_store_reads(stored)
+    assert len(batches) > 1, "later batches ran after the change, or this test proves nothing"
+    live = policy_module.load(stored).fingerprint
+    assert live in page_admission._SCOPE_MEMOS[str(stored)].header, "the memo that the pass leaves is the live policy's"
+
+
+def test_the_store_read_warm_up_waits_for_foreground_work_before_each_name_it_groups(stored, writer, monkeypatch):  # noqa: F811
+    """Defect: the name grouping runs in one stretch, so a request that arrives during a start waits
+    behind a pass that grows with the vault (0.3 s of CPU at 50,000 pages).
+    """
+    a_restricted_hub(stored, writer)
+    a_new_process_state()
+    events = []
+    yield_to_foreground = foreground_priority.yield_to_foreground
+    look_up = epistemic_graph._link_candidates_for_key
+
+    def yields(*args, **kwargs):
+        events.append("yield")
+        return yield_to_foreground(*args, **kwargs)
+
+    def looks_up(*args, **kwargs):
+        events.append("name")
+        return look_up(*args, **kwargs)
+
+    monkeypatch.setattr(foreground_priority, "yield_to_foreground", yields)
+    monkeypatch.setattr(epistemic_graph, "_link_candidates_for_key", looks_up)
+    warmup.warm_store_reads(stored)
+    assert events.count("name") > 1, "the pass groups several names, or this test proves nothing"
+    assert all(before == "yield" for before, name in zip(events, events[1:], strict=False) if name == "name"), events
+
+
 @pytest.mark.parametrize("caller", ["owner", "few withheld"])
 def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, caller, monkeypatch):  # noqa: F811
     """A linked page's unique identifier must not force YAML decoding for every ranked candidate."""
@@ -1518,7 +1788,10 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
     repeats = int(os.environ.get("EXOMEM_ADMISSION_DRILL_REPEATS", "3"))
     callers = os.environ.get("EXOMEM_ADMISSION_DRILL_CALLERS", "owner,few withheld,most withheld,homonym").split(",")
     operations = os.environ.get("EXOMEM_ADMISSION_DRILL_OPERATIONS", "participants,find").split(",")
-    states = os.environ.get("EXOMEM_ADMISSION_DRILL_STATES", "cold process,first after commit,registry pass,warm").split(",")
+    states = os.environ.get(
+        "EXOMEM_ADMISSION_DRILL_STATES",
+        "cold process,cold service,first after commit,first after policy change,registry pass,warm",
+    ).split(",")
     for caller in callers:
         scope = stored / "Knowledge Base/_Governance/scopes/secret.yaml"
         selector = '["cohort-0"]' if caller != "most withheld" else (
@@ -1532,22 +1805,32 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
         for operation in operations:
             for state in states:
                 samples = []
-                if state == "first after commit":
+                if state in ("first after commit", "first after policy change"):
                     # A caller view this process has not seen yet is the cold cell's cost, not this one's.
                     admission_sample(stored, caller, operation)
                 for repeat in range(repeats):
-                    if state == "cold process":
+                    if state in ("cold process", "cold service"):
+                        # A new process: nothing is memoised. A service has also run its store-read warm-up,
+                        # whose seconds the sample reports beside the read's own.
                         result = subprocess.run([
                             sys.executable, "-c",
-                            "import json,sys; from pathlib import Path; "
+                            "import json,sys,time; from pathlib import Path; "
+                            "from exomem import warmup; "
                             "from test_vault_store_graph_readers import admission_sample; "
-                            "print(json.dumps(admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3])))",
-                            str(stored), caller, operation,
-                        ], check=True, capture_output=True, text=True, timeout=180)
+                            "root=Path(sys.argv[1]); began=time.perf_counter(); "
+                            "sys.argv[4] == 'service' and warmup.warm_store_reads(root); "
+                            "warmed=time.perf_counter()-began; "
+                            "print(json.dumps({**admission_sample(root,sys.argv[2],sys.argv[3]),"
+                            "'warm_up_seconds':warmed}))",
+                            str(stored), caller, operation, state.split()[1],
+                        ], check=True, capture_output=True, text=True, timeout=1800)
                         samples.append(json.loads(result.stdout.splitlines()[-1]))
                         continue
                     if state == "first after commit":
                         write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\n{repeat}\n".encode()))
+                    elif state == "first after policy change":
+                        # An edit that names the same pages: a new caller view, so no scope set is memoised for it.
+                        scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector[:-1]}, \"edit-{repeat}\"]\n")
                     elif state == "registry pass":
                         if repeat == 0:
                             with writer.handle.transaction() as tx:
@@ -1557,6 +1840,8 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                         admission_sample(stored, caller, operation)
                     membership.clear_memo()
                     samples.append(admission_sample(stored, caller, operation))
+                    if state == "first after policy change":
+                        scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
                 report["samples"][f"{caller}/{operation}/{state}"] = samples
                 report_path.write_text(json.dumps(report, indent=2))
     report["sweep"] = {}
@@ -1616,10 +1901,12 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
             )
             scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector}\n")
             target = profile_path + f".{index}"
-            if state == "cold process":
+            if state in ("cold process", "cold service"):
                 script = (
                     "import cProfile,json,pstats,sys; from pathlib import Path; "
+                    "from exomem import warmup; "
                     "from test_vault_store_graph_readers import admission_sample; "
+                    "sys.argv[5] == 'service' and warmup.warm_store_reads(Path(sys.argv[1])); "
                     "p=cProfile.Profile(); p.enable(); "
                     "sample=admission_sample(Path(sys.argv[1]),sys.argv[2],sys.argv[3]); "
                     "p.disable(); p.dump_stats(sys.argv[4]+'.pstats'); "
@@ -1628,14 +1915,16 @@ def test_restricted_admission_drill(stored, writer):  # noqa: F811
                     "out.close(); print(json.dumps(sample))"
                 )
                 profiled = subprocess.run(
-                    [sys.executable, "-c", script, str(stored), caller, operation, target],
-                    check=True, capture_output=True, text=True, timeout=180,
+                    [sys.executable, "-c", script, str(stored), caller, operation, target, state.split()[1]],
+                    check=True, capture_output=True, text=True, timeout=1800,
                 )
                 sample = json.loads(profiled.stdout.splitlines()[-1])
             else:
                 admission_sample(stored, caller, operation)
                 if state == "first after commit":
                     write.commit(writer, put(EVIDENCE, PAGES[EVIDENCE].encode() + f"\nProfile {index}.\n".encode()))
+                elif state == "first after policy change":
+                    scope.write_text(scope.read_text().split("tags:")[0] + f"tags: {selector[:-1]}, \"edit-{index}\"]\n")
                 elif state == "registry pass":
                     rederive.settle(stored, writer)
                 membership.clear_memo()

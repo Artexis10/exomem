@@ -421,6 +421,14 @@ class _Unreadable(Exception):
 
 
 def _open(vault: Path, row: Row):
+    # A pooled filing keeps no file at its logical path: its bytes are the shared pool object, opened behind the binding.
+    # The hash judges every byte, so an object of the wrong size opens and reads as damaged.
+    if row.kind == FILE:
+        snapshot = originals.pooled(vault, row.path)
+        if snapshot is not None:
+            from . import media_store
+
+            return media_store._open_local_original(vault, row.path, snapshot, check_size=False)
     # A blob or text path came from a walk of the disk, so it opens as spelled there; a sidecar path as bound.
     return reserved_paths.open_generic_binary(vault, row.path, physical=row.kind != FILE)
 
@@ -435,6 +443,9 @@ def _held(vault: Path, row: Row) -> Iterator[reserved_paths.GenericBinarySource]
         if error.code == "MISSING":
             raise _Absent from None
         raise _Unreadable(error.code) from None
+    except ValueError:
+        # An unreadable pool format marker: the row keeps its state until the layout reads again.
+        raise _Unreadable("the shared original pool is unreadable") from None
 
 
 def _parts(row: Row, stream: BinaryIO) -> Iterator[bytes]:
@@ -514,13 +525,14 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
     # a whole page for a text original and the compressed blob for a member.
     changed: list[tuple[Row, int]] = []
     steady: list[tuple[Row, int]] = []
+    shared = _shares_originals(vault)
     for row in foreground_priority.yielding(rows):
         try:
-            info = os.lstat(vault / row.path)
+            info = _stat(vault, row, shared)
         except FileNotFoundError:
             _absent(vault, row, result, reads)
             continue
-        except OSError:
+        except (OSError, _Unreadable):
             result.unreadable += 1
             continue
         if not stat.S_ISREG(info.st_mode):
@@ -552,6 +564,39 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
         _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved,
                   unreadable=result.unreadable, rescheduled=result.rescheduled)
     return result
+
+
+def _shares_originals(vault: Path) -> bool:
+    """Whether the archive pools its originals, read once per pass; an unreadable marker answers yes, so each row names it."""
+    from . import original_pool
+
+    try:
+        return original_pool.enabled(vault)
+    except (ValueError, held_fs.HeldFsError):
+        return True
+
+
+def _stat(vault: Path, row: Row, shared: bool) -> os.stat_result:
+    """The presence check's stat: the row's file, or the shared pool object of a pooled filing that has no file.
+
+    A missing file and a missing pool object both raise `FileNotFoundError`. A pool object whose size differs from
+    its binding is present, and its hash then reads it as damaged. An unreadable pool raises `_Unreadable`, so it
+    reads as neither a missing original nor a retired binding. Only a pooled archive pays for the second look.
+    """
+    try:
+        return os.lstat(vault / row.path)
+    except FileNotFoundError:
+        if row.kind != FILE or not shared:
+            raise
+        try:
+            snapshot = originals.original_state(vault, row.path)
+        except (ValueError, held_fs.HeldFsError):
+            raise _Unreadable("the shared original is not readable as its binding") from None
+        except reserved_paths.ReservedPathLeafError:
+            raise FileNotFoundError(row.path) from None
+        if snapshot.local_path is None:
+            raise
+        return os.lstat(snapshot.local_path)
 
 
 def _marks(values: tuple[str, ...]) -> str:
@@ -774,18 +819,25 @@ def _plain(sink: BinaryIO) -> Iterator[BinaryIO]:
 def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, result: PassResult,
             reads: _Reads) -> None:
     """Restore a damaged original from the first copy that verifies, or record that none does."""
+    copies = _copies(vault, row, reads)
+    install = _install
+    if row.kind == FILE and originals.pooled(vault, row.path) is not None:
+        # The damaged bytes are the shared pool object, which the pool's owner replaces; the logical path keeps no file.
+        # Another pooled filing of these bytes shares the damage, so it is no copy.
+        copies = [copy for copy in copies if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
+        install = _install_pooled
     kept = _kept_trash(vault, row, hashed)
-    for copy in _copies(vault, row, reads):
+    for copy in copies:
         staged = _stage(vault, row, copy, pace)
         if staged is None:
             continue
         trashed: list[str] = []
         try:
-            identity = _install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
+            identity = install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
         except (_Changed, OpError):
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
-        except (OSError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
             # The copy verified but could not be put in place. The row keeps its last identity and
             # verification time, so the next pass finds it changed or due, and tries again.
             code = getattr(error, "code", None) or type(error).__name__
@@ -843,11 +895,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
     `trashed` receives the vault path of a new Trash copy.
     """
     from . import media_store
-    from .delete_file import free_trash_path, planned_trash_path
 
     target = PurePosixPath(row.path)
-    now = dt.datetime.now()
-    planned = Path(planned_trash_path(vault, row.path, now))
     damaged_name, restored_name = held_fs.publish_temporary_name(), held_fs.publish_temporary_name()
     noted = [[row.path, damaged_name], [row.path, restored_name]]
     _note_temporaries(vault, noted, [])
@@ -880,19 +929,8 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                         raise _Changed
                     unchanged()
                     if kept is None:
-                        with filesystem.parent(planned.parent.as_posix(), create=True,
-                                               access="mutate").require() as folder:
-                            leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
-                            metadata = {
-                                "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
-                                "reason": "original_fixity", "cause": cause,
-                                "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
-                            }
-                            held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
-                                                  json.dumps(metadata, indent=2).encode("utf-8")).require()
-                            _rename(filesystem, parent, damaged_name, written, folder, leaf)
-                            filesystem.flush_directory(folder).require()
-                        trashed.append((planned.parent / leaf).as_posix())
+                        trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row, hashed,
+                                                      cause))
                     unchanged()  # A write outside Exomem since the first check keeps its bytes.
                     _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
                     filesystem.flush_directory(parent).require()
@@ -908,6 +946,87 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                                     filesystem.unlink(residue).require()
     finally:
         _note_temporaries(vault, [], noted)
+
+
+def _install_pooled(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *, kept: str | None,
+                    trashed: list[str]) -> Identity:
+    """Put the verified bytes in place of a damaged shared pool object, and the changed bytes in Trash.
+
+    As in `_install`, the changed bytes are copied beside the filing's companion under a noted name, read through
+    the filing's binding. The pool's owner stages the verified bytes inside the pool, outside the vault guard.
+    Under the guard the binding and the object are checked again, the changed bytes move to Trash, and the owner
+    replaces that exact object version. Returns the restored object's stat identity.
+    """
+    from . import media_store, original_pool
+
+    shared = originals.pooled(vault, row.path)
+    if shared is None or shared.binary_size is None:
+        raise _Changed
+    target = PurePosixPath(row.path)
+    damaged_name = held_fs.publish_temporary_name()
+    noted = [[row.path, damaged_name]]
+    _note_temporaries(vault, noted, [])
+    written: dict[str, held_fs.StableIdentity] = {}
+    try:
+        with held_fs.acquire(vault).require() as filesystem, \
+                filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
+            try:
+                if kept is None:
+                    with _held(vault, row) as damaged, filesystem.file(parent, damaged_name, access="write",
+                                                                        create=True, exclusive=True).require() as copy:
+                        written[damaged_name] = copy.identity  # known before the write, so a failed one is removed
+                        if damaged.version != hashed.version:
+                            raise _Changed
+                        filesystem.write(copy, held_fs.Chunks(open=lambda: _stream_parts(damaged.stream))).require()
+                        damaged.require_current()
+                with original_pool.prepare(vault, row.sha256, shared.binary_size,
+                                           held_fs.Chunks(open=lambda: _file_parts(staged)), replacing=True) as fresh:
+                    with media_store._guard(vault, "original_fixity_restore"):
+                        if not _still_bound(vault, row) or _version(vault, row) != hashed.version:
+                            raise _Changed
+                        if kept is None:
+                            trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row,
+                                                          hashed, cause))
+                        fresh.replace(hashed.version)
+                        return Identity.of(os.fstat(fresh.source.stream.fileno()))
+            except (_Absent, _Unreadable, original_pool.PublicationRace):
+                raise _Changed from None  # The object changed or went since the hash; the next pass decides.
+            finally:
+                for name, identity in written.items():
+                    with suppress(held_fs.HeldFsError, OSError):
+                        leftover = filesystem.file(parent, name, access="mutate")
+                        if leftover.ok:
+                            with leftover.require() as residue:
+                                if residue.identity == identity:
+                                    filesystem.unlink(residue).require()
+    finally:
+        _note_temporaries(vault, [], noted)
+
+
+def _trash_changed(vault: Path, filesystem, parent, damaged_name: str, written: dict[str, held_fs.StableIdentity],
+                   row: Row, hashed: _Hashed, cause: str) -> str:
+    """Under the vault guard, move the changed bytes' copy to Trash with its metadata; returns its vault path."""
+    from .delete_file import free_trash_path, planned_trash_path
+
+    now = dt.datetime.now()
+    planned = Path(planned_trash_path(vault, row.path, now))
+    with filesystem.parent(planned.parent.as_posix(), create=True, access="mutate").require() as folder:
+        leaf = free_trash_path(planned, lambda slot: _exists(filesystem, folder, slot.name)).name
+        metadata = {
+            "original_path": row.path, "trashed_at": now.isoformat(), "deleted_by": "exomem",
+            "reason": "original_fixity", "cause": cause,
+            "expected_sha256": row.sha256, "found_sha256": hashed.sha256,
+        }
+        held_fs.publish_bytes(filesystem, folder, leaf + trash_metadata.METADATA_SUFFIX,
+                              json.dumps(metadata, indent=2).encode("utf-8")).require()
+        _rename(filesystem, parent, damaged_name, written, folder, leaf)
+        filesystem.flush_directory(folder).require()
+    return (planned.parent / leaf).as_posix()
+
+
+def _stream_parts(stream: BinaryIO) -> Iterator[bytes]:
+    stream.seek(0)
+    return iter(lambda: stream.read(_CHUNK), b"")
 
 
 def _identity_of(filesystem, parent, name: str) -> held_fs.StableIdentity:

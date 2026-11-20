@@ -54,6 +54,18 @@ A pooled archive SHALL store identical original bytes once in its managed canoni
 - **THEN** original reads report corruption or unavailable bytes
 - **AND** they do not silently select another version or retire recovery copies
 
+#### Scenario: A filing without an extension keeps an ordinary file
+
+- **WHEN** a new original's name has no extension in a pooled archive
+- **THEN** its bytes stay an ordinary file at its logical path, as a dataset's do
+- **AND** a restricted caller's output redacts its name as for any withheld file
+
+#### Scenario: A shared original is renamed to a name without an extension
+
+- **WHEN** a move would give a pooled or evicted pooled original a destination name with no extension
+- **THEN** the move is refused before anything changes and names a destination with an extension
+- **AND** ordinary originals and extension-carrying destinations move unchanged
+
 ### Requirement: Physical reuse preserves resource admission
 
 Physical reuse SHALL NOT waive existing declared-byte intake admission or session-held charges for a new filing. The supplied bytes SHALL pass destination staging before a physical match releases allocation. Logical duplicate reuse SHALL retain its current contract. This requirement does not hide later shared-capacity changes or revise existing Cloud offload policy.

@@ -887,6 +887,7 @@ def plan_note(
     The leaf names the folder and file under the plan's day; this only keeps two notes
     of one plan apart.
     """
+    from . import title_occupancy
     from .note import NoteError, planned_destination
     from .vault import InvalidSlugError
 
@@ -899,28 +900,33 @@ def plan_note(
     for field in ("project", "domain"):
         if rule.get(field):
             note[field] = rule[field]
-    slug: str | None = None
-    attempt = 1
+    # A page of a taken name takes the collision number that the leaf adds, so a retry keeps the vault's
+    # style. The plan freezes the number, and the leaf applies it, so a plan lands where it was made.
+    try:
+        title_check = title_occupancy.TitleCheck(root, None)
+    except InvalidSlugError as error:
+        return {"code": "WRITE_REFUSED", "reason": f"the note target is unavailable: {error}"}
+    number = 1
     while True:
         try:
             target = planned_destination(
-                root, note_type=rule["note_type"], title=title, slug=slug,
+                root, note_type=rule["note_type"], title=title, slug=None,
                 project=rule.get("project"), domain=rule.get("domain"), date_iso=date_iso,
+                name_number=number if number > 1 else None,
             )
         except (NoteError, InvalidSlugError, ValueError) as error:
             return {"code": getattr(error, "code", "WRITE_REFUSED"),
                     "reason": f"the note target is unavailable: {error}"}
-        if not destinations.taken(target):
+        if not destinations.taken(target) and not title_check.held(Path(target).stem):
             break
-        attempt += 1
-        slug = slugify_with_truncation_check(f"{title} {attempt}")[0]
+        number += 1
     reason = access.writable_reason(root, target)
     if reason is not None:
         return {"code": "WRITE_REFUSED", "reason": reason}
     destinations.reserve(target)
     note["target_path"] = target
-    if slug is not None:
-        note["slug"] = slug
+    if number > 1:
+        note["name_number"] = number
     return note
 
 

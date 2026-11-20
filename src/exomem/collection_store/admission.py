@@ -18,9 +18,10 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from .. import held_fs, state_migration, state_paths, vault, writer_lease
+from .. import held_fs, state_migration, state_paths, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
+from ..kbdir import managed_root
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
 from .connection import CollectionStoreError
 
@@ -34,7 +35,7 @@ def _isolated_session(parent):
     if not state_paths.state_store_root().resolve().is_relative_to(parent):
         raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state must be inside the isolated parent")
     root = Path(tempfile.mkdtemp(prefix="collection-create-", dir=parent))
-    (root / vault.kb_dirname()).mkdir()
+    managed_root(root).mkdir()
     with _ProducerSession.open(root, production=False) as session:
         yield session
 
@@ -75,7 +76,7 @@ class _ProducerSession:
         self.fs = stack.enter_context(held_fs.acquire(parent).require())
         self.directory = stack.enter_context(self.fs.parent(self.root.name).require())
         self.kb_directory = stack.enter_context(self.fs.parent(
-            (self.root / vault.kb_dirname()).relative_to(parent).as_posix(),
+            managed_root(self.root).relative_to(parent).as_posix(),
         ).require())
         self.namespace = stack.enter_context(self.fs.parent(
             authority.marker_path(self.root).parent.relative_to(parent).as_posix(), create=True, access="mutate",

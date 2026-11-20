@@ -15,10 +15,13 @@ from . import (
     evolution,
     get_page,
     memory_refs,
+    originals,
+    reserved_paths,
     vault,
 )
 from . import find as find_module
 from .governance import egress
+from .kbdir import managed_join
 
 _SAFE_FRONTMATTER = frozenset(
     {
@@ -59,7 +62,7 @@ class _ReferenceResolver:
         if ref is None:
             ref = (
                 context_refs.source_ref(path)
-                if path.startswith("Knowledge Base/Sources/")
+                if path.startswith(managed_join("Sources/"))
                 else context_refs.vault_ref(path)
             )
         self._cache[path] = ref
@@ -467,15 +470,23 @@ def _provenance_rows(
         path = _normalize_link(value)
         if not path or not access.is_indexable(vault_root, path):
             continue
-        exists = (vault_root / path).is_file()
         rows.append(
             {
                 "path": path,
                 "ref": _reference_for_path(ref_resolver, path),
-                "exists": exists,
+                "exists": _held(vault_root, path),
             }
         )
     return rows
+
+
+def _held(vault_root: Path, path: str) -> bool:
+    """Whether the archive holds the page or original at `path`; a pooled original has no file there."""
+    try:
+        return originals.available(vault_root, path)
+    except (ValueError, reserved_paths.ReservedPathLeafError):
+        # A path that names no filing is judged as the file at it: one odd row must not end the section.
+        return (vault_root / path).is_file()
 
 
 def _history_section(vault_root: Path, path: str, *, limit: int) -> dict[str, Any]:

@@ -588,6 +588,13 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
             raw.execute(f"DROP TABLE {table}")
         for table in ("item_references", "item_reference_state"):  # schema 17 added these
             raw.execute(f"DROP TABLE {table}")
+        # Schema 18 added the Source dependency columns, their indexes and the version bindings.
+        raw.execute("DROP TABLE version_source_bindings")
+        for index in ("held_candidates_by_publication", "projection_state_by_dependency_window"):
+            raw.execute(f"DROP INDEX {index}")
+        for table, column in (("txns", "event_version"), ("audit_effects", "dependency_current_complete"),
+                              ("audit_effects", "dependency_prior_complete"), ("held_candidates", "dependency_json")):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
         raw.execute("UPDATE alembic_version SET version_num='13'")
 
@@ -887,6 +894,32 @@ def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(de
     with pytest.raises(OpError) as stale:
         page(after=first["next_cursor"])
     assert stale.value.code == "QUERY_CURSOR_STALE"
+
+
+def test_status_beside_the_store_thread_reports_an_unreadable_open_member_as_unknown(derived, monkeypatch, tmp_path):
+    """Defect: status read off the store thread swallowed a failed read of the derived file, so a running
+    job's totals silently fell back to its ended members, as if the open member had imported nothing."""
+    writer, job = derived("unreadable")
+    run_jobs(writer, max_batches=1)  # one batch of three rows; the member's fourth row keeps it open
+
+    def status_beside():
+        with connection.store_reader(writer.handle.path, writer.handle.readers) as reader:
+            snapshot = connection.SnapshotHandle(writer.handle.path, reader, writer.handle)
+            reader.execute("BEGIN")
+            try:
+                return agent(writer, snapshot, mode="status", continuation=job["continuation"])
+            finally:
+                reader.execute("ROLLBACK")
+
+    readable = status_beside()
+    unreadable_file = tmp_path / "unreadable.sqlite"
+    unreadable_file.write_bytes(b"not a database file" * 8)
+    monkeypatch.setattr(derived_rows, "path", lambda store_path: unreadable_file)
+    unreadable = status_beside()
+
+    assert (readable["state"], readable["rows"]["imported"], readable["batches"]) == ("running", 3, 1)
+    assert (unreadable["state"], unreadable["rows"]["imported"], unreadable["batches"]) == ("running", None, None)
+    assert unreadable["members"]["read"] is None and len(unreadable["warnings"]) == 1
 
 
 def test_a_writer_that_lost_the_lease_stages_no_derived_rows(derived):

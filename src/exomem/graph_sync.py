@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO
 
+from .kbdir import managed_split
+
 if TYPE_CHECKING:
     from .mutation_lock import _SecureDirectory
     from .vault import PlannedWrite
@@ -397,6 +399,11 @@ class GraphSyncCheckpoint:
 
     def render(self) -> str:
         return _canonical_json(self.as_dict()).decode("utf-8")
+
+    @property
+    def changes_no_input(self) -> bool:
+        """A path-scoped generation with no page: a pass over no page covers it."""
+        return self.scope == "paths" and not self.paths
 
     @classmethod
     def parse(cls, raw: str | bytes) -> GraphSyncCheckpoint | None:
@@ -988,11 +995,10 @@ def checkpoint_path(vault_root: Path) -> Path:
 def _resolver_requires_full_scope(
     epoch: GraphEpochState, paths: Iterable[tuple[str, str | None]]
 ) -> bool:
-    from .kbdir import kb_dirname
 
     # Non-KB inputs and physical names outside the checkpoint format use full recovery.
     return epoch.requires_full_recovery or any(
-        not rel.startswith(f"{kb_dirname()}/") or not _is_canonical_relative_path(rel)
+        managed_split(rel) is None or not _is_canonical_relative_path(rel)
         for rel, _digest in paths
     )
 
@@ -1823,6 +1829,56 @@ def reconcile_checkpoint(vault_root: Path) -> GraphSyncCheckpoint:
     return checkpoint
 
 
+def forget_settled_path(vault_root: Path, relative_path: str) -> GraphSyncCheckpoint | None:
+    """Replace a settled record that names this page with one that names no page; the caller holds the boundary.
+
+    The record is for crash recovery: it names what the last canonical write changed, so a process that dies
+    before the graph repairs those pages lets the next one repair only them. Once the graph acknowledges it, it
+    owes no repair, yet it names its pages until a later write replaces it. The successor is a generation that
+    changed no graph input, so recovery from it repairs nothing, which is what the acknowledged record owed.
+    None when the record does not name the page, the graph still owes it repair, or a batch is committing.
+    """
+    from . import deferred_index, graph_drain
+    from .epistemic_graph import sidecar_path
+    from .vault import PlannedWrite, batch_atomic_write, batch_commit_if_idle
+
+    root = Path(vault_root)
+    epoch = classify_epoch(root)
+    current, acknowledgement = epoch.checkpoint, epoch.acknowledgement
+    if epoch.kind != "coherent" or current is None or current.scope != "paths" or epoch.floor is None:
+        return None
+    if relative_path not in current.created_paths and all(name != relative_path for name, _hash in current.paths):
+        return None
+    # Without a graph nothing will repair from the record; a graph owes it nothing once it acknowledges it.
+    if not (acknowledgement.covers(current) if acknowledgement is not None else not sidecar_path(root).exists()):
+        return None
+    successor = next_checkpoint(
+        current=current,
+        acknowledged_generation=acknowledgement.generation if acknowledgement is not None else 0,
+        floor_generation=epoch.floor.generation,
+        mutation_id=_checkpoint_mutation_id(),
+        paths=[],
+        created_paths=[],
+    )
+    with batch_commit_if_idle() as idle:
+        if not idle:
+            return None  # A committing batch may wait in its fan-out for the boundary this caller holds.
+        # Its empty debt first: a write that lands before the graph acknowledges the successor then finds the
+        # generation it skips recorded, and repairs per path instead of rebuilding the whole graph.
+        deferred_index.enqueue_graph_checkpoint(root, successor)
+        batch_atomic_write(
+            [
+                PlannedWrite(floor_path(root), GraphSyncGenerationFloor.create(successor.generation).render()),
+                PlannedWrite(checkpoint_path(root), successor.render()),
+            ],
+            vault_root=root,
+            post_commit_fanout=False,
+            commit_point=False,
+        )
+    graph_drain.note_graph_debt()  # The drain acknowledges the successor with a pass over no page.
+    return successor
+
+
 def _write_floor(vault_root: Path, floor: GraphSyncGenerationFloor) -> None:
     from . import reserved_paths
 
@@ -1973,9 +2029,13 @@ def prepare_recovery_epoch(
 
 
 def prepare_rename_epoch(
-    vault_root: Path, renames: Iterable[tuple[str, str]]
+    vault_root: Path, renames: Iterable[tuple[str, str]], *, adopted: bool = False
 ) -> GraphDeletionEpoch | None:
-    """Fence actual file renames before any source leaves its current location."""
+    """Fence actual file renames before any source leaves its current location.
+
+    `adopted` says the renames already ran (curation adopts an interrupted move), so each new
+    page is read from its new path.
+    """
     from . import recall_policy, reserved_paths
     from .vault import in_excluded_scan_dir
 
@@ -1990,7 +2050,9 @@ def prepare_rename_epoch(
         )
         new_input = new_rel.lower().endswith(".md") and not in_excluded_scan_dir(new_rel)
         if new_input:
-            content = reserved_paths.read_generic_bytes(root, old_rel, physical=True).data
+            content = reserved_paths.read_generic_bytes(
+                root, new_rel if adopted else old_rel, physical=True
+            ).data
             new_input = recall_policy.admits_markdown_content(root, new_rel, content)
         if old_input:
             paths.append((old_rel, None))

@@ -49,7 +49,7 @@ import secrets
 import time
 import zlib
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from pathlib import Path
@@ -93,8 +93,9 @@ MAX_ROW_BYTES = 1 << 20
 MAX_DEPTH = 32
 MAX_BATCH_ROWS = 500
 MAX_BATCH_BYTES = 4 << 20
-# The import hold budget, spent on reading a store batch's rows before it takes the vault boundary: a
-# process that reads rows slowly commits smaller batches. It does not time the write (design Decision 6).
+# The time a store batch may spend reading its source rows on the store thread before it closes and
+# takes the vault boundary, so a process that reads rows slowly commits smaller batches. It does not
+# bound the hold itself, which the batch's row and byte limits size (design Decision 6).
 BATCH_SECONDS = 0.25
 PREVIEW_ROWS = 100
 # Preview runs on the store thread, where every store write and status call waits behind it.
@@ -530,8 +531,84 @@ def _resolved(writer, row: Mapping[str, Any], manifest, request: _Request) -> _R
 class Source:
     ref: str
     path: Path
-    guard: vault.PathGuard
+    guard: vault.PathGuard | _BoundGuard
     members: tuple[_Member, ...] = ()
+    canonical_ref: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundGuard:
+    """The identity of a preserved original that no file holds at its path: the digest and size its filing binds.
+
+    A shared archive keeps those bytes once, in an object that the digest names, so an unchanged binding names
+    unchanged bytes. A deleted filing no longer resolves, like a file that changed.
+    """
+
+    root: Path
+    ref: str
+    sha256: str
+    size: int
+
+    @classmethod
+    def capture(cls, root: Path, ref: str) -> _BoundGuard | None:
+        from .. import originals
+
+        snapshot = originals.digest_addressed(root, ref)
+        if snapshot is None or snapshot.binary_sha256 is None or snapshot.binary_size is None:
+            return None
+        return cls(root, ref, snapshot.binary_sha256, snapshot.binary_size)
+
+    def recheck(self, root: Path) -> None:
+        try:
+            current = type(self).capture(root, self.ref)
+        except ValueError as error:  # A retirement its witness no longer confirms is not the proven filing.
+            raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed") from error
+        if current != self:
+            raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed")
+
+
+class _BoundStream:
+    """A shared original's pinned bytes; closing the stream releases the pin and checks the binding held."""
+
+    def __init__(self, guard: _BoundGuard) -> None:
+        from .. import media_store
+
+        self.guard, self._held = guard, ExitStack()
+        with _bound_refusal():
+            try:
+                self._source = self._held.enter_context(media_store.open_original(guard.root, guard.ref))
+                guard.recheck(guard.root)  # The pinned object is the one the proven binding names.
+            except BaseException:
+                self._held.close()
+                raise
+
+    def read(self, size: int = -1) -> bytes:
+        return self._source.stream.read(size)
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        return self._source.stream.seek(offset, whence)
+
+    def close(self) -> None:
+        with _bound_refusal():
+            self._held.close()
+
+    def __enter__(self) -> _BoundStream:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+@contextmanager
+def _bound_refusal() -> Iterator[None]:
+    """Refuse a shared original that its pin or binding check could not hold as a changed import source."""
+    from .. import held_fs, media_store, reserved_paths
+
+    try:
+        yield
+    except (media_store.MediaStoreError, reserved_paths.ReservedPathLeafError, held_fs.HeldFsError,
+            ValueError) as error:
+        raise vault.PathGuardError("PATH_GUARD_CHANGED", "import source binding changed") from error
 
 
 def resolve_source(
@@ -550,13 +627,17 @@ def resolve_source(
     found: list[tuple[Source, str, int]] = []
 
     def released(relative: str, path: Path) -> bool:
-        guard = vault.PathGuard.capture(
-            root,
-            relative,
-            leaf_policy="generation",
-            expected_generation=vault.stat_generation(os.lstat(path)),
-        )
-        source = Source(relative, path, guard)
+        try:
+            generation = vault.stat_generation(os.lstat(path))
+        except FileNotFoundError:
+            # A shared archive's filing, which `records.resolve_preserved_source` resolved without a file.
+            bound = _BoundGuard.capture(root, relative)
+            if bound is None:
+                return False
+            source = Source(relative, path, bound)
+        else:
+            guard = vault.PathGuard.capture(root, relative, leaf_policy="generation", expected_generation=generation)
+            source = Source(relative, path, guard)
         proved: list[tuple[str, int]] = []
 
         def prove() -> str:
@@ -567,6 +648,17 @@ def resolve_source(
         if not operation.allows_file(relative, content_sha256=prove):
             return False
         prove()
+        from .. import memory_refs
+
+        try:
+            with _open_source(source) as stream:
+                header = vault.read_frontmatter_header(stream, 64 * 1024)
+            canonical_ref = memory_refs.ref_from_markdown(header.decode("utf-8"))
+        except (UnicodeDecodeError, vault.FrontmatterError):
+            # A legacy or binary input stays importable; it cannot supply incarnation coverage.
+            canonical_ref = None
+        source = dataclasses.replace(source, canonical_ref=canonical_ref)
+        source.guard.recheck(root)
         found.append((source, *proved[0]))
         return True
 
@@ -576,6 +668,8 @@ def resolve_source(
 
 
 def _open_source(source: Source):
+    if isinstance(source.guard, _BoundGuard):
+        return _BoundStream(source.guard)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(source.path, flags)
     handle = os.fdopen(descriptor, "rb", buffering=0)
@@ -2277,12 +2371,16 @@ def _deadline_passed(job: _Job) -> bool:
 
 
 def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
-    progress, checkpoint = job.progress, job.checkpoint
+    progress, checkpoint, warnings = job.progress, job.checkpoint, {}
     derived = derived_rows.is_derived(writer.connection, job.collection_id)
     if job.state == "running" and derived:
-        record = derived_rows.member_progress(writer, job.collection_id)
-        if record is not None and record["job"] == job.id:
-            progress = _with_member(progress, record["counts"])
+        try:
+            record = derived_rows.member_progress(writer, job.collection_id)
+        except derived_rows.ProgressUnknown as unknown:
+            progress, warnings = _with_member(progress, None), {"warnings": [str(unknown)]}
+        else:
+            if record is not None and record["job"] == job.id:
+                progress = _with_member(progress, record["counts"])
     rejections = [
         {"row": ordinal, "byte": offset, "code": code, "at": at}
         for ordinal, offset, code, at in writer.connection.execute(
@@ -2363,6 +2461,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
         "activity": _activity(writer, job, checkpoint["byte"], total),
         "resumable": state == "partial" and reason in _RESUMABLE,
         "cancellable": job.state == "running" or (job.state == "partial" and job.reason in _RESUMABLE),
+        **warnings,
         **_reference_report(writer, job, state),
     }
 
@@ -2502,7 +2601,7 @@ def _prove(writer, job: _Job, operation) -> Source:
             members = _export(writer.root, source.ref, sha256, bound["members"]["select"])
             if [member.sha256 for member in members] != bound["members"]["sha256"]:
                 raise _Lost
-            source = Source(source.ref, source.path, source.guard, members)
+            source = dataclasses.replace(source, members=members)
     except collections.CollectionError as error:
         raise _Lost from error
     _proofs(writer)[job.id] = source
@@ -2947,7 +3046,7 @@ class _Settlement:
             superseded,
             plan,
         )
-        self.source = (proof.ref, proof.guard)
+        self.source = records.ResolvedSource(proof.ref, proof.guard, proof.canonical_ref)
         self.guards = guards
         self.prepared, self.version = prepared, version
         self.tally: dict[str, int] | None = None
@@ -2960,7 +3059,7 @@ class _Settlement:
     def prepared_row(self, index, manifest, reference, source, item):
         """Reuse only the same declaration, source proof, kept position and exact mapped content."""
         if ((manifest.collection_id, manifest.manifest_version.path, manifest.manifest_version.hash) != self._manifest
-                or reference != self._source[0] or source != self._source
+                or reference != self._source.path or source != self._source
                 or not 0 <= index < len(self._kept_prepared)):
             return None
         position, prepared = self._kept_prepared[index]
@@ -3142,7 +3241,9 @@ class _Activity:
     """
 
     since: int  # when this host began timing the job, in Unix seconds
-    batch: int | None = None  # the running batch's sequence; None between batches
+    # The running batch's number, None between batches: a store import's checkpoint sequence, which its
+    # request id and receipt name; a derived import's count of the batches staged before it (``_derived_batch``).
+    batch: int | None = None
     phase: str | None = None  # reading (authority and source rows), waiting (for the boundary) or writing
     phase_began: float = 0.0
     began: float = 0.0  # when the running batch began
@@ -3150,7 +3251,8 @@ class _Activity:
     timed: int = 0  # batches timed to their end
     rows: int = 0  # source rows the timed batches consumed, rejected rows included
     source_bytes: int = 0
-    spent_ms: tuple[float, float, float] = (0.0, 0.0, 0.0)  # read, boundary wait and hold, summed
+    # Read, boundary wait and hold, summed; a wait or hold sum is None once any timed batch's is unknown.
+    spent_ms: tuple[float, float | None, float | None] = (0.0, 0.0, 0.0)
     first_began: float = 0.0
     last_ended: float = 0.0
     # (batch, rows, read, wait, hold) of the last timed batch and of the one with the longest hold.
@@ -3202,10 +3304,22 @@ def _timed(writer, job_id: str, batch: Batch, before, after) -> None:
     telemetry[job_id] = dataclasses.replace(
         current, batch=None, phase=None, phase_began=now, read_ms=None, timed=current.timed + 1,
         rows=current.rows + entry[1], source_bytes=current.source_bytes + batch.source_bytes,
-        spent_ms=(spent[0] + read, spent[1] + (wait or 0.0), spent[2] + (hold or 0.0)),
+        spent_ms=(spent[0] + read, _sum(spent[1], wait), _sum(spent[2], hold)),
         first_began=current.first_began if current.timed else current.began, last_ended=now,
         last=entry, longest=longest,
     )
+
+
+def _sum(total: float | None, value: float | None) -> float | None:
+    return None if total is None or value is None else total + value
+
+
+def _renumber(writer, job_id: str, batch: int) -> None:
+    """Name the job's running batch ``batch``, once the batch knows its number."""
+    telemetry = writer.handle.import_telemetry
+    current = telemetry.get(job_id)
+    if current is not None and current.phase is not None:
+        telemetry[job_id] = dataclasses.replace(current, batch=batch)
 
 
 def _between(writer, job_id: str) -> None:
@@ -3220,9 +3334,11 @@ def _between(writer, job_id: str) -> None:
 def _activity(writer, job: _Job, consumed: int, total: int) -> dict[str, Any]:
     """Status's view of the job's activity on this host: every value null where this host timed nothing."""
     current = writer.handle.import_telemetry.get(job.id)
-    if current is None:
-        return dict.fromkeys(("since", "phase", "phase_ms", "batch", "timed_batches", "timings_ms",
-                              "last_batch", "longest_hold", "rows_per_second", "eta_seconds"))
+    view = _view(current or _Activity(since=0), consumed, total)
+    return view if current is not None else dict.fromkeys(view)
+
+
+def _view(current: _Activity, consumed: int, total: int) -> dict[str, Any]:
     # One batch's own rate leaves out the gap before the next batch, so a rate needs two.
     span = current.last_ended - current.first_began if current.timed >= 2 else 0.0
     rate = current.rows / span if span > 0 else None
@@ -3233,7 +3349,7 @@ def _activity(writer, job: _Job, consumed: int, total: int) -> dict[str, Any]:
         "phase_ms": None if current.phase is None else round((time.monotonic() - current.phase_began) * 1000),
         "batch": current.batch,
         "timed_batches": current.timed,
-        "timings_ms": dict(zip(("read", "wait", "hold"), (round(ms) for ms in current.spent_ms), strict=True))
+        "timings_ms": dict(zip(("read", "wait", "hold"), (_ms(ms) for ms in current.spent_ms), strict=True))
         if current.timed else None,
         "last_batch": _timed_batch(current.last),
         "longest_hold": _timed_batch(current.longest),
@@ -3247,8 +3363,11 @@ def _timed_batch(entry) -> dict[str, Any] | None:
     if entry is None:
         return None
     sequence, rows, read, wait, hold = entry
-    return {"batch": sequence, "rows": rows, "read_ms": round(read),
-            "wait_ms": None if wait is None else round(wait), "hold_ms": None if hold is None else round(hold)}
+    return {"batch": sequence, "rows": rows, "read_ms": round(read), "wait_ms": _ms(wait), "hold_ms": _ms(hold)}
+
+
+def _ms(value: float | None) -> int | None:
+    return None if value is None else round(value)
 
 
 def _step(root: Path, writer, job_id: str) -> str:
@@ -3410,15 +3529,22 @@ def _derived_apply(conn, goal, batch: Batch, manifest, source_ref: str, shas: li
     return _Applied(outcomes, entries, rejections, superseded)
 
 
-def _with_member(progress: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
-    """A job's counters with a derived member's batches, which reach the job row only at the member's end."""
+def _with_member(progress: dict[str, Any], counts: dict[str, int] | None) -> dict[str, Any]:
+    """A job's counters with a derived member's batches, which reach the job row only at the member's end.
+
+    ``counts`` None is an open member whose progress status could not read: each counter it adds to is unknown.
+    """
+
+    def plus(total: int, *names: str) -> int | None:
+        return None if counts is None else total + sum(counts[name] for name in names)
+
     folded = dict(progress)
     for name in ("inserted", "updated", "unchanged", "rejected", "duplicates", "batches"):
-        folded[name] += counts[name]
-    folded["collapsed_in_source"] += counts["duplicates"]  # a derived member counts the rows it supersedes within a batch
-    folded["imported"] += counts["inserted"] + counts["updated"] + counts["unchanged"]
-    folded["members"] = {"read": progress["members"]["read"] + counts["read"],
-                         "skipped": progress["members"]["skipped"] + counts["skipped"]}
+        folded[name] = plus(folded[name], name)
+    # A derived member counts the rows it supersedes within a batch.
+    folded["collapsed_in_source"] = plus(folded["collapsed_in_source"], "duplicates")
+    folded["imported"] = plus(folded["imported"], "inserted", "updated", "unchanged")
+    folded["members"] = {name: plus(progress["members"][name], name) for name in ("read", "skipped")}
     return folded
 
 
@@ -3455,6 +3581,8 @@ def _derived_batch(root: Path, writer, job: _Job, manifest, proof: Source) -> st
     record = store.progress(cid)
     if record is not None and record["job"] != job.id:
         return "deferred"
+    # The checkpoint sequence advances once per member, so batches are numbered as ``batches`` counts them.
+    _renumber(writer, job.id, job.progress["batches"] + (0 if record is None else record["counts"]["batches"]))
     if record is not None and record["done"]:
         return _settle_member(root, writer, job, manifest, store, goal, record, [])
     current = job if record is None else dataclasses.replace(
@@ -3770,7 +3898,7 @@ def _start(root: Path, writer, collection: str, request: _Request) -> dict[str, 
             source, sha256, size = resolve_source(root, operation, request.source_ref)
             if request.members is not None:
                 members = _export(root, source.ref, sha256, request.members)
-                source = Source(source.ref, source.path, source.guard, members)
+                source = dataclasses.replace(source, members=members)
         finally:
             operation.close()
     binding = {

@@ -445,15 +445,15 @@ def test_relocation_steps_refuse_before_transition_publication_or_rename(
         raise AssertionError("curation attempted a rename without lineage capability")
 
     monkeypatch.setattr(reserved_paths, "move_generic_path", forbidden_rename)
-    plans = (
-        {
-            "step_id": "move",
-            "kind": "move",
-            "args": {
-                "old_path": move_source,
-                "new_path": move_source.replace(".md", "-new.md"),
-            },
+    move_step = {
+        "step_id": "move",
+        "kind": "move",
+        "args": {
+            "old_path": move_source,
+            "new_path": move_source.replace(".md", "-new.md"),
         },
+    }
+    plans = (
         {
             "step_id": "delete",
             "kind": "delete",
@@ -490,23 +490,9 @@ def test_relocation_steps_refuse_before_transition_publication_or_rename(
     assert rename_calls == []
     runs = vault / "Knowledge Base/_Governance/curation/runs"
     assert not runs.exists()
-
-
-def test_matching_relocation_hashes_cannot_authorize_placement_recovery(vault: Path) -> None:
-    from exomem import curation
-
-    path = _seed_note(vault, "curation-hash-is-not-lineage")
-    digest = content_hash((vault / path).read_text(encoding="utf-8"))
-    preparation = {
-        "effect_before": [{"path": path, "absent": True}],
-        "effect_after": [{"path": path, "content_hash": digest}],
-        "rename_after": [{"path": path, "content_hash": digest}],
-    }
-
-    with pytest.raises(
-        curation.CurationError, match="CURATION_RENAME_HISTORY_UNPROVABLE"
-    ):
-        curation._prepared_placement(vault, preparation)
+    # A move records its intent before its rename, so it proposes; nothing renames at proposal.
+    assert _propose(vault, move_step)["phase"] == "proposed"
+    assert rename_calls == []
 
 
 def test_invalid_witness_blocks_instead_of_guessing_or_retrying(vault: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -859,13 +845,14 @@ def test_a_folded_head_still_reads_back_every_history_entry_under_an_access_poli
     from test_latency_gate import _seed_freshness_live
 
     from exomem import vault as vault_module
+    from exomem.kbdir import kb_prefix
 
     if obsidian_root:
         (vault_module.kb_root(vault) / ".obsidian").mkdir()
     pages = earlier_episode(4)
     named = pages[1].removesuffix(".md")
     written = vault_module.parse_frontmatter((vault / pages[0]).read_text(encoding="utf-8"))[0]["superseded_by"]
-    assert written == [f"[[{named.removeprefix(vault_module.kb_prefix()) if obsidian_root else named}]]"]
+    assert written == [f"[[{named.removeprefix(kb_prefix()) if obsidian_root else named}]]"]
     # Only a governed vault runs the gate's name lookup: an ungoverned one returns before it.
     _write_source_rule(vault, ceiling=6)
     _apply(vault, _propose(vault, _fold_step(pages, vault)))

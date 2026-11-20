@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 from _public_call import public_call
-from test_media_store import selected_store as _selected_store  # noqa: F401 - shared encrypted-store fixture
+from test_media_store import (
+    selected_store as _selected_store,  # noqa: F401 - shared encrypted-store fixture
+)
 
 from exomem import commands, media_engines, reserved_paths, server
 
@@ -186,7 +188,7 @@ original = media_store.open_original
 
 @contextmanager
 def stalled(vault, target, **kwargs):
-    if target.exists():
+    if (vault / target).exists():
         (vault / "preparing").write_text("yes")
         time.sleep(30)
     with original(vault, target, **kwargs) as value:

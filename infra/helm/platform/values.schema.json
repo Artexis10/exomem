@@ -233,6 +233,14 @@
           "type": "array", "uniqueItems": true,
           "items": {"$ref": "#/$defs/mediaEngineName"}
         },
+        "sourceErasureCellIds": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {
+            "type": "array", "maxItems": 1024, "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+          }
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},

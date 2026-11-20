@@ -19,6 +19,7 @@ from contextlib import contextmanager
 import httpx
 import jwt
 import pytest
+from _curl_send import curl_request
 from _public_call import public_call
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -221,7 +222,7 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
     # The descriptor the agent saves has passed the cell's real output filter.
     descriptor = _run(app, prepare)
     assert set(descriptor) == {"token", "upload_url", "ttl_seconds", "hold", "lane", "expected_sha256",
-                               "max_bytes", "handoff_status", "committed"}
+                               "max_bytes", "handoff_status", "committed", "next"}
     assert descriptor["upload_url"] == UPLOAD_URL and descriptor["committed"] is False
     assert 0 < descriptor["ttl_seconds"] <= 900
     (tmp_path / "handoff.json").write_text(json.dumps(descriptor))
@@ -249,6 +250,22 @@ def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cel
     [receipt] = owned["files"]
     assert receipt["outcome"] == "stored" and receipt["hash"] == digest
     assert (vault / receipt["stored_path"]).read_bytes() == ORIGINAL
+
+
+def test_the_replys_own_send_line_holds_the_file_through_the_gateway(cell, tmp_path):
+    # The cell's egress scrubber rewrote a bearer token written into the line, and the gateway refused the header.
+    key, app, _ = cell
+    descriptor = _run(app, lambda client: _tool(
+        client, "upload_files", _prepare_arguments(), _mcp_origin(key, LOGIN_A)))
+    (tmp_path / "original.bin").write_bytes(ORIGINAL)
+    send, _ = descriptor["next"]
+
+    url, request = curl_request(send["shell"], token=descriptor["token"], file=str(tmp_path / "original.bin"))
+    with httpx.Client(transport=_Gateway(key, app)) as gateway:
+        sent = gateway.post(url, **request)
+
+    assert sent.status_code == 201, sent.text
+    assert sent.json()["state"] == "held" and sent.json()["hash"] == hashlib.sha256(ORIGINAL).hexdigest()
 
 
 # The tool that adopts a held upload of each lane, and the arguments it takes besides the files.

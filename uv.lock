@@ -846,7 +846,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.182.0" # x-release-please-version
+version = "0.192.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "aiofile" },
@@ -869,6 +869,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rank-bm25" },
     { name = "referencing" },
+    { name = "rpds-py" },
     { name = "snowballstemmer" },
     { name = "sqlalchemy" },
     { name = "tzdata" },
@@ -911,6 +912,7 @@ image-codecs = [
 media = [
     { name = "av" },
     { name = "ctranslate2" },
+    { name = "defusedxml" },
     { name = "faster-whisper" },
     { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -926,6 +928,7 @@ media = [
 ]
 media-cpu = [
     { name = "av" },
+    { name = "defusedxml" },
     { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
     { name = "odfdo" },
     { name = "onnx-asr", extra = ["cpu"] },
@@ -978,6 +981,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'frame-codecs'", specifier = ">=11,<19" },
     { name = "charset-normalizer", specifier = ">=3.4,<4" },
     { name = "ctranslate2", marker = "extra == 'media'", specifier = ">=4.6.3,<5" },
+    { name = "defusedxml", marker = "extra == 'media-cpu'", specifier = ">=0.7.1" },
     { name = "exomem", extras = ["frame-codecs"], marker = "extra == 'media-cpu'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'embeddings'" },
     { name = "exomem", extras = ["image-codecs"], marker = "extra == 'frame-codecs'" },
@@ -1015,6 +1019,7 @@ requires-dist = [
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "rawpy", marker = "(platform_machine != 'x86_64' and extra == 'image-codecs') or (sys_platform != 'darwin' and extra == 'image-codecs')", specifier = ">=0.28,<0.29" },
     { name = "referencing", specifier = ">=0.37,<0.38" },
+    { name = "rpds-py", specifier = ">=0.30,<0.31" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
     { name = "sentence-transformers", marker = "extra == 'nli'", specifier = ">=3.0" },
     { name = "sentence-transformers", extras = ["onnx"], marker = "extra == 'reranker-onnx'", specifier = ">=5.5.1" },

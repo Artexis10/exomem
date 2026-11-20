@@ -6,16 +6,17 @@ walk only through ``iter_owned``, so none of them takes another's files for crea
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from .. import reserved_paths, vault
+from .. import collection_profiles, reserved_paths, vault
 from ..collection_store import ownership as collection_ownership
 from ..find_corpus import EntryKind, entry_kind, is_sync_conflict_copy
-from ..kbdir import kb_dirname
+from ..kbdir import is_managed_root_name, managed_root, managed_root_rel, managed_split
 
 
 class Ownership(StrEnum):
@@ -78,7 +79,7 @@ def is_markdown(rel: str) -> bool:
     return rel.lower().endswith(".md")
 
 
-def classify(rel: str) -> Ownership:
+def classify_by_rule(rel: str) -> Ownership:
     """Who owns one vault-relative POSIX path. It does no I/O, and the first matching rule wins.
 
     1. A path outside the Knowledge Base folder is a read-only input: NONE.
@@ -93,10 +94,10 @@ def classify(rel: str) -> Ownership:
     The store owns content that search hides: ``_trash``, ``_archive``, ``_attachments`` and ``_Adoption``
     are owned, although the Knowledge Base walk skips them.
     """
-    prefix = kb_dirname() + "/"
-    if not rel.startswith(prefix):
+    below = managed_split(rel)
+    if below is None:
         return Ownership.NONE
-    parts = rel[len(prefix):].split("/")
+    parts = below.split("/")
     if any(_is_dot_name(part) for part in parts) or is_sync_conflict_copy(parts[-1]):
         return Ownership.NONE
     claimed = _claimed(rel)
@@ -109,9 +110,36 @@ def classify(rel: str) -> Ownership:
     return Ownership.BINARY
 
 
+#: Paths remembered for the process: above the 50,000-page load target with room for its binaries.
+_OWNERSHIP_MEMO_MAX = 131_072
+
+
+def _ownership_key() -> tuple[str, int, int]:
+    """The inputs of ``classify_by_rule`` beyond the path: folder name, profiles and registry."""
+    return (
+        managed_root_rel(),
+        id(collection_profiles.PROFILES),
+        id(reserved_paths.internal_state_registry()),
+    )
+
+
+# Pure-function memo, keyed by its whole input. It shares an assumption with the reserved-path LRU
+# (``reserved_paths._classify_logical_text``): the profiles and the registry are replaced as whole
+# objects, never mutated in place, so an object's identity names its value.
+@functools.lru_cache(maxsize=_OWNERSHIP_MEMO_MAX)
+def _classified(rel: str, _kb: str, _profiles_id: int, _registry_id: int) -> Ownership:
+    return classify_by_rule(rel)
+
+
+def classify(rel: str) -> Ownership:
+    """``classify_by_rule``, remembered for the process: a path costs the rule once."""
+    return _classified(rel, *_ownership_key())
+
+
 def classify_many(rels: Iterable[str]) -> dict[str, Ownership]:
     """``classify`` for each distinct path of ``rels``, by the same rule: a path costs one classification."""
-    return {rel: classify(rel) for rel in dict.fromkeys(rels)}
+    key = _ownership_key()
+    return {rel: _classified(rel, *key) for rel in dict.fromkeys(rels)}
 
 
 def owns_folder(rel: str) -> bool:
@@ -120,10 +148,10 @@ def owns_folder(rel: str) -> bool:
     A folder below the Knowledge Base folder (or that folder itself) that no dot-named component,
     collection layer or reserved family takes. It does no I/O.
     """
-    kb = kb_dirname()
-    if rel != kb and not rel.startswith(kb + "/"):
+    below = "" if is_managed_root_name(rel) else managed_split(rel)
+    if below is None:
         return False
-    if any(_is_dot_name(part) for part in rel[len(kb) + 1:].split("/")):
+    if any(_is_dot_name(part) for part in below.split("/")):
         return False
     return _claimed(rel) is not Ownership.NONE
 
@@ -141,8 +169,7 @@ def iter_owned(
     so a caller can tell a partial walk from a whole one. Without ``on_skip`` the walk stays silent.
     """
     report = on_skip or (lambda _skipped: None)
-    kb = kb_dirname()
-    yield from _walk(Path(vault_root) / kb, kb, report)
+    yield from _walk(managed_root(Path(vault_root)), managed_root_rel(), report)
 
 
 # Both enums are closed sets that code implements. A directory and a regular file never reach this map.

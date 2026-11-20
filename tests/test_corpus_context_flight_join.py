@@ -652,12 +652,12 @@ _DECLARED_UNBOUNDED_JOINS = {
     "complete_component borrow, each for one batch, and lend makes no offer after its room",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "process.wait",
     ): "age exits once its output reaches EOF or after kill; its input ends with the feed",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "feeder.join",
     ): "the feed ends at the object's end, a broken pipe, or the edge store's per-read timeout",
     (
@@ -748,6 +748,11 @@ _DECLARED_UNBOUNDED_JOINS = {
         "_warm_embedding_matrix",
         "embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join",
     ): "startup warm thread joins the background matrix load it shares; not a request path",
+    (
+        "server_runtime.py",
+        "_warm_embedding_matrix",
+        "loading.join",
+    ): "startup warm thread joins the optional passage-matrix load it requested; not a request path",
     (
         "working_set_runtime.py",
         "join_builds",

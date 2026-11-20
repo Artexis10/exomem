@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
+from ..kbdir import managed_root_rel
 from .registry import PUBLIC_INSTANCE, RegistryError, RegistrySpec, Snapshot
 
 
@@ -356,13 +357,12 @@ def _bound_storage(
     every page it admits, so it prepares them once.
     """
     from .. import registry_history
-    from ..kbdir import kb_dirname
     from ..structured_collections import _portable_path_key
     from ..vault_store import read
     from . import registry_specs
 
     memo = read.request_memo(root)
-    folder = kb_dirname()
+    folder = managed_root_rel()
     if memo is not None:
         kept = memo.get((__name__, "bound storage"))
         if kept is not None and kept[1] == folder and (kept[0] is document or kept[0] == document):

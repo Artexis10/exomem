@@ -46,7 +46,7 @@ from typing import Any
 import yaml
 
 from . import registry_history, vault
-from .kbdir import kb_dirname
+from .kbdir import is_managed_root_name, managed_root
 
 log = logging.getLogger(__name__)
 
@@ -100,12 +100,19 @@ _PROVENANCE_KEYS = frozenset({"value", "why", "at", "evidence"})
 _TOP_LEVEL_FIELDS = frozenset(
     {"schema_version", "anchors", "state", "stopwords", "resolution", "referential", "budgets"}
 )
-#: The response budgets a vault may set, each with the range the server accepts. Each key names a
-#: budget the server implements; a vault chooses only the number, so this closed set is not vocabulary.
-BUDGET_BOUNDS: Mapping[str, tuple[int, int]] = {
+#: The response budgets and selection limits a vault may set, each with the range the server accepts. Each key
+#: names a limit the server implements; a vault chooses only the number, so this closed set is not vocabulary. A
+#: float range takes an integer or a float; an integer range takes an integer only.
+BUDGET_BOUNDS: Mapping[str, tuple[int | float, int | float]] = {
     "stance_max_chars": (0, 8000),
     "skills_max_chars": (0, 8000),
     "skill_summary_max_chars": (40, 1000),
+    "domain_profile_max_chars": (0, 8000),
+    "profiles_max_chars": (0, 8000),
+    "profile_semantic_floor": (0.0, 1.0),
+    "profile_lexical_floor": (0.0, 100.0),
+    "profile_domains_max": (1, 8),
+    "positions_max_chars": (0, 8000),
 }
 
 
@@ -148,11 +155,11 @@ class Conventions:
     #: One mapping per ADDED entry, in file order: `field`, `value`, and any
     #: of `why`, `at` and `evidence` the owner's agent recorded.
     referential_provenance: tuple[Mapping[str, str], ...] = ()
-    #: Effective response budgets as sorted `(name, value)` pairs (`BUDGET_BOUNDS` keys).
-    budgets: tuple[tuple[str, int], ...] = ()
+    #: Effective response budgets and selection limits as sorted `(name, value)` pairs (`BUDGET_BOUNDS` keys).
+    budgets: tuple[tuple[str, int | float], ...] = ()
 
-    def budget(self, name: str) -> int | None:
-        """The effective value of one response budget, or None when the shipped file lacks it."""
+    def budget(self, name: str) -> int | float | None:
+        """The effective value of one budget or selection limit, or None when the shipped file lacks it."""
         return dict(self.budgets).get(name)
 
     @property
@@ -299,7 +306,7 @@ def shipped_conventions_text() -> str:
 
 def override_path(vault_root: Path) -> Path:
     """Where a vault's own registry lives, if the owner authored one."""
-    return Path(vault_root) / kb_dirname() / "_Schema" / REGISTRY_FILENAME
+    return managed_root(Path(vault_root)) / "_Schema" / REGISTRY_FILENAME
 
 
 def clear_cache() -> None:
@@ -581,7 +588,7 @@ def _validate_folder_rule(raw: str) -> tuple[str | None, str | None]:
     if any(segment.startswith(".") or segment.startswith("_") for segment in segments):
         return None, "rule_hidden_segment"
     head = segments[0]
-    if head.casefold() == kb_dirname().casefold():
+    if is_managed_root_name(head, key=str.casefold):
         return None, "rule_kb_prefixed"
     if head.casefold() == "entities":
         return None, "rule_entity_folder"
@@ -790,9 +797,9 @@ def _merge_resolution(
 
 
 def _merge_budgets(
-    shipped: Mapping[str, int], raw: Any, findings: list[dict[str, str]]
-) -> dict[str, int]:
-    """Replace a known budget with a valid integer in range; report anything else and keep the prior value."""
+    shipped: Mapping[str, int | float], raw: Any, findings: list[dict[str, str]]
+) -> dict[str, int | float]:
+    """Replace a known budget with a valid number in range; report anything else and keep the prior value."""
     budgets = dict(shipped)
     if raw is None:
         return budgets
@@ -805,12 +812,16 @@ def _merge_budgets(
             findings.append(_finding("unknown_field", f"budgets.{key}", "unknown budget"))
             continue
         low, high = bounds
-        if not isinstance(value, int) or isinstance(value, bool) or not (low <= value <= high):
+        fractional = isinstance(low, float)
+        numeric = isinstance(value, (int, float)) if fractional else isinstance(value, int)
+        # A NaN fails the range comparison, so it is rejected with the out-of-range values.
+        if isinstance(value, bool) or not numeric or not (low <= value <= high):
+            kind = "a number" if fractional else "an integer"
             findings.append(
-                _finding("invalid_budget", f"budgets.{key}", f"rejected value {value!r}; must be an integer {low}..{high}")
+                _finding("invalid_budget", f"budgets.{key}", f"rejected value {value!r}; must be {kind} {low}..{high}")
             )
             continue
-        budgets[key] = int(value)
+        budgets[key] = float(value) if fractional else int(value)
     return budgets
 
 

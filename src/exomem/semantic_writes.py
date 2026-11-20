@@ -30,6 +30,8 @@ from . import (
     metrics,
     note_types,
     origin_bindings,
+    page_lineage,
+    prior_claims,
     promotions,
     provenance,
     relation_barrier,
@@ -41,13 +43,15 @@ from . import (
     semantic_index,
     semantic_language_registry,
     source_closure,
+    source_custody,
     temporal,
+    trash_metadata,
     vault,
 )
 from . import (
     find as find_module,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_form, managed_relative, managed_split
 from .mutation_timings import MutationTimings, mutation_timing_span
 from .vault_store import read
 
@@ -73,7 +77,8 @@ _POSTHOC_FINDING_LIMIT = 256
 _POSTHOC_PATH_LIMIT = 64
 _POSTHOC_SUMMARY_LIMIT = 64
 _POSTHOC_BYTE_BUDGET = 120 * 1024
-_MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
+# The wikilink shape a move rewrites; `structured_files` rewrites the same links through it.
+MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 _MAX_REVIEWED_STAMP_AGE = dt.timedelta(hours=24)
 _MAX_REVIEWED_STAMP_SKEW = dt.timedelta(minutes=5)
 
@@ -126,11 +131,10 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
-    prefix = kb_prefix()
-    old_full = old_no_ext if old_no_ext.startswith(prefix) else prefix + old_no_ext
-    new_full = new_no_ext if new_no_ext.startswith(prefix) else prefix + new_no_ext
-    old_stripped = old_full.removeprefix(prefix)
-    new_stripped = new_full.removeprefix(prefix)
+    old_full = managed_form(old_no_ext)
+    new_full = managed_form(new_no_ext)
+    old_stripped = managed_relative(old_full)
+    new_stripped = managed_relative(new_full)
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
     changed = 0
@@ -148,7 +152,7 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
         target_path = target_path.rstrip()
         target_no_ext = target_path.removesuffix(".md")
         if target_no_ext in {old_full, old_stripped}:
-            replacement = new_full if target_path.startswith(prefix) else new_stripped
+            replacement = new_full if managed_split(target_path) is not None else new_stripped
         elif (
             "/" not in target_no_ext
             and target_no_ext == old_basename
@@ -162,7 +166,7 @@ def rewrite_wikilinks_for_move(text: str, old_rel: str, new_rel: str) -> tuple[s
             changed += 1
         return rewritten
 
-    return _MOVE_WIKILINK_PATTERN.sub(replace, text), changed
+    return MOVE_WIKILINK_PATTERN.sub(replace, text), changed
 
 
 def _bounded_feedback_text(value: str, truncation: dict[str, int]) -> str:
@@ -978,9 +982,17 @@ class CreationPreflight:
     #: call: the review hash it would copy from the validate result is the server's.
     draft_bound: bool = True
 
+    #: A profile page's creation needs no relation review while it is a draft, so its preview names the
+    #: exact source it would write instead of a review draft; see `require_profile_preview`.
+    profile_source_hash: str | None = None
+    #: Whether the page is a profile, so its preview says when its proof may be used.
+    profile: bool = False
+
     @property
     def draft_hash(self) -> str | None:
-        return self.creation_validation.draft_hash if self.creation_validation is not None else None
+        if self.creation_validation is not None:
+            return self.creation_validation.draft_hash
+        return self.profile_source_hash
 
     @property
     def relation_candidates(self) -> tuple[relation_review.RelationCandidate, ...]:
@@ -1012,6 +1024,9 @@ class CreationPreflight:
             value["placement"] = self.placement
         if fields := self.review_fields.as_dict():
             value["relation_review_fields"] = fields
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            value["review_token"] = creation_review(self.draft_id, self.draft_hash, self.draft_token)
         return value
 
 
@@ -1135,6 +1150,8 @@ class ExistingPreflight:
     origin_inputs: origin_bindings.PreparedOriginInputs | None = None
     read_dependency_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     provenance_server_at: str | None = None
+    #: The page is a profile, so the preview tells the agent what a commit needs (`PROFILE_PREVIEW_NEXT_ACTION`).
+    profile: bool = False
 
     @property
     def before_hash(self) -> str:
@@ -1156,6 +1173,10 @@ class ExistingPreflight:
         }
         if self.operation == "tier2_overwrite":
             value["draft_token"] = self.transition_token
+        if self.profile:
+            value["next_action"] = PROFILE_PREVIEW_NEXT_ACTION
+            # An in-place change's proof is its transition token alone, so the token is its `review_token`.
+            value["review_token"] = self.transition_token
         return value
 
 
@@ -1521,6 +1542,14 @@ def _validate_origin_inputs(root: Path, prepared: origin_bindings.PreparedOrigin
         raise SemanticWriteError(error.code, error.reason) from error
 
 
+def _custody_references(
+    closure: source_closure.SourceClosurePlan | None,
+    origins: origin_bindings.PreparedOriginInputs | None,
+) -> tuple[str, ...]:
+    references = source_closure.custody_references(closure) if closure is not None else ()
+    return tuple(dict.fromkeys((*references, *origins.source_references))) if origins is not None else references
+
+
 def _origin_commit_guards(
     root: Path,
     prepared: origin_bindings.PreparedOriginInputs | None,
@@ -1821,6 +1850,77 @@ def _existing_applicability(
     return "structural"
 
 
+PROFILE_PREVIEW_REQUIRED = "PROFILE_PREVIEW_REQUIRED"
+# The proof shows the preview happened, not that the owner agreed, so the preview says when its proof may be used.
+PROFILE_PREVIEW_NEXT_ACTION = (
+    "This changes a profile page. Show the owner the resulting lines. Send the same call with `review` set to this "
+    "preview's `review_token` only after the owner confirms these exact lines, or when the owner's latest message "
+    "asked for this profile change. A preference the owner only states is not that request: use it in your answer "
+    "and offer the line."
+)
+
+
+def creation_review(draft_id: str | None, draft_hash: str | None, draft_token: str) -> str:
+    """A creation preview's one proof value: its draft fields as a base64url JSON array.
+
+    A profile preview returns its proof as `review_token`, because the egress scrubber leaves a `_token` field,
+    which the caller echoes back, unchanged.
+    """
+    return base64.urlsafe_b64encode(json.dumps([draft_id, draft_hash, draft_token]).encode()).decode()
+
+
+def creation_review_fields(review: str) -> tuple[str, str, str] | None:
+    """The draft_id, draft_hash and draft_token that `creation_review` packed; None for any other value."""
+    try:
+        fields = json.loads(base64.urlsafe_b64decode(review.encode("ascii")))
+    except ValueError:
+        return None
+    if not (isinstance(fields, list) and len(fields) == 3 and all(isinstance(f, str) and f for f in fields)):
+        return None
+    return fields[0], fields[1], fields[2]
+
+
+def _is_profile(vault_root: Path, *page_types: object) -> bool:
+    types = note_types.Basis(vault_root).reading()
+    return any(types.selects(semantic_contract.normalized_compiled_type(value), note_types.profile) for value in page_types)
+
+
+def require_profile_preview(vault_root: Path, *page_types: object, previewed: bool) -> None:
+    """Refuse a commit that creates or changes a profile page without the proof of its preview.
+
+    `previewed` is whether the write carries what its own preview returned: the transition token
+    for an in-place change (bound to the exact before and after bytes), the draft hash for a
+    creation. Every governed write path calls this one check.
+    """
+    # A one-call profile rewrite the owner never saw is what this stops; a wrong firing costs the agent one preview call.
+    if not previewed and _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_PREVIEW_REQUIRED,
+            "a profile page changes only from a reviewed preview: preview this exact change first "
+            "(preview=true), show the owner the resulting lines, then send the same call with `review` "
+            "set to the preview's `review_token`. To remove a line, preview an edit_note change that "
+            "deletes it.",
+        )
+
+
+PROFILE_SUPERSESSION_REFUSED = "PROFILE_SUPERSESSION_REFUSED"
+
+
+def refuse_profile_supersession(vault_root: Path, *page_types: object) -> None:
+    """Refuse a page supersession whose predecessor or successor is a profile, at its first call.
+
+    Only the page types matter, so a preview is refused as early as a commit.
+    """
+    # Stops a successor that loses its domain and becomes the global profile; a wrong firing costs the agent one
+    # different call, and the agent pays it.
+    if _is_profile(vault_root, *page_types):
+        raise SemanticWriteError(
+            PROFILE_SUPERSESSION_REFUSED,
+            "a profile is not superseded by another page. To change a profile, preview an edit_note change "
+            "of it in place (replace_body replaces the whole body). To start a new profile, use create_note.",
+        )
+
+
 # Which attempt an `exomem_write_*` sample belongs to. A stale validity stamp
 # re-runs the WHOLE preflight through the public `preflight_existing` (kept
 # public deliberately: tests monkeypatch that name as a race seam), so without
@@ -2027,6 +2127,11 @@ def _preflight_existing(
     # Evaluate the logical text so CRLF alone never looks like semantic drift.
     # The PathGuard and the transition token bind the exact bytes instead.
     before_source = exact_before_source.replace("\r\n", "\n").replace("\r", "\n")
+    lineage_change = page_lineage.changed_field(before_source, after_source)
+    if lineage_change is not None:
+        raise SemanticWriteError(
+            page_lineage.PROTECTED_CODE, page_lineage.protected_reason(lineage_change)
+        )
     after_source = _place_origin_source(path, after_source, before_source=before_source)
     origin_inputs = _prepare_origin_inputs(root, path, after_source, before_source=before_source)
     if expected_before_hash is not None and expected_before_hash != raw_before_hash:
@@ -2121,6 +2226,8 @@ def _preflight_existing(
             origin_inputs = _prepare_origin_inputs(
                 root, path, after_source, before_source=before_source
             )
+    if not validate_only:
+        require_profile_preview(root, before.page_type, after.page_type, previewed=transition_token is not None)
     before_contracts = memory_schema.resolve_contracts(
         loaded_contracts,
         projects=before.projects,
@@ -2346,6 +2453,7 @@ def _preflight_existing(
         closure_plan,
         origin_inputs,
         provenance_server_at=provenance_server_at,
+        profile=_is_profile(root, before.page_type, after.page_type),
     )
 
 
@@ -2398,6 +2506,7 @@ def _commit_existing_locked(
     result: semantic_contract.SemanticContractResult,
     index_reports: list[Any] | None = None,
     source_guards: tuple[vault.PathGuard, ...] = (),
+    closure_plan: source_closure.SourceClosurePlan | None = None,
 ) -> ExistingCommit:
     """Plan lifecycle state and commit while the semantic namespace is held.
 
@@ -2507,16 +2616,8 @@ def _commit_existing_locked(
             # An edit that kept a reviewed-none decision in force records which
             # lifecycle decision it was, so the next edit finds it again. A
             # decision that lives in the creation receipt needs no pointer.
-            disposition = result.relation_disposition
-            carried_from = (
-                relation_review.load_lifecycle_decision_at(
-                    root,
-                    preflight.after.identity,
-                    disposition.review_reference,
-                    admission=admission,
-                )
-                if disposition is not None and disposition.review_renewed
-                else None
+            carried_from = _renewed_decision(
+                root, preflight.after.identity, result, admission=admission
             )
             prepared = relation_review.build_lifecycle_prepared_transition(
                 transition_id=_existing_transition_id(preflight.transition_token),
@@ -2601,11 +2702,14 @@ def _commit_existing_locked(
         derived=(*derived_auxiliaries, *(("lifecycle-review", item) for item in lifecycle_writes)),
     )
     publication_entered = False
+    custody_refs = _custody_references(closure_plan, preflight.origin_inputs)
 
     def validate_bindings() -> None:
         nonlocal publication_entered
         if preflight.origin_inputs is not None:
             _validate_origin_inputs(root, preflight.origin_inputs)
+        for reference in custody_refs:
+            source_custody.require_publishable(root, reference)
         if admission is not None:
             if not admission(relation_review.lifecycle_prepared_path(root, preflight.after.identity).relative_to(root).as_posix()):
                 raise ValueError("WRITE_REFUSED: target is unavailable")
@@ -2619,7 +2723,10 @@ def _commit_existing_locked(
     try:
         from . import reserved_paths
 
-        with reserved_paths._subsystem_authority_scope("compiled_history"):
+        with reserved_paths._subsystem_authority_scope("compiled_history"), source_custody.producing(
+            root, custody_refs, owner="semantic_writes", locator=preflight.path,
+            version=vault.content_hash(preflight.after_source), primary=primary_write,
+        ):
             written = vault.batch_atomic_write(
                 writes,
                 vault_root=root,
@@ -2738,22 +2845,38 @@ def _prepare_markdown_catalog_publication(
 
 
 @call_spans.timed("post_commit.structure_suggestion")
-def _structure_suggestion(vault_root: Path, state: Any) -> dict[str, Any] | None:
-    """The note-cohesion question for a committed page, while its item is open. Advisory; never raises.
+def _structure_suggestion(
+    vault_root: Path, state: Any, *, created: bool = False, previous: Any = None
+) -> dict[str, Any] | None:
+    """The structure question for a committed page, while its item is open. Advisory; never raises.
 
     Runs only after the guarded write has returned, over the page state the
     preflight already built, and holds no lock. It reads the review-state file to
     learn whether the page's item is already answered. A fault here, including an
     unreadable review state, costs the caller the question, never the write:
     asking on every write when decisions cannot be read would turn it into noise.
-    """
-    try:
-        from . import note_cohesion
 
-        return note_cohesion.suggestion_for_state(vault_root, state)
-    except Exception:  # noqa: BLE001 -- a structural question never breaks a commit
-        log.debug("note cohesion question failed (non-fatal)", exc_info=True)
-        return None
+    A response carries one question. The ownership question leads the cohesion question:
+    a page's home decides what its size means. `created` and `previous` (the page before
+    an edit) tell the ownership review whether this write opens its item.
+    """
+    from . import note_cohesion, ownership_review
+
+    questions: tuple[Callable[[], dict[str, Any] | None], ...] = (
+        lambda: ownership_review.suggestion_after_write(
+            vault_root, state, created=created, previous=previous
+        ),
+        lambda: note_cohesion.suggestion_for_state(vault_root, state),
+    )
+    for ask in questions:
+        try:
+            suggestion = ask()
+        except Exception:  # noqa: BLE001 -- a structural question never breaks a commit
+            log.debug("structure question failed (non-fatal)", exc_info=True)
+            continue
+        if suggestion is not None:
+            return suggestion
+    return None
 
 
 def _records_routing_from_terms(
@@ -2761,13 +2884,30 @@ def _records_routing_from_terms(
     terms: Sequence[str],
     facets: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any] | None:
-    """Route authored terms through visible projected claims. Advisory; fail open."""
-    try:
-        from . import collection_claims, due_state
+    """Route authored terms through visible projected claims, naming the collection's capture method.
 
-        return collection_claims.route(
-            terms, due_state.routing_targets(vault_root), facets=facets
+    Advisory; fail open.
+    """
+    try:
+        from . import capture_method, collection_claims, due_state
+
+        targets = due_state.routing_targets(vault_root)
+        routed = collection_claims.route(terms, targets, facets=facets)
+        if routed is None:
+            return None
+        declared = next(
+            (target.capture_method for target in targets if target.collection == routed["collection"]), None
         )
+        # Naming the method is a courtesy of the route, never a condition of it: a method that does not
+        # resolve for this caller leaves the route as it was.
+        method = (
+            capture_method.resolve(vault_root, declared, readable=due_state.routing_visibility(vault_root))
+            if declared
+            else None
+        )
+        if method is None:
+            return routed
+        return {**routed, "method": {"title": method.title, "read_ref": method.ref}}
     except Exception:  # noqa: BLE001 -- routing advice never breaks a commit
         log.debug("collection claims routing failed (non-fatal)", exc_info=True)
         return None
@@ -3140,7 +3280,9 @@ def commit_existing(
             corpus=preflight.after_corpus,
             transition_id=_existing_transition_id(preflight.transition_token),
         )
-    suggestion = _structure_suggestion(vault_root, preflight.after)
+    suggestion = _structure_suggestion(
+        vault_root, preflight.after, previous=preflight.before
+    )
     routing = _records_routing(vault_root, preflight.after)
     _observation_delta(vault_root, preflight.after, routing)
     delivered_routing = _records_routing_for_delivery(
@@ -3379,6 +3521,7 @@ def _commit_existing(
                         result=result,
                         index_reports=index_reports,
                         source_guards=closure_plan.required_guards,
+                        closure_plan=closure_plan,
                     )
             # The fan-out ran as the creation lock was released.
             if committed.index_report is None and index_reports:
@@ -3408,10 +3551,10 @@ def _move_state_map(
     root: Path,
     *,
     before_corpus: semantic_contract.SemanticCorpusContext,
-    old_path: str,
-    new_path: str,
-    source: str,
-    moved_source: str,
+    old_path: str | None,
+    new_path: str | None,
+    source: str | None,
+    moved_source: str | None,
     rewrites: tuple[vault.PlannedWrite, ...],
     registry: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
@@ -3420,20 +3563,15 @@ def _move_state_map(
     semantic_contract.SemanticCorpusContext,
     dict[str, semantic_contract.SemanticPageState],
 ]:
-    status_basis = status_basis or lifecycle_statuses.Basis(root)
-    states = dict(before_corpus.pages)
-    states.pop(old_path, None)
-    changed: dict[str, semantic_contract.SemanticPageState] = {}
-    moved = semantic_contract.build_page_state(
-        root,
-        new_path,
-        moved_source,
-        relation_registry=registry,
-        language_registry=language,
-        status_basis=status_basis,
-    )
-    states[new_path] = moved
-    changed[new_path] = moved
+    """The corpus after a move and its rewrites, with each page they change.
+
+    Without a moved page (`old_path` None), the rewrites alone: a relocation step that
+    rewrites links after its moves committed.
+    """
+    pages: dict[str, str | None] = {}
+    if old_path is not None and new_path is not None and moved_source is not None:
+        pages[old_path] = None
+        pages[new_path] = moved_source
     for write in rewrites:
         try:
             rel = write.path.relative_to(root).as_posix()
@@ -3442,34 +3580,60 @@ def _move_state_map(
                 "LIFECYCLE_TRANSITION_MISMATCH",
                 "move rewrite is outside the vault",
             ) from error
-        rewritten = semantic_contract.build_page_state(
+        pages[rel] = str(write.content)
+    return _corpus_with_pages(
+        root, before_corpus, pages, registry=registry, language=language, status_basis=status_basis
+    )
+
+
+def _corpus_with_pages(
+    root: Path,
+    corpus: semantic_contract.SemanticCorpusContext,
+    pages: Mapping[str, str | None],
+    *,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    status_basis: lifecycle_statuses.Basis | None = None,
+) -> tuple[
+    semantic_contract.SemanticCorpusContext,
+    dict[str, semantic_contract.SemanticPageState],
+]:
+    """`corpus` once each page in `pages` holds its text, or is gone where it is None, with each
+    page that holds text.
+
+    A link that names a path some page left resolves by the lineage these pages hold, before the
+    index has refreshed: the claims are the index's with these pages applied.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(root)
+    states = dict(corpus.pages)
+    changed: dict[str, semantic_contract.SemanticPageState] = {}
+    for rel, text in pages.items():
+        if text is None:
+            states.pop(rel, None)
+            continue
+        state = semantic_contract.build_page_state(
             root,
             rel,
-            write.content,
+            text,
             relation_registry=registry,
             language_registry=language,
             status_basis=status_basis,
         )
-        states[rel] = rewritten
-        changed[rel] = rewritten
-
-    entries = tuple(
-        entry
-        for entry in before_corpus.identity_census.entries
-        if entry.path not in {old_path, *changed}
+        states[rel] = state
+        changed[rel] = state
+    identity_census = corpus.identity_census.with_pages(
+        {rel: changed.get(rel) for rel in pages}, casefold_paths=vault.vault_casefolds(root)
     )
-    identity_census = semantic_contract.StableIdentityCensus(
-        entries, before_corpus.identity_census.reference_only_entries
+    claims = prior_claims.current(root).with_pages(
+        {rel: None if text is None else text.encode("utf-8") for rel, text in pages.items()}
     )
-    casefold_paths = vault.vault_casefolds(root)
-    for state in changed.values():
-        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
     return (
         semantic_contract.SemanticCorpusContext.from_states(
             root,
             states.values(),
             registry=registry,
             identity_census=identity_census,
+            prior_claims=claims,
         ),
         changed,
     )
@@ -3584,14 +3748,16 @@ def _review_carry_signature(
 
 def _move_evaluation_pairs(
     *,
-    old_path: str,
-    new_path: str,
+    old_path: str | None,
+    new_path: str | None,
     changed: dict[str, semantic_contract.SemanticPageState],
     before_corpus: semantic_contract.SemanticCorpusContext,
     after_corpus: semantic_contract.SemanticCorpusContext,
 ) -> tuple[tuple[str, str], ...]:
-    """Return the deterministic fixed-point closure affected by a move."""
-    pairs: dict[str, str] = {new_path: old_path}
+    """Return the deterministic fixed-point closure affected by a move, or by rewrites alone."""
+    pairs: dict[str, str] = (
+        {new_path: old_path} if new_path is not None and old_path is not None else {}
+    )
     for path in changed:
         if path != new_path:
             pairs[path] = path
@@ -3605,12 +3771,8 @@ def _move_evaluation_pairs(
     resolvers: dict[str, vault.WikilinkResolver | None] = {"before": None, "after": None}
     if visible is not None:
         resolvers = {
-            "before": vault.WikilinkResolver.from_entries(
-                before_corpus.vault_root, before_corpus.resolver_entries
-            ),
-            "after": vault.WikilinkResolver.from_entries(
-                after_corpus.vault_root, after_corpus.resolver_entries
-            ),
+            "before": before_corpus.link_resolver(),
+            "after": after_corpus.link_resolver(),
         }
     candidates = after_corpus.eligible_compiled_paths | after_corpus.status_unavailable_paths
     for _ in range(len(after_corpus.pages) + 1):
@@ -3632,130 +3794,90 @@ def _move_evaluation_pairs(
     return tuple((pairs[path], path) for path in sorted(pairs))
 
 
-def preflight_move(
-    vault_root: Path,
+def _corpus_before_rename(
+    root: Path,
+    disk: semantic_contract.SemanticCorpusContext,
     *,
     old_path: str,
     new_path: str,
     source: str,
-    moved_source: str,
-    source_guard: vault.PathGuard,
-    destination_guard: vault.PathGuard,
-    rewrites: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
-    content_transform: Callable[[str], str] | None = None,
-    status_basis: lifecycle_statuses.Basis | None = None,
-) -> MovePreflight:
-    """Evaluate a move and all exact inbound rewrites against one final corpus.
-
-    `content_transform` lets a caller declare a content change the move carries —
-    today only source reclassification, which rewrites classification frontmatter.
-    The binding stays exact rather than becoming permissive: the moved bytes must
-    equal the declared derivation, so an arbitrary edit still cannot ride along,
-    and a declared transform cannot be silently skipped either.
-    """
-    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
-    root = Path(vault_root)
-    rewrite_tuple = tuple(rewrites)
-    if (
-        source_guard.target != old_path
-        or not source_guard.binds_bytes
-        or source_guard.expected_content_hash != vault.content_hash(source)
-        or destination_guard.target != new_path
-        or not destination_guard.expects_absence
-    ):
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    status_basis: lifecycle_statuses.Basis,
+) -> semantic_contract.SemanticCorpusContext:
+    """The corpus as it stood before a rename that already ran: the page back at `old_path`."""
+    held = disk.pages.get(new_path)
+    if held is None or held.source_hash != vault.content_hash(source):
         raise SemanticWriteError(
-            "LIFECYCLE_TRANSITION_MISMATCH",
-            "move guards do not bind the exact source and destination",
+            "STALE_SEMANTIC_WRITE", "the renamed page changed before its move was adopted"
         )
-    expected_moved_source, _ = rewrite_wikilinks_for_move(source, old_path, new_path)
-    permitted = {source, expected_moved_source}
-    if content_transform is not None:
-        permitted = {content_transform(candidate) for candidate in permitted}
-    if moved_source not in permitted:
-        raise SemanticWriteError(
-            "LIFECYCLE_TRANSITION_MISMATCH",
-            "moved source is not an exact path-only rewrite"
-            if content_transform is None
-            else "moved source is not the exact declared derivation of the move",
-        )
-    for write in rewrite_tuple:
-        if not (write.guard is not None and write.guard.binds_bytes):
-            raise SemanticWriteError(
-                "LIFECYCLE_TRANSITION_MISMATCH",
-                "move rewrite is not bound to exact source bytes",
-            )
-
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
-    loaded_contracts = memory_schema.load_saved_contracts(root)
-    before_corpus = semantic_contract.build_corpus_context(
-        root, registry=registry, language_registry=language, status_basis=status_basis
-    )
-    before_moved = before_corpus.pages.get(old_path)
-    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
-        raise SemanticWriteError(
-            "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
-        )
-    pure_path_rewrites: set[str] = set()
-    for write in rewrite_tuple:
-        rel = write.path.relative_to(root).as_posix()
-        before_rewrite = before_corpus.pages.get(rel)
-        try:
-            # A stored page is read from the store; its file may trail it.
-            before_bytes = (
-                read.owned_bytes(root, rel) if read.serves(root, rel) else write.path.read_bytes()
-            )
-            if before_bytes is None:
-                raise FileNotFoundError(rel)
-            before_source = before_bytes.decode("utf-8")
-        except (OSError, UnicodeDecodeError) as error:
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "inbound page changed during semantic move preflight",
-            ) from error
-        if (
-            before_rewrite is None
-            or before_rewrite.source_hash != vault.content_hash(before_source)
-            or write.guard.expected_content_hash != vault.content_hash(before_source)
-        ):
-            raise SemanticWriteError(
-                "STALE_SEMANTIC_WRITE",
-                "inbound page changed during semantic move preflight",
-            )
-        expected_source, changed_count = rewrite_wikilinks_for_move(
-            before_source, old_path, new_path
-        )
-        if changed_count and expected_source == write.content:
-            pure_path_rewrites.add(rel)
-
-    after_corpus, changed = _move_state_map(
+    restored = semantic_contract.build_page_state(
         root,
-        before_corpus=before_corpus,
-        old_path=old_path,
-        new_path=new_path,
-        source=source,
-        moved_source=moved_source,
-        rewrites=rewrite_tuple,
-        registry=registry,
-        language=language,
+        old_path,
+        source,
+        relation_registry=registry,
+        language_registry=language,
         status_basis=status_basis,
     )
-    manifest = activation_manifest.load_manifest(root)
-    boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census, manifest=manifest, vault_root=root
+    pages = {path: state for path, state in disk.pages.items() if path != new_path}
+    pages[old_path] = restored
+    identity_census = semantic_contract.StableIdentityCensus(
+        tuple(entry for entry in disk.identity_census.entries if entry.path != new_path),
+        disk.identity_census.reference_only_entries,
+    ).with_page(restored, casefold_paths=vault.vault_casefolds(root))
+    return semantic_contract.SemanticCorpusContext.from_states(
+        root,
+        pages.values(),
+        registry=registry,
+        identity_census=identity_census,
+        prior_claims=disk.prior_claims,
     )
+
+
+def _renewed_decision(
+    root: Path,
+    identity: str,
+    result: semantic_contract.SemanticContractResult,
+    *,
+    admission: Callable[[str], bool] | None = None,
+) -> relation_review.LifecycleDecision | None:
+    """The lifecycle decision that a write keeps in force on the page it judged, else None.
+
+    A decision that lives in the creation receipt needs no pointer, so it reads as None too.
+    """
+    disposition = result.relation_disposition
+    if disposition is None or not disposition.review_renewed:
+        return None
+    return relation_review.load_lifecycle_decision_at(
+        root, identity, disposition.review_reference, admission=admission
+    )
+
+
+def _evaluate_relocation(
+    root: Path,
+    *,
+    pairs: tuple[tuple[str, str], ...],
+    moved_path: str | None,
+    pure_path_rewrites: set[str],
+    before_corpus: semantic_contract.SemanticCorpusContext,
+    after_corpus: semantic_contract.SemanticCorpusContext,
+    loaded_contracts: tuple[memory_schema.LoadedMemoryContract, ...],
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    manifest: activation_manifest.ActivationManifest | None,
+    status_basis: lifecycle_statuses.Basis,
+) -> list[MovePageEvaluation]:
+    """Judge each page a relocation changes, as `move`: the moved page as the move's own write,
+    every other page as a read whose links the relocation rewrites.
+
+    A page that keeps a reviewed-none decision in force records which decision it was
+    (`carried_from`), as an edit does, so that the page's next write finds it again: the
+    relocation changes the page's bytes, and with them the fingerprint the decision binds.
+    """
     evaluations: list[MovePageEvaluation] = []
-    pairs = _move_evaluation_pairs(
-        old_path=old_path,
-        new_path=new_path,
-        changed=changed,
-        before_corpus=before_corpus,
-        after_corpus=after_corpus,
-    )
     for before_path, after_path in pairs:
         before = before_corpus.pages[before_path]
         after = after_corpus.pages[after_path]
-        if before_path != old_path:
+        if before_path != moved_path:
             # The move only rewrites links in this page, so it is judged as a read.
             before = semantic_contract.read_side(before)
             after = semantic_contract.read_side(after)
@@ -3834,7 +3956,7 @@ def preflight_move(
                 before.path,
                 source_hash=before.source_hash,
                 exomem_id=before.identity,
-                manifest=boundary.manifest,
+                manifest=manifest,
                 census=before_corpus.activation_census,
                 identity_census=before_corpus.identity_census,
                 eligible_compiled=before.eligible_compiled,
@@ -3856,6 +3978,11 @@ def preflight_move(
             include_relation_disposition=applicability == "full",
             language_registry=language,
         )
+        if carried_from is None and applicability == "full":
+            try:
+                carried_from = _renewed_decision(root, after.identity, result)
+            except relation_review.RelationReviewError as error:
+                raise SemanticWriteError(error.code, error.reason) from error
         token = _existing_transition_token(
             operation="move",
             path=before.path,
@@ -3877,6 +4004,166 @@ def preflight_move(
                 carried_from,
             )
         )
+    return evaluations
+
+
+def _bound_rewrite_sources(
+    root: Path,
+    before_corpus: semantic_contract.SemanticCorpusContext,
+    rewrites: tuple[vault.PlannedWrite, ...],
+) -> dict[str, str]:
+    """Each rewritten page's before source, which must be the bytes its write binds."""
+    sources: dict[str, str] = {}
+    for write in rewrites:
+        rel = write.path.relative_to(root).as_posix()
+        before_rewrite = before_corpus.pages.get(rel)
+        try:
+            # A stored page is read from the store; its file may trail it.
+            before_bytes = (
+                read.owned_bytes(root, rel) if read.serves(root, rel) else write.path.read_bytes()
+            )
+            if before_bytes is None:
+                raise FileNotFoundError(rel)
+            before_source = before_bytes.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "inbound page changed during semantic move preflight",
+            ) from error
+        if (
+            before_rewrite is None
+            or write.guard is None
+            or before_rewrite.source_hash != vault.content_hash(before_source)
+            or write.guard.expected_content_hash != vault.content_hash(before_source)
+        ):
+            raise SemanticWriteError(
+                "STALE_SEMANTIC_WRITE",
+                "inbound page changed during semantic move preflight",
+            )
+        sources[rel] = before_source
+    return sources
+
+
+def preflight_move(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    source: str,
+    moved_source: str,
+    source_guard: vault.PathGuard,
+    destination_guard: vault.PathGuard,
+    rewrites: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    content_transform: Callable[[str], str] | None = None,
+    status_basis: lifecycle_statuses.Basis | None = None,
+    adopt: bool = False,
+) -> MovePreflight:
+    """Evaluate a move and all exact inbound rewrites against one final corpus.
+
+    `adopt` evaluates a move whose rename already ran (curation adopts an interrupted move):
+    `source_guard` binds the new path holding `source` and `destination_guard` the old path's
+    absence, so `commit_move` rechecks the rename-after state. The before corpus is the vault
+    with the page put back at its old path.
+
+    `content_transform` lets a caller declare a content change the move carries —
+    today only source reclassification, which rewrites classification frontmatter.
+    The binding stays exact rather than becoming permissive: the moved bytes must
+    equal the declared derivation, so an arbitrary edit still cannot ride along,
+    and a declared transform cannot be silently skipped either.
+    """
+    status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
+    root = Path(vault_root)
+    rewrite_tuple = tuple(rewrites)
+    held_at, absent_at = (new_path, old_path) if adopt else (old_path, new_path)
+    if (
+        source_guard.target != held_at
+        or not source_guard.binds_bytes
+        or source_guard.expected_content_hash != vault.content_hash(source)
+        or destination_guard.target != absent_at
+        or not destination_guard.expects_absence
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "move guards do not bind the exact source and destination",
+        )
+    expected_moved_source, _ = rewrite_wikilinks_for_move(source, old_path, new_path)
+    permitted = {source, expected_moved_source}
+    if content_transform is not None:
+        permitted = {content_transform(candidate) for candidate in permitted}
+    if moved_source not in permitted:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "moved source is not an exact path-only rewrite"
+            if content_transform is None
+            else "moved source is not the exact declared derivation of the move",
+        )
+    for write in rewrite_tuple:
+        if not (write.guard is not None and write.guard.binds_bytes):
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_MISMATCH",
+                "move rewrite is not bound to exact source bytes",
+            )
+
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    loaded_contracts = memory_schema.load_saved_contracts(root)
+    before_corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    if adopt:
+        before_corpus = _corpus_before_rename(
+            root, before_corpus, old_path=old_path, new_path=new_path, source=source,
+            registry=registry, language=language, status_basis=status_basis,
+        )
+    before_moved = before_corpus.pages.get(old_path)
+    if before_moved is None or before_moved.source_hash != vault.content_hash(source):
+        raise SemanticWriteError(
+            "STALE_SEMANTIC_WRITE", "move source changed during semantic preflight"
+        )
+    pure_path_rewrites: set[str] = set()
+    for rel, before_source in _bound_rewrite_sources(root, before_corpus, rewrite_tuple).items():
+        write = next(item for item in rewrite_tuple if item.path == root / rel)
+        expected_source, changed_count = rewrite_wikilinks_for_move(
+            before_source, old_path, new_path
+        )
+        if changed_count and expected_source == write.content:
+            pure_path_rewrites.add(rel)
+
+    after_corpus, changed = _move_state_map(
+        root,
+        before_corpus=before_corpus,
+        old_path=old_path,
+        new_path=new_path,
+        source=source,
+        moved_source=moved_source,
+        rewrites=rewrite_tuple,
+        registry=registry,
+        language=language,
+        status_basis=status_basis,
+    )
+    manifest = activation_manifest.load_manifest(root)
+    boundary = activation_manifest.plan_activation_boundary(
+        before_corpus.activation_census, manifest=manifest, vault_root=root
+    )
+    pairs = _move_evaluation_pairs(
+        old_path=old_path,
+        new_path=new_path,
+        changed=changed,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+    )
+    evaluations = _evaluate_relocation(
+        root,
+        pairs=pairs,
+        moved_path=old_path,
+        pure_path_rewrites=pure_path_rewrites,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        loaded_contracts=loaded_contracts,
+        language=language,
+        manifest=boundary.manifest,
+        status_basis=status_basis,
+    )
     return MovePreflight(
         old_path,
         new_path,
@@ -3902,14 +4189,32 @@ def _plan_move_lifecycle(
     tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...],
     tuple[tuple[str, str], ...],
 ]:
-    writes: list[vault.PlannedWrite] = []
-    guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = []
-    states: list[tuple[str, str]] = []
     auxiliaries = list(preflight.rewrites)
     if preflight.moved_source != preflight.source:
         auxiliaries.append(vault.PlannedWrite(root / preflight.new_path, preflight.moved_source))
-    auxiliary_hash = relation_review.lifecycle_auxiliary_hash(auxiliaries, root)
-    for item in preflight.evaluations:
+    return _plan_relocation_lifecycle(
+        root,
+        preflight.evaluations,
+        preflight.after_corpus,
+        relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
+    )
+
+
+def _plan_relocation_lifecycle(
+    root: Path,
+    evaluations: tuple[MovePageEvaluation, ...],
+    after_corpus: semantic_contract.SemanticCorpusContext,
+    auxiliary_hash: str,
+) -> tuple[
+    tuple[vault.PlannedWrite, ...],
+    tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...],
+    tuple[tuple[str, str], ...],
+]:
+    """Each changed page's next lifecycle record, which the relocation commits with its bytes."""
+    writes: list[vault.PlannedWrite] = []
+    guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = []
+    states: list[tuple[str, str]] = []
+    for item in evaluations:
         if (
             item.before.path == item.after.path
             and item.before.source_hash == item.after.source_hash
@@ -3920,7 +4225,7 @@ def _plan_move_lifecycle(
             item.after.eligible_compiled
             and item.after.identity_kind == "exomem_id"
             and item.after.review_fingerprint is not None
-            and preflight.after_corpus.identity_census.paths_by_identity.get(item.after.identity)
+            and after_corpus.identity_census.paths_by_identity.get(item.after.identity)
             == (item.after.path,)
         )
         if not stable_active:
@@ -3958,6 +4263,137 @@ def _plan_move_lifecycle(
     return tuple(writes), tuple(guards), tuple(states)
 
 
+def refuse_blocked_move(preflight: MovePreflight) -> None:
+    """Refuse a move whose contract blocks, as its commit does."""
+    _refuse_blocked_evaluations(preflight.blocking_evaluations)
+
+
+def _refuse_blocked_evaluations(evaluations: Sequence[MovePageEvaluation]) -> None:
+    if any(item.contract_result.should_block for item in evaluations):
+        raise SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED",
+            _blocking_reason_for_evaluations(evaluations),
+            tuple(
+                finding
+                for item in evaluations
+                for finding in item.contract_result.blocking_findings
+            ),
+        )
+
+
+class ProjectedMoves:
+    """Judges a plan's inverse moves against the vault as the plan's earlier steps leave it.
+
+    An undo's inverse move runs after its link restore, so a page that linked the moved page
+    names its old path again by then; judged against the vault as it is, that link names the
+    path the inverse move vacates and seems lost. One instance serves one plan's preparation:
+    it reads the corpus, registries, contracts and activation boundary once, and patches its
+    projected corpus by the pages that changed since its last judgement, never the whole plan
+    again per step.
+    """
+
+    def __init__(self, vault_root: Path) -> None:
+        root = Path(vault_root)
+        self._root = root
+        self._status_basis = lifecycle_statuses.Basis(root)
+        self._registry = relation_registry.load_registry(root)
+        self._language = semantic_language_registry.load_registry(root)
+        self._disk = semantic_contract.build_corpus_context(
+            root,
+            registry=self._registry,
+            language_registry=self._language,
+            status_basis=self._status_basis,
+        )
+        self._disk_claims = prior_claims.current(root)
+        self._contracts = memory_schema.load_saved_contracts(root)
+        self._manifest = activation_manifest.plan_activation_boundary(
+            self._disk.activation_census,
+            manifest=activation_manifest.load_manifest(root),
+            vault_root=root,
+        ).manifest
+        # The corpus last judged, its claims, and the text of each page it holds apart from the
+        # vault's.
+        self._corpus = self._disk
+        self._claims = self._disk_claims
+        self._texts: dict[str, str | None] = {}
+
+    def refuse_blocked(
+        self,
+        *,
+        old_path: str,
+        new_path: str,
+        source: str,
+        moved_source: str,
+        projection: Mapping[str, str | None],
+    ) -> None:
+        """Refuse the move of `old_path` at `source` to `new_path` at `moved_source` when its
+        contract blocks once the earlier steps have run.
+
+        `projection` maps each page those steps leave to its text, or to None where they
+        remove it.
+        """
+        before_corpus, _held = self._at({**projection, old_path: source})
+        after_corpus, held = self._at({**projection, old_path: None, new_path: moved_source})
+        _refuse_blocked_evaluations(_evaluate_relocation(
+            self._root,
+            pairs=_move_evaluation_pairs(
+                old_path=old_path,
+                new_path=new_path,
+                changed={new_path: held[new_path]},
+                before_corpus=before_corpus,
+                after_corpus=after_corpus,
+            ),
+            moved_path=old_path,
+            pure_path_rewrites=set(),
+            before_corpus=before_corpus,
+            after_corpus=after_corpus,
+            loaded_contracts=self._contracts,
+            language=self._language,
+            manifest=self._manifest,
+            status_basis=self._status_basis,
+        ))
+
+    def _at(
+        self, pages: Mapping[str, str | None]
+    ) -> tuple[
+        semantic_contract.SemanticCorpusContext,
+        dict[str, semantic_contract.SemanticPageState],
+    ]:
+        """The corpus once each page in `pages` holds its text, or is gone where it is None, and
+        the state of each page that holds text."""
+        if not self._texts.keys() <= pages.keys():
+            # A page the plan no longer changes is the vault's again, census entry and all.
+            self._corpus, self._claims, self._texts = self._disk, self._disk_claims, {}
+        changed: dict[str, semantic_contract.SemanticPageState | None] = {}
+        held: dict[str, semantic_contract.SemanticPageState] = {}
+        for rel, text in pages.items():
+            if rel in self._texts and self._texts[rel] == text:
+                if text is not None:
+                    held[rel] = self._corpus.pages[rel]
+                continue
+            current = None if rel in self._texts else self._disk.pages.get(rel)
+            if text is None:
+                changed[rel] = None
+            elif current is not None and current.source_hash == vault.content_hash(text):
+                held[rel] = current
+                changed[rel] = current
+            else:
+                held[rel] = changed[rel] = semantic_contract.build_page_state(
+                    self._root,
+                    rel,
+                    text,
+                    relation_registry=self._registry,
+                    language_registry=self._language,
+                    status_basis=self._status_basis,
+                )
+        self._claims = self._claims.with_pages({
+            rel: None if pages[rel] is None else str(pages[rel]).encode("utf-8") for rel in changed
+        })
+        self._corpus = self._corpus.with_pages(changed, prior_claims=self._claims)
+        self._texts = dict(pages)
+        return self._corpus, held
+
+
 def commit_move(
     vault_root: Path,
     *,
@@ -3966,16 +4402,7 @@ def commit_move(
 ) -> MoveCommit:
     """Commit a preflighted move while holding the shared semantic namespace."""
     root = Path(vault_root)
-    if preflight.should_block:
-        raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED",
-            _blocking_reason_for_evaluations(preflight.blocking_evaluations),
-            tuple(
-                finding
-                for item in preflight.blocking_evaluations
-                for finding in item.contract_result.blocking_findings
-            ),
-        )
+    refuse_blocked_move(preflight)
     if not preflight.manifest_install_required:
         activation_manifest.ensure_manifest(root, commit_point=False)
     if preflight.manifest_install_required:
@@ -4006,6 +4433,160 @@ def commit_move(
     return MoveCommit(preflight, lifecycle_states)
 
 
+@dataclass(frozen=True, slots=True)
+class RewritePreflight:
+    """The judgement of a relocation's in-place link rewrites, made before any write."""
+
+    rewrites: tuple[vault.PlannedWrite, ...]
+    evaluations: tuple[MovePageEvaluation, ...]
+    after_corpus: semantic_contract.SemanticCorpusContext
+
+
+def preflight_rewrites(
+    vault_root: Path, rewrites: Sequence[vault.PlannedWrite]
+) -> RewritePreflight:
+    """Judge the in-place rewrites of a relocation whose moves already committed.
+
+    Each write binds its page's exact before bytes, and its caller vouches that the after bytes
+    are the relocation's own derivation of them (repoint-links re-derives each from the bytes it
+    sealed). Each page is then judged as a move judges its own path-only rewrites, so a
+    reviewed-none decision carries while the page's relations stay the same. Pages whose bytes
+    do not change keep their records, so only the rewritten pages are judged.
+    """
+    root = Path(vault_root)
+    rewrite_tuple = tuple(rewrites)
+    status_basis = lifecycle_statuses.Basis(root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    before_corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language, status_basis=status_basis
+    )
+    vouched = set(_bound_rewrite_sources(root, before_corpus, rewrite_tuple))
+    after_corpus, changed = _move_state_map(
+        root,
+        before_corpus=before_corpus,
+        old_path=None,
+        new_path=None,
+        source=None,
+        moved_source=None,
+        rewrites=rewrite_tuple,
+        registry=registry,
+        language=language,
+        status_basis=status_basis,
+    )
+    boundary = activation_manifest.plan_activation_boundary(
+        before_corpus.activation_census,
+        manifest=activation_manifest.load_manifest(root),
+        vault_root=root,
+    )
+    evaluations = _evaluate_relocation(
+        root,
+        pairs=tuple((rel, rel) for rel in sorted(changed)),
+        moved_path=None,
+        pure_path_rewrites=vouched,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        loaded_contracts=memory_schema.load_saved_contracts(root),
+        language=language,
+        manifest=boundary.manifest,
+        status_basis=status_basis,
+    )
+    return RewritePreflight(rewrite_tuple, tuple(evaluations), after_corpus)
+
+
+def commit_rewrites(
+    vault_root: Path,
+    *,
+    preflight: RewritePreflight,
+    mutate: Callable[
+        [
+            tuple[vault.PlannedWrite, ...],
+            tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...],
+        ],
+        None,
+    ],
+) -> None:
+    """Commit judged rewrites with each page's next lifecycle record, as `commit_move` does.
+
+    `mutate` receives the lifecycle writes and the guards they need, and commits them in the
+    same batch as the rewrites, under the shared semantic namespace lock.
+    """
+    root = Path(vault_root)
+    try:
+        with vault.vault_creation_lock(root, "semantic-creation"):
+            writes, guards, _states = _plan_relocation_lifecycle(
+                root,
+                preflight.evaluations,
+                preflight.after_corpus,
+                relation_review.lifecycle_auxiliary_hash(list(preflight.rewrites), root),
+            )
+            mutate(writes, guards)
+    except vault.VaultLockTimeout as error:
+        raise SemanticWriteError(
+            "SEMANTIC_CREATION_LOCK_TIMEOUT",
+            "timed out acquiring semantic creation lock",
+        ) from error
+    except vault.VaultLockError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+
+
+def require_lifecycle_settled(vault_root: Path, pages: Mapping[str, str]) -> None:
+    """Refuse a relocation, before it writes, that would start on a page whose record it cannot carry.
+
+    `pages` maps each page the relocation writes to its text now. A relocation carries a
+    page's lifecycle record forward, which needs the record to bind the page as it stands. A
+    pending record is an interrupted write that its own retry finishes first, and a stale one
+    is for reconcile to classify, because reconcile holds the trash proof a recovery needs. A
+    relocation decides neither, so it names the page and the step that settles it.
+    """
+    root = Path(vault_root)
+    if not pages:
+        return
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    status_basis = lifecycle_statuses.Basis(root)
+    for rel in sorted(pages):
+        state = semantic_contract.build_page_state(
+            root,
+            rel,
+            pages[rel],
+            relation_registry=registry,
+            language_registry=language,
+            status_basis=status_basis,
+        )
+        if (
+            not state.eligible_compiled
+            or state.identity_kind != "exomem_id"
+            or state.review_fingerprint is None
+        ):
+            continue
+        try:
+            prepared = relation_review.load_lifecycle_prepared(root, state.identity)
+            settled = (
+                relation_review.lifecycle_prepared_state(
+                    prepared,
+                    relation_review.LifecyclePrimaryBinding(
+                        rel, state.source_hash, state.review_fingerprint
+                    ),
+                )
+                if prepared is not None
+                else "committed"
+            )
+        except relation_review.RelationReviewError as error:
+            raise SemanticWriteError(error.code, f"{rel!r}: {error.reason}") from error
+        if settled == "pending":
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_PENDING",
+                f"{rel!r} has an interrupted write: retry that write, then propose again",
+            )
+        if settled == "stale":
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_STALE",
+                f"{rel!r} changed outside a governed write after its last lifecycle record: "
+                "run maintenance reconcile, then propose again",
+            )
+
+
 def _corpus_with_recovery_states(
     root: Path,
     base: semantic_contract.SemanticCorpusContext,
@@ -4019,10 +4600,11 @@ def _corpus_with_recovery_states(
         tuple(entry for entry in base.identity_census.entries if entry.path not in removed_paths),
         base.identity_census.reference_only_entries,
     )
-    casefold_paths = vault.vault_casefolds(root)
-    for state in states:
-        pages[state.path] = state
-        identity_census = identity_census.with_page(state, casefold_paths=casefold_paths)
+    recovered = {state.path: state for state in states}
+    pages.update(recovered)
+    identity_census = identity_census.with_pages(
+        recovered, casefold_paths=vault.vault_casefolds(root)
+    )
     return semantic_contract.SemanticCorpusContext.from_states(
         root,
         pages.values(),
@@ -4350,7 +4932,7 @@ def _plan_recovery_lifecycle(
                     for path in preflight.before_corpus.identity_census.paths_by_identity.get(
                         item.after.identity, ()
                     )
-                    if not path.startswith(f"{kb_prefix()}_trash/")
+                    if not trash_metadata.is_inside_trash(path)
                 )
                 trash_proof = relation_review.LifecycleTrashProof(
                     page_identity=item.after.identity,
@@ -4793,6 +5375,11 @@ def _preflight_creation(
         vault.parse_frontmatter(source, strict=True)
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
+    lineage_change = page_lineage.changed_field(None, source)
+    if lineage_change is not None:
+        raise SemanticWriteError(
+            page_lineage.PROTECTED_CODE, page_lineage.protected_reason(lineage_change)
+        )
     closure_plan = source_closure.prepare_source_closure(
         root,
         source,
@@ -4902,6 +5489,7 @@ def _preflight_creation(
                 relation_review.review_applies(validation.relation_disposition),
             ),
             draft_bound=draft_bound,
+            profile=_is_profile(root, state.page_type),
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -4925,6 +5513,7 @@ def _preflight_creation(
         ),
         definitions=semantic_contract.page_definitions_witnesses(state),
     )
+    profile = _is_profile(root, state.page_type)
     return CreationPreflight(
         applicability,
         path,
@@ -4945,6 +5534,8 @@ def _preflight_creation(
         ) if vocabulary_binding is not None else (),
         origin_inputs,
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
+        profile_source_hash=vault.content_hash(source) if profile else None,
+        profile=profile,
     )
 
 
@@ -5102,7 +5693,9 @@ def _creation_post_commit(
             vault_root, preflight.destination, before_source=None, after_source=preflight.source,
             origin=promotion_origin, corpus=preflight.corpus, source_state=preflight.semantic_state,
         )
-    suggestion = _structure_suggestion(vault_root, preflight.semantic_state)
+    # A successor asks the ownership question too: a supersede is a write that can carry
+    # a wrong project forward.
+    suggestion = _structure_suggestion(vault_root, preflight.semantic_state, created=True)
     routing = _records_routing(vault_root, preflight.semantic_state)
     _observation_delta(vault_root, preflight.semantic_state, routing)
     delivered_routing = _records_routing_for_delivery(
@@ -5459,13 +6052,19 @@ def _structural_verdicts(
     return _judge_batch(root, before, states, operation=operation), before, states
 
 
-def _holds_planned_bytes(write: vault.PlannedWrite) -> bool:
-    """Whether `write`'s file holds exactly the text this batch planned for it."""
+def _holds_planned_bytes(root: Path, write: vault.PlannedWrite) -> bool:
+    """Whether `write`'s page holds exactly the text this batch planned for it.
+
+    A store-mode page is the store's, and its file is only a projection that lags the commit. The
+    probe runs inside the write's own error handler, so any failure of it reads as "not proven
+    written" and the write's own error is raised.
+    """
     try:
         return isinstance(write.content, str) and (
-            Path(write.path).read_bytes() == write.content.encode("utf-8")
+            vault.read_bytes_without_pinning(Path(write.path), root)
+            == write.content.encode("utf-8")
         )
-    except OSError:
+    except Exception:  # noqa: BLE001 - a failed probe must not replace the error it runs under.
         return False
 
 
@@ -5542,10 +6141,13 @@ def _commit_structural(
     bound_origins = [
         item.preflight.origin_inputs for item in planned if item.preflight.origin_inputs is not None
     ]
+    custody_refs = tuple(dict.fromkeys(reference for item in planned for reference in _custody_references(item.closure_plan, item.preflight.origin_inputs)))
 
     def validate_bound_origins() -> None:
         for bound in bound_origins:
             _validate_origin_inputs(root, bound)
+        for reference in custody_refs:
+            source_custody.require_publishable(root, reference)
 
     closure_guards = tuple(guard for item in planned for guard in item.closure_plan.required_guards)
     token = semantic_index.set_parent_states(
@@ -5561,17 +6163,22 @@ def _commit_structural(
             vocabulary_auxiliaries.seal(root, primary=primary, derived=item.derived)
             for item, primary in zip(planned, primary_writes, strict=True)
         )
-        written = vault.batch_atomic_write(
-            writes,
-            vault_root=root,
-            required_guards=(
-                *vocabulary_guards,
-                *origin_guards,
-                *closure_guards,
-            ),
-            _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
-            _validate_prepared_bindings=validate_bound_origins if bound_origins else None,
-        )
+        with contextlib.ExitStack() as custody:
+            for item, primary in zip(planned, primary_writes, strict=True):
+                custody.enter_context(source_custody.producing(root, _custody_references(item.closure_plan, item.preflight.origin_inputs),
+                                                              owner="semantic_writes", locator=item.preflight.destination,
+                                                              version=vault.content_hash(item.preflight.source), primary=primary))
+            written = vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(
+                    *vocabulary_guards,
+                    *origin_guards,
+                    *closure_guards,
+                ),
+                _vocabulary_auxiliaries=manifests[0] if len(manifests) == 1 else manifests,
+                _validate_prepared_bindings=validate_bound_origins if bound_origins or custody_refs else None,
+            )
     except vault.PathGuardError as error:
         if error.code == "PATH_VARIANT_EXISTS":
             raise SemanticWriteError(error.code, error.reason) from error
@@ -5599,8 +6206,8 @@ def _commit_structural(
         # The write kept workspace state and may have kept pages, so it is no refusal.
         return (), error
     except Exception as error:
-        if any(_holds_planned_bytes(write) for write in primary_writes):
-            # The write failed after its commit point, so the pages are on disk.
+        if any(_holds_planned_bytes(root, write) for write in primary_writes):
+            # The write failed after its commit point, so the pages are written.
             return (), error
         raise
     finally:
@@ -5782,7 +6389,18 @@ def _commit_creation(
                 ) from error
             # Its in-lock revalidation reports its outcome on the nested
             # `commit.relation_review_attempt` span.
-            with call_spans.span("commit.relation_review"):
+            custody_refs = _custody_references(closure_plan, preflight.origin_inputs)
+            custody_primary = vault.PlannedWrite(root / preflight.destination, preflight.source, create_only=True)
+            def validate_custody_and_origins() -> None:
+                if preflight.origin_inputs is not None:
+                    _validate_origin_inputs(root, preflight.origin_inputs)
+                for reference in custody_refs:
+                    source_custody.require_publishable(root, reference)
+
+            with call_spans.span("commit.relation_review"), source_custody.producing(
+                root, custody_refs, owner="semantic_writes", locator=preflight.destination,
+                version=vault.content_hash(preflight.source), primary=custody_primary,
+            ):
                 committed = relation_review.commit_prepared_creation_draft(
                     root,
                     prepared,
@@ -5801,9 +6419,7 @@ def _commit_creation(
                     origin_required_guards=_origin_commit_guards(
                         root, preflight.origin_inputs, catalog_writes
                     ),
-                    _validate_prepared_bindings=(
-                        lambda: _validate_origin_inputs(root, preflight.origin_inputs)
-                    ) if preflight.origin_inputs is not None else None,
+                    _validate_prepared_bindings=validate_custody_and_origins if preflight.origin_inputs is not None or custody_refs else None,
                 )
             _publish_creation_catalog(catalog_target)
             return CreationCommit(

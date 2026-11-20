@@ -24,8 +24,9 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from functools import partial, wraps
 from inspect import signature as inspect_signature
+from itertools import islice
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from . import (
     call_spans,
@@ -46,6 +47,7 @@ from . import (
     request_budget,
     runtime_resources,
     semantic_units,
+    source_custody,
     structured_filters,
     view_lag,
 )
@@ -57,7 +59,7 @@ from .find_types import (
     SemanticUnitHit,
 )
 from .governance import policy as governance_policy
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_root, managed_split, managed_splitter
 
 if TYPE_CHECKING:
     from .vault import WikilinkResolver
@@ -741,9 +743,10 @@ class FreshnessSnapshot:
         self, scope: str, admit_path: Callable[[str], bool],
         *, page_of: Callable[[str], ParsedPage | None] | None,
     ) -> set[str]:
+        split = managed_splitter()
         candidates = {
             path for path in self.recall_paths(scope)
-            if scope == "vault" or path.startswith(kb_prefix())
+            if scope == "vault" or split(path) is not None
         }
         paths = self._published_admitted_paths(scope, admit_path, candidates)
         if paths is None:
@@ -1091,7 +1094,7 @@ def _corpus_walk(vault_root: Path, scope: str) -> Iterable[Path]:
 
     def disk(**walk: Any) -> Iterable[Path]:
         if scope == "kb":
-            kb = vault_root / kb_dirname()
+            kb = managed_root(vault_root)
             return _walk_md(kb, **walk) if kb.is_dir() else ()
         from .vault import walk_vault_md
 
@@ -1104,7 +1107,7 @@ def _kb_missing(vault_root: Path) -> bool:
     """Whether the Knowledge Base folder is missing: a store-mode vault holds its pages in the
     store, so it needs no folder.
     """
-    return not (vault_root / kb_dirname()).is_dir() and not find_corpus.store_serves(vault_root)
+    return not managed_root(vault_root).is_dir() and not find_corpus.store_serves(vault_root)
 
 
 def _resolve_page(
@@ -1202,11 +1205,11 @@ def _merge_pending_walk(
                 continue
             seen.add(rel_path)
         yield path
-    prefix = kb_prefix()
+    under = managed_splitter()
     for row in pending.current_pages():
         if row.rel_path in seen:
             continue
-        if scope != "vault" and not row.rel_path.startswith(prefix):
+        if scope != "vault" and under(row.rel_path) is None:
             continue
         yield vault_root / row.rel_path
 
@@ -1228,10 +1231,10 @@ def _pending_keyword_paths(
     scoring or any cap.
     """
     admitted: list[str] = []
-    prefix = kb_prefix()
+    under = managed_splitter()
     for row in pending.current_pages():
         rel = row.rel_path
-        if scope != "vault" and not rel.startswith(prefix):
+        if scope != "vault" and under(rel) is None:
             continue
         if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
             continue
@@ -1476,6 +1479,9 @@ def _with_catalog_scope(function):
             # Direct store readers pin the same host constants as dispatched read commands.
             state_paths.resolution_scope() if lexstore.store_catalogue() else ExitStack(),
         ):
+            # Passage selection owns its published view; generic pending hydration opens unselected Sources.
+            if kwargs.get("result_level") == "passage":
+                return function(vault_root, *args, **kwargs)
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"
@@ -1641,7 +1647,7 @@ def find(
     _cache_probe: bool = False,
     _prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     _defer_finish: bool = False,
-) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
+) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit] | dict[str, Any]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -1765,16 +1771,27 @@ def find(
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.find(vault_root, locals())
     if admit_path is None:
         admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     type_basis = type_basis or note_types.Basis(vault_root)
 
-    def _dependency() -> tuple[tuple[str, str], tuple[str, str]]:
-        return (status_basis.dependency, type_basis.dependency)
+    # Source erasure moves this at its cutoff: a result read before it is never stored or served after it.
+    retired_through = source_custody.retirement_generation(vault_root)
 
-    def _current(dependency: tuple[tuple[str, str], tuple[str, str]]) -> bool:
-        return status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+    def _publishable() -> bool:
+        return retired_through is not None and retired_through == source_custody.retirement_generation(vault_root)
+
+    def _dependency() -> tuple[tuple[str, str], tuple[str, str], int | None]:
+        return (status_basis.dependency, type_basis.dependency, retired_through)
+
+    def _current(dependency: tuple[tuple[str, str], tuple[str, str], int | None]) -> bool:
+        return (status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+                and dependency[2] == source_custody.retirement_generation(vault_root))
 
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
@@ -2310,7 +2327,7 @@ def find(
                 catalog_view=catalog_view,
             )
             _note_projection_lag()
-            if unit_cache_key is not None and not degraded and not failed:
+            if unit_cache_key is not None and not degraded and not failed and _publishable():
                 with _FIND_CACHE_LOCK:
                     _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
                     _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
@@ -2681,23 +2698,42 @@ def find(
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
     # map to a KB-only walk in the underlying rankers.
+    def resolve_plan_paths() -> set[str]:
+        return _resolve_eligible_filter_paths(
+            vault_root,
+            scope=walk_scope,
+            plan=filter_plan,
+            snapshot=snapshot,
+            timings=timings,
+            pending=pending,
+        )
+
     eligible_paths: set[str] | None = None
-    if filter_plan.root is not None:
-        with _span(timings, _nested_name(timings, "filter_eligibility")):
-            eligible_paths = _resolve_eligible_filter_paths(
-                vault_root,
-                scope=walk_scope,
-                plan=filter_plan,
-                snapshot=snapshot,
-                timings=timings,
-                pending=pending,
-            )
+    planned = filter_plan.root is not None
+    with ExitStack() as eligibility:
+        if planned:
+            eligibility.enter_context(_span(timings, _nested_name(timings, "filter_eligibility")))
+        # A browse the store's index can window never resolves the plan's whole eligible set, so its
+        # cost follows the limit; `_browse_window` is None for every other request.
+        browse_window = _browse_window(
+            vault_root,
+            plan=filter_plan if planned else None,
+            query_norm=query_norm,
+            pending=pending,
+            dimension_lookups=dimension_lookups,
+            timings=timings,
+            resolve_plan=resolve_plan_paths,
+        )
+        if planned and browse_window is None:
+            eligible_paths = resolve_plan_paths()
     # Intersect the relation participants into the eligibility seam so the filter
     # composes AND with every structured filter and gates every ranking lane and
     # empty-query recall. An authoritative empty participant set yields no hits.
     if relation_paths is not None:
         relation_set = set(relation_paths)
         eligible_paths = relation_set if eligible_paths is None else (eligible_paths & relation_set)
+        if browse_window is not None:
+            browse_window = replace(browse_window, keyed=True)
 
     # Only the caller's own filters size the candidate pool. Admission narrows
     # what every lane ranks; it never deepens the pool (`collect_candidates`).
@@ -2731,6 +2767,7 @@ def find(
                 page_memo=page_memo,
                 select_pages=select_pages,
                 proven=snapshot.proven_recall_paths(walk_scope),
+                window=browse_window,
             )
     else:
         with _span(timings, "semantic.search", elapsed_ms_field="entry_ms"):
@@ -3036,6 +3073,7 @@ def find(
             and not failed
             and not budget_skipped_rerank
             and not unproven_graph_key
+            and _publishable()
         ):
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
@@ -4934,6 +4972,7 @@ def _resolve_relation_filter(
     relation_direction: str,
     snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
+    anchor_visible: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is the request's content
@@ -4942,6 +4981,8 @@ def _resolve_relation_filter(
     would hold them. A caller with such a view re-derives the links that resolve
     differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
+    `anchor_visible` can supply an existing namespace-authority check without
+    opening an unselected anchor. It does not replace graph freshness or release.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4958,7 +4999,12 @@ def _resolve_relation_filter(
 
     if relation_of:
         relation_of = epistemic_graph._page_rel(relation_of)
-        if not egress.quick_page_visible(vault_root, relation_of):
+        visible = (
+            anchor_visible(relation_of)
+            if anchor_visible is not None
+            else egress.quick_page_visible(vault_root, relation_of)
+        )
+        if not visible:
             return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.
@@ -5278,11 +5324,7 @@ def _resolve_eligible_filter_paths(
     Served store-mode requests keep the managed route's refusals. An offline caller
     still takes the exact oracle for plans that the store's columns cannot answer.
     """
-    from . import lexstore, readiness
-
-    if _managed_reader() or (
-        lexstore.store_rows_serve(vault_root) and (readiness.runtime_managed() or _index_answers(plan))
-    ):
+    if _filter_route_is_managed(vault_root, plan):
         return _managed_eligible_filter_paths(
             vault_root,
             scope=scope,
@@ -5333,6 +5375,16 @@ def _resolve_eligible_filter_paths(
         plan=plan,
         candidate_parent_paths=candidate_parents,
         pending=pending,
+    )
+
+
+def _filter_route_is_managed(vault_root: Path, plan: structured_filters.FilterPlan) -> bool:
+    """Whether eligibility resolves on the managed route (with its refusals), not the offline oracle."""
+    from . import lexstore, readiness
+
+    return _managed_reader() or (
+        lexstore.store_rows_serve(vault_root)
+        and (readiness.runtime_managed() or _index_answers(plan))
     )
 
 
@@ -5405,16 +5457,10 @@ def _refused_filter_shapes(
     return eligibility.inexpressible if eligibility.refuses else ()
 
 
-def _managed_eligible_filter_paths(
-    vault_root: Path,
-    *,
-    scope: str,
-    plan: structured_filters.FilterPlan,
-    snapshot: FreshnessSnapshot,
-    timings: FindTimings | None = None,
-    pending: Any | None = None,
-) -> set[str]:
-    """Index-backed eligibility for a managed reader — never a scope walk."""
+def _answerable_eligibility(
+    plan: structured_filters.FilterPlan, timings: FindTimings | None
+) -> structured_filters.EligibilityPlan:
+    """The plan's eligibility, or the managed route's refusal of it."""
     eligibility = structured_filters.plan_index_eligibility(plan)
     if not eligibility.resolvable:
         _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
@@ -5433,6 +5479,20 @@ def _managed_eligible_filter_paths(
         # spec's retryable warming outcome.
         _mark_source(timings, "filter_eligibility", find_types.SOURCE_DECLINED)
         raise RetrievalIndexWarming(site="filter_eligibility_unnarrowed")
+    return eligibility
+
+
+def _managed_eligible_filter_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+    snapshot: FreshnessSnapshot,
+    timings: FindTimings | None = None,
+    pending: Any | None = None,
+) -> set[str]:
+    """Index-backed eligibility for a managed reader — never a scope walk."""
+    eligibility = _answerable_eligibility(plan, timings)
     try:
         candidate_parents = _eligibility_candidate_paths(
             vault_root,
@@ -5596,6 +5656,8 @@ def _managed_page_metadata(
                                     state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
                                     json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
                                     raw.line, raw.end_line, order,
+                                    # `lexstore._OCCURRENCE_COLUMNS` order; the stored page date the index keeps.
+                                    page.updated or lexstore.UNDATED,
                                 )
                                 unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
                                 unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
@@ -5624,6 +5686,57 @@ def _managed_page_metadata(
     return metadata
 
 
+def _emission_rule(
+    vault_root: Path, metadata: Mapping[str, Any], proven: AbstractSet[str]
+) -> Callable[[str], str | None]:
+    """The page that a candidate row is reported as, or None when the row is not reported.
+
+    One rule for the eligibility pass and both browse routes. A navigation page, or a page that the
+    caller may not see, is dropped. A child is reported as its emitted parent when that parent has a
+    view and is a recall candidate, else as itself; the page it is reported as must be visible too.
+    `proven` holds the paths that the catalogue's projection already admitted for recall; the
+    symlink and access walk runs only for the others.
+    """
+    from . import access
+
+    seen: dict[str, bool] = {}
+
+    def visible(rel: str) -> bool:
+        if rel not in seen:
+            row = metadata.get(rel)
+            seen[rel] = bool(
+                row is not None
+                and row.view is not None
+                and (
+                    rel in proven
+                    or (
+                        recall_policy.is_recall_candidate(vault_root, vault_root / rel)
+                        and access.is_indexable(vault_root, rel)
+                    )
+                )
+            )
+        return seen[rel]
+
+    def emitted_as(rel: str) -> str | None:
+        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
+            return None
+        row = metadata[rel]
+        parent = metadata.get(row.parent)
+        emitted = (
+            row.parent
+            if parent is not None
+            and parent.view is not None
+            and (
+                row.parent in proven
+                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
+            )
+            else rel
+        )
+        return emitted if visible(emitted) else None
+
+    return emitted_as
+
+
 def _metadata_eligible_filter_paths(
     vault_root: Path,
     *,
@@ -5637,40 +5750,12 @@ def _metadata_eligible_filter_paths(
     `proven` holds the paths the catalogue's projection already admitted for
     recall; the symlink and access walk runs only for the others.
     """
-    from . import access
-
-    def visible(rel: str) -> bool:
-        row = metadata.get(rel)
-        return (
-            row is not None
-            and row.view is not None
-            and (
-                rel in proven
-                or (
-                    recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                    and access.is_indexable(vault_root, rel)
-                )
-            )
-        )
-
+    emitted_as = _emission_rule(vault_root, metadata, proven)
     eligible: set[str] = set()
     matches: dict[str, bool] = {}
     for rel in candidate_parent_paths:
-        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not visible(rel):
-            continue
-        row = metadata[rel]
-        parent = metadata.get(row.parent)
-        emitted = (
-            row.parent
-            if parent is not None
-            and parent.view is not None
-            and (
-                row.parent in proven
-                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
-            )
-            else rel
-        )
-        if not visible(emitted):
+        emitted = emitted_as(rel)
+        if emitted is None:
             continue
         if emitted not in matches:
             value = metadata[emitted]
@@ -5691,11 +5776,11 @@ def _merge_pending_candidates(candidates: set[str], *, pending: Any, scope: str)
     reaches the results through the empty-query filter-only lane — a page the
     scope was asked to exclude.
     """
-    prefix = kb_prefix()
+    under = managed_splitter()
     return set(pending.shadow(candidates)) | {
         row.rel_path
         for row in pending.current_pages()
-        if scope == "vault" or row.rel_path.startswith(prefix)
+        if scope == "vault" or under(row.rel_path) is not None
     }
 
 
@@ -5926,6 +6011,306 @@ def _managed_browse_reader() -> bool:
     return bool(_managed_reader())
 
 
+@dataclass(frozen=True)
+class _BrowseWindow:
+    """A browse that reads an ordered window of the store, not every page in scope.
+
+    `plan` and `eligibility` are the request's filter plan and its index form, or None for an
+    unfiltered browse. `resolve_plan` resolves the plan's eligible paths the way the exhaustive
+    route does; the window calls it only when it declines. `keyed` marks a relation filter, whose
+    bounded member set is read by key instead of walked.
+    """
+
+    plan: structured_filters.FilterPlan | None
+    eligibility: structured_filters.EligibilityPlan | None
+    resolve_plan: Callable[[], set[str]] | None
+    keyed: bool = False
+
+
+class _BrowseWindowDeclined(Exception):
+    """The window cannot answer this browse exactly. The exhaustive route answers it instead."""
+
+
+class _Emitted(NamedTuple):
+    """A page to report, with what its hit is built from.
+
+    `first` names the candidate that gives the page its excerpt, `frame` is the metadata of the
+    child that gives it a scene frame (None for no frame), and `metadata` holds the rows of `path`
+    and `first`, which the hydrated pages must still match.
+    """
+
+    path: str
+    first: str
+    frame: Any | None
+    metadata: Mapping[str, Any]
+
+
+def _browse_window(
+    vault_root: Path,
+    *,
+    plan: structured_filters.FilterPlan | None,
+    query_norm: str,
+    pending: Any,
+    dimension_lookups: Any,
+    timings: FindTimings | None,
+    resolve_plan: Callable[[], set[str]] | None,
+) -> _BrowseWindow | None:
+    """The window route for this request, or None when it takes the exhaustive route.
+
+    The window reads the store's rows through its browse index, so it applies to a store-mode
+    browse (an empty query) with no pending overlay to merge and no dimension predicate, whose plan,
+    if any, the managed route answers. A plan it answers keeps that route's refusals.
+    """
+    from . import lexstore
+
+    if (
+        query_norm
+        or not pending.empty
+        or dimension_lookups is not None
+        # First: a file-mode browse never reaches the content-index gate, which probes FTS.
+        or not lexstore.store_rows_serve(vault_root)
+        or not lexstore.maintained_content_index_enabled()
+    ):
+        return None
+    if plan is None:
+        return _BrowseWindow(None, None, None)
+    if not _filter_route_is_managed(vault_root, plan):
+        return None
+    _mark_source(timings, "filter_eligibility", find_types.SOURCE_INDEX)
+    return _BrowseWindow(plan, _answerable_eligibility(plan, timings), resolve_plan)
+
+
+#: The rows one window read may ask for. A chunk starts at the browse's limit and doubles while the
+#: pages it yields do not fill the limit, so a heavily withheld or filtered vault costs a few reads.
+_BROWSE_CHUNK_LIMIT = 1024
+
+
+def _window_chunks(
+    vault_root: Path,
+    window: _BrowseWindow,
+    *,
+    scope: str,
+    size: int,
+    freshness_key: tuple[int, int, str] | None,
+) -> Iterator[tuple[list[Any], dict[str, list[Any]]]]:
+    """The index walk: each chunk is page rows, newest first, with the in-scope children of any that have some."""
+    from . import lexstore
+
+    after = None
+    while True:
+        result = lexstore.browse_window_result(
+            vault_root,
+            window.eligibility,
+            scope=scope,
+            freshness=freshness_key,
+            after=after,
+            size=size,
+        )
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        if result.value is None:
+            raise _BrowseWindowDeclined("no browse index")
+        rows = result.value
+        if not rows:
+            return
+        parents = {row.path for row in rows if row.has_children}
+        yield (
+            rows,
+            (
+                _browse_children(
+                    vault_root, parents, window, scope=scope, freshness_key=freshness_key
+                )
+                if parents
+                else {}
+            ),
+        )
+        if len(rows) < size:
+            return
+        after = (rows[-1].updated, rows[-1].path)
+        size = min(size * 2, _BROWSE_CHUNK_LIMIT)
+
+
+def _browse_children(
+    vault_root: Path,
+    parents: set[str],
+    window: _BrowseWindow,
+    *,
+    scope: str,
+    freshness_key: tuple[int, int, str] | None,
+) -> dict[str, list[Any]]:
+    from . import lexstore
+
+    result = lexstore.browse_children_result(
+        vault_root,
+        parents,
+        window.eligibility,
+        scope=scope,
+        freshness=freshness_key,
+    )
+    if not result.readiness.complete:
+        _raise_catalog_outcome(result.readiness)
+    children: dict[str, list[Any]] = {}
+    for row in result.value or []:
+        children.setdefault(row.parent, []).append(row)
+    return children
+
+
+def _keyed_chunks(
+    vault_root: Path,
+    window: _BrowseWindow,
+    members: AbstractSet[str],
+    *,
+    scope: str,
+    size: int,
+    freshness_key: tuple[int, int, str] | None,
+) -> Iterator[tuple[list[Any], dict[str, list[Any]]]]:
+    """The keyed walk, for a relation filter: the rows of `members` and their parents, by key.
+
+    The members bound the read, so it is read whole and ordered here; chunks are cut from it. A
+    member in scope is placed at its own key and as a child of its parent when that parent has a
+    view, as the index walk lists them; the rule that reports it decides which.
+    """
+    from . import lexstore
+
+    def rows_of(paths: set[str]) -> dict[str, Any]:
+        result = lexstore.browse_rows_result(
+            vault_root,
+            paths,
+            window.eligibility,
+            scope=scope,
+            freshness=freshness_key,
+        )
+        if not result.readiness.complete:
+            _raise_catalog_outcome(result.readiness)
+        return {row.path: row for row in result.value or []}
+
+    rows = rows_of(set(members))
+    rows.update(
+        rows_of({row.parent for row in rows.values() if row.parent and row.parent not in rows})
+    )
+    unplaced = {path for path in members if path not in rows or not rows[path].in_scope}
+    if (
+        window.plan is None
+        and unplaced
+        and unplaced
+        - _browse_children(
+            vault_root, unplaced, window, scope=scope, freshness_key=freshness_key
+        ).keys()
+    ):
+        # An unfiltered relation names an identity that is neither a row of the scope nor the
+        # parent of one: the catalogue is behind the projection that named it. A plan has already
+        # dropped such an identity, as it only matches the catalogue's own rows.
+        raise RetrievalIndexWarming(site="browse_ordering_incomplete")
+    placed: dict[str, Any] = {}
+    children: dict[str, list[Any]] = {}
+    for path in members:
+        row = rows.get(path)
+        if row is None or not row.in_scope:
+            continue
+        placed[path] = row
+        parent = rows.get(row.parent) if row.parent else None
+        if parent is not None and parent.has_view:
+            placed[parent.path] = parent
+            children.setdefault(parent.path, []).append(row)
+    ordered = sorted(
+        placed.values(), key=lambda row: _browse_order_key(row.path, row.updated), reverse=True
+    )
+    start = 0
+    while start < len(ordered):
+        yield ordered[start : start + size], children
+        start += size
+        size = min(size * 2, _BROWSE_CHUNK_LIMIT)
+
+
+def _window_order(
+    vault_root: Path,
+    window: _BrowseWindow,
+    *,
+    scope: str,
+    limit: int,
+    members: AbstractSet[str] | None,
+    freshness_key: tuple[int, int, str] | None,
+    pending: Any,
+    proven: AbstractSet[str],
+) -> Iterator[_Emitted]:
+    """Emitted pages newest first, read a chunk at a time, with the exhaustive route's grouping.
+
+    A chunk holds the rows of pages that may be reported, in the key order that the hits are in, and
+    every candidate of each (the page itself and its in-scope children). Each candidate is reported
+    as the page that the shared emission rule names, from the same metadata read as the exhaustive
+    route's, so a page is decoded only when the window reaches it. A candidate that the rule reports
+    as another page is skipped here: that page is listed at its own key and takes it there. `members` is the relation and admission set: a row outside it is not a
+    candidate and is never decoded, so a withheld child's excerpt and frame never reach a visible
+    parent's hit.
+    """
+    size = max(limit, 1)
+    chunks = (
+        _keyed_chunks(
+            vault_root, window, members, scope=scope, size=size, freshness_key=freshness_key
+        )
+        if window.keyed and members is not None
+        else _window_chunks(vault_root, window, scope=scope, size=size, freshness_key=freshness_key)
+    )
+    plan = window.plan
+    for emitted_rows, children in chunks:
+        groups: dict[str, list[Any]] = {}
+        for emitted in emitted_rows:
+            candidates = [emitted] if emitted.in_scope else []
+            candidates += children.get(emitted.path, [])
+            candidates = [
+                row
+                for row in candidates
+                if (members is None or row.path in members) and (row.own or row.via_parent)
+            ]
+            if candidates:
+                groups[emitted.path] = candidates
+        if not groups:
+            continue
+        keys = {row.path: row.updated for rows in groups.values() for row in rows}
+        metadata = _managed_page_metadata(
+            vault_root,
+            set(keys),
+            scope=scope,
+            freshness_key=freshness_key,
+            pending=pending,
+            include_units=plan is not None and plan.has_unit_predicate,
+        )
+        read = {row.path: row.updated for row in emitted_rows if row.path in metadata} | keys
+        if any(metadata[rel].updated != updated for rel, updated in read.items()):
+            raise RetrievalIndexWarming(site="browse_ordering_stale")
+        eligible = (
+            None
+            if plan is None
+            else _metadata_eligible_filter_paths(
+                vault_root,
+                plan=plan,
+                candidate_parent_paths=set(keys),
+                metadata=metadata,
+                proven=proven,
+            )
+        )
+        emitted_as = _emission_rule(vault_root, metadata, proven)
+        first: dict[str, str] = {}
+        frames: dict[str, Any] = {}
+        for group, rows in groups.items():
+            for row in sorted(
+                rows,
+                key=lambda row: _browse_order_key(row.path, metadata[row.path].updated),
+                reverse=True,
+            ):
+                if eligible is not None and row.path not in eligible:
+                    continue
+                if emitted_as(row.path) != group:
+                    continue  # reported as another page, which takes it at its own key
+                first.setdefault(group, row.path)
+                if group != row.path and metadata[row.path].media_file and group not in frames:
+                    frames[group] = metadata[row.path]
+        for rel in sorted(
+            first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
+        ):
+            yield _Emitted(rel, first[rel], frames.get(rel), metadata)
+
+
 def _find_managed_browse(
     vault_root: Path,
     *,
@@ -5943,6 +6328,7 @@ def _find_managed_browse(
     page_memo: dict[str, ParsedPage | None] | None = None,
     select_pages: Callable[[list[str]], set[str]] | None = None,
     proven: AbstractSet[str] = frozenset(),
+    window: _BrowseWindow | None = None,
 ) -> list[Hit]:
     """Order emitted identities before hydrating a bounded answer.
 
@@ -5950,9 +6336,44 @@ def _find_managed_browse(
     annotation, as the exhaustive browse did. Group membership, parent dates
     and frame hints come from metadata; unselected groups cost no page reads.
     Pending snapshots supply their current dates before the final ordering.
-    """
-    from . import access
 
+    With a `window` the order is read from the store's browse index a chunk at a time, so the cost
+    follows the limit. `eligible_paths` then holds only the relation and admission set; a window
+    that cannot answer exactly resolves the plan and takes the exhaustive route.
+    """
+    common = dict(
+        limit=limit,
+        pending=pending,
+        types=types,
+        projects=projects,
+        tags=tags,
+        speakers=speakers,
+        file_types=file_types,
+        exclude_file_types=exclude_file_types,
+        page_memo=page_memo,
+        select_pages=select_pages,
+    )
+    if window is not None:
+        try:
+            return _browse_hits(
+                vault_root,
+                _window_order(
+                    vault_root,
+                    window,
+                    scope=scope,
+                    limit=limit,
+                    members=eligible_paths,
+                    freshness_key=freshness_key,
+                    pending=pending,
+                    proven=proven,
+                ),
+                filtered=eligible_paths is not None or window.plan is not None,
+                **common,
+            )
+        except _BrowseWindowDeclined:
+            if window.resolve_plan is not None:
+                resolved = window.resolve_plan()
+                eligible_paths = resolved if eligible_paths is None else resolved & eligible_paths
     rows = _index_resolved_scope_rows(vault_root, scope=scope, freshness=freshness_key)
     if rows is None:
         raise RetrievalIndexWarming(site="browse_ordering_unavailable")
@@ -5991,55 +6412,53 @@ def _find_managed_browse(
         ordered.extend(
             row.rel_path for row in pending.current_pages() if row.rel_path in candidates
         )
-    visible: dict[str, bool] = {}
-
-    def admitted(rel: str) -> bool:
-        if rel not in visible:
-            value = metadata.get(rel)
-            visible[rel] = bool(
-                value is not None
-                and value.view is not None
-                and (
-                    rel in proven
-                    or (
-                        recall_policy.is_recall_candidate(vault_root, vault_root / rel)
-                        and access.is_indexable(vault_root, rel)
-                    )
-                )
-            )
-        return visible[rel]
-
+    emitted_as = _emission_rule(vault_root, metadata, proven)
     first: dict[str, str] = {}
     frames: dict[str, Any] = {}
     for rel in ordered:
-        if rel.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES or not admitted(rel):
-            continue
-        row = metadata[rel]
-        parent = metadata.get(row.parent)
-        emitted = (
-            row.parent
-            if parent is not None
-            and parent.view is not None
-            and (
-                row.parent in proven
-                or recall_policy.is_recall_candidate(vault_root, vault_root / row.parent)
-            )
-            else rel
-        )
-        if not admitted(emitted):
+        emitted = emitted_as(rel)
+        if emitted is None:
             continue
         first.setdefault(emitted, rel)
+        row = metadata[rel]
         if emitted != rel and row.media_file and emitted not in frames:
             frames[emitted] = row
 
     emitted_paths = sorted(
         first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
     )
+    return _browse_hits(
+        vault_root,
+        (_Emitted(rel, first[rel], frames.get(rel), metadata) for rel in emitted_paths),
+        filtered=eligible_paths is not None,
+        **common,
+    )
+
+
+def _browse_hits(
+    vault_root: Path,
+    order: Iterable[_Emitted],
+    *,
+    limit: int,
+    filtered: bool,
+    pending: Any | None,
+    types: list[str] | None,
+    projects: list[str] | None,
+    tags: list[str] | None,
+    speakers: list[str] | None,
+    file_types: list[str] | None,
+    exclude_file_types: list[str] | None,
+    page_memo: dict[str, ParsedPage | None] | None,
+    select_pages: Callable[[list[str]], set[str]] | None,
+) -> list[Hit]:
+    """Hydrate the first `limit` emitted pages of `order`, refilling from it after a failed hydration."""
+    emitted_pages = iter(order)
     if select_pages is not None:
         # Preserve the original lane limit and freeze mixed identities before
         # any canonical proof can fail. Missing selected groups do not refill.
-        selected_paths = select_pages(emitted_paths[:limit])
-        emitted_paths = [path for path in emitted_paths[:limit] if path in selected_paths]
+        head = list(islice(emitted_pages, limit))
+        selected_paths = select_pages([item.path for item in head])
+        emitted_pages = iter([item for item in head if item.path in selected_paths])
     pages = page_memo if page_memo is not None else {}
 
     def resolve(path: str) -> ParsedPage | None:
@@ -6048,11 +6467,9 @@ def _find_managed_browse(
         return pages[path]
 
     hits: list[Hit] = []
-    for emitted in emitted_paths:
-        candidate = resolve(first[emitted])
-        page = (
-            candidate if first[emitted] == emitted else resolve(emitted)
-        )
+    for emitted in emitted_pages:
+        candidate = resolve(emitted.first)
+        page = candidate if emitted.first == emitted.path else resolve(emitted.path)
         if candidate is None or page is None:
             from . import lexstore
 
@@ -6062,7 +6479,7 @@ def _find_managed_browse(
                 continue
             raise RetrievalIndexWarming(site="browse_snapshot_unavailable")
         for current in (candidate, page):
-            expected = metadata[current.rel_path]
+            expected = emitted.metadata[current.rel_path]
             if (
                 _browse_order_key(current.rel_path, current.updated)
                 != _browse_order_key(current.rel_path, expected.updated)
@@ -6081,10 +6498,10 @@ def _find_managed_browse(
         ):
             # The maintained eligibility query has already applied these
             # predicates. A disagreement means its proof no longer holds.
-            if eligible_paths is not None:
+            if filtered:
                 raise RetrievalIndexWarming(site="browse_eligibility_stale")
             continue
-        frame = frames.get(emitted)
+        frame = emitted.frame
         hit = Hit(
             path=page.rel_path,
             type=page.page_type,
@@ -6193,7 +6610,7 @@ def _find_managed_keyword(
                 ),
                 "matches": bool(
                     page is not None and path in (pending_paths or ())
-                    and (scope == "vault" or path.startswith(kb_prefix()))
+                    and (scope == "vault" or managed_split(path) is not None)
                     and path.rsplit("/", 1)[-1].lower() not in _NAVIGATION_BASENAMES
                     and (allowed_paths is None or path in allowed_paths)
                     and _make_excerpt(page, query_norm) is not None
@@ -6281,6 +6698,7 @@ def _find_keyword(
     page_memo: dict[str, ParsedPage | None] | None = None,
     select_pages: Callable[[list[str]], set[str]] | None = None,
     proven: AbstractSet[str] = frozenset(),
+    window: _BrowseWindow | None = None,
 ) -> list[Hit]:
     """Keyword-mode recall, hydrating only maintained-index matches.
 
@@ -6326,6 +6744,7 @@ def _find_keyword(
             page_memo=page_memo,
             select_pages=select_pages,
             proven=proven,
+            window=window,
         )
     lexical_repair = _bounded_lexical_repair_allowed(freshness_key)
     if query_norm:
@@ -6360,7 +6779,7 @@ def _find_keyword(
                 if not catalog.complete:
                     _raise_catalog_outcome(catalog)
         if scope == "kb" and _kb_missing(vault_root):
-            log.error("KB directory missing: %s", vault_root / kb_dirname())
+            log.error("KB directory missing: %s", managed_root(vault_root))
             return []
         walk = _corpus_walk(vault_root, scope)
         _mark_source(timings, "keyword", find_types.SOURCE_COMPUTED)
@@ -7283,8 +7702,8 @@ def _widening_allowed_paths(
         return None
     except structured_filters.FilterError:
         return None
-    prefix = kb_prefix()
-    return {path for path in eligible if not path.startswith(prefix)}
+    under = managed_splitter()
+    return {path for path in eligible if under(path) is None}
 
 
 def _find_outside_kb(
@@ -7380,8 +7799,9 @@ def _find_outside_kb(
             else None
         )
         post_eligibility = eligible_paths
+        split = managed_splitter()
         allowed_outside = (
-            {path for path in eligible_paths or () if not path.startswith(kb_prefix())}
+            {path for path in eligible_paths or () if split(path) is None}
             if eligible_paths is not None
             else None
         )
@@ -7389,7 +7809,8 @@ def _find_outside_kb(
     if admit_path is not None:
         with _span(timings, _nested_name(timings, "filter_eligibility"), source=find_types.SOURCE_INDEX):
             admitted_paths = snapshot.admitted_paths("vault", admit_path)
-        admitted_outside = {path for path in admitted_paths if not path.startswith(kb_prefix())}
+        split = managed_splitter()
+        admitted_outside = {path for path in admitted_paths if split(path) is None}
         allowed_outside = admitted_outside if allowed_outside is None else allowed_outside & admitted_outside
         post_eligibility = allowed_outside
     # A structured filter ranks the EXACT outside-KB eligible set, so no
@@ -7474,7 +7895,7 @@ def _find_outside_kb(
             # whenever no filter narrowed it, and an unrestricted vault-scope
             # query returns knowledge-base rows.
             restricted = catalog_served and allowed_outside is not None
-            if restricted or not path.startswith(kb_prefix()):
+            if restricted or managed_split(path) is None:
                 candidates.append(path)
                 score_by_path[path] = float(_score)
     except RetrievalIndexWarming:
@@ -7677,7 +8098,7 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
             rel = path.resolve().relative_to(vault_resolved).as_posix()
         except ValueError:
             continue
-        if rel.startswith(kb_prefix()):
+        if managed_split(rel) is not None:
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
@@ -7895,7 +8316,7 @@ def _keyword_match_paths(
         walk: Iterable[Path] = (
             vault_root / rel
             for rel in allowed_paths
-            if scope != "kb" or rel.startswith(kb_prefix())
+            if scope != "kb" or managed_split(rel) is not None
         )
     elif scope == "kb" and _kb_missing(vault_root):
         return []
@@ -7972,7 +8393,7 @@ def _outbound_wikilink_paths(
         rel_with_md = rel if rel.endswith(".md") else rel + ".md"
         # Sanity: only walk into the KB itself for graph expansion; curated
         # trees are intentional out-of-graph references.
-        if not rel_with_md.startswith(kb_prefix()):
+        if managed_split(rel_with_md) is None:
             continue
         if (
             rel_with_md not in allowed_paths
@@ -8237,27 +8658,31 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     """
     from . import freshness as freshness_module
     from .vault import WikilinkResolver
+    from .vault_store import read as store_read
 
     root = Path(vault_root)
-    if freshness is None:
-        freshness = FreshnessSnapshot(root).vault()
-    checkpoint = freshness_module.consumer_checkpoint(root, "vault")
-    if checkpoint.triple != freshness:
-        checkpoint = None
-    cached = _RESOLVER_CACHE.get(root)
-    if cached and cached[0] == freshness:
-        return cached[1]
-    with _RESOLVER_LOCK:
+    # A store-mode key is the revision that it read, so the key and the build read one revision: a resolver
+    # keyed at R1 that listed the pages of R1+1 would show a reader still pinned at R1 a page it cannot see.
+    with store_read.request_snapshot(root):
+        if freshness is None:
+            freshness = FreshnessSnapshot(root).vault()
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        if checkpoint.triple != freshness:
+            checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == freshness:
             return cached[1]
-        resolver = WikilinkResolver(root)
-        _RESOLVER_CACHE[root] = (freshness, resolver)
-        if checkpoint is not None:
-            _RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RESOLVER_CHECKPOINTS.pop(root, None)
-    return resolver
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached and cached[0] == freshness:
+                return cached[1]
+            resolver = WikilinkResolver(root)
+            _RESOLVER_CACHE[root] = (freshness, resolver)
+            if checkpoint is not None:
+                _RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RESOLVER_CHECKPOINTS.pop(root, None)
+        return resolver
 
 
 def borrow_query_resolver(
@@ -8278,8 +8703,17 @@ def borrow_query_resolver(
     Set `schedule_rebuild=False` for an advisory read that must not start a rebuild.
     Writers and explicit operations keep `_get_query_resolver`.
     """
+    from . import lexstore
+
     root = Path(vault_root)
-    triple = freshness.consumer_checkpoint(root, "vault").triple
+    # A store-mode resolver is keyed on the snapshot's revision (`FreshnessSnapshot._scope_key`), which no
+    # file registry holds; the revision moves with every commit, so a resolver that a commit passed is a miss.
+    if lexstore.store_rows_serve(root):
+        from .vault_store import read as store_read
+
+        triple = store_read.scope_triple(root, "vault")
+    else:
+        triple = freshness.consumer_checkpoint(root, "vault").triple
     cached = _RESOLVER_CACHE.get(root)
     if triple is not None and cached is not None and cached[0] == triple:
         return cached[1]
@@ -8507,6 +8941,8 @@ def recall_resolver_snapshot_at_checkpoint(
 ):
     """Borrow a read-only resolver only when exact event lineage is resident.
 
+    The resolver alone; `recall_resolver_publication_at_checkpoint` also returns its token.
+
     Incremental graph maintenance must not rebuild a resolver from current disk
     and label it with an older live checkpoint: that loses the pre-delta
     topology needed to prove bounded edge repair. A cache miss is therefore an
@@ -8518,6 +8954,20 @@ def recall_resolver_snapshot_at_checkpoint(
     body-only path stay O(delta) without copying every resolver map. A caller
     that needs to mutate or reconstruct topology must fork explicitly.
     """
+    borrowed = recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
+    return borrowed[0] if borrowed is not None else None
+
+
+def recall_resolver_publication_at_checkpoint(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+) -> tuple[WikilinkResolver, object] | None:
+    """`recall_resolver_snapshot_at_checkpoint` with the token of the maps it borrowed.
+
+    The token is read under the lock that a publisher patches the maps under, so a caller that
+    compares it later learns whether a patch landed after this borrow; read from the resolver
+    after the lock, it could already name patched maps.
+    """
     root = Path(vault_root)
     identity = _recall_checkpoint_identity(checkpoint)
     with _RESOLVER_LOCK:
@@ -8528,7 +8978,7 @@ def recall_resolver_snapshot_at_checkpoint(
             or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
         ):
             return None
-        return cached[1]
+        return cached[1], cached[2]
 
 
 def borrow_recall_resolver(

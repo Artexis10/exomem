@@ -37,7 +37,7 @@ from contextvars import ContextVar
 from pathlib import Path
 
 from . import query_log
-from .kbdir import kb_prefix
+from .kbdir import managed_relative
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +48,7 @@ def canon(path: str) -> str:
     p = (path or "").strip().replace("\\", "/")
     if p.lower().endswith(".md"):
         p = p[:-3]
-    if p.startswith(kb_prefix()):
-        p = p[len(kb_prefix()):]
-    return p.lower()
+    return managed_relative(p).lower()
 
 
 def _read_jsonl_file(path: Path, out: list[dict]) -> None:

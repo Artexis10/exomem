@@ -22,6 +22,7 @@ import hashlib
 import logging
 import math
 import os
+import re
 import sqlite3
 import sys
 import threading
@@ -48,7 +49,7 @@ from . import (
 )
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
-from .embedding_index import EmbeddingIndex, expected_parent_state
+from .embedding_index import EmbeddingIndex, PageScorer, expected_parent_state
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
@@ -1070,6 +1071,8 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
 #: limit (about 290-330 bge-m3 tokens for CJK prose).
 MAX_UNSPACED_CHARS_PER_CHUNK = 500
 _SENTENCE_END_MARKS = frozenset("。！？.!?")
+#: A run of non-space characters longer than the cap: the shape of one over-long "word".
+_OVERLONG_WORD = re.compile(rf"\S{{{MAX_UNSPACED_CHARS_PER_CHUNK + 1}}}")
 
 
 def _needs_character_cap(paragraph: str) -> bool:
@@ -1081,8 +1084,12 @@ def _needs_character_cap(paragraph: str) -> bool:
     limit = MAX_UNSPACED_CHARS_PER_CHUNK
     if len(paragraph) <= limit:
         return False
-    if max(len(word) for word in paragraph.split()) > limit:
+    # str.split and \S share one whitespace definition, so this finds the words the split yields.
+    if _OVERLONG_WORD.search(paragraph):
         return True
+    if not text_scripts.contains_scriptio_continua(paragraph):
+        # With no unspaced character both bounds below are false; skip the per-character scan.
+        return False
     token_chars = 0
     unspaced = 0
     for character in paragraph:
@@ -1195,6 +1202,13 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     segmenter would have run, and the caller decides what a page whose current
     chunking it cannot afford to derive is worth to it.
     """
+    # Frontmatter is optional in the seam's page interface, like media_type below.
+    if "declared_passages" in (getattr(page, "frontmatter", None) or {}):
+        from .passage_evidence import declared_chunks
+
+        declared = declared_chunks(page)
+        if declared is not None:
+            return [chunk.text for chunk in declared]
     from . import semantic_segments as ss
 
     if not (
@@ -1751,6 +1765,33 @@ def peek_embedding_index(vault_root: Path) -> EmbeddingIndex | None:
     return index
 
 
+def resident_page_scorer(vault_root: Path) -> PageScorer | None:
+    """A scorer bound to the resident recall matrix that serves now, or None when none serves this read.
+
+    Scoring pages through it costs those pages' rows, not the vault. It never encodes and never loads a matrix on this
+    thread: a one-shot process never loads one, so a cold matrix there reads None, and a service whose matrix is cold
+    starts its one background load and reads None. Its `token` names the matrix it scores against, so a result kept
+    under that token is correct for as long as a later read gets the same token. A vector scored through it must be
+    in the sidecar's space: a caller that encoded one checks the encoder's fingerprint against the sidecar's first.
+    """
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return None
+    from . import readiness
+
+    try:
+        index = peek_embedding_index(vault_root)
+        if index is None or readiness.should_defer("embeddings"):
+            return None
+        if not readiness.runtime_managed() and index.resident_matrix() is None:
+            return None
+        return index.page_scorer()
+    except recall_space.CorpusMatrixCold:
+        return None
+    except Exception:  # noqa: BLE001 - a failed read is a reading that did not run; the caller reports that state
+        log.debug("resident page scorer unavailable", exc_info=True)
+        return None
+
+
 def get_embedding_index(vault_root: Path, *, path: Path | None = None) -> EmbeddingIndex:
     """Return the process-shared `EmbeddingIndex` for this vault.
 
@@ -1927,7 +1968,7 @@ def reconstruct_publication(vault_root: Path, path: Path) -> EmbeddingPublicatio
             if page is None:
                 return None
             identity = index.identity or recall_space.current_identity(recall_space.current_dim())
-            prepared.check_page(page, vector_dim=0 if prepared.source_bytes <= 1024 else identity.dim)
+            prepared.check_page(page, vector_dim=0)  # This chunk pass encodes nothing.
             chunks = _chunks_for_page(vault_root, page, allow_encode=False)
             if chunks is None:
                 return None  # The existing segmenter needs inference: replay instead.
@@ -2263,7 +2304,7 @@ def _upsert_after_write_status(
         if preparation is not None:
             identity = getattr(index, "identity", None)
             width = identity.dim if identity else recall_space.current_dim()
-            preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
+            preparation.check_page(page, vector_dim=0)  # The first chunk pass encodes nothing.
         try:
             chunks = _chunks_for_page(vault_root, page, allow_encode=False) if preparation is not None else None
             if chunks is None:
@@ -2503,7 +2544,7 @@ def parent_rows_from_source(
         raise ValueError("the page could not be parsed")
     identity = getattr(index, "identity", None)
     width = identity.dim if identity else recall_space.current_dim()
-    preparation.check_page(page, vector_dim=0 if preparation.source_bytes <= 1024 else width)
+    preparation.check_page(page, vector_dim=0)  # This chunk pass encodes nothing.
     chunks = _chunks_for_page(vault_root, page, allow_encode=False)
     if chunks is None:
         # Timed segmentation encodes while it chunks, so its reservation comes first.

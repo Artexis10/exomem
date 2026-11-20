@@ -15,8 +15,8 @@ from test_recall_integration import _PageReadSentinel
 from exomem import find as find_module
 from exomem import find_candidates, find_policy, find_results, lexstore
 from exomem.governance.principal import library_scope
+from exomem.kbdir import kb_dirname
 from exomem.ranking_config import DEFAULT_RANKING
-from exomem.vault import kb_dirname
 
 
 @pytest.mark.usefixtures("anchors_packet")  # tests the rollback packet; maps is the default

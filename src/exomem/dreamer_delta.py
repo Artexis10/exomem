@@ -30,7 +30,7 @@ from pathlib import Path, PurePosixPath
 
 from . import access, dreamer_store, freshness
 from .find_corpus import EXCLUDED_DIR_NAMES, EXCLUDED_DIR_PREFIXES, NAVIGATION_BASENAMES
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 
 SCOPE = "vault"
 
@@ -78,7 +78,7 @@ def checkpoint(
 def eligible(vault_root: Path, rel_path: str) -> bool:
     """Indexable Markdown under the Knowledge Base, outside governance and trash."""
     rel = PurePosixPath(rel_path)
-    if rel.suffix.lower() != ".md" or not rel.parts or rel.parts[0] != kb_dirname():
+    if rel.suffix.lower() != ".md" or managed_split_parts(rel.parts) is None:
         return False
     if rel.name.casefold() in NAVIGATION_BASENAMES:
         return False

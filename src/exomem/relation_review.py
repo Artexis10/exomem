@@ -25,10 +25,11 @@ from . import (
     relation_registry,
     semantic_contract,
     semantic_language_registry,
+    trash_metadata,
     vault,
 )
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
 from .memory_refs import ID_FIELD, new_id, normalize_id
 from .vault_store import availability as store_availability
 from .vault_store import targets as store_targets
@@ -169,6 +170,13 @@ class RelationReviewError(ValueError):
 
     def as_dict(self) -> dict[str, str]:
         return {"code": self.code, "reason": self.reason}
+
+
+class AuxiliaryGuardMoved(RelationReviewError):
+    """A server-planned auxiliary's guard moved between the write's plan and
+    its pre-commit recheck. It keeps the guard's own PATH_GUARD_* code and
+    message for direct callers; the writer lease converts only this — never a
+    guard on the write's own basis — into an absorbable, re-plannable busy."""
 
 
 # The three request parameters of a relation review, fixed by the tool schema
@@ -669,8 +677,7 @@ def _normalize_destination(root: Path, path: object) -> tuple[Path, str]:
         posix.is_absolute()
         or any(part in {"", ".", ".."} for part in posix.parts)
         or posix.suffix.casefold() != ".md"
-        or not posix.parts
-        or posix.parts[0] != kb_dirname()
+        or managed_split_parts(posix.parts) is None
     ):
         raise RelationReviewError("INVALID_DRAFT_PATH", "draft path is not a managed Markdown path")
     try:
@@ -754,14 +761,11 @@ def draft_token_hash(value: object) -> str:
 
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
-    return Path(vault_root, kb_dirname(), *REVIEW_FOLDER) / f"{identity}.json"
+    return Path(managed_root(Path(vault_root)), *REVIEW_FOLDER) / f"{identity}.json"
 
 
 def _lifecycle_reference(page_identity: str, name: str) -> str:
-    return (
-        f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/lifecycle/"
-        f"{page_identity}/{name}"
-    )
+    return managed_join(f"{'/'.join(REVIEW_FOLDER)}/lifecycle/{page_identity}/{name}")
 
 
 def _canonical_fingerprint(value: object) -> str:
@@ -1470,20 +1474,34 @@ def list_lifecycle_prepared_identities(vault_root: Path) -> tuple[str, ...]:
     return tuple(identities)
 
 
-def _safe_trash_original_path(value: object) -> bool:
+def _trash_original_parts(value: object) -> tuple[str, ...] | None:
+    """The parts of a well-formed relative POSIX ``original_path``, else ``None``."""
     if type(value) is not str:
-        return False
+        return None
     posix = PurePosixPath(value)
-    return bool(
+    if not (
         value
         and "\\" not in value
         and "\0" not in value
         and posix.as_posix() == value
         and not posix.is_absolute()
-        and not any(part in {"", ".", ".."} for part in posix.parts)
         and posix.parts
-        and posix.parts[0] == kb_dirname()
-    )
+        and not any(part in {"", ".", ".."} for part in posix.parts)
+    ):
+        return None
+    return posix.parts
+
+
+def _safe_trash_original_path(value: object) -> bool:
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts) is not None
+
+
+def _trash_original_outside_managed_root(value: object) -> bool:
+    # The casefold comparison keeps a root spelled in other letter case failing closed: on a
+    # case-insensitive filesystem that spelling can still name a real managed page.
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts, key=str.casefold) is None
 
 
 def _read_bounded_lifecycle_sidecar_bytes(
@@ -1668,7 +1686,7 @@ def _capture_bounded_lifecycle_sidecar_guard(
 
 
 def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
-    start = f"{kb_dirname()}/_trash"
+    start = managed_join(trash_metadata.TRASH_SUBPATH)
     pending = [start]
     files: set[str] = set()
     file_identities: dict[str, vault.PathIdentity] = {}
@@ -1753,7 +1771,10 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             source = raw.decode("utf-8", errors="strict")
             metadata = parse_exact_json_object(source)
             original = metadata.get("original_path")
-            if not _safe_trash_original_path(original):
+            # Prepared paths are managed paths, so a sidecar outside the managed root can never
+            # prove one.
+            unrelated = _trash_original_outside_managed_root(original)
+            if not unrelated and not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
             guard = _capture_bounded_lifecycle_sidecar_guard(
                 root,
@@ -1771,6 +1792,8 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             ) from error
         aggregate_sidecar_bytes += len(raw)
         content_guards.append(guard)
+        if unrelated:
+            continue
         assert isinstance(original, str)
         trash_root = relative.removesuffix(".meta.json")
         target_kind: Literal["file", "directory", "missing"] = "missing"
@@ -1884,7 +1907,7 @@ def _prepared_primary_binding(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
     if len(owner_paths) == 1 and owner_paths[0] in corpus.pages:
         state = corpus.pages[owner_paths[0]]
@@ -1914,7 +1937,7 @@ def _trash_proof_for_prepared(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
     target_guards: list[vault.PathGuard] = []
     parts = PurePosixPath(prepared.after_path).parts
@@ -2091,7 +2114,7 @@ def _live_identity_owner_paths(
     return tuple(
         path
         for path in census.paths_by_identity.get(page_identity, ())
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
 
 
@@ -2745,9 +2768,9 @@ def _capture_review_directory(
     root: Path,
     nested: tuple[str, ...] = (),
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
-    directory = Path(root, kb_dirname(), *REVIEW_FOLDER, *nested)
+    directory = Path(managed_root(Path(root)), *REVIEW_FOLDER, *nested)
     current = root
-    components = (kb_dirname(), *REVIEW_FOLDER, *nested)
+    components = (managed_root_rel(), *REVIEW_FOLDER, *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:
@@ -2991,8 +3014,7 @@ def _safe_record_path(value: str) -> bool:
         and posix.as_posix() == value
         and not posix.is_absolute()
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and posix.parts
-        and posix.parts[0] == kb_dirname()
+        and managed_split_parts(posix.parts) is not None
         and posix.suffix.casefold() == ".md"
     )
 
@@ -3144,7 +3166,7 @@ def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, s
         return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
 
     name = f"{identity}.json"
-    reference = f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/{name}"
+    reference = managed_join(f"{'/'.join(REVIEW_FOLDER)}/{name}")
     # A receipt that the caller may not read goes to the listing below, which drops it.
     stored = _stored_artifact(root, reference, None) if admission(reference) else None
     if stored is not None:
@@ -3903,7 +3925,15 @@ def _detach_auxiliaries(
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
                 )
-            value.guard.recheck(root)
+            try:
+                value.guard.recheck(root)
+            except vault.PathGuardError as error:
+                # A writer ahead in line committed between this write's plan
+                # and its pre-boundary prepare: the auxiliary it moved is
+                # re-planned on the absorbed retry, as it already is when the
+                # in-boundary commit reports the same race. The subclass keeps
+                # the guard's own code for callers that plan no retry.
+                raise AuxiliaryGuardMoved(error.code, error.reason) from error
         else:
             try:
                 from .vault_store import read as store_read

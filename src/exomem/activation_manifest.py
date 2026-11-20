@@ -23,7 +23,7 @@ import yaml
 
 from . import access, activation, lifecycle_statuses, note_types
 from . import find as find_module
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .vault import (
     PathGuardError,
@@ -244,7 +244,7 @@ def recorded_status(value: object) -> str | None:
 
 def manifest_path(vault_root: Path) -> Path:
     """Return the governed activation-manifest path for ``vault_root``."""
-    return Path(vault_root) / kb_dirname() / "_Schema" / _MANIFEST_NAME
+    return managed_root(Path(vault_root)) / "_Schema" / _MANIFEST_NAME
 
 
 def reset_manifest_cache() -> None:
@@ -630,7 +630,7 @@ def _owner_local_classes(vault_root: Path, labels: Iterable[str]) -> dict[str, s
 
 
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     candidates: list[ActivationCandidate] = []
     # The census is shared and never served, so it reads the owner's note types.
     census_types = note_types.Basis(vault_root, owner_local=True)
@@ -796,8 +796,7 @@ def _validate_rel_path(value: str, *, path: Path, index: int) -> None:
         or posix.as_posix() != value
         or posix.is_absolute()
         or any(part in {"", ".", ".."} for part in posix.parts)
-        or not posix.parts
-        or posix.parts[0] != kb_dirname()
+        or managed_split_parts(posix.parts) is None
         or posix.suffix.lower() != ".md"
     ):
         _invalid(path, f"pages[{index}].path_at_activation must be a safe KB Markdown path")

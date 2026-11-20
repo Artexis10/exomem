@@ -53,6 +53,8 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from .kbdir import managed_relative, managed_root
+
 log = logging.getLogger(__name__)
 
 #: The registry indexes built inside `one_registry_index`, by corpus: `(corpus, filtered, index)`.
@@ -753,12 +755,11 @@ def _attachment_exists(vault_root: Path, target: str) -> bool:
     rooted and KB-relative -- so this agrees with the audit family on what an
     attachment is.
     """
-    from .kbdir import kb_dirname, kb_prefix
 
     try:
-        normalized = target.removeprefix(kb_prefix()).lstrip("/")
+        normalized = managed_relative(target).lstrip("/")
         return _ordinary_file_exists(vault_root, vault_root / target.lstrip("/")) or (
-            _ordinary_file_exists(vault_root, vault_root / kb_dirname() / normalized)
+            _ordinary_file_exists(vault_root, managed_root(vault_root) / normalized)
         )
     except Exception:  # noqa: BLE001 -- a probe failure is never an attachment
         return False

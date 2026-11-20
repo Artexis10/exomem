@@ -35,8 +35,8 @@ from re._casefix import _EXTRA_CASES as _SRE_EXTRA_CASES
 from types import MappingProxyType
 from urllib.parse import unquote
 
-from .. import held_fs, request_budget, vault
-from ..kbdir import kb_dirname
+from .. import held_fs, originals, request_budget, vault
+from ..kbdir import managed_join, managed_root_rel, managed_split, managed_splitter
 
 #: A literal alias starts and ends where the text does not continue a path.
 _NOT_PATH_CHARACTER = re.compile(r"[^\w./-]")
@@ -266,6 +266,9 @@ class ArtifactCensus:
     by_stem: Mapping[str, tuple[str, ...]]
     literals: LiteralAliases
     listings: Mapping[str, _Listing]
+    #: The same aliases of the originals that pages named like companions may bind (`_Tables.add_file`). Their
+    #: literal aliases are in `literals`.
+    filings: ArtifactCensus | None = None
 
     @classmethod
     def empty(cls) -> ArtifactCensus:
@@ -297,17 +300,33 @@ class _Tables:
     """The alias tables of a census as they are built, file by file."""
 
     def __init__(self) -> None:
-        self.kb_prefix = f"{kb_dirname()}/"
+        self.under = managed_splitter()
         self.by_path: dict[str, list[str]] = {}
         self.by_name: dict[str, list[str]] = {}
         self.by_stem: dict[str, list[str]] = {}
+        self.filings: tuple[dict[str, list[str]], dict[str, list[str]], dict[str, list[str]]] = ({}, {}, {})
         self.literal_aliases: set[str] = set()
 
     def add_file(self, rel: str) -> None:
+        suffix = self._add(rel, self.by_path, self.by_name, self.by_stem)
+        # A page `<name>.md` whose `<name>` has a suffix of its own has the shape of the companion of an original at
+        # `<name>`, which a pooled archive keeps no file for. Its aliases are listed with no file read; the gate keeps
+        # that original only where the page binds it (`egress._ArtifactReferenceGate._filing`).
+        if suffix == ".md" and originals.may_share_bytes(rel[:-3]):
+            self._add(rel[:-3], *self.filings)
+
+    def _add(
+        self,
+        rel: str,
+        by_path: dict[str, list[str]],
+        by_name: dict[str, list[str]],
+        by_stem: dict[str, list[str]],
+    ) -> str:
         name = rel.rpartition("/")[2]
         aliases = {rel, unquote(rel)}
-        if rel.startswith(self.kb_prefix):
-            aliases.add(rel[len(self.kb_prefix) :])
+        below = self.under(rel)
+        if below is not None:
+            aliases.add(below)
         # The posix spelling throughout: an alias with backslash separators
         # never matches the forward-slash token `resolve` normalises to, so a
         # reference to a withheld page would survive redaction on Windows.
@@ -315,21 +334,27 @@ class _Tables:
         stem = name[: -len(suffix)] if suffix else name
         aliases.add(rel[: -len(suffix)] if suffix else rel)
         for alias in aliases:
-            add_alias(self.by_path, alias, rel)
+            add_alias(by_path, alias, rel)
             if len(alias) >= 3:
                 self.literal_aliases.add(alias)
-        add_alias(self.by_name, name, rel)
-        add_alias(self.by_stem, stem, rel)
+        add_alias(by_name, name, rel)
+        add_alias(by_stem, stem, rel)
         if len(name) >= 3:
             self.literal_aliases.add(name)
+        return suffix
 
     def census(self, listings: Mapping[str, _Listing]) -> ArtifactCensus:
+        by_path, by_name, by_stem = self.filings
         return ArtifactCensus(
             by_path=_alias_table(self.by_path),
             by_name=_alias_table(self.by_name),
             by_stem=_alias_table(self.by_stem),
             literals=LiteralAliases.build(self.literal_aliases),
             listings=MappingProxyType(listings),
+            filings=ArtifactCensus(
+                _alias_table(by_path), _alias_table(by_name), _alias_table(by_stem),
+                LiteralAliases(), MappingProxyType({}),
+            ),
         )
 
 
@@ -362,7 +387,7 @@ def _resolved_root(root: str) -> str:
 def _vault_key(vault_root: Path | str) -> tuple[str, str]:
     # One spelling per vault: the writers, the file watcher and the gate each
     # hold the root as their caller spelled it.
-    return (_resolved_root(os.fspath(vault_root)), kb_dirname())
+    return (_resolved_root(os.fspath(vault_root)), managed_root_rel())
 
 
 def _walk_census(
@@ -448,7 +473,7 @@ def vault_listing(vault_root: Path, directory: str | None = None) -> VaultListin
 
     `directory` is vault-relative with forward slashes; each directory walked keeps its own listings.
     """
-    directory = kb_dirname() if directory is None else directory
+    directory = managed_root_rel() if directory is None else directory
     key = (_vault_key(vault_root), directory)
     with _CENSUS_LOCK:
         previous = _LISTINGS.get(key, {})
@@ -503,6 +528,14 @@ class CensusView:
         if self.overlay is None:
             return (self.base.literals,)
         return (self.base.literals, self.overlay.literals)
+
+    @property
+    def filings(self) -> CensusView:
+        """The originals that pages named like companions may bind, as candidates that the gate confirms."""
+        empty = ArtifactCensus.empty()
+        base = self.base.filings or empty
+        overlay = None if self.overlay is None else self.overlay.filings or empty
+        return CensusView(base, overlay, self.published)
 
 
 #: Files the overlay may hold before the published census is withdrawn. A
@@ -748,7 +781,7 @@ def direct_paths(vault_root: Path, token: str) -> tuple[str, ...]:
     present, because a gate that misses a withheld name leaks it. A file that
     the check finds joins the overlay, so the next request resolves it.
     """
-    candidates = tuple(dict.fromkeys((token, f"{kb_dirname()}/{token}")))
+    candidates = tuple(dict.fromkeys((token, managed_join(token))))
     outcomes = {relative: _probe(vault_root, relative) for relative in candidates}
     present = tuple(relative for relative, outcome in outcomes.items() if outcome != "absent")
     note_created(
@@ -768,7 +801,7 @@ def with_path_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, 
     """
     candidates: list[tuple[int, int]] = []
     key = _case_key(text)
-    prefix = _case_key(f"{kb_dirname()}/")
+    prefix = _case_key(managed_join(""))
     at = key.find(prefix)
     while at != -1:
         if at == 0 or _NOT_PATH_CHARACTER.match(text, at - 1):
@@ -802,9 +835,10 @@ def tombstone_aliases(
 
     The lifecycle returns the same set until its state changes, so a request
     builds these once per generation. `kb_name` is part of the cache key
-    because the knowledge base folder name changes the aliases.
+    because the knowledge base folder name changes the aliases; the body reads it again
+    through `managed_split`.
     """
-    kb_prefix = f"{kb_name}/"
+    del kb_name
     table: dict[str, list[str]] = {}
     literal_aliases: set[str] = set()
     for rel in tombstones:
@@ -812,8 +846,9 @@ def tombstone_aliases(
             continue
         path = PurePosixPath(rel)
         aliases = {rel, unquote(rel), path.name, path.stem}
-        if rel.startswith(kb_prefix):
-            aliases.add(rel[len(kb_prefix) :])
+        below = managed_split(rel)
+        if below is not None:
+            aliases.add(below)
         for alias in aliases:
             add_alias(table, alias, rel)
             if len(alias) >= 3:

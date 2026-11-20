@@ -105,7 +105,7 @@ The build Job SHALL restrict shared-volume changes to staged copies, `.building`
 
 ### Requirement: Quota and node capacity bound the build Job
 
-The namespace quota SHALL add exactly one pod and the build profile's requests and limits beside existing headroom. Requests SHALL cover the measured or estimated build peak. Build Jobs SHALL use scheduler capacity checks, without `nodeName` or `priorityClassName`. Until shared concurrency accounting includes build Jobs, cellctl SHALL permit at most one build Job per node.
+The namespace quota SHALL add exactly one pod and the build profile's requests and limits beside existing headroom. Requests SHALL cover the build's measured non-reclaimable memory with headroom and the CPU it needs for steady progress. Limits SHALL cover the measured build peak, including reclaimable page cache. Build Jobs SHALL use scheduler capacity checks, without `nodeName` or `priorityClassName`. Until shared concurrency accounting includes build Jobs, cellctl SHALL permit at most one build Job per node.
 
 #### Scenario: The quota admits a build Job beside the serving pod
 

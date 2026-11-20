@@ -941,6 +941,18 @@ def _write_kwargs(name: str) -> dict:
     }.get(name, {})
 
 
+def _write_scope(name: str):
+    """The caller that reaches each write command's writer path. The Source capture protocol and
+    Source erasure refuse any caller without whole-namespace authority before their leaf, so the owner calls them."""
+    from contextlib import nullcontext
+
+    from exomem.governance.principal import owner_principal, request_scope
+
+    if name in ("reserve_source_capture", "settle_source_capture", "erase_captured_source"):
+        return request_scope(owner_principal(surface="mcp"))
+    return nullcontext()
+
+
 def _write_commands() -> list[str]:
     from exomem import commands
 
@@ -963,7 +975,8 @@ def test_every_product_write_command_commits_under_a_trace(vault, name: str) -> 
         return {"ok": True}
 
     spied = dataclasses.replace(_command(name), leaf=leaf)
-    writer_lease.invoke_command(spied, vault, **_write_kwargs(name))
+    with _write_scope(name):
+        writer_lease.invoke_command(spied, vault, **_write_kwargs(name))
 
     assert len(seen) == 1, "the leaf must run on the writer path"
     assert seen[0] is not None and seen[0][1] == name

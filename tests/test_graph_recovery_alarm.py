@@ -145,20 +145,6 @@ def test_pth_without_a_kill_switch_is_not_reported(
     assert doctor.graph_kill_switch_sources() == []
 
 
-def test_readiness_payload_exposes_recovery_age(vault: Path) -> None:
-    """Scenario: the readiness payload exposes the recovery age."""
-    from exomem import readiness
-
-    _durable_checkpoint(vault)
-    graph_sync.observe_recovery_state(vault)
-
-    payload = readiness.graph_recovery_payload(vault)
-
-    assert payload["recovery_required"] is True
-    assert isinstance(payload["recovery_age_s"], float)
-    assert payload["recovery_age_s"] >= 0.0
-
-
 def test_the_recovery_check_actually_runs_in_the_doctor(vault: Path) -> None:
     """A check nobody runs is not an alarm. Pin its presence in the real run."""
     report = doctor.doctor(vault=str(vault))

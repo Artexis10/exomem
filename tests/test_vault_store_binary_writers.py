@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -51,10 +50,6 @@ from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
 from exomem.vault_store import batch, importer, ownership, projector, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 # The fixtures of the suites that build this vault, re-exported by assignment: a test that takes one
 # is then no redefinition of an import.

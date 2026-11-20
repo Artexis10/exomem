@@ -32,7 +32,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import held_fs, memory_refs, reserved_paths, state_paths
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root
 
 SCHEMA_VERSION = 1
 LEDGER_DIRNAME = "_Approvals"
@@ -282,7 +282,7 @@ def _ref_id(ref: str) -> str:
 
 
 def ledger_root(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / LEDGER_DIRNAME
+    return managed_root(Path(vault_root)) / LEDGER_DIRNAME
 
 
 def entry_path(vault_root: Path, ref: str, entry_id: str) -> Path:
@@ -290,7 +290,7 @@ def entry_path(vault_root: Path, ref: str, entry_id: str) -> Path:
 
 
 def _relative(*parts: str) -> str:
-    return "/".join((kb_dirname(), LEDGER_DIRNAME, *parts))
+    return managed_join("/".join((LEDGER_DIRNAME, *parts)))
 
 
 def _read_key(vault_root: Path) -> bytes | None:

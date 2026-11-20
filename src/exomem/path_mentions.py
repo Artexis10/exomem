@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 from . import provenance
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .vault import _FM_PATTERN
 
 #: The warning a move or a reclassification gives when the catalogue could not answer.
@@ -83,21 +83,15 @@ def find_pages(vault_root: Path, paths: Sequence[str]) -> Lookup:
     """
     from . import lexstore
 
-    found: set[str] = set()
-    complete = True
-    for rel in paths:
-        query = rel.removeprefix(kb_prefix()).lower()
-        answer = lexstore.search_substring_result(vault_root, query, scope="kb")
-        if not answer.readiness.complete or answer.value is None:
-            complete = False
-            continue
-        found.update(answer.value)
-    return Lookup(tuple(sorted(found)), complete)
+    queries = [managed_relative(rel).lower() for rel in paths]
+    answer = lexstore.search_substrings_result(vault_root, queries, scope="kb")
+    if not answer.readiness.complete or answer.value is None:
+        return Lookup((), False)
+    return Lookup(tuple(sorted({rel for found in answer.value.values() for rel in found})), True)
 
 
 def _pattern(old_rel: str) -> re.Pattern[str]:
-    prefix = kb_prefix()
-    spellings = {old_rel, old_rel.removeprefix(prefix)}
+    spellings = {old_rel, managed_relative(old_rel)}
     alternatives = "|".join(re.escape(form) for form in sorted(spellings, key=len, reverse=True))
     # Boundary only: the old path must not sit inside a longer path or file name. Which text may
     # change is decided by the body split, the carrier spans and the checks below, not by this pattern.
@@ -130,7 +124,7 @@ def rewrite(text: str, moves: Sequence[Rename], *, apply: bool = True) -> tuple[
 
 
 def _rename(text: str, move: Rename) -> tuple[str, int]:
-    prefix = kb_prefix()
+    prefix = managed_join("")
     frontmatter = _FM_PATTERN.match(text)
     body_start = frontmatter.start(2) if frontmatter else 0
     inside_carrier = provenance.in_carrier(text)

@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import reserved_paths, sidecar_store
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 
 _SEMANTIC_ISOLATION_CURSOR_KEY = "semantic_isolation_cursors:v1"
 _MIXED_DRAIN_TURN_KEY = "mixed_drain_turn:v1"
@@ -1002,7 +1002,7 @@ def _safe_markdown_rel_path(
         or any(part in {"", ".", ".."} for part in path.parts)
         or not normalized.lower().endswith(".md")
         or not path.parts
-        or (knowledge_base_only and path.parts[0] != kb_dirname())
+        or (knowledge_base_only and managed_split_parts(path.parts) is None)
     ):
         return None
     return path.as_posix()
@@ -1285,7 +1285,26 @@ def enqueue_graph_checkpoint(vault_root: Path, checkpoint: Any) -> int:
         return 0
     rels = [rel for rel, _content_hash in checkpoint.paths]
     rels.extend(checkpoint.created_paths)
+    if not rels:
+        # A generation that changed no page owes no receipt, but a later write's predecessor probe still asks for it.
+        record_graph_debt_generation(vault_root, generation=int(checkpoint.generation))
+        return 0
     return add_graph(vault_root, rels, generation=int(checkpoint.generation))
+
+
+def record_graph_debt_generation(vault_root: Path, *, generation: int) -> None:
+    """Record a generation's complete graph debt when that debt is no path at all."""
+    conn = _connect(vault_root, create=True)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _record_graph_debt_generation_locked(conn, generation, time.time())
+        except Exception:
+            conn.rollback()
+            raise
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
