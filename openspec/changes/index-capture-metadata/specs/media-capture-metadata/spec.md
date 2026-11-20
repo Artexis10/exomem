@@ -10,18 +10,23 @@ Record when and where a photo or video was captured, make capture date and place
 
 Image and video extraction SHALL record each of these values in the sidecar frontmatter when the file states it:
 
-- capture time as the camera recorded it, with its UTC offset when the file records one;
-- capture date, the ISO calendar date of that recorded local time;
-- GPS latitude and longitude;
-- camera make and model;
-- pixel dimensions.
+- capture time (`capture_time`) as the camera recorded it, with its UTC offset when the file records one;
+- capture date (`capture_date`), the ISO calendar date of that recorded local time;
+- GPS latitude and longitude (`capture_lat`, `capture_lon`);
+- camera make and model (`camera_make`, `camera_model`);
+- pixel dimensions (`pixel_width`, `pixel_height`).
 
-For images, the capture time SHALL come only from the EXIF original capture time and its offset field. It SHALL NOT come from the file's modification time, which scanners and editors set. A GPS block that the file marks void SHALL count as no position. A value that the file does not state SHALL be absent, never zero, empty or a default date.
+For images, the capture time SHALL come only from the EXIF original capture time and its offset field. It SHALL NOT come from the file's modification time, which scanners and editors set, or from the generic EXIF date-time field. For a RAW file, the capture time is the RAW reader's timestamp. For a video, the capture time SHALL be the QuickTime creation date with its local offset when the file has one. Otherwise it SHALL be the container's UTC creation time, ending in `Z`, with the capture date taken in UTC and `capture_date_basis` set to `utc`. A GPS block that the file marks void, or whose references are missing or invalid, SHALL count as no position. A value that the file does not state SHALL be absent, never zero, empty or a default date. The extraction write SHALL record these fields together with the extracted text.
 
 #### Scenario: A phone photo with an offset
 
 - **WHEN** a JPEG records an original capture time of 2012-07-14 18:05:00 with offset +03:00 and a valid GPS position
 - **THEN** the sidecar records that time with offset +03:00, the capture date 2012-07-14, and that position
+
+#### Scenario: A video with only a UTC creation time
+
+- **WHEN** a video's container records a UTC creation time and no QuickTime creation date
+- **THEN** the sidecar records that time ending in `Z`, the UTC date as the capture date, and `capture_date_basis: utc`
 
 #### Scenario: A scanned print
 
@@ -31,7 +36,7 @@ For images, the capture time SHALL come only from the EXIF original capture time
 
 ### Requirement: Search filters by capture date and by place
 
-A search SHALL accept the capture date as a structured filter with the existing ordered operators on ISO dates. It SHALL accept a geographic bounding box as a pair of ordered latitude and longitude filters. A box that crosses the antimeridian SHALL be expressed as two longitude ranges joined by `$or`. A filtered search SHALL use an index, and its cost SHALL NOT grow with the number of media files outside the filter.
+A search SHALL accept the capture date as a structured filter (`page.capture_date`) with the existing ordered operators on ISO dates. It SHALL accept a geographic bounding box as a pair of ordered numeric filters on `page.capture_lat` and `page.capture_lon`. A box that crosses the antimeridian SHALL be expressed as two longitude ranges joined by `$or`. A filtered search SHALL use an index, and its cost SHALL NOT grow with the number of media files outside the filter.
 
 #### Scenario: A summer window
 
@@ -40,13 +45,13 @@ A search SHALL accept the capture date as a structured filter with the existing 
 
 ### Requirement: A location is withheld from a caller who may not read the original
 
-A caller who fails an original's release check SHALL see that original's position as absent on every surface, including:
+A caller who fails an original's download check SHALL see that original's position as absent on every surface, including:
 
 - page reads, excerpts and exports;
 - lexical and vector text;
 - every filter, including generic frontmatter-pointer filters and `$exists`.
 
-The release check SHALL be evaluated per original. A location filter SHALL match only originals that the caller passes the release check for.
+The release check SHALL be evaluated per original, from the original that the page is bound to. A location filter SHALL match only originals that the caller passes the release check for. The UTC offset of the capture time is not a position and is not withheld.
 
 #### Scenario: A reader without original access
 
@@ -60,13 +65,19 @@ The release check SHALL be evaluated per original. A location filter SHALL match
 
 ### Requirement: An owner operation adds capture metadata to existing sidecars without changing their text
 
-One owner operation SHALL add capture metadata to existing image and video sidecars through the media job ledger. It SHALL rewrite only the capture block. It SHALL keep the extracted text, the preserved notes and the prior-extraction pages byte for byte. A sidecar that the boundary guard cannot classify SHALL be skipped and counted. An original that is not local SHALL be skipped and counted, never hydrated by this operation. The operation SHALL run only when the owner starts it.
+One owner operation SHALL add capture metadata to existing image and video sidecars as a `maintain_memory` mode on the maintenance job ledger. A preview SHALL report a `plan_id`, and the write SHALL name that `plan_id` and a reason. The operation SHALL rewrite only the capture block. It SHALL keep the extracted text, the preserved notes and the prior-extraction pages byte for byte. A sidecar that the boundary guard cannot classify SHALL be skipped and counted. An original whose bytes are not on the volume SHALL be skipped and counted, never fetched by this operation. A file that states no capture metadata SHALL leave its sidecar unchanged. A vault whose pages live in the page store SHALL receive the write through that store. The operation SHALL run only when the owner starts it.
 
 #### Scenario: A sidecar with owner notes
 
 - **WHEN** the operation reaches a sidecar that carries owner notes after its extracted text
 - **THEN** the notes and the extracted text are byte-identical after the write
 - **AND** the capture block is added
+
+#### Scenario: An original that is not on the volume
+
+- **WHEN** the operation reaches a sidecar whose original has no bytes on the volume
+- **THEN** the sidecar is unchanged and counted as skipped with the reason `bytes not on the volume`
+- **AND** the original is not fetched
 
 #### Scenario: An ambiguous legacy sidecar
 
