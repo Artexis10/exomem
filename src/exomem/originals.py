@@ -516,10 +516,18 @@ def original_state(
     return OriginalSnapshot(
         state, binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
         reference, hashlib.sha256(data).hexdigest(),
-        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
-        offloadable=not is_note_path(relative) and "data_file" not in fields,
+        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field. So does a
+        # suffix-less original of a pooled archive, whose evicted bytes could otherwise turn pool-only (`may_share_bytes`).
+        offloadable=not is_note_path(relative) and "data_file" not in fields
+        and not (not may_share_bytes(relative) and _pooled_archive(vault, archive)),
         local_path=local_path,
     )
+
+
+def _pooled_archive(vault: Path, archive: ArchiveReads | None) -> bool:
+    from . import original_pool
+
+    return archive.pooled() if archive is not None else original_pool.enabled(vault)
 
 
 def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:

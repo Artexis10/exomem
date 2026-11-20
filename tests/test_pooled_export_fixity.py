@@ -752,25 +752,40 @@ def test_a_grant_on_one_restored_filing_does_not_reveal_another_that_shares_its_
     assert raw_protection.permits(restored, other, reader) is False
 
 
-def test_a_suffixless_original_hydrates_to_its_file_in_a_pooled_archive_with_a_store(
+def test_a_suffixless_original_evicted_before_pooling_hydrates_to_its_file(
         vault: Path, selected_store, monkeypatch):  # noqa: F811
-    """Reading an evicted suffix-less original back must not leave it pool-only, or its companion reads as a note
-    and a restricted caller sees its bare name."""
+    """Reading it back must not leave it pool-only, or its companion reads as a note and a restricted caller
+    sees its bare name."""
     from exomem import media_jobs, media_store
     from tests.test_media_store import _offload
 
-    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
-    original_pool.enable(vault)
     captured = preserve.preserve(vault, scope="Test", category="legal", filename="LICENSE", content="x" * 300)
     path = vault / captured.path
     preserve.update_sidecar_extraction(vault, vault / captured.sidecar_path, text="An observation.", engine="text")
     media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
     _offload(vault, path)
     assert media_store.evict(vault, path)
-    assert originals.original_state(vault, path).state == "evicted"
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
 
     relative = path.relative_to(vault).as_posix()
     assert media_store.read_original_bytes(vault, relative).data == b"x" * 300
 
     assert path.is_file()
     assert originals.pooled(vault, relative) is None
+
+
+def test_a_suffixless_original_of_a_pooled_archive_is_never_offloaded(
+        vault: Path, selected_store, monkeypatch):  # noqa: F811
+    """An evicted original whose bytes a pooled twin holds reads as pool-only, so its bare name would show."""
+    from exomem import media_store
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    plain = vault / preserve.preserve(vault, scope="Test", category="legal", filename="LICENSE", content="x" * 300).path
+    twin = preserve.preserve(vault, scope="Test", category="legal", filename="terms.txt", content="x" * 300).path
+
+    assert originals.original_state(vault, plain).offloadable is False
+    assert originals.original_state(vault, vault / twin).offloadable is True
+    assert not media_store.evict(vault, plain)
+    assert plain.is_file()
