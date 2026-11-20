@@ -3041,29 +3041,29 @@ def _hit_path(hit: Any) -> str:
 
 
 def _borrowed_of(hit: Any) -> dict[str, str | None]:
-    """The pages other than its own that a page hit's text and annotations may come from."""
+    """The pages other than its own that a hit's producer named as supplying its content, with their pins."""
     return hit.borrowed_pages() if isinstance(hit, Hit) else {}
 
 
 def _withhold_borrowed(
     hits: Sequence[Any], releasable: Callable[[str, str | None], bool]
 ) -> frozenset[str]:
-    """Clear from each hit what it took from a page that `releasable` refuses, and name those pages.
+    """Clear from each hit what a page that `releasable` refuses lent it, and name those pages.
 
     A hit's own decision covers its own page only; a frame or a part that supplied its excerpt is a
-    page of its own, and the policy may withhold it from this caller. The hit stays where it ranks.
-    One verdict per page, however many hits borrowed from it.
+    page of its own, and the policy may withhold it from this caller. The hit stays where it ranks
+    and keeps what it has of its own. One verdict per page and pin, however many hits borrowed from it.
     """
-    verdicts: dict[str, bool] = {}
+    verdicts: dict[tuple[str, str | None], bool] = {}
     refused: set[str] = set()
     for hit in hits:
         pages = _borrowed_of(hit)
-        for path, pinned in pages.items():
-            if path not in verdicts:
-                verdicts[path] = releasable(path, pinned)
-        lost = [path for path in pages if not verdicts[path]]
+        for path, pin in pages.items():
+            if (path, pin) not in verdicts:
+                verdicts[path, pin] = releasable(path, pin)
+        lost = [path for path, pin in pages.items() if not verdicts[path, pin]]
         if lost:
-            hit.drop_borrowed()
+            hit.drop_borrowed(lost)
             refused.update(lost)
     return frozenset(refused)
 
@@ -3106,7 +3106,7 @@ def annotate_hits(
     if _file_policy_empty(vault_root, policy):
         released = hits[:effective_limit]
         # No rule withholds a page here, so only a floor or a tombstone can refuse one.
-        lost = _withhold_borrowed(released, lambda path, _pinned: not floored(path))
+        lost = _withhold_borrowed(released, lambda path, _pin: not floored(path))
         return AnnotatedHits(
             hits=released,
             withheld_paths=tombstoned | lost,
@@ -3195,8 +3195,8 @@ def annotate_hits(
     permitted = [h for h in permitted if not _seeded_only_by_withheld(h, frozen_withheld)]
     released = permitted[:effective_limit]
 
-    def releasable(path: str, pinned: str | None) -> bool:
-        decision = decide(path, pinned)
+    def releasable(path: str, pin: str | None) -> bool:
+        decision = decide(path, pin)
         # A page released only with some identities stripped cannot lend its text: a borrowed excerpt is not stripped.
         return decision is not None and decision.level >= RELEASE_FLOOR and not decision.release_strip
 

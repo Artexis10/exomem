@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date
@@ -265,14 +266,9 @@ class ParsedPage:
         return find_policy.dominant_script(self.title + " " + self.search_body)
 
 
-def sidecar_of(media: str) -> str:
-    """The page that describes the media file `media`: its sidecar, beside it."""
-    return media + ".md"
-
-
 def emitted_parent(parent_media: str | None, part_of: str | None) -> str | None:
     """The page a hit on a page is emitted as: a scene frame's video, or a part's Source."""
-    return sidecar_of(parent_media) if parent_media else part_of
+    return parent_media + ".md" if parent_media else part_of
 
 
 @dataclass(frozen=True)
@@ -330,16 +326,11 @@ def _format_timestamp(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-#: The `Hit` fields that a page's hit can take from another page (a scene frame's text, its place in
-#: the video, the passage and transcript time its chunk matched), each with its value when nothing was taken.
-_BORROWABLE_FIELDS: tuple[tuple[str, Any], ...] = (
-    ("excerpt", ""),
-    ("scene_frame", None),
-    ("scene_frame_ts", None),
-    ("matched_part", None),
-    ("passage", None),
-    ("transcript_ts", None),
-)
+#: What a page can lend to another page's hit: its text (excerpt, matched passage and part, transcript
+#: time) or its scene frame. Each `Hit` field that can be lent names its role in its field metadata.
+LENT_TEXT = "text"
+LENT_FRAME = "frame"
+LENT_ROLES = frozenset({LENT_TEXT, LENT_FRAME})
 
 
 @dataclass
@@ -349,7 +340,7 @@ class Hit:
     scope: str | None
     title: str
     updated: str
-    excerpt: str
+    excerpt: str = field(metadata={"lent": LENT_TEXT})
     bm25_rank: int | None = None
     vector_rank: int | None = None
     vector_score: float | None = None
@@ -366,14 +357,14 @@ class Hit:
     media_type: str | None = None
     media_file: str | None = None
     clip_frame_ts: float | None = None
-    scene_frame: str | None = None
-    scene_frame_ts: float | None = None
+    scene_frame: str | None = field(default=None, metadata={"lent": LENT_FRAME})
+    scene_frame_ts: float | None = field(default=None, metadata={"lent": LENT_FRAME})
     #: For a Source whose extracted text continues on part pages: the part that matched and the
     #: matched passage (`text`, `part`, `offset` into the whole text, `length`). A dataset value
     #: hit has no parts: its `passage` holds `text` only and `matched_part` stays unset.
-    matched_part: int | None = None
-    passage: dict[str, object] | None = None
-    transcript_ts: float | None = None
+    matched_part: int | None = field(default=None, metadata={"lent": LENT_TEXT})
+    passage: dict[str, object] | None = field(default=None, metadata={"lent": LENT_TEXT})
+    transcript_ts: float | None = field(default=None, metadata={"lent": LENT_TEXT})
     status: str | None = None
     superseded_by: list[str] = field(default_factory=list)
     activation: float | None = None
@@ -392,8 +383,11 @@ class Hit:
     #: Set on a hit that `dataset_values` built from a dataset's values. It is raw content that
     #: only the full release level may release, so egress drops it below that; never serialized.
     dataset_value: bool = False
-    # Selected excerpts and annotations can disclose separate source snapshots.
+    # Selected excerpts and annotations can disclose separate source snapshots. A producer names here
+    # every page it took this hit's content from (`lend`), so the release step decides each of them.
     evidence_sources: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    # What each page in `evidence_sources` lent. A page with no entry may have lent anything.
+    lent_roles: dict[str, frozenset[str]] = field(default_factory=dict, repr=False, compare=False)
     # Release-plane annotation, attached by `governance.egress.annotate_hits`
     # strictly AFTER `find()` returns (design D2). It is per-principal, so it
     # must never be present on a candidate stored in the shared `_FIND_CACHE`
@@ -401,31 +395,45 @@ class Hit:
     # `test_find_hot_cache_stays_principal_free` pins that.
     decision: Any = None
 
+    def lend(self, page: ParsedPage, *roles: str) -> None:
+        """Record that `page`, another page than this hit's own, supplied some of this hit's content.
+
+        `roles` name what it supplied (`LENT_TEXT`, `LENT_FRAME`); none names both. The page is
+        pinned to the snapshot the producer read, and the hit also pins its own page, so the cache
+        check that reads `evidence_sources` keeps covering it.
+        """
+        if page.rel_path == self.path:
+            return
+        if self.snapshot_hash:
+            self.evidence_sources.setdefault(self.path, self.snapshot_hash)
+        # A parsed page always carries its hash; an empty pin could only fail closed.
+        self.evidence_sources[page.rel_path] = page.snapshot_hash or ""
+        self.lend_path(page.rel_path, *roles)
+
+    def lend_path(self, path: str, *roles: str) -> None:
+        """Record a page that supplied some of this hit's content without being read: decided by path alone."""
+        if path != self.path:
+            self.lent_roles[path] = self.lent_roles.get(path, frozenset()) | (frozenset(roles) or LENT_ROLES)
+
     def borrowed_pages(self) -> dict[str, str | None]:
-        """The pages other than its own that this hit's text and annotations may come from.
+        """The pages other than its own that its producer named as supplying its content, each with its pin.
 
-        Each maps to the snapshot hash that the producer pinned, or to None for a page that only an
-        annotation names. A producer's declaration (`evidence_sources`) is exact. The scene frame
-        that the hit names adds its page, so the release gate decides it even when a producer
-        declared nothing. A part of the text is not listed: it belongs to exactly its Source's scopes.
+        A page named without being read has no pin. A part of the hit's Source is such a page on
+        every route that takes text from it, and the release step decides it by its own path. A part
+        has the Source's membership, but a session grant is bound to a path, so a caller whose grant
+        names only the Source loses what the part lent.
         """
-        pages: dict[str, str | None] = {}
-        # A scene frame names its media file, and a media file's page is its sidecar. A `.md` value
-        # already is a page (a frame with no media file), which the producer declared.
-        if self.scene_frame and not self.scene_frame.endswith(".md"):
-            pages[sidecar_of(self.scene_frame)] = None
-        pages.update(self.evidence_sources)
-        pages.pop(self.path, None)
-        return pages
+        named = {**dict.fromkeys(self.lent_roles), **self.evidence_sources}
+        named.pop(self.path, None)
+        return {path: self.evidence_sources.get(path) for path in named}
 
-    def drop_borrowed(self) -> None:
-        """Clear what this hit may have taken from another page, and keep the hit.
-
-        The excerpt falls back to none, not to the page's own text: the hit does not record which of
-        the two it holds. Which fields can be borrowed is a property of this class's own fields.
-        """
-        for name, unset in _BORROWABLE_FIELDS:
-            setattr(self, name, unset)
+    def drop_borrowed(self, refused: Iterable[str]) -> None:
+        """Clear what the `refused` pages lent to this hit, and keep what the hit has of its own."""
+        roles = frozenset().union(*(self.lent_roles.get(path, LENT_ROLES) for path in refused))
+        for spec in dataclasses.fields(self):
+            if spec.metadata.get("lent") in roles:
+                # `excerpt` is the one lendable field with no default: it clears to empty.
+                setattr(self, spec.name, "" if spec.default is dataclasses.MISSING else spec.default)
 
     def as_dict(self) -> dict:
         out: dict = {

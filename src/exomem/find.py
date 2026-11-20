@@ -53,6 +53,8 @@ from . import (
 )
 from . import ranking_config as _ranking_config
 from .find_types import (
+    LENT_FRAME,
+    LENT_TEXT,
     FindTimings,
     Hit,
     ParsedPage,
@@ -6034,14 +6036,14 @@ class _BrowseWindowDeclined(Exception):
 class _Emitted(NamedTuple):
     """A page to report, with what its hit is built from.
 
-    `first` names the candidate that gives the page its excerpt, `frame` is the metadata of the
-    child that gives it a scene frame (None for no frame), and `metadata` holds the rows of `path`
-    and `first`, which the hydrated pages must still match.
+    `first` names the candidate that gives the page its excerpt, `frame` names the child that gives
+    it a scene frame (None for no frame), and `metadata` holds the rows of `path`, `first` and
+    `frame`, which the hydrated pages must still match.
     """
 
     path: str
     first: str
-    frame: Any | None
+    frame: str | None
     metadata: Mapping[str, Any]
 
 
@@ -6291,7 +6293,7 @@ def _window_order(
         )
         emitted_as = _emission_rule(vault_root, metadata, proven)
         first: dict[str, str] = {}
-        frames: dict[str, Any] = {}
+        frames: dict[str, str] = {}
         for group, rows in groups.items():
             for row in sorted(
                 rows,
@@ -6304,7 +6306,7 @@ def _window_order(
                     continue  # reported as another page, which takes it at its own key
                 first.setdefault(group, row.path)
                 if group != row.path and metadata[row.path].media_file and group not in frames:
-                    frames[group] = metadata[row.path]
+                    frames[group] = row.path
         for rel in sorted(
             first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
         ):
@@ -6414,7 +6416,7 @@ def _find_managed_browse(
         )
     emitted_as = _emission_rule(vault_root, metadata, proven)
     first: dict[str, str] = {}
-    frames: dict[str, Any] = {}
+    frames: dict[str, str] = {}
     for rel in ordered:
         emitted = emitted_as(rel)
         if emitted is None:
@@ -6422,7 +6424,7 @@ def _find_managed_browse(
         first.setdefault(emitted, rel)
         row = metadata[rel]
         if emitted != rel and row.media_file and emitted not in frames:
-            frames[emitted] = row
+            frames[emitted] = rel
 
     emitted_paths = sorted(
         first, key=lambda rel: _browse_order_key(rel, metadata[rel].updated), reverse=True
@@ -6501,7 +6503,7 @@ def _browse_hits(
             if filtered:
                 raise RetrievalIndexWarming(site="browse_eligibility_stale")
             continue
-        frame = emitted.frame
+        frame = None if emitted.frame is None else emitted.metadata[emitted.frame]
         hit = Hit(
             path=page.rel_path,
             type=page.page_type,
@@ -6518,6 +6520,11 @@ def _browse_hits(
             scene_frame_ts=None if frame is None else frame.frame_ts,
         )
         hit.transcript_ts = _transcript_ts_for_hit(page, None, "")
+        # The excerpt is the first member's and the frame the first frame member's, each its own page.
+        hit.lend(candidate, LENT_TEXT)
+        if emitted.frame is not None:
+            # Named by path from the catalogue row: the frame's own page is not read for this.
+            hit.lend_path(emitted.frame, LENT_FRAME)
         hits.append(hit)
         if len(hits) >= limit:
             break
@@ -6554,6 +6561,13 @@ def _part_match(
     )
 
 
+def _frame_image_page(frame_image: str) -> str:
+    """The page that describes a scene frame's image: its sidecar, named by the filing rule."""
+    from . import originals
+
+    return originals.sidecar_path(Path(frame_image)).as_posix()
+
+
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
     *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
@@ -6576,6 +6590,8 @@ def _keyword_hit(
         nearest = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
         if nearest is not None:
             hit.scene_frame, hit.scene_frame_ts = nearest
+            # The frames folder lists the image; the release step decides its sidecar page by path, unread.
+            hit.lend_path(_frame_image_page(nearest[0]), LENT_FRAME)
     return hit
 
 
@@ -6664,14 +6680,15 @@ def _find_managed_keyword(
             scene_frame_ts=source.frame_ts if child else None,
             part_match=_part_match(vault_root, page, source, query_norm),
         )
-        sources = {page.rel_path: group.hashes[page.rel_path], source.rel_path: group.hashes[source.rel_path]}
+        # The cache check reads the hit's own page too, at the hash the group proved.
+        hit.evidence_sources[page.rel_path] = group.hashes[page.rel_path]
+        hit.lend(source)
         if hit.scene_frame is None and group.frame_path is not None:
             frame = resolve(group.frame_path, group.hashes[group.frame_path])
             if frame is None:
                 continue
             hit.scene_frame, hit.scene_frame_ts = frame.media_file, frame.frame_ts
-            sources[frame.rel_path] = group.hashes[frame.rel_path]
-        hit.evidence_sources = sources
+            hit.lend(frame, LENT_FRAME)
         hits.append(hit)
     return hits
 
@@ -6818,6 +6835,7 @@ def _find_keyword(
         scene_frame: str | None = None
         scene_frame_ts: float | None = None
         part_match: dict[str, object] | None = None
+        child: ParsedPage | None = None  # the page that lends its text and frame to its parent's hit
         if page.emitted_parent:
             parent_page = _resolve_page(vault_root, page.emitted_parent, pending)
             if page_memo is not None:
@@ -6836,8 +6854,10 @@ def _find_keyword(
                         if existing.scene_frame is None:
                             existing.scene_frame = page.media_file
                             existing.scene_frame_ts = page.frame_ts
+                            existing.lend(page, LENT_FRAME)
                         continue
                     scene_frame, scene_frame_ts = page.media_file, page.frame_ts
+                child = page
                 page = parent_page
         if page.rel_path in by_path:
             continue
@@ -6857,6 +6877,8 @@ def _find_keyword(
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
             part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
+        if child is not None:
+            hit.lend(child)
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
 
@@ -7420,10 +7442,13 @@ def _find_semantic(
                     nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
                     if nf is not None:
                         hit.scene_frame, hit.scene_frame_ts = nf
-                        frame_page = _page_of(hit.scene_frame + ".md")
+                        frame_page = _page_of(_frame_image_page(hit.scene_frame))
                         if frame_page is None:
                             incomplete()
                             continue
+                        if frame_page.rel_path not in sources:
+                            # It supplied the frame only; the excerpt stays the hit's own if it is withheld.
+                            hit.lent_roles[frame_page.rel_path] = frozenset({LENT_FRAME})
                         sources[frame_page.rel_path] = frame_page.snapshot_hash
             hit.evidence_sources = sources
             hits.append(hit)
