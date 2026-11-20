@@ -28,6 +28,7 @@ None.
 
 - `agent-memory-onboarding`: the learning instruction asks for custody of handed files.
 - `attachment-source-ingestion`: receiving a file makes it eligible for custody under `proactive_capture`, and a text copy is reported as a text copy.
+- `attention-queue`: a Source kept for custody only is listed by name, outside the default attention set and the due-state projection.
 
 ## Impact
 
