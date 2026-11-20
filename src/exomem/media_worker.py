@@ -43,11 +43,13 @@ from . import (
     epistemic_graph,
     extract,
     extraction_parts,
+    foreground_activity,
     graph_sync,
     index_sync,
     media_brakes,
     media_engines,
     media_jobs,
+    media_publication,
     media_slot_client,
     preserve,
     prior_extraction,
@@ -369,6 +371,40 @@ def _result_basis_holds(
     )
 
 
+def _result_replaces(result: media_jobs.MediaJobResult) -> str | None:
+    """Set only by a reprocess: the extraction this result replaces."""
+    return result.payload.get("replaces") if result.kind == "extraction" else None
+
+
+def _result_basis_holds_for(result: media_jobs.MediaJobResult, content: str) -> bool:
+    return _result_basis_holds(
+        content,
+        media_type=result.job.media_type,
+        replaces=_result_replaces(result),
+        expected_hash=result.sidecar_before_hash,
+        expected_version=result.sidecar_before_evidence_version,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedResult:
+    """A result whose writes join the batch commit, with the receipts and parts it owes."""
+
+    result: media_jobs.MediaJobResult
+    writes: tuple[PlannedWrite, ...]
+    receipts: list[deferred_index.DeferredReceipt]
+    surplus: tuple[Path, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalResult:
+    """A result that ends in a recorded failure and writes no page."""
+
+    result: media_jobs.MediaJobResult
+    state: str
+    error: str
+
+
 def _sidecar_is_pending(path: Path) -> bool:
     try:
         return "\nprocessing_state: pending\n" in path.read_text(encoding="utf-8")
@@ -478,6 +514,8 @@ class MediaWorker:
         self._gpu_preflight: cuda_containment.Preflight | None = None
         #: The supervisor killed the running child itself, so its signal exit is not a crash.
         self._child_stopped = False
+        #: When this process last committed a result batch (`_clock`), for the spacing between batches.
+        self._last_batch_at: float | None = None
         #: A stop of the dead child that the ledger has not recorded yet: its kind, cell and settings.
         self._unrecorded_stop: tuple[str, media_brakes.CellMemory, media_brakes.Settings] | None = None
         self._memory_hold_until = 0.0
@@ -1456,26 +1494,20 @@ class MediaWorker:
                 [write.path.relative_to(self._vault_root).as_posix() for write in writes],
             )
             try:
-                handoff = preserve.commit_media_sidecar_writes(
-                    self._vault_root,
-                    writes,
-                    post_commit_fanout=False,
-                    defer_graph_completion=True,
-                )
+                handoff, epoch_published = self._commit_deferred(writes)
             except ContentHashMismatchError:
                 return _STOPPED
             except PathGuardError as error:
                 if error.code != "PATH_GUARD_CONTENT":
                     raise
                 return _STOPPED
-            assert isinstance(handoff, DeferredGraphCompletion)
-            return handoff, receipts, surplus
+            return handoff, receipts, surplus, epoch_published
 
         committed = self._holding_boundary("background_media_extraction_commit", commit)
         if committed is _STOPPED or committed is _BUSY:
             return False
-        handoff, receipts, surplus = committed
-        self._complete_deferred_graph_completion(handoff, receipts)
+        handoff, receipts, surplus, epoch_published = committed
+        self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
         self._retire_surplus_parts(surplus)
         return True
 
@@ -1648,11 +1680,8 @@ class MediaWorker:
                     [job.sidecar_path.relative_to(self._vault_root).as_posix()],
                 )
                 try:
-                    handoff = preserve.commit_media_sidecar_writes(
-                        self._vault_root,
-                        (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
-                        post_commit_fanout=False,
-                        defer_graph_completion=True,
+                    handoff, epoch_published = self._commit_deferred(
+                        (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),)
                     )
                 except ContentHashMismatchError:
                     return _RETRY
@@ -1660,18 +1689,93 @@ class MediaWorker:
                     if conflict.code != "PATH_GUARD_CONTENT":
                         raise
                     return _RETRY
-                assert isinstance(handoff, DeferredGraphCompletion)
-                return handoff, receipts
+                return handoff, receipts, epoch_published
 
             committed = self._holding_boundary("background_media_failure_commit", commit)
             if committed is _RETRY:
                 continue
             if committed is _STOPPED or committed is _BUSY:
                 return False
-            handoff, receipts = committed
-            self._complete_deferred_graph_completion(handoff, receipts)
+            handoff, receipts, epoch_published = committed
+            self._complete_deferred_graph_completion(handoff, receipts, epoch_published=epoch_published)
             return True
         return False
+
+    def _commit_deferred(
+        self,
+        writes: tuple[PlannedWrite, ...],
+        *,
+        publication_intents: list[object] | None = None,
+    ) -> tuple[DeferredGraphCompletion, bool]:
+        """Commit media writes and publish their graph epoch inside the caller's one boundary hold.
+
+        The epoch used to take the boundary a second time, and a foreground write could be
+        refused that take, which left the graph floor ahead of its checkpoint and sent the
+        next write to a whole-vault rebuild. The flag says whether the epoch is published.
+        """
+        handoff = preserve.commit_media_sidecar_writes(
+            self._vault_root,
+            writes,
+            post_commit_fanout=False,
+            defer_graph_completion=True,
+            publication_intents_out=publication_intents,
+        )
+        assert isinstance(handoff, DeferredGraphCompletion)
+        if handoff.checkpoint is None:
+            return handoff, True  # a store-mode commit carries its graph rows; no epoch is owed
+        try:
+            return handoff, self._publish_deferred_epoch(handoff)
+        except Exception:  # noqa: BLE001 - the pages are committed; the completion recovers the epoch
+            log.warning("media graph epoch not published inside the commit hold", exc_info=True)
+            return handoff, False
+
+    def _publish_deferred_epoch(self, token: DeferredGraphCompletion) -> bool:
+        """Write the batch's graph floor and checkpoint; the caller holds the vault boundary.
+
+        True once the checkpoint is durable. False when the floor or checkpoint moved since the
+        content commit, so the epoch needs recovery instead. The checkpoint stays a separate
+        transaction from the media pages (a rollback of pages must not drag an open checkpoint
+        file down with it on Windows), yet it rides the commit's own boundary hold: a second take
+        could be refused by a foreground write and leave the floor ahead of the checkpoint.
+        """
+        assert token.checkpoint is not None
+        floor_path = graph_sync.floor_path(self._vault_root)
+        checkpoint_path = graph_sync.checkpoint_path(self._vault_root)
+        try:
+            floor_raw = graph_sync._read_bounded_bytes(
+                floor_path, limit=graph_sync._FLOOR_READ_LIMIT, vault_root=self._vault_root
+            )
+        except FileNotFoundError:
+            return False
+        floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
+        if floor is None or floor.generation != token.checkpoint.generation:
+            return False
+        floor_content = floor_raw.decode("utf-8")
+        try:
+            checkpoint_raw = graph_sync._read_bounded_bytes(
+                checkpoint_path, limit=graph_sync._CHECKPOINT_READ_LIMIT, vault_root=self._vault_root
+            )
+        except FileNotFoundError:
+            predecessor = None
+            checkpoint_hash = MISSING_CONTENT_HASH
+        else:
+            predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
+            checkpoint_hash = (
+                content_hash(checkpoint_raw.decode("utf-8")) if predecessor is not None else None
+            )
+        if predecessor != token.predecessor or checkpoint_hash is None:
+            return False
+        batch_atomic_write(
+            [
+                PlannedWrite(floor_path, floor_content, expected_hash=content_hash(floor_content)),
+                PlannedWrite(
+                    checkpoint_path, token.checkpoint.render(), expected_hash=checkpoint_hash
+                ),
+            ],
+            vault_root=self._vault_root,
+            post_commit_fanout=False,
+        )
+        return True
 
     def _complete_deferred_graph_completion(
         self,
@@ -1681,7 +1785,9 @@ class MediaWorker:
         publication_intents: tuple[object, ...] | list[object] = (),
         recover_on_mismatch: bool = False,
         parent_receipted_handoff: bool = False,
+        epoch_published: bool = False,
     ) -> bool:
+        """Publish the epoch (unless the commit's own hold already did), then fan out the batch."""
         publication_intents = tuple(publication_intents)
         if token.checkpoint is None:
             # A store-mode commit: the graph rows committed with the page, so no fan-out is owed.
@@ -1692,62 +1798,13 @@ class MediaWorker:
         registered_checkpoint: graph_sync.GraphSyncCheckpoint | None = None
         try:
             needs_recovery = False
-            with get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_graph_completion",
-                holder_kind="background",
-            ):
-                floor_path = graph_sync.floor_path(self._vault_root)
-                checkpoint_path = graph_sync.checkpoint_path(self._vault_root)
-                try:
-                    floor_raw = graph_sync._read_bounded_bytes(
-                        floor_path,
-                        limit=graph_sync._FLOOR_READ_LIMIT,
-                        vault_root=self._vault_root,
-                    )
-                except FileNotFoundError:
-                    needs_recovery = True
-                else:
-                    floor = graph_sync.GraphSyncGenerationFloor.parse(floor_raw)
-                    if floor is None or floor.generation != token.checkpoint.generation:
-                        needs_recovery = True
-                    else:
-                        floor_content = floor_raw.decode("utf-8")
-                        try:
-                            checkpoint_raw = graph_sync._read_bounded_bytes(
-                                checkpoint_path,
-                                limit=graph_sync._CHECKPOINT_READ_LIMIT,
-                                vault_root=self._vault_root,
-                            )
-                        except FileNotFoundError:
-                            predecessor = None
-                            checkpoint_hash = MISSING_CONTENT_HASH
-                        else:
-                            predecessor = graph_sync.GraphSyncCheckpoint.parse(checkpoint_raw)
-                            checkpoint_hash = (
-                                content_hash(checkpoint_raw.decode("utf-8"))
-                                if predecessor is not None
-                                else None
-                            )
-                        if predecessor != token.predecessor or checkpoint_hash is None:
-                            needs_recovery = True
-                        else:
-                            batch_atomic_write(
-                                [
-                                    PlannedWrite(
-                                        floor_path,
-                                        floor_content,
-                                        expected_hash=content_hash(floor_content),
-                                    ),
-                                    PlannedWrite(
-                                        checkpoint_path,
-                                        token.checkpoint.render(),
-                                        expected_hash=checkpoint_hash,
-                                    )
-                                ],
-                                vault_root=self._vault_root,
-                                post_commit_fanout=False,
-                            )
+            if not epoch_published:
+                with get_manager().mutation_guard(
+                    self._vault_root,
+                    operation="background_media_graph_completion",
+                    holder_kind="background",
+                ):
+                    needs_recovery = not self._publish_deferred_epoch(token)
             if needs_recovery:
                 if not recover_on_mismatch or not index_sync.recover_full_receipt_graph_epoch(
                     self._vault_root, build=False
@@ -1773,6 +1830,11 @@ class MediaWorker:
                         list(token.replaced),
                         index_reports if parent_receipted_handoff else None,
                         None,
+                        # The checkpoint names the pages this batch created; the fan-out must
+                        # report the same set or the incremental refresh refuses the batch.
+                        created_paths=[
+                            self._vault_root / rel for rel in token.checkpoint.created_paths
+                        ],
                         publication_intents=publication_intents,
                     )
                 finally:
@@ -2101,7 +2163,7 @@ class MediaWorker:
                                 if self._store.has_parent_work():
                                     # A retained result may make no write; retry next pass.
                                     idle_signature = None
-                                    self._drain_parent_results()
+                                    self._drain_parent_results(gated=True)
                                 else:
                                     # Capture after close; the check can change the WAL.
                                     idle_signature = _job_store_signature(self._store)
@@ -2219,9 +2281,10 @@ class MediaWorker:
                                 and now < forced_recheck_at
                             )
                             parent_work = not settled and self._store.has_parent_work()
-                            if parent_work:
+                            # A drain that left results waiting for a quiet gap in foreground writes
+                            # falls through, so the next job starts and the supervisor keeps polling.
+                            if parent_work and self._drain_parent_results(gated=True):
                                 recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
-                                self._drain_parent_results()
                             elif not settled and self._store.needs_worker():
                                 idle_signature = None
                                 recheck_interval = _SUPERVISE_FORCED_RECHECK_SECONDS
@@ -2246,7 +2309,7 @@ class MediaWorker:
                                         self._release_slot()
                                         log.exception("media worker: could not start child")
                                         relaunch_after = _clock() + 5.0
-                            elif not settled:
+                            elif not settled and not parent_work:
                                 # Nothing to do.  Record the signature AFTER the check,
                                 # not the one read before it: `needs_worker()` opens the
                                 # store, and that open writes to the WAL, so a
@@ -2357,8 +2420,13 @@ class MediaWorker:
         if self._slot is not None:
             self._slot.release()
 
-    def _drain_parent_results(self) -> None:
-        """Publish bounded child results while the disposable child remains alive."""
+    def _drain_parent_results(self, *, gated: bool = False) -> bool:
+        """Publish bounded child results while the disposable child remains alive.
+
+        A gated drain (the supervisor's) publishes only when `media_publication.publication_due`
+        allows. It returns False when it left finished results waiting for a quiet gap, so the
+        supervisor keeps starting children meanwhile.
+        """
         assert self._store is not None
         for blocked in self._store.blocked_compute_presentations_needing_convergence(
             limit=32
@@ -2370,15 +2438,66 @@ class MediaWorker:
                     self.converge_compute_runtime_blocked(blocked)
                 except Exception:  # noqa: BLE001 - retained for the next parent pass
                     log.warning("media parent blocked presentation deferred", exc_info=True)
-        for result in self._store.pending_results(limit=32):
+        if gated and not self._publication_due():
+            return False
+        results = self._store.pending_results(limit=media_publication.BATCH_RESULT_LIMIT)
+        if results:
+            self._publish_parent_results(results)
+        return True
+
+    def _publication_due(self) -> bool:
+        """Whether a batch may take the boundary now: foreground writes are quiet, or a result has waited its floor."""
+        assert self._store is not None
+        count, oldest = self._store.pending_result_facts()
+        if not count:
+            return True  # nothing waits on the gate; the drain ends at once
+        since_last = None if self._last_batch_at is None else _clock() - self._last_batch_at
+        return media_publication.publication_due(
+            idle_seconds=foreground_activity.idle_seconds(self._vault_root),
+            oldest_age_seconds=0.0 if oldest is None else max(0.0, time.time() - oldest),
+            since_last_batch_seconds=since_last,
+        )
+
+    def _publish_parent_results(self, results: list[media_jobs.MediaJobResult]) -> None:
+        """Publish drained results as one batch: one hold, one commit, one generation advance, one fan-out.
+
+        A batch lands whole or rolls back. A rolled-back batch is retried one result at a time, so a
+        result that cannot publish stops only itself.
+        """
+        batch: list[media_jobs.MediaJobResult] = []
+        for result in results:
             try:
-                self._publish_parent_result(result)
+                if self._plan_parent_result(result) is not None:
+                    batch.append(result)
             except Exception:  # noqa: BLE001 - durable result custody is retried
                 log.warning("media parent publication deferred for job %s", result.job_id, exc_info=True)
+        if not batch:
+            return
+        try:
+            self._publish_batch(batch)
+        except Exception:  # noqa: BLE001 - durable result custody is retried
+            if len(batch) == 1:
+                log.warning("media parent publication deferred for job %s", batch[0].job_id, exc_info=True)
+                return
+            log.warning("media parent batch of %d rolled back; publishing one at a time", len(batch), exc_info=True)
+            for result in batch:
+                try:
+                    self._publish_batch([result])
+                except Exception:  # noqa: BLE001 - durable result custody is retried
+                    log.warning("media parent publication deferred for job %s", result.job_id, exc_info=True)
 
     def _publish_parent_result(self, result: media_jobs.MediaJobResult) -> None:
+        """Publish one drained result (a batch of one)."""
+        if self._plan_parent_result(result) is not None:
+            self._publish_batch([result])
+
+    def _plan_parent_result(self, result: media_jobs.MediaJobResult) -> media_jobs.MediaJobResult | None:
+        """Settle a result that needs no sidecar commit, with no boundary held.
+
+        Returns the result when it still needs one, and None when this ended it (superseded, stale,
+        already committed, or republished for a changed binary).
+        """
         job = result.job
-        publication_intents: list[object] = []
         if job.claim_revision != result.claim_revision:
             # A prior version could retry a terminal result. Never let an old
             # packet publish into its successor's claim, but do release it so
@@ -2398,17 +2517,10 @@ class MediaWorker:
             current_binary is None
             or _result_binary_identity(current_binary) != result.binary_identity
         )
-        # Set only by a reprocess: the extraction this result replaces.
-        replaces = result.payload.get("replaces") if result.kind == "extraction" else None
+        replaces = _result_replaces(result)
 
         def basis_holds(content: str) -> bool:
-            return _result_basis_holds(
-                content,
-                media_type=job.media_type,
-                replaces=replaces,
-                expected_hash=result.sidecar_before_hash,
-                expected_version=result.sidecar_before_evidence_version,
-            )
+            return _result_basis_holds_for(result, content)
 
         prepared_target = (
             result.target_hash is not None
@@ -2513,113 +2625,135 @@ class MediaWorker:
                     error="stale media result: sidecar content changed",
                 )
             return
-        terminal_error: str | None = None
-        terminal_state = media_jobs.BLOCKED
-        def publish():
-            nonlocal terminal_error, terminal_state
-            receipts = None
-            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return _STOPPED
-            before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
-            if _result_binary_identity(self._identity(job) or ((-1,) * 5, None)) != result.binary_identity:
-                return _STOPPED
-            if not basis_holds(before):
-                return _STOPPED
-            writes: tuple[PlannedWrite, ...] = ()
-            surplus: tuple[Path, ...] = ()
-            try:
-                if result.kind == "extraction":
-                    asr = result.payload.get("asr")
-                    ocr = result.payload.get("ocr")
-                    writes, surplus = self._extraction_writes(
-                        job,
-                        before,
-                        guard,
-                        text=str(result.payload["text"]),
-                        engine=str(result.payload["engine"]),
-                        speakers=list(result.payload.get("speakers", [])),
-                        speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
-                        asr=AsrFacts.from_payload(asr) if asr is not None else None,
-                        ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
-                        reprocessing=replaces is not None,
-                    )
-                    target = writes[0].content
-                elif result.payload.get("presented_state") == media_jobs.PENDING:
-                    target = preserve.render_sidecar_processing_pending(
-                        before,
-                        attempts=max(1, job.attempts),
-                        next_action=str(result.payload["next_action"]),
-                    )
-                else:
-                    target = preserve.render_sidecar_processing_failure(
-                        before,
-                        state=media_jobs.PENDING if result.kind == "pending" else job.state,
-                        attempts=max(1, job.attempts),
-                        error=str(result.payload["error"]),
-                        retryable=bool(result.payload.get("retryable", True)),
-                        next_action=str(result.payload["next_action"]),
-                    )
-            except preserve.PreserveError as exc:
-                if exc.code == "AMBIGUOUS_SIDECAR_BOUNDARY":
-                    terminal_error = f"{exc.code}: {exc.reason}"
-                else:
-                    terminal_error = f"{type(exc).__name__}: {exc}"
-                    terminal_state = media_jobs.FAILED
-                handoff = None
-            if terminal_error is not None:
-                pass
+        return result
+
+    def _stage_parent_result(
+        self, result: media_jobs.MediaJobResult, taken: set[Path]
+    ) -> _StagedResult | _TerminalResult | None:
+        """Prepare one result's writes under the batch's hold; None leaves it pending for the next batch."""
+        job = result.job
+        replaces = _result_replaces(result)
+        if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+            return None
+        before, guard = read_guarded_text(self._vault_root, job.sidecar_path)
+        if _result_binary_identity(self._identity(job) or ((-1,) * 5, None)) != result.binary_identity:
+            return None
+        if not _result_basis_holds_for(result, before):
+            return None
+        writes: tuple[PlannedWrite, ...] = ()
+        surplus: tuple[Path, ...] = ()
+        try:
+            if result.kind == "extraction":
+                asr = result.payload.get("asr")
+                ocr = result.payload.get("ocr")
+                writes, surplus = self._extraction_writes(
+                    job,
+                    before,
+                    guard,
+                    text=str(result.payload["text"]),
+                    engine=str(result.payload["engine"]),
+                    speakers=list(result.payload.get("speakers", [])),
+                    speaker_verification=str(result.payload.get("speaker_verification", "unavailable")),
+                    asr=AsrFacts.from_payload(asr) if asr is not None else None,
+                    ocr=OcrFacts.from_payload(ocr) if ocr is not None else None,
+                    reprocessing=replaces is not None,
+                )
+                target = writes[0].content
+            elif result.payload.get("presented_state") == media_jobs.PENDING:
+                target = preserve.render_sidecar_processing_pending(
+                    before,
+                    attempts=max(1, job.attempts),
+                    next_action=str(result.payload["next_action"]),
+                )
             else:
-                if not writes:
-                    writes = (
-                        PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
-                    )
-                rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
-                receipts = deferred_index.add_full_receipts(
-                    self._vault_root,
-                    [write.path.relative_to(self._vault_root).as_posix() for write in writes],
+                target = preserve.render_sidecar_processing_failure(
+                    before,
+                    state=media_jobs.PENDING if result.kind == "pending" else job.state,
+                    attempts=max(1, job.attempts),
+                    error=str(result.payload["error"]),
+                    retryable=bool(result.payload.get("retryable", True)),
+                    next_action=str(result.payload["next_action"]),
                 )
-                receipt = next(item for item in receipts if item.rel_path == rel)
-                if not self._store.persist_prepared_result(
-                    result,
-                    target_hash=_target_digest(target),
-                    target_evidence_version=_evidence_version_or_none(target),
-                    target_size=len(target.encode("utf-8")),
-                    receipt_revision=receipt.revision,
-                ):
-                    deferred_index.clear_full_receipts(self._vault_root, receipts)
-                    return _STOPPED
-                handoff = preserve.commit_media_sidecar_writes(
-                    self._vault_root,
-                    writes,
-                    post_commit_fanout=False,
-                    defer_graph_completion=True,
-                    publication_intents_out=publication_intents,
-                )
-                assert isinstance(handoff, DeferredGraphCompletion)
-            return handoff, receipts, surplus
+        except preserve.PreserveError as exc:
+            if exc.code == "AMBIGUOUS_SIDECAR_BOUNDARY":
+                return _TerminalResult(result, media_jobs.BLOCKED, f"{exc.code}: {exc.reason}")
+            return _TerminalResult(result, media_jobs.FAILED, f"{type(exc).__name__}: {exc}")
+        if not writes:
+            writes = (
+                PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),
+            )
+        if any(write.path in taken for write in writes):
+            return None  # two results meet on one page; the next batch takes this one
+        rel = job.sidecar_path.relative_to(self._vault_root).as_posix()
+        receipts = deferred_index.add_full_receipts(
+            self._vault_root,
+            [write.path.relative_to(self._vault_root).as_posix() for write in writes],
+        )
+        receipt = next(item for item in receipts if item.rel_path == rel)
+        if not self._store.persist_prepared_result(
+            result,
+            target_hash=_target_digest(target),
+            target_evidence_version=_evidence_version_or_none(target),
+            target_size=len(target.encode("utf-8")),
+            receipt_revision=receipt.revision,
+        ):
+            deferred_index.clear_full_receipts(self._vault_root, receipts)
+            return None
+        taken.update(write.path for write in writes)
+        return _StagedResult(result, writes, receipts, surplus)
+
+    def _publish_batch(self, results: list[media_jobs.MediaJobResult]) -> None:
+        """Commit up to one hold's worth of `results` together, then fan out once.
+
+        Inside one boundary hold: stage each result, commit every write as one batch and publish the
+        graph epoch. Outside it: one fan-out for the batch, then each result ends. Results that did
+        not fit the hold's size or time cap stay pending for the next batch.
+        """
+        publication_intents: list[object] = []
+        staged: list[_StagedResult] = []
+        terminals: list[_TerminalResult] = []
+
+        def publish():
+            deadline = _clock() + media_publication.BATCH_HOLD_SECONDS
+            taken: set[Path] = set()
+            for result in results:
+                if staged and _clock() >= deadline:
+                    break
+                item = self._stage_parent_result(result, taken)
+                if isinstance(item, _TerminalResult):
+                    terminals.append(item)
+                elif item is not None:
+                    staged.append(item)
+            if not staged:
+                return None
+            return self._commit_deferred(
+                tuple(write for item in staged for write in item.writes),
+                publication_intents=publication_intents,
+            )
 
         published = self._holding_boundary("background_media_parent_publication", publish)
-        if published is _STOPPED or published is _BUSY:
-            return  # a busy boundary leaves the prepared result for the next drain
-        handoff, receipts, surplus = published
-        if terminal_error is not None:
-            self._store.terminalize_result(
-                result, state=terminal_state, error=terminal_error
-            )
+        if published is _BUSY:
+            return  # a busy boundary leaves the prepared results for the next drain
+        for terminal in terminals:
+            self._store.terminalize_result(terminal.result, state=terminal.state, error=terminal.error)
+        if published is None:
             return
-        assert handoff is not None
+        handoff, epoch_published = published
         if not self._complete_deferred_graph_completion(
             handoff,
-            receipts,
+            [receipt for item in staged for receipt in item.receipts],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
             parent_receipted_handoff=True,
+            epoch_published=epoch_published,
         ):
             return
-        self._retire_surplus_parts(surplus)
-        self._store.finalize_result(
-            result, requeue_remaining=result.kind in {"extraction", "pending"}
-        )
+        self._last_batch_at = _clock()
+        for item in staged:
+            self._retire_surplus_parts(item.surplus)
+            self._store.finalize_result(
+                item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
+            )
 
     def _finish_prepared_target(
         self, result: media_jobs.MediaJobResult, *, expected_sidecar: str
@@ -2681,26 +2815,23 @@ class MediaWorker:
             ):
                 deferred_index.clear_full_receipts(self._vault_root, [receipt])
                 return _STOPPED
-            handoff = preserve.commit_media_sidecar_writes(
-                self._vault_root,
+            handoff, epoch_published = self._commit_deferred(
                 (PlannedWrite(job.sidecar_path, target, expected_hash=content_hash(before), guard=guard),),
-                post_commit_fanout=False,
-                defer_graph_completion=True,
-                publication_intents_out=publication_intents,
+                publication_intents=publication_intents,
             )
-            assert isinstance(handoff, DeferredGraphCompletion)
-            return handoff, receipt
+            return handoff, receipt, epoch_published
 
         published = self._holding_boundary("background_media_parent_pending_publication", publish)
         if published is _STOPPED or published is _BUSY:
             return False
-        handoff, receipt = published
+        handoff, receipt, epoch_published = published
         if not self._complete_deferred_graph_completion(
             handoff,
             [receipt],
             publication_intents=publication_intents,
             recover_on_mismatch=True,
             parent_receipted_handoff=True,
+            epoch_published=epoch_published,
         ):
             return False
         return self._store.finalize_result(result, requeue_remaining=True, keep_ocr=True)

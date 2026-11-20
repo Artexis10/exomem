@@ -1985,6 +1985,14 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def pending_result_facts(self) -> tuple[int, float | None]:
+        """How many finished results wait to publish, and when the oldest was recorded (epoch seconds)."""
+        conn = self._connect()
+        try:
+            return _read_publication_facts(conn)
+        finally:
+            conn.close()
+
     def has_parent_work(self) -> bool:
         """Whether the supervisor owns a result or stale blocked presentation."""
         conn = self._connect()
@@ -3020,6 +3028,24 @@ def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", paramete
     )
 
 
+def _read_publication_facts(conn: sqlite3.Connection) -> tuple[int, float | None]:
+    """The count and oldest `created_at` of the results that wait to publish."""
+    try:
+        count, oldest = conn.execute("SELECT count(*), min(created_at) FROM media_job_results").fetchone()
+    except sqlite3.OperationalError:
+        return 0, None  # a store from before the table existed holds no result
+    return int(count), None if oldest is None else float(oldest)
+
+
+def _publication_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Finished results waiting for a quiet gap in foreground writes: how many, and how long the oldest has."""
+    count, oldest = _read_publication_facts(conn)
+    return {
+        "pending_count": count,
+        "oldest_age_seconds": None if oldest is None else round(max(0.0, time.time() - oldest), 1),
+    }
+
+
 def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
     """The facts of `status` that jobs do not show: a busy GPU, the preflight, hidden CUDA, repeated child deaths."""
     wait = _read_meta_json(conn, GPU_WAIT_KEY)
@@ -3028,6 +3054,7 @@ def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tup
     hidden = _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY)
     crashes = _read_meta_json(conn, CHILD_CRASHES_KEY)
     return {
+        "result_publication": _publication_status(conn),
         "waiting_count": waiting,
         "wait": None
         if wait is None or not waiting
@@ -3142,6 +3169,7 @@ def status(
         "gpu_preflight": None,
         "serving_worker_cuda_hidden": None,
         "child_crashes": None,
+        "result_publication": {"pending_count": 0, "oldest_age_seconds": None},
         "jobs": [],
         "errors": [],
         "hydration_policy_problem": None,
@@ -3197,6 +3225,7 @@ def status(
             "gpu_preflight": facts["preflight"],
             "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
             "child_crashes": facts["child_crashes"],
+            "result_publication": facts["result_publication"],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
             "hydration_policy_problem": empty["hydration_policy_problem"],
@@ -3208,7 +3237,9 @@ def status(
 #: The `status` fields a tool caller sees. The worker process, the store path and
 #: the per-reason counts are operator detail: a memory reason belongs on operator
 #: surfaces such as doctor, and a job row already shows waiting work as pending.
-TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
+TOOL_STATUS_FIELDS = (
+    "healthy", "counts", "reconciliation_required_count", "result_publication", "jobs", "errors",
+)
 #: Facts about the machine's GPU and media processes. On a personal install the caller owns the machine and
 #: a pending job gives no other sign of them, so the tool shows them. A Cloud cell's tenant does not own the
 #: node, so there they stay in doctor like the memory reasons (see the cloud-media runbook).
