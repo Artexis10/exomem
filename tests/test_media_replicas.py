@@ -109,6 +109,27 @@ def test_an_original_whose_every_copy_is_damaged_stays_corrupt_and_is_not_overwr
     assert all(step["failed"] for step in finding.meta["route"])
 
 
+def test_a_restricted_caller_is_not_told_which_store_holds_a_replica_or_under_which_key(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    from exomem.governance import egress
+
+    original = _stored(vault, "Recordings")
+    reference = _offload(vault, original)
+    _replicate_all(vault)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    original.write_bytes(DAMAGED)
+    for root, copy in ((Path(selected_store[0]["root"]), reference), (mirrored, originals.original_state(vault, original).replicas[0])):
+        (root / copy.object / copy.version).write_bytes(b"damaged")
+    original_fixity.run_pass(vault, budget=0)
+    monkeypatch.setattr(egress, "caller_restricted", lambda _root: True)
+
+    [finding] = _findings(vault)
+
+    [replica] = [step for step in finding.meta["route"] if step["source"] == "replica"]
+    assert not {"store", "key_version", "object", "version", "path"} & replica.keys()
+
+
 def test_a_replica_of_an_evicted_original_is_the_stored_ciphertext_and_needs_no_download(
         vault: Path, selected_store, mirrored: Path) -> None:
     """An evicted original has no bytes on the volume: replicating it must copy the first store's ciphertext, hashed
@@ -221,6 +242,7 @@ def test_declaring_a_store_on_another_device_writes_its_marker_once(vault: Path,
         assert media_store.declare_store(vault, MIRROR) == root
         assert media_store.declare_store(vault, MIRROR) == root  # the same declaration changes nothing
         assert media_store.read_store_marker(root) == MIRROR
+        assert media_replicas.declared_store_id(vault, MIRROR) == media_store.read_store_id(root) is not None
     finally:
         for child in root.iterdir():
             child.unlink()
@@ -309,6 +331,15 @@ def test_the_status_reads_one_index_and_the_page_returns_originals_by_path(vault
     assert all(len(row["replicas"]) == 2 for row in first["originals"])
 
 
+def test_the_drain_picks_its_next_original_from_an_index_with_no_sort(vault: Path, selected_store, mirrored: Path) -> None:
+    """A sort of the pending rows for every pick is quadratic over a queue of hundreds of thousands."""
+    _offload(vault, _preserved(vault))
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._pick({"x"}), (
+            media_replicas.PENDING, 0.0, "x")))
+    assert "media_replica_queue_pick" in plan and "TEMP B-TREE" not in plan
+
+
 def test_the_owner_s_key_export_is_what_makes_a_replica_recoverable(vault: Path, selected_store, mirrored: Path) -> None:
     """Recoverable status must not be assumed: a replica whose key lives only on a lost machine cannot be read."""
     _offload(vault, _preserved(vault))
@@ -323,6 +354,69 @@ def test_the_owner_s_key_export_is_what_makes_a_replica_recoverable(vault: Path,
     # A vault that lists no stores says nothing about custody; a platform that holds the identity says so itself.
     assert media_replicas.recoverability({"store": "x"}, "1", {}) == (None, "key custody unknown")
     assert media_replicas.recoverability({"store": "x", originals.KEY_CUSTODY: originals.PLATFORM_CUSTODY}, "1", {}) == (True, None)
+
+
+def test_failure_domains_read_unknown_when_a_store_that_holds_replicas_declares_none(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """Two stores may be one disk: counting only the declared domains would report a lower bound as a number."""
+    _offload(vault, _preserved(vault))
+    _replicate_all(vault)
+    assert _measured(vault)["totals"]["distinct_failure_domains"] == 2
+
+    values, config = selected_store
+    values["stores"][1].pop("failure_domain")
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    totals = media_replicas.status(vault)["totals"]
+
+    assert (totals["distinct_failure_domains"], totals["stores_without_failure_domain"]) == (None, 1)
+
+
+def test_the_status_keeps_a_replica_known_not_to_survive_apart_from_one_whose_custody_is_unstated(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    _offload(vault, _preserved(vault))
+    _replicate_all(vault)
+    [personal] = [s for s in _measured(vault)["stores"] if s["name"] == MIRROR]
+    assert (personal["not_recoverable_reasons"], personal["recoverability_unknown_reasons"]) == (["key not exported"], [])
+
+    values, config = selected_store
+    del values["stores"]  # a vault that lists no stores states nothing about who holds the key
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    [cloud] = [s for s in media_replicas.status(vault)["stores"] if s["name"] == MIRROR]
+    assert (cloud["not_recoverable"], cloud["recoverability_unknown"]) == (0, 1)
+    assert (cloud["not_recoverable_reasons"], cloud["recoverability_unknown_reasons"]) == ([], ["key custody unknown"])
+
+
+def test_the_status_reports_the_workers_observation_of_a_store_and_never_reads_the_store(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    media_replicas.observe(vault)
+    monkeypatch.setattr(media_store.FilesystemStore, "require_identity",
+                        lambda self: (_ for _ in ()).throw(AssertionError("status read a store")))
+    media_replicas.rebuild(vault)
+
+    [mirror] = [s for s in media_replicas.status(vault)["stores"] if s["name"] == MIRROR]
+
+    assert mirror["reachable"] is True and mirror["reachable_observed_at"] is not None
+
+
+def test_a_publication_made_during_a_rebuild_survives_it_whatever_the_clock_says(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    """Staleness is a rebuild generation, not a timestamp: a wall clock that steps back must not drop a fresh row."""
+    original = _preserved(vault)
+    _offload(vault, original)
+    real_walk = media_store.bound_originals
+    fresh = originals.StoredObject(1, MIRROR, "1", "o" * 64, "v1", 10, "c" * 64)
+
+    def walk_with_a_publication(*args, **kwargs):
+        yield from real_walk(*args, **kwargs)
+        monkeypatch.setattr(media_replicas.time, "time", lambda: 1.0)  # the clock steps back mid-walk
+        media_replicas.record(vault, "Knowledge Base/Recordings/new.m4a", fresh, verified_at=1.0)
+
+    monkeypatch.setattr(media_store, "bound_originals", walk_with_a_publication)
+    media_replicas.rebuild(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        rows = ledger.execute("SELECT binary_rel, store FROM media_replicas ORDER BY binary_rel, store").fetchall()
+    assert ("Knowledge Base/Recordings/new.m4a", MIRROR) in rows
 
 
 def test_a_retry_after_a_lost_upload_reply_reuses_the_replica_name(vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
@@ -371,6 +465,104 @@ def test_one_drain_settles_a_bounded_batch_and_an_unavailable_store_pauses_its_q
     assert (progress["copied"], progress["remaining"]) == (2, 1)
 
 
+def test_a_repeated_replicate_keeps_the_progress_of_a_running_request_and_starts_a_new_one_when_it_ends(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
+    for category in ("a", "b"):
+        _offload(vault, _preserved(vault, category=category))
+    media_replicas.request(vault, MIRROR)
+    media_replicas.work(vault)  # the rebuild
+    media_replicas.work(vault)  # the scan
+    assert media_replicas.drain(vault) == 1
+    running = media_replicas.progress(vault, MIRROR)
+    assert (running["copied"], running["remaining"]) == (1, 1)
+
+    assert media_replicas.request(vault, MIRROR) == running  # nothing wiped, no new scan
+    assert media_replicas.progress(vault, MIRROR)["scan"] == "complete"
+
+    while media_replicas.work(vault):
+        pass
+    assert media_replicas.progress(vault, MIRROR)["copied"] == 2
+    assert media_replicas.request(vault, MIRROR)["scan"] == "running"  # a finished request is asked again from the start
+
+
+def test_a_malformed_connection_field_makes_only_that_store_unavailable(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    values, config = selected_store
+    values["stores"] = [
+        {"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE},
+        {"name": MIRROR, "adapter": "filesystem", "root": str(mirrored), "failure_domain": "disk-b",
+         "max_object_bytes": "ten gigabytes", **IMMEDIATE},
+    ]
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    original = _preserved(vault)
+    _offload(vault, original)  # the store that serves eviction still works
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.replicate(vault, original, MIRROR)
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert media_store.store_reachable(vault, MIRROR) is False
+
+
+def test_a_replica_entry_that_cannot_name_an_object_is_a_failed_candidate_and_not_an_aborted_pass(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    _replicate_all(vault)
+    sidecar = original.with_name(original.name + ".md")
+    text = sidecar.read_text()
+    [replica] = originals.original_state(vault, original).replicas
+    sidecar.write_text(text.replace(replica.version, "a/b"))
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    original.write_bytes(DAMAGED)
+    first = originals.original_state(vault, original).reference
+    damaged_first = Path(selected_store[0]["root"]) / first.object / first.version
+    damaged_first.write_bytes(os.urandom(damaged_first.stat().st_size))
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+
+    [finding] = _findings(vault)
+    failed = [step for step in finding.meta["route"] if step["source"] == "replica"]
+    assert [step["failed"] for step in failed] == ["ValueError"]
+
+
+def test_a_declared_media_edge_store_has_no_connection_of_its_own(vault: Path, selected_store, mirrored: Path) -> None:
+    """The edge is one connection for the process: a second declared store of that adapter would be the same place."""
+    values, config = selected_store
+    values["stores"] = [
+        {"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE},
+        {"name": "edge-two", "adapter": "media-edge", "failure_domain": "disk-c", **IMMEDIATE},
+    ]
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+
+    with pytest.raises(media_store.MediaStoreError, match="no connection of its own"):
+        media_store.require_replica_store(vault, "edge-two")
+    with pytest.raises(media_store.MediaStoreError, match="no connection of its own"):
+        media_store.store_for(vault, "edge-two")
+    assert media_store.replica_unusable(
+        vault, originals.StoredObject(1, "edge-two", "1", "o" * 64, "v1", 10, "c" * 64)) == "store_unavailable"
+    [edge] = [stats for stats in _measured(vault)["stores"] if stats["name"] == "edge-two"]
+    assert (edge["available"], "no connection of its own" in edge["unavailable_reason"]) == (False, True)
+
+
+def test_a_root_with_another_stores_marker_id_is_not_served_once_the_owner_recorded_the_id(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """Two disks that carry the same store name are told apart by the id that the declaration recorded."""
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_replicas.record_store_id(vault, MIRROR, media_store.read_store_id(mirrored))
+    assert media_store.store_reachable(vault, MIRROR) is True
+
+    (mirrored / media_store.STORE_MARKER).unlink()
+    media_store.write_store_marker(mirrored, MIRROR)  # another disk of the same name: a new random id
+
+    assert media_store.store_reachable(vault, MIRROR) is False
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.replicate(vault, original, MIRROR)
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+
+
 def test_a_busy_vault_boundary_ends_the_round_and_spends_no_attempt(
         vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     _offload(vault, _preserved(vault, category="a"))
@@ -385,6 +577,31 @@ def test_a_busy_vault_boundary_ends_the_round_and_spends_no_attempt(
     for _ in range(media_replicas._MAX_ATTEMPTS + 1):
         assert media_replicas.drain(vault) == 0
     assert media_replicas.progress(vault, MIRROR)["remaining"] == 1  # not refused after the attempt limit
+
+
+def test_a_store_that_does_not_answer_is_checked_before_any_work_and_spends_no_attempt(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    """An unmounted store must cost no hashing, encryption or download, and must not walk the queue to refusal."""
+    original = _preserved(vault, category="a")
+    _offload(vault, original)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.work(vault)
+    media_replicas.work(vault)
+    (mirrored / media_store.STORE_MARKER).unlink()
+    worked: list[str] = []
+    for name in ("_pin", "_upload_encrypted", "_copy_ciphertext"):
+        real = getattr(media_store, name)
+        monkeypatch.setattr(media_store, name, lambda *a, _name=name, _real=real, **k: worked.append(_name) or _real(*a, **k))
+
+    for _ in range(media_replicas._MAX_ATTEMPTS + 1):
+        assert media_replicas.drain(vault) == 0
+    with pytest.raises(media_store.MediaStoreError) as direct:
+        media_store.replicate(vault, original, MIRROR)  # a direct call is refused as early
+
+    assert worked == [] and direct.value.code == "MEDIA_STORE_UNAVAILABLE"
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT state, attempts, code FROM media_replica_queue").fetchall() == [("pending", 0, None)]
+    assert originals.original_state(vault, original).replicas == ()
 
 
 def test_a_replica_that_the_binding_no_longer_lists_is_not_read_by_repair(vault: Path, selected_store, mirrored: Path) -> None:

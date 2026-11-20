@@ -153,8 +153,8 @@ _MARKER_SCHEMA = 1
 _MARKER_MAX_BYTES = 4096
 
 
-def read_store_marker(root: Path) -> str | None:
-    """The store name that `root`'s marker declares; None when the root, the marker or its content is absent or unreadable."""
+def _read_marker(root: Path) -> dict[str, object] | None:
+    """The marker's content; None when the root, the marker or its content is absent, unreadable or not a marker."""
     try:
         descriptor = os.open(root / STORE_MARKER, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
     except OSError:
@@ -168,19 +168,37 @@ def read_store_marker(root: Path) -> str | None:
     except ValueError:
         return None
     if isinstance(value, dict) and value.get("schema") == _MARKER_SCHEMA and isinstance(value.get("store"), str):
-        return value["store"]
+        return value
     return None
 
 
-def write_store_marker(root: Path, name: str) -> None:
-    """Create the marker that names `root` as store `name`; refuses to replace one. `declare_store` is the owner's door to it."""
+def read_store_marker(root: Path) -> str | None:
+    """The store name that `root`'s marker declares; None when the root, the marker or its content is absent or unreadable."""
+    found = _read_marker(root)
+    return None if found is None else str(found["store"])
+
+
+def read_store_id(root: Path) -> str | None:
+    """The random id that `root`'s marker carries; None when there is no marker, or an older one that has no id."""
+    found = _read_marker(root)
+    return found["id"] if found is not None and isinstance(found.get("id"), str) else None
+
+
+def write_store_marker(root: Path, name: str) -> str:
+    """Create the marker that names `root` as store `name`, with a new random id, and return the id; refuses to replace one.
+
+    `declare_store` is the owner's door to it.
+    """
+    store_id = uuid.uuid4().hex
     descriptor = os.open(root / STORE_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                          | getattr(os, "O_BINARY", 0), 0o600)
     with os.fdopen(descriptor, "wb") as marker:
-        marker.write(json.dumps({"schema": _MARKER_SCHEMA, "store": name}, separators=(",", ":")).encode("utf-8"))
+        marker.write(json.dumps({"schema": _MARKER_SCHEMA, "store": name, "id": store_id},
+                                separators=(",", ":")).encode("utf-8"))
         marker.flush()
         os.fsync(marker.fileno())
     held_fs.flush_directory_path(root).require()
+    return store_id
 
 
 class FilesystemStore:
@@ -188,15 +206,19 @@ class FilesystemStore:
 
     It never creates its root, and it serves only a root whose marker names this store. Without that, a NAS that is
     not mounted would read as an empty store: `head` would answer absent, and the upload would land on the local disk.
+    When the owner's declaration recorded the marker's random id (`store_id`), a root whose marker carries another id
+    is another store of the same name, and is refused too.
     """
 
-    def __init__(self, root: Path, *, name: str, max_object_bytes: int | None = None):
+    def __init__(self, root: Path, *, name: str, max_object_bytes: int | None = None, store_id: str | None = None):
         self.root = root
         self.name = name
         self.max_object_bytes = max_object_bytes
+        self.store_id = store_id
 
     def require_identity(self) -> None:
-        if read_store_marker(self.root) != self.name:
+        found = _read_marker(self.root)
+        if found is None or found["store"] != self.name or (self.store_id is not None and found.get("id") != self.store_id):
             # Unavailable is never proof that a version is gone: the caller keeps what it recorded.
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE",
                                   "the store root is missing, or its marker does not name this store")
@@ -257,14 +279,19 @@ def _settings(vault: Path) -> dict[str, object]:
 def _adapter(connection: dict[str, object], name: str) -> Store:
     """Build a store from its connection fields. The adapter names are the closed set of adapters this code implements."""
     adapter = connection.get("adapter")
-    if adapter == "media-edge":
-        from .media_edge_store import EdgeStore
+    try:
+        if adapter == "media-edge":
+            from .media_edge_store import EdgeStore
 
-        return EdgeStore.from_configuration(connection)
-    if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(connection.get("root"), str):
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
-    bound = connection.get("max_object_bytes")
-    return FilesystemStore(Path(str(connection["root"])), name=name, max_object_bytes=None if bound is None else int(bound))
+            return EdgeStore.from_configuration(connection)
+        if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(connection.get("root"), str):
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
+        bound = connection.get("max_object_bytes")
+        return FilesystemStore(Path(str(connection["root"])), name=name,
+                               max_object_bytes=None if bound is None else int(bound))
+    except (TypeError, ValueError) as error:
+        # A connection field of the wrong type or form makes this one store unavailable, never the caller's whole pass.
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the store's connection fields are invalid: {error}") from error
 
 
 def store_for(vault: Path, name: str | None = None) -> Store:
@@ -275,7 +302,26 @@ def store_for(vault: Path, name: str | None = None) -> Store:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "no media store of that name is configured")
     if not entry.serves_eviction and not entry.available:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store's descriptor is incomplete")
-    return _adapter(entry.connection, entry.name)
+    if (refusal := connection_refusal(entry)) is not None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
+    backend = _adapter(entry.connection, entry.name)
+    if isinstance(backend, FilesystemStore):
+        from . import media_replicas
+
+        backend.store_id = media_replicas.declared_store_id(vault, entry.name)
+    return backend
+
+
+def connection_refusal(entry: originals.StoreEntry) -> str | None:
+    """Why a store's entry cannot name a connection of its own, or None.
+
+    The media edge is one connection for the whole process (its address and credential come from the environment),
+    so a declared further store of that adapter would silently be the store that serves eviction again: a replica in
+    the same place, counted as a second failure domain.
+    """
+    if not entry.serves_eviction and entry.connection.get("adapter") == "media-edge":
+        return "a media-edge store has no connection of its own: only the store that serves eviction uses the edge"
+    return None
 
 
 def declare_store(vault: Path, name: str) -> Path:
@@ -297,15 +343,26 @@ def declare_store(vault: Path, name: str) -> Path:
     if os.stat(folder).st_dev == os.stat(Path(vault)).st_dev:
         raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
                               "the store's root is on the vault's own device, so it would not survive that device's loss")
+    from . import media_replicas
+
     declared = read_store_marker(folder)
-    if declared == name:
-        return folder
-    if declared is not None:
+    if declared is not None and declared != name:
         raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root already names another store")
+    recorded = media_replicas.declared_store_id(vault, name)
+    if declared == name:
+        # The same store again: its marker's id is recorded (also after a lost ledger), unless another id is on record.
+        found = read_store_id(folder)
+        if recorded is not None and found != recorded:
+            raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                                  "the store's root carries a marker other than the one recorded for this store")
+        if found is not None and found != recorded:
+            media_replicas.record_store_id(vault, name, found)
+        return folder
     try:
-        write_store_marker(folder, name)
+        store_id = write_store_marker(folder, name)
     except FileExistsError:
         raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root holds a marker that cannot be read") from None
+    media_replicas.record_store_id(vault, name, store_id)
     return folder
 
 
@@ -1656,6 +1713,8 @@ def require_replica_store(vault: Path, name: str) -> originals.StoreEntry:
     if not entry.available:
         fields = ", ".join((*entry.missing, *entry.invalid))
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the store's descriptor is incomplete: {fields}")
+    if (refusal := connection_refusal(entry)) is not None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
     return entry
 
 
@@ -1663,7 +1722,7 @@ def store_reachable(vault: Path, name: str) -> bool | None:
     """Whether the store answers as itself now; None when its adapter has no cheap check (a remote store is not probed)."""
     try:
         backend = store_for(vault, name)
-    except MediaStoreError:
+    except (MediaStoreError, ValueError):
         return False
     if not isinstance(backend, FilesystemStore):
         return None
@@ -1682,7 +1741,7 @@ def replica_unusable(vault: Path, replica: StoredObject) -> str | None:
     """
     config = _settings(vault)
     entry = originals.store_entry(config, replica.store)
-    if entry is None or not entry.available:
+    if entry is None or not entry.available or connection_refusal(entry) is not None:
         return "store_unavailable"
     if entry.retrieval_class != originals.IMMEDIATE:
         return "owner_restores"
@@ -1739,6 +1798,9 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
     config = _settings(vault)
     require_replica_store(vault, store_name)
     backend = store_for(vault, store_name)
+    if isinstance(backend, FilesystemStore):
+        # Before any read, hash, encryption or download: a store that does not answer as itself costs nothing.
+        backend.require_identity()
     ledger = MediaJobStore(vault)
     with _pin(vault, path) as (_ledger, token), ExitStack() as held:
         snapshot = original_state(vault, path)

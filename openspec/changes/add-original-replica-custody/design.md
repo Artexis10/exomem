@@ -89,23 +89,23 @@ What this control prevents: a status that reports two safe copies when a disk lo
 
 ### D5: The filesystem adapter proves which store it is writing to
 
-The adapter never creates its root. The root holds a marker file naming the configured store. Only an explicit owner command, `exomem media-replicas declare-store`, writes the marker. It refuses a root on the vault's own device (`st_dev`), because an unmounted NAS leaves its mount point there and a marker written into that empty directory would defeat the marker.
+The adapter never creates its root. The root holds a marker file naming the configured store, with a random identity. Only an explicit owner command, `exomem media-replicas declare-store`, writes the marker. It refuses a root on the vault's own device (`st_dev`), because an unmounted NAS leaves its mount point there and a marker written into that empty directory would defeat the marker.
 
 Without the marker, an unmounted NAS mount point looks like an empty store. `head` would answer "absent", offload would drop the pointer, and the new upload would land on the primary disk.
 
-With the marker missing or different, uploads and `head` refuse. The store reads as unavailable, and replica states stay as recorded. The adapter has no delete capability.
+The declaration records the marker's identity in the media ledger, so two disks that carry the same store name are told apart; a ledger that lost the record is repaired by declaring the store again. With the marker missing, naming another store or holding another recorded identity, uploads and `head` refuse. The store reads as unavailable, and replica states stay as recorded. The adapter has no delete capability.
 
 ### D6: Copying is a bounded owner operation
 
 `replicate` is an operation of `process_media`, for the vault owner only. It records the owner's request for one declared store and returns the progress counts: queued, copied, refused and remaining. A background worker then makes a replica of each original that lacks one, in bounded batches, and yields to foreground work between originals. It takes the vault mutation guard only for the short protection and publication commits, never while it hashes, encrypts or uploads. A retry after a lost reply reuses the recorded object name, through the existing protection record. A replica in a store that already holds a verified one is kept.
 
-The copy queue has its own tables in the media ledger and its own worker thread. It does not use the `jobs` table: that table holds one row per original and feeds the eviction accounting, and a second store's copy of the same original would collide with it. A failure that a retry can pass (an unreachable store) retries with a growing delay and then counts as refused. A failure that repeats, such as an oversized object, counts as refused at once. A new `replicate` arms the refused rows again.
+The copy queue has its own tables in the media ledger and its own worker thread. It does not use the `jobs` table: that table holds one row per original and feeds the eviction accounting, and a second store's copy of the same original would collide with it. The worker checks that a store answers as itself before it does any work for it. A store that does not answer pauses only its own queue and spends no attempt. A failure that a retry can pass, such as a copy that breaks half way, retries with a growing delay and then counts as refused. A failure that repeats, such as an oversized object, counts as refused at once. A repeat of `replicate` while a request for the store is running changes nothing and returns the counts. A new request after the last finished arms the refused rows again.
 
 ### D7: Status reads an aggregate, and reports unknown during a rebuild
 
 The status reads per-store counts and the oldest verification time from the `media_replicas` table in the media ledger, in one grouped query over a covering index. The table is keyed by original and store. A per-original view pages through results by path, and the status of one exact path reads that original's binding.
 
-A rebuild fills the table from the bindings and records a census row when it completes. A table that is missing or has no census shows every value as unknown, with the reason, until the background rebuild finishes. The worker rebuilds the table daily and after any loss. The status never walks the bindings itself. A rebuilt row has no upload time, because the binding does not record one: the status counts those replicas as verification time unknown, never as old or new.
+A rebuild fills the table from the bindings and records a census row when it completes. A table that is missing or has no census shows every value as unknown, with the reason, until the background rebuild finishes. The worker rebuilds the table daily and after any loss. The status never walks the bindings or reads a store itself: whether a store answers is the worker's last observation, shown with its time. Each row carries the number of the rebuild that last confirmed it, so a row that a publication wrote during a rebuild is never mistaken for a stale one, whatever the clock says. A rebuilt row has no upload time, because the binding does not record one: the status counts those replicas as verification time unknown, never as old or new.
 
 ### D8: Fixity tries local copies first
 

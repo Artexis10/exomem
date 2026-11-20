@@ -846,7 +846,7 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
         failure = "hash_mismatch"
-    except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
+    except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
         failure = str(getattr(error, "code", None) or type(error).__name__)
@@ -1240,9 +1240,10 @@ def attention_findings(vault: Path) -> tuple[list[Any], str | None]:
     restricted = bool(rows) and egress.caller_restricted(Path(vault))
 
     def route(row: Row) -> list[dict[str, str]]:
-        # A replica's object and version locate ciphertext in the owner's store: they go to the owner only.
+        # A replica's store, key version, object and version locate ciphertext in the owner's store: owner only.
         return [copy if copy["source"] in _VAULT_COPIES or not restricted
-                else {key: value for key, value in copy.items() if key not in ("path", "object", "version")}
+                else {key: value for key, value in copy.items()
+                      if key not in ("path", "store", "key_version", "object", "version")}
                 for copy in row.route]
 
     return [

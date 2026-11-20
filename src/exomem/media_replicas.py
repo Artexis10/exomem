@@ -42,6 +42,8 @@ _DRAIN_SECONDS = 60.0
 _MAX_ATTEMPTS = 5
 _RETRY_SECONDS = 30.0
 _IDLE_SECONDS = 30.0
+#: The least time between two observations of whether each store answers as itself.
+_OBSERVE_SECONDS = 60.0
 #: A scan writes its queue rows this many at a time.
 _SCAN_BATCH = 500
 
@@ -51,7 +53,7 @@ def initialize(conn: sqlite3.Connection) -> None:
     existed = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_replicas'").fetchone()
     conn.execute("CREATE TABLE IF NOT EXISTS media_replicas ("
                  "binary_rel TEXT NOT NULL, store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, "
-                 "key_version TEXT NOT NULL, verified_at REAL, state TEXT NOT NULL, seen REAL NOT NULL, "
+                 "key_version TEXT NOT NULL, verified_at REAL, state TEXT NOT NULL, seen INTEGER NOT NULL, "
                  "PRIMARY KEY (binary_rel, store)) WITHOUT ROWID")
     # The status groups by these columns in this order, so it reads the index alone.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_status "
@@ -60,14 +62,25 @@ def initialize(conn: sqlite3.Connection) -> None:
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
     if existed is None:
         conn.execute("DELETE FROM media_replica_census")
+    # Every rebuild takes the next number. A row carries the number of the rebuild that last confirmed it, or of the
+    # one running when a publication wrote it, so "stale" never depends on a wall clock that can step backwards.
+    conn.execute("CREATE TABLE IF NOT EXISTS media_replica_generation ("
+                 "id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL)")
+    conn.execute("INSERT OR IGNORE INTO media_replica_generation(id, value) VALUES (1, 0)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_demands ("
                  "store TEXT PRIMARY KEY, requested_at REAL NOT NULL, scanned_at REAL)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_queue ("
                  "store TEXT NOT NULL, binary_rel TEXT NOT NULL, state TEXT NOT NULL, code TEXT, "
                  "attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
                  "PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replica_queue_state "
-                 "ON media_replica_queue(state, retry_at, store, binary_rel)")
+    # The drain's pick is `ORDER BY store, binary_rel` among the pending rows, so this order reads it with no sort;
+    # `retry_at` only filters.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replica_queue_pick ON media_replica_queue(state, store, binary_rel)")
+    # What the worker last saw of each store that has a cheap check, so a status never reads a store.
+    conn.execute("CREATE TABLE IF NOT EXISTS media_replica_reach ("
+                 "store TEXT PRIMARY KEY, reachable INTEGER NOT NULL, observed_at REAL NOT NULL)")
+    # The random id that the owner's declaration recorded for each filesystem store's marker.
+    conn.execute("CREATE TABLE IF NOT EXISTS media_store_ids (store TEXT PRIMARY KEY, store_id TEXT NOT NULL)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_key_exports ("
                  "key_version TEXT PRIMARY KEY, confirmed_at REAL NOT NULL)")
 
@@ -79,19 +92,28 @@ def _iso(value: float | None) -> str | None:
 # --- what a publication records ---------------------------------------------------------------------
 
 
-_UPSERT = ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, verified_at, state, seen) "
-           "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(binary_rel, store) DO UPDATE SET object = excluded.object, "
-           "version = excluded.version, key_version = excluded.key_version, state = excluded.state, "
-           "seen = excluded.seen, verified_at = CASE WHEN media_replicas.object = excluded.object "
-           "AND media_replicas.version = excluded.version THEN COALESCE(excluded.verified_at, "
-           "media_replicas.verified_at) ELSE excluded.verified_at END")
+def _upsert(seen: str) -> str:
+    """The statement that writes one row; `seen` is the SQL that gives the row's generation."""
+    return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, verified_at, state, seen) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, {seen}) ON CONFLICT(binary_rel, store) DO UPDATE SET "
+            "object = excluded.object, version = excluded.version, key_version = excluded.key_version, "
+            "state = excluded.state, seen = excluded.seen, "
+            "verified_at = CASE WHEN media_replicas.object = excluded.object "
+            "AND media_replicas.version = excluded.version THEN COALESCE(excluded.verified_at, "
+            "media_replicas.verified_at) ELSE excluded.verified_at END")
+
+
+#: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
+#: strand the row below its own generation.
+_UPSERT_PUBLISHED = _upsert("(SELECT value FROM media_replica_generation WHERE id = 1)")
+_UPSERT_REBUILT = _upsert("?")
 
 
 def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, verified_at: float | None) -> None:
     """Note a replica that a binding now lists. `verified_at` is its upload time; None when this write does not know it."""
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute(_UPSERT, (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
-                               verified_at, UPLOAD_VERIFIED, time.time()))
+        conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
+                                         replica.key_version, verified_at, UPLOAD_VERIFIED))
 
 
 def _replicas_of(snapshot: originals.OriginalSnapshot) -> Iterator[originals.StoredObject]:
@@ -104,16 +126,18 @@ def _replicas_of(snapshot: originals.OriginalSnapshot) -> Iterator[originals.Sto
 def rebuild(vault: Path) -> int:
     """Fill the table from every binding and drop each row that no binding names; return the rows written.
 
-    A row that a publication recorded while the walk ran has a newer `seen` and stays. The census is set only after
-    the whole walk, so a walk that stops leaves the status unknown. A binding whose state cannot be read is
-    skipped and counted, and the status reports that count. An upload time is kept for a replica the table
-    already knew; a rebuilt row has none, because the binding does not record one.
+    A row that a publication recorded while the walk ran carries this rebuild's generation and stays. The census
+    is set only after the whole walk, so a walk that stops leaves the status unknown. A binding whose state cannot
+    be read is skipped and counted, and the status reports that count. An upload time is kept for a replica the
+    table already knew; a rebuilt row has none, because the binding does not record one.
     """
     from . import media_store
 
     vault = Path(vault).resolve()
     ledger = MediaJobStore(vault)
-    started = time.time()
+    with closing(ledger._connect()) as conn, conn:
+        conn.execute("UPDATE media_replica_generation SET value = value + 1 WHERE id = 1")
+        generation = conn.execute("SELECT value FROM media_replica_generation WHERE id = 1").fetchone()[0]
     unread = 0
 
     def skip(error: originals.RetirementUnconfirmed) -> None:
@@ -126,20 +150,20 @@ def rebuild(vault: Path) -> int:
 
     def flush() -> None:
         with closing(ledger._connect()) as conn, conn:
-            conn.executemany(_UPSERT, batch)
+            conn.executemany(_UPSERT_REBUILT, batch)
         batch.clear()
 
     for snapshot in foreground_priority.yielding(media_store.bound_originals(vault, unconfirmed=skip)):
         relative = snapshot.path.relative_to(vault).as_posix()
         for replica in _replicas_of(snapshot):
             batch.append((relative, replica.store, replica.object, replica.version, replica.key_version, None,
-                          UPLOAD_VERIFIED, started))
+                          UPLOAD_VERIFIED, generation))
             written += 1
         if len(batch) >= _SCAN_BATCH:
             flush()
     flush()
     with closing(ledger._connect()) as conn, conn:
-        conn.execute("DELETE FROM media_replicas WHERE seen < ?", (started,))
+        conn.execute("DELETE FROM media_replicas WHERE seen < ?", (generation,))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -205,6 +229,81 @@ def recoverability(config: dict[str, object], key_version: str, exports: dict[st
     return None, "key custody unknown"
 
 
+# --- what the worker observed of each store ---------------------------------------------------------
+
+
+_reach: dict[tuple[Path, str], bool] = {}
+
+
+def _note_reach(vault: Path, store: str, answer: bool, *, force: bool = False) -> None:
+    """Write what the worker saw of `store`; an unchanged answer is written again only when `force` says so."""
+    if not force and _reach.get((vault, store)) is answer:
+        return
+    _reach[(vault, store)] = answer
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("INSERT INTO media_replica_reach(store, reachable, observed_at) VALUES (?, ?, ?) "
+                     "ON CONFLICT(store) DO UPDATE SET reachable = excluded.reachable, "
+                     "observed_at = excluded.observed_at", (store, int(answer), time.time()))
+
+
+def observe(vault: Path) -> None:
+    """Record whether each store that has a cheap check answers as itself now.
+
+    Only the worker calls it (and the drain, when a copy meets a store that does not answer), so a status reports an
+    observation with its time and never reads a store itself. A store with no cheap check (a remote one) is not
+    probed and keeps no record.
+    """
+    from . import media_store
+
+    vault = Path(vault).resolve()
+    config = originals.configuration(vault)
+    if config is None:
+        return
+    for name in originals.store_entries(config):
+        if (answer := media_store.store_reachable(vault, name)) is not None:
+            _note_reach(vault, name, answer, force=True)
+
+
+def _observations(conn: sqlite3.Connection) -> dict[str, tuple[bool, float]]:
+    try:
+        return {row["store"]: (bool(row["reachable"]), row["observed_at"])
+                for row in conn.execute("SELECT store, reachable, observed_at FROM media_replica_reach")}
+    except sqlite3.OperationalError:
+        return {}
+
+
+# --- the id that the owner's declaration recorded for a store's marker ------------------------------
+
+
+def declared_store_id(vault: Path, store: str) -> str | None:
+    """The marker id recorded when the owner declared `store`; None when there is none on this machine.
+
+    Without a record the marker's name alone identifies the store, as before a declaration; the owner declares the
+    store again to record the id that its root carries, after a lost ledger as well.
+    """
+    from . import media_store
+
+    ledger = MediaJobStore(vault, create=False)
+    if not ledger.path.exists():
+        return None
+    try:
+        with closing(ledger._connect(readonly=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_store_ids'").fetchone() is None:
+                return None
+            row = conn.execute("SELECT store_id FROM media_store_ids WHERE store = ?", (store,)).fetchone()
+    except (sqlite3.Error, OSError) as error:
+        # Not knowing the recorded id is not the same as there being none: the store is not served on a guess.
+        raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE",
+                                          f"the store's recorded identity cannot be read: {type(error).__name__}") from error
+    return None if row is None else row["store_id"]
+
+
+def record_store_id(vault: Path, store: str, store_id: str) -> None:
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("INSERT INTO media_store_ids(store, store_id) VALUES (?, ?) "
+                     "ON CONFLICT(store) DO UPDATE SET store_id = excluded.store_id", (store, store_id))
+
+
 # --- status -----------------------------------------------------------------------------------------
 
 
@@ -234,6 +333,7 @@ def status(vault: Path) -> dict[str, object]:
                 "MIN(verified_at) AS oldest FROM media_replicas GROUP BY store, key_version, state").fetchall()
             queue = conn.execute("SELECT store, state, COUNT(*) AS n FROM media_replica_queue "
                                  "GROUP BY store, state").fetchall()
+            reach = _observations(conn)
     except (sqlite3.Error, OSError) as error:
         return _unknown(f"the replica state cannot be read: {type(error).__name__}")
     if census is None:
@@ -243,20 +343,26 @@ def status(vault: Path) -> dict[str, object]:
     stores: dict[str, dict[str, Any]] = {}
     for name in names:
         entry = entries.get(name)
+        refusal = media_store.connection_refusal(entry) if entry is not None else None
+        seen_reachable, observed_at = reach.get(name, (None, None))
         stores[name] = {
             "name": name,
             "configured": entry is not None,
-            "available": entry.available if entry is not None else False,
+            "available": entry.available and refusal is None if entry is not None else False,
+            "unavailable_reason": refusal,
             "missing_fields": list(entry.missing) if entry is not None else [],
             "invalid_fields": list(entry.invalid) if entry is not None else [],
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "head_recomputes": entry.head_recomputes if entry is not None else None,
             "serves_eviction": bool(entry and entry.serves_eviction),
-            "reachable": media_store.store_reachable(vault, name) if entry is not None and entry.available else None,
+            # The worker's last observation, never a read of the store: None when it has made none (a remote store
+            # has no cheap check, and a vault without a running worker has no observation).
+            "reachable": seen_reachable,
+            "reachable_observed_at": _iso(observed_at),
             "replicas": 0, "verified_at_upload": 0, "recoverable": 0, "not_recoverable": 0,
-            "recoverability_unknown": 0, "not_recoverable_reasons": [], "oldest_verified_at": None,
-            "verification_time_unknown": 0,
+            "recoverability_unknown": 0, "not_recoverable_reasons": [], "recoverability_unknown_reasons": [],
+            "oldest_verified_at": None, "verification_time_unknown": 0,
         }
     for row in groups:
         stats = stores[row["store"]]
@@ -269,12 +375,13 @@ def status(vault: Path) -> dict[str, object]:
         recoverable, reason = recoverability(config, row["key_version"], exports)
         if recoverable is True:
             stats["recoverable"] += row["replicas"]
-        elif recoverable is False:
-            stats["not_recoverable"] += row["replicas"]
-        else:
-            stats["recoverability_unknown"] += row["replicas"]
-        if reason is not None and reason not in stats["not_recoverable_reasons"]:
-            stats["not_recoverable_reasons"].append(reason)
+            continue
+        # A copy that is known not to survive and one whose custody nobody stated are different answers.
+        counted, reasons = (("not_recoverable", "not_recoverable_reasons") if recoverable is False
+                            else ("recoverability_unknown", "recoverability_unknown_reasons"))
+        stats[counted] += row["replicas"]
+        if reason is not None and reason not in stats[reasons]:
+            stats[reasons].append(reason)
     progress: dict[str, dict[str, int]] = {}
     for row in queue:
         progress.setdefault(row["store"], {})[row["state"]] = row["n"]
@@ -285,6 +392,7 @@ def status(vault: Path) -> dict[str, object]:
                                     "remaining": counts.get(PENDING, 0)}
     holding = [stats for stats in stores.values() if stats["replicas"]]
     domains = {stats["failure_domain"] for stats in holding if stats["failure_domain"] is not None}
+    undeclared = sum(1 for stats in holding if stats["failure_domain"] is None)
     times = [stats["oldest_verified_at"] for stats in holding if stats["oldest_verified_at"] is not None]
     totals = {
         "replicas": sum(stats["replicas"] for stats in holding),
@@ -292,9 +400,9 @@ def status(vault: Path) -> dict[str, object]:
         "recoverable": sum(stats["recoverable"] for stats in holding),
         "not_recoverable": sum(stats["not_recoverable"] for stats in holding),
         "recoverability_unknown": sum(stats["recoverability_unknown"] for stats in holding),
-        "distinct_failure_domains": len(domains),
-        # A store with replicas and no declared failure domain makes the count above a lower bound.
-        "stores_without_failure_domain": sum(1 for stats in holding if stats["failure_domain"] is None),
+        # Unknown, not a lower bound: a store that holds replicas and declares no domain may share one with another.
+        "distinct_failure_domains": None if undeclared else len(domains),
+        "stores_without_failure_domain": undeclared,
         "oldest_verified_at": min(times) if times else None,
         "verification_time_unknown": sum(stats["verification_time_unknown"] for stats in holding),
     }
@@ -385,9 +493,11 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
 
 
 def request(vault: Path, store: str) -> dict[str, int]:
-    """Ask for a replica of every original in `store`; the background drain makes them, and this returns the progress.
+    """Ask for a replica of every original in `store`; the background drain makes them. Returns the current counts.
 
-    A request starts a new scan, drops the finished rows of the last one and arms the refused ones. It raises
+    While a request for the store is running (its scan has not finished, or originals are left to copy) a repeat
+    changes nothing and returns the counts: read the progress there, or in the status. Once it has finished, a new
+    request starts a new scan, drops the finished rows of the last one and arms the refused ones. It raises
     `MediaStoreError` for a store that cannot take a replica now.
     """
     from . import media_store
@@ -396,12 +506,16 @@ def request(vault: Path, store: str) -> dict[str, int]:
     media_store.require_replica_store(vault, store)
     now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ?", (store, DONE))
-        conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
-                     "WHERE store = ? AND state = ?", (PENDING, store, REFUSED))
-        conn.execute("INSERT INTO media_replica_demands(store, requested_at, scanned_at) VALUES (?, ?, NULL) "
-                     "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, scanned_at = NULL",
-                     (store, now))
+        active = conn.execute(
+            "SELECT 1 FROM media_replica_demands WHERE store = ? AND (scanned_at IS NULL OR EXISTS "
+            "(SELECT 1 FROM media_replica_queue WHERE state = ? AND store = ?))", (store, PENDING, store)).fetchone()
+        if active is None:
+            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ?", (store, DONE))
+            conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
+                         "WHERE store = ? AND state = ?", (PENDING, store, REFUSED))
+            conn.execute("INSERT INTO media_replica_demands(store, requested_at, scanned_at) VALUES (?, ?, NULL) "
+                         "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, scanned_at = NULL",
+                         (store, now))
     wake()
     return progress(vault, store)
 
@@ -449,6 +563,13 @@ def scan(vault: Path, store: str) -> int:
     return queued
 
 
+def _pick(paused: set[str]) -> str:
+    """The query for the next pending original outside the paused stores: `(state, store, binary_rel)` order, no sort."""
+    skipped = f" AND store NOT IN ({', '.join('?' for _ in paused)})" if paused else ""
+    return ("SELECT store, binary_rel, attempts FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
+            + skipped + " ORDER BY store, binary_rel LIMIT 1")
+
+
 def drain(vault: Path, *, deadline: float | None = None) -> int:
     """Copy up to a batch of queued originals; return how many it settled (copied or refused)."""
     from . import media_store
@@ -459,15 +580,18 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
     limit = time.monotonic() + _DRAIN_SECONDS if deadline is None else deadline
     paused: set[str] = set()
     while settled < _DRAIN_BATCH and time.monotonic() < limit:
-        skipped = ", ".join("?" for _ in paused)
         with closing(ledger._connect(readonly=True)) as conn:
-            row = conn.execute(
-                "SELECT store, binary_rel, attempts FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
-                + (f" AND store NOT IN ({skipped})" if paused else "") + " ORDER BY store, binary_rel LIMIT 1",
-                (PENDING, time.time(), *paused)).fetchone()
+            row = conn.execute(_pick(paused), (PENDING, time.time(), *paused)).fetchone()
         if row is None:
             break
         foreground_priority.yield_to_foreground()
+        if (answer := media_store.store_reachable(vault, row["store"])) is not None:
+            _note_reach(vault, row["store"], answer)
+        if answer is False:
+            # The store does not answer as itself: an outage, which spends no attempt and writes no refusal. Its
+            # queue waits for the next round, and the other stores go on.
+            paused.add(row["store"])
+            continue
         code = None
         try:
             media_store.replicate(vault, vault / row["binary_rel"], row["store"])
@@ -493,7 +617,7 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
                                  "WHERE store = ? AND binary_rel = ?",
                                  (attempts, code, time.time() + _RETRY_SECONDS * attempts, row["store"], row["binary_rel"]))
             if code == "MEDIA_STORE_UNAVAILABLE":
-                paused.add(row["store"])  # Every original of an unavailable store fails the same way.
+                paused.add(row["store"])  # A store that failed mid-copy fails the same way for the next original.
         else:
             _settle(ledger, row, REFUSED, code)
             settled += 1
@@ -506,12 +630,18 @@ def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | Non
                      "WHERE store = ? AND binary_rel = ?", (state, code, attempts, row["store"], row["binary_rel"]))
 
 
+_observed: dict[Path, float] = {}
+
+
 def work(vault: Path, *, deadline: float | None = None) -> bool:
     """One bounded unit of background work: a rebuild, a scan or a drain; True when it did something."""
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True:
         return False
+    if time.monotonic() - _observed.get(vault, -_OBSERVE_SECONDS) >= _OBSERVE_SECONDS:
+        _observed[vault] = time.monotonic()
+        observe(vault)
     if rebuild_due(vault):
         rebuild(vault)
         return True
