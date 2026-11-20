@@ -26,7 +26,7 @@ from fastmcp.server.transforms import Transform
 from fastmcp.utilities.versions import dedupe_with_versions
 from starlette.middleware import Middleware as ASGIMiddleware
 
-from . import capabilities, cloud_cell, edit_operations, guards, multi_edit
+from . import capabilities, cloud_cell, edit_operations, guards, multi_edit, source_offer
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
@@ -960,7 +960,13 @@ def build_server(
         lifespan = health_listener.lifespan(lifespan)
     mcp = ExomemFastMCP(
         "exomem",
-        instructions=SERVER_INSTRUCTIONS,
+        # A cloud cell is a network service run by the operator, so AGPL section 13 asks it
+        # to offer its source. Self-hosted servers hold their source already, and their
+        # instructions stay the shared text that tests and the prompt observer hash.
+        instructions=(
+            f"{SERVER_INSTRUCTIONS} {source_offer.offer_text()}" if cloud else SERVER_INSTRUCTIONS
+        ),
+        website_url=source_offer.SERVER_REPOSITORY_URL,
         auth=auth,
         icons=server_icons(),
         lifespan=lifespan,

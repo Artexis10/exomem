@@ -564,4 +564,15 @@ operations.
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+The server, CLI and everything not listed below are AGPL-3.0-or-later. See
+[LICENSE](LICENSE).
+
+| Path | Licence |
+|---|---|
+| `plugins/` (the Claude Code and Exomem Cloud client plugins) | Apache-2.0, see [`plugins/claude-code/LICENSE`](plugins/claude-code/LICENSE) |
+| `src/exomem/_scaffold/` (the starter skill and vault scaffold) | Apache-2.0, see [`src/exomem/_licenses/Apache-2.0.txt`](src/exomem/_licenses/Apache-2.0.txt) |
+| `infra/topolvm/` | Apache-2.0, upstream's own licence |
+
+Exomem Cloud offers its running source from the app and from the MCP server
+instructions. The names Exomem and Substrate Systems follow
+[TRADEMARK.md](TRADEMARK.md). Contributions need a signed [CLA](CLA.md).

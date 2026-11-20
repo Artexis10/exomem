@@ -9,7 +9,7 @@
   },
   "homepage": "https://substratesystems.io/exomem",
   "repository": "https://github.com/Artexis10/exomem",
-  "license": "AGPL-3.0-or-later",
+  "license": "Apache-2.0",
   "keywords": [
     "memory",
     "knowledge-base",
