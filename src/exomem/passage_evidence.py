@@ -346,11 +346,12 @@ def _stop_if_caller_left(phase: str) -> None:
     reader, while the work keeps an admission slot that a live caller is refused for.
     Other tools keep running on purpose: a capture's caller adopts its settled write.
     """
-    from anyio import NoEventLoopError, from_thread
+    from anyio import from_thread
 
     try:
         from_thread.check_cancelled()
-    except NoEventLoopError:
+    # The documented error of every anyio that mcp admits; `NoEventLoopError` exists only from 4.11.
+    except RuntimeError:
         return  # A CLI or in-process call has no serving host, so no caller can leave it.
     except asyncio.CancelledError:
         log_event(_log, logging.INFO, "passage_search_abandoned", fields={"phase": phase})
