@@ -579,3 +579,5 @@ source stays AGPL-3.0-or-later; the copies the plugin ships are Apache-2.0.
 Exomem Cloud offers its source from the app and from the MCP handshake, which names the
 running release and this repository. The names Exomem and Substrate Systems follow
 [TRADEMARK.md](TRADEMARK.md). Contributions need a signed [CLA](CLA.md).
+
+[docs/cloud-security-model.md](docs/cloud-security-model.md) lists Exomem Cloud's security claims and the public code that enforces each one.
