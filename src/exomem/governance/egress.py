@@ -158,6 +158,8 @@ class DisclosureCollector:
     credential_redactions: int = 0
     credential_principal: str | None = None
     credential_purpose: str | None = None
+    #: A collector that nothing emits (`disclosure_boundary(sink=True)`): a decision made inside it records no outcome.
+    sink: bool = False
 
 
 def _published_paths(entries: Any, field_name: str) -> set[str] | None:
@@ -276,11 +278,15 @@ _DISCLOSURE_BOUNDARY_OWNERS: ContextVar[tuple[bool, ...]] = ContextVar(
 
 
 @contextmanager
-def disclosure_boundary(vault_root: Path, command_name: str, *, join_existing: bool = False):
+def disclosure_boundary(
+    vault_root: Path, command_name: str, *, join_existing: bool = False, sink: bool = False,
+):
     """Collect one command's decisions and emit only on its success.
 
     Nested commands own separate receipts unless their caller explicitly opts
-    into the active command's same-vault collector.
+    into the active command's same-vault collector. A `sink` boundary is one
+    whose collector no caller emits: it only keeps its decisions out of the
+    enclosing command's receipt, so it records none and hashes no page.
     """
     existing = _collector()
     root = Path(vault_root)
@@ -290,7 +296,7 @@ def disclosure_boundary(vault_root: Path, command_name: str, *, join_existing: b
     collector = (
         existing
         if not owns_collector
-        else DisclosureCollector(root, uuid.uuid4().hex, command_name)
+        else DisclosureCollector(root, uuid.uuid4().hex, command_name, sink=sink)
     )
     token = _DISCLOSURE_COLLECTOR.set(collector) if owns_collector else None
     owners = _DISCLOSURE_BOUNDARY_OWNERS.set((*_DISCLOSURE_BOUNDARY_OWNERS.get(), owns_collector))
@@ -479,7 +485,8 @@ def _outcome_for_decision(
     if (decision is not None and _file_policy_empty(vault_root, policy)
             and not raw_protection.marked(rel_path)):
         return
-    if collector is None or not _claim_path_outcome(
+    # Nothing emits a sink's outcomes, so claiming a path in it would only hash the page for nobody.
+    if collector is None or collector.sink or not _claim_path_outcome(
         collector, rel_path, outcome, decision.level if decision is not None else None,
     ):
         return
@@ -2305,9 +2312,13 @@ def _stored_admission_many(
     root: Path, paths: list[str], publish: bool, *, policy: Policy, who: RequestPrincipal,
     identity: Callable[[], object], scalar: Callable[[str, bool], tuple[bool, bool]],
     purpose: str | None = None, tombstones: frozenset[str] = frozenset(), content_only: bool = False,
-    record_outcomes: bool = False,
+    record_outcomes: bool = False, within_request: Callable[[], object] | None = None,
 ) -> dict[str, tuple[bool, bool]]:
-    """Decide each ordinary scope class once; unknown facts and caller views remain scalar."""
+    """Decide each ordinary scope class once; unknown facts and caller views remain scalar.
+
+    `within_request` names the classes of a caller that `identity` cannot publish for (a bound writer, an
+    empty policy). Its classes live in this request's memo alone and its verdicts are never published.
+    """
     from ..vault_store import read as store_read
     from . import page_admission
 
@@ -2315,6 +2326,10 @@ def _stored_admission_many(
     if memo is None:
         return {path: scalar(path, publish) for path in paths}
     named = identity()
+    if named is None and within_request is not None:
+        named, publish = within_request(), False
+    collector = _collector()
+    recording = record_outcomes and collector is not None and not collector.sink
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
     classes = memo.setdefault(("scope-admission", named, content_only), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
@@ -2338,7 +2353,7 @@ def _stored_admission_many(
         permitted, decision = classes[scopes]
         tombstoned = not content_only and lifecycle.is_tombstoned_in(tombstones, path)
         allowed = permitted and not tombstoned
-        if record_outcomes and not tombstoned and decision is not None and _collector() is not None:
+        if record_outcomes and not tombstoned and decision is not None and recording:
             content_hash, size = page_admission.evidence(root, path)
             _outcome_for_decision(
                 root, path, decision=_resolve_l4_bridge(root, decision, policy=policy, audience=who.audience_id),
@@ -3597,16 +3612,39 @@ def quick_page_visible(
     return decision.level >= RELEASE_FLOOR
 
 
+def _bound_operation_decides_as(root: Path, policy: Policy, who: RequestPrincipal, purpose: str | None) -> bool:
+    """Whether the bound writer's operation is this caller's, under this policy.
+
+    `_decide_path` under a bound writer refuses another principal or purpose and withholds under another
+    policy, whatever the page. A set decided by class would skip that check, so such a set stays per page.
+    """
+    writer = bound_writer(root)
+    if writer is None:
+        return True
+    operation = writer._operation
+    return (operation is not None and operation.who == who and operation.purpose == purpose
+            and operation.policy.fingerprint == policy.fingerprint)
+
+
 def _release_admission_identity(
     root: Path, policy: Policy, who: RequestPrincipal, purpose: str | None,
-    grants_hash: str, tombstones: frozenset[str],
+    grants_hash: str, tombstones: frozenset[str], *, within_request: bool = False,
 ) -> tuple | None:
-    """Name every non-page dependency of a publishable release verdict."""
+    """Name every non-page dependency of a publishable release verdict.
+
+    `within_request` names the classes of one set that a request decides for itself and publishes nowhere,
+    so a bound writer and an empty policy, whose live collection state a publication cannot name, may have
+    them: a page that the class route serves is not collection-relevant (`page_admission.simple_page`).
+    """
     # Sessions read time; writers and empty policies can read live collection ownership.
-    if (policy.empty or policy.blocked or not who.resolved
+    if (policy.blocked or not who.resolved
             or who.authorization_session_id is not None
-            or who.verified_authorization_session is not None
-            or bound_writer(root) is not None):
+            or who.verified_authorization_session is not None):
+        return None
+    if within_request:
+        if not _bound_operation_decides_as(root, policy, who, purpose):
+            return None
+    elif policy.empty or bound_writer(root) is not None:
         return None
     try:
         boundary = connector_boundary.admission_identity(root, who)
@@ -7953,6 +7991,11 @@ def release_walk_filter(
             vault_root, policy, who, declared_purpose, grants_hash, tombstones,
         )
 
+    def request_identity() -> tuple | None:
+        return _release_admission_identity(
+            vault_root, policy, who, declared_purpose, grants_hash, tombstones, within_request=True,
+        )
+
     def judge_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
         if not paths:
             return {}
@@ -7960,6 +8003,7 @@ def release_walk_filter(
             return _stored_admission_many(
                 vault_root, paths, publish, policy=policy, who=who, purpose=declared_purpose,
                 tombstones=tombstones, identity=identity, scalar=judge, record_outcomes=True,
+                within_request=request_identity,
             )
 
     keep = AdmittedPredicate(Admission(identity, judge, judge_many))
@@ -8359,16 +8403,17 @@ def page_filter_over(
     # A non-page reference is kept whatever the page verdicts say, so the
     # catalogue publishes only the pages `decide` hands on to the release verdict.
     def decide_many(paths: list[str], publish: bool) -> dict[str, tuple[bool, bool]]:
-        if store_read.request_memo(root) is None:
-            if not paths:
-                return {}
-            with release_decision_context(root):
+        if not paths:
+            return {}
+        # The context first: under a bound writer it is what opens the request that the set route reads.
+        with release_decision_context(root):
+            if store_read.request_memo(root) is None:
                 return {path: decide(path, publish) for path in paths}
-        held_page = store_read.held_lookup(root, paths)
-        ordinary = [path for path in paths if path not in held and held_page(path)]
-        answers = offered.decide_many(ordinary, publish)
-        answers.update({path: decide(path, publish) for path in paths if path not in answers})
-        return answers
+            held_page = store_read.held_lookup(root, paths)
+            ordinary = [path for path in paths if path not in held and held_page(path)]
+            answers = offered.decide_many(ordinary, publish)
+            answers.update({path: decide(path, publish) for path in paths if path not in answers})
+            return answers
 
     return AdmittedPredicate(Admission(offered.identity, decide, decide_many))
 
