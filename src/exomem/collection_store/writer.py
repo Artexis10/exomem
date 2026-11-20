@@ -3604,16 +3604,21 @@ class CollectionWriter:
             )
             self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
+            # A retracted row is not validated again; its history is judged on the revised projects.
+            self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
+                ((governance.reprojected(captured, metadata), row_id) for row_id, captured in self.connection.execute(
+                    "SELECT row_id,governance_json FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
+                    (current.collection_id,)).fetchall()), many=True)
             for held_id, kind, encoded, captured, path in self.connection.execute(
                 "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id,),
             ).fetchall():
-                if kind == "view-correction":
-                    preserved = governance._metadata(captured)
-                    preserved["projects"] = governance._metadata(metadata)["projects"]
-                    held_metadata = _json(preserved)
+                candidate = None if kind == "view-correction" else records._decode_held_value(json.loads(encoded))
+                if candidate is None or (candidate.get("action") == "update" and candidate.get("item_key") not in plans):
+                    # A view correction, or an update held against a row since retracted, has no current row to
+                    # validate again; it keeps its own tags and classes.
+                    held_metadata = governance.reprojected(captured, metadata)
                 else:
-                    candidate = records._decode_held_value(json.loads(encoded))
                     before = plans.get(candidate.get("item_key"))
                     held_metadata = governance.held_metadata(proposed.schema, candidate, metadata, before)
                 self._execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",

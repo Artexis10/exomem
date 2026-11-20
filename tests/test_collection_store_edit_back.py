@@ -2084,7 +2084,7 @@ def test_a_held_whole_log_view_is_withheld_from_a_caller_who_cannot_read_every_r
     from test_collection_store_writer import OTHER, log_manifest_text
     from test_governance_egress import _external, write_rule, write_scope
 
-    from exomem.collection_store import authority
+    from exomem.collection_store import authority, governance
     from exomem.collection_store.preview import preview_store
     from exomem.governance.principal import owner_principal, request_scope
 
@@ -2125,9 +2125,16 @@ def test_a_held_whole_log_view_is_withheld_from_a_caller_who_cannot_read_every_r
 
     assert attention(owner_principal()) == ([held], None)
     assert attention(_external()) == ([], None)
+    # The held bytes still show the withheld row once it is retracted, so the hold's own decision stays at that row's.
+    container, version = store.current_guards(CID, OTHER)
+    store.retract_record(CID, item_key=OTHER, expected_container_hash=container, expected_item_version=version,
+                         why="entered in error")
+    with request_scope(_external()), store.read_snapshot():
+        [hold] = governance.subjects(store.connection, CID, "test", identity=f"exomem://collection-held/{CID}/{held}")
+        assert store._operation.decision(hold).level == 0
 
 
-X3 = "Knowledge Base/Records/Health/X3/_collection.md"
+X3 ="Knowledge Base/Records/Health/X3/_collection.md"
 X3_LOG = "Knowledge Base/Records/Health/X3/Training Log.md"
 
 

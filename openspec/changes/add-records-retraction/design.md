@@ -30,7 +30,8 @@ Schema 19 renames the table `items` to `item_rows` and adds `retracted_txn INTEG
 - SQLite rewrites child foreign keys, indexes and trigger bodies on `ALTER TABLE ... RENAME`. The minimum supported SQLite (3.38) does this.
 - The view flattens onto the unique and partial indexes.
 - A write to the view fails loudly, so every raw writer that names `items` must move to `item_rows`. Blob I/O cannot open a view, so the blob readers move too.
-- Reads that must see retracted rows (history, identity, typed version reads) read `item_rows`.
+- Reads that must see retracted rows (history, identity, typed version reads, and the rows that bound a hold's release) read `item_rows`.
+- A revise gives a retracted row the manifest's new projects and keeps its tags and classes, so its history is judged on the current manifest.
 
 **Rejected alternatives:**
 
@@ -75,7 +76,7 @@ A failure leaves schema 18.
 ## Risks / Trade-offs
 
 - **Every earlier release refuses a schema-19 store.** Back up the store with the current release before the upgrade. To go back, restore that backup, which loses writes made after it, or roll forward.
-- **A reader that must see retracted rows but reads the view** silently omits them. The history, identity and typed version reads are named in the tasks, and the history tests cover them.
+- **A reader that must see retracted rows but reads the view** silently omits them. The history, identity and typed version reads are named in the tasks, and the history tests cover them. A hold whose row is retracted would lose that row's release bound, so the hold tests cover it too.
 - **The import row counter assumed rows are never removed.** It still walks forward from the last import log row, and counts the current rows through the partial index when a retraction or re-admission follows that row.
 
 ## Migration Plan

@@ -45,11 +45,19 @@ from test_collection_store_importer import (
 from test_collection_store_summary import bulk, create, pages, summary_text
 from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
 from test_collection_store_writer import store as store  # noqa: F401
-from test_governance_egress import _external
+from test_governance_egress import _external, write_rule, write_scope
 from test_records_bulk_upsert import _evidence
 from test_typed_history_generations import before_retractable_rows
 
-from exomem import memory_refs, page_ids, record_history, records
+from exomem import (
+    command_surface,
+    commands,
+    memory_refs,
+    mutation_terminal,
+    page_ids,
+    record_history,
+    records,
+)
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
@@ -151,17 +159,16 @@ def test_a_retracted_row_id_is_refused_like_an_absent_id(store):
     assert refusal(row_id) == refusal(absent) and refusal(row_id)[0] == "ITEM_NOT_FOUND"
 
 
-def test_a_query_page_in_flight_is_refused_after_a_retraction(store):
-    """A continuation that outlives a retraction pages over a row set that changed under it."""
+def test_the_person_reads_that_the_row_was_retracted_not_that_its_page_was_deleted(store):
+    """The receipt names the collection's page, which stays; "Deleted -> <page>" tells the person it is gone."""
     create(store)
-    keys = [append(store, f"Entry {number}") for number in range(3)]
-    with preview_store(store.root, store.handle):
-        first = record_memory(store.root, "query", collection=CID, columns=["title"], limit=1)
-    retract(store, keys[2])
-    with preview_store(store.root, store.handle), pytest.raises(OpError) as refused:
-        record_memory(store.root, "query", collection=CID, columns=["title"], limit=1,
-                      continuation=first["continuation"])
-    assert refused.value.code == "STALE_RECORD_SNAPSHOT"
+    receipt = retract(store, append(store, WRONG))
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "record_memory")
+    terminal = mutation_terminal.committed_terminal(
+        receipt, request_id="11111111-1111-4111-8111-111111111111", receipt_id="receipt-1", idempotency_key=None)
+    verb = command_surface.outcome_verb_of(command, {"action": "retract"})
+    summary = mutation_terminal.project_terminal(terminal, outcome_verb=verb)["user_summary"]
+    assert summary.startswith(f"Retracted -> {pages(store)[0]} (")
 
 
 # --- T2 history and the chain -----------------------------------------------------------------
@@ -183,6 +190,22 @@ def test_row_history_shows_the_versions_and_the_retraction_with_its_reason(store
     assert history["revisions"][0]["prior"]["values"] == {"title": WRONG, "count": 2}
     assert history["revisions"][0]["after_item_hash"] is None
     assert agent["events"][0]["operation"] == "retract" and agent["events"][0]["item_key"] == key
+
+
+def test_a_retracted_rows_history_opens_after_the_collection_joins_a_project(store):
+    """A row inherits the manifest's projects; a revise that reaches only current rows leaves a retracted row on the old ones."""
+    create(store)
+    key = append(store, WRONG)
+    retract(store, key)
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.revise_collection(CID, manifest_text=summary_text().replace("title: Work", "title: Work\nprojects: [Alpha]"),
+                            why="file the collection under a project", **guards)
+    with preview_store(store.root, store.handle):
+        history = record_history.read(store.root, CID, item_key=key, semantic_profile="records")
+        agent = records.agent_audit_history(store.root, CID)
+    assert [revision["operation"] for revision in history["revisions"]] == ["retract"]
+    assert history["revisions"][0]["prior"]["values"] == {"title": WRONG, "count": 1}
+    assert [event["operation"] for event in agent["events"]] == ["revise", "retract", "append", "create"]
 
 
 def test_a_cold_reopen_verifies_the_chain_and_a_later_write_commits(store):
@@ -297,6 +320,34 @@ def test_a_restricted_caller_gets_the_collection_refusal_and_nothing_is_written(
         store.retract_record(CID, item_key=key, expected_container_hash=container,
                              expected_item_version=version, why="try")
     assert tuple(store.connection.iterdump()) == before
+
+
+def test_a_hold_on_a_retracted_row_stays_withheld_with_that_row(store):
+    """A hold is released no further than the row it would change; a hold that loses its row at a retraction shows a withheld row's values."""
+    text = summary_text(manifest_text().replace("    count:", "    classes: {type: array, items: {type: string}}\n    count:"))
+    store.create_collection(manifest_path(), text, why="create", scaffold=False)
+    key = store.append_record(CID, item={"title": WRONG, "classes": ["Private"]}, why="observe")["item_key"]
+    container, version = store.current_guards(CID, key)
+    with pytest.raises(collections.CollectionError, match="SCHEMA_FIELD_TYPE"):
+        store.update_record(CID, item_key=key, changes={"classes": [], "count": "many"}, why="declassify",
+                            expected_container_hash=container, expected_item_version=version)
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + "classes: [private]\n")  # withholds the row; the refused update carries no class
+    write_rule(store.root, ceiling=0)
+
+    def held(who):
+        with request_scope(who):
+            return store.inspect_collection(CID)["coverage"]["held"]
+
+    assert (held(owner_principal()), held(_external())) == (1, 0)
+    retract(store, key)
+    assert (held(owner_principal()), held(_external())) == (1, 0)
+    # A revise has no current row to judge the hold against; the hold keeps the retracted row's bound.
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.revise_collection(CID, manifest_text=text.replace("title: Work", "title: Work\nprojects: [Alpha]"),
+                            why="file the collection under a project", **guards)
+    assert (held(owner_principal()), held(_external())) == (1, 0)
 
 
 def test_a_collection_that_renders_one_view_per_row_refuses_retraction(store):

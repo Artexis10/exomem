@@ -98,6 +98,16 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
     return row_metadata(schema, attempted, metadata)
 
 
+def reprojected(captured: str, metadata: str) -> str:
+    """``captured`` metadata under a revised manifest: its own tags and classes, the manifest's projects.
+
+    A revise gives this to material it does not validate again, so its release follows the new projects.
+    """
+    preserved = _metadata(captured)
+    preserved["projects"] = _metadata(metadata)["projects"]
+    return _json(preserved)
+
+
 def _pass_release_limit(error: collections.CollectionError) -> None:
     """Re-raise the typed summary release limit, which a generic not-found refusal would hide."""
     if error.code == RELEASE_LIMIT:
@@ -537,8 +547,8 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                   query_order=False, retained=False) -> Iterator[CanonicalSubject]:
     """Stream canonical metadata; a row key selects no manifest or held candidate.
 
-    ``retained`` also yields a retracted row, which only a history reader of that row may ask for;
-    every other caller sees the current rows of the ``items`` view.
+    ``retained`` also yields a retracted row, which only a reader that judges that row's history or holds
+    may ask for; every other caller sees the current rows of the ``items`` view.
     """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
@@ -616,16 +626,21 @@ def held_shows_every_row(candidate_json: str) -> bool:
 
 
 def held_targets(conn: sqlite3.Connection, hold: CanonicalSubject) -> tuple[CanonicalSubject, ...]:
-    """The existing items a hold would change or show: its one item, every row for a whole log view,
-    or none when it proposes a new item."""
+    """The items a hold would change or show: its one item, every row for a whole log view,
+    or none when it proposes a new item.
+
+    A retracted row stays a target: the held values were written against it, so its release still bounds them.
+    """
     row = conn.execute("SELECT candidate_json FROM held_candidates WHERE collection_id=? AND held_id=?",
                        (hold.collection_id, hold.row_id)).fetchone()
     key = None if row is None else held_item_key(row[0])
     if key is not None:
-        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), 1))
+        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key,
+                                          retained=True), 1))
     if row is not None and held_shows_every_row(row[0]):
         return tuple(subject for subject in iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id,
-                                                          include_held=False) if subject.basis.domain == "row")
+                                                          include_held=False, retained=True)
+                     if subject.basis.domain == "row")
     return ()
 
 
