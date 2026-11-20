@@ -21,6 +21,13 @@ request at ~100 s. **Diagnose from the access log before touching the server**
 (claude.ai gateway IPs `160.79.104.0/21` still appear through the tunnel); don't
 restart the service reflexively — restarts CAUSE pattern (1) for live sessions.
 
+## Finding what a busy service thread is doing
+
+`top -H` shows every service thread as `python`. To name them, send `kill -USR1 <worker pid>`
+(the `service_manager ... worker` process). The worker writes `thread-dump-<time>-<pid>.txt` in
+its log directory: each OS thread by CPU time, busiest first, with its Python name and stack. The
+dump only reads state. Send two a minute apart to see whether a thread is stuck or looping.
+
 ## Live-cell guardrails (2026-08 incident; standing until `bound-graph-recovery-funnel` lands in code)
 
 - **Never run an out-of-process drain (`exomem index --scope vault`) while the
