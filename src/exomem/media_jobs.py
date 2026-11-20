@@ -1949,13 +1949,21 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def pending_results(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJobResult]:
+    def pending_results(
+        self, *, limit: int = STATUS_JOB_LIMIT, keys: list[tuple[int, int]] | None = None
+    ) -> list[MediaJobResult]:
+        """The recorded results, oldest update first; `keys` (job id, claim revision) names the ones wanted."""
         if isinstance(limit, bool) or limit <= 0:
             raise ValueError("media result limit must be a positive integer")
+        if keys is not None and not keys:
+            return []
+        wanted = "" if keys is None else "WHERE " + " OR ".join(
+            ["(media_job_results.job_id = ? AND media_job_results.claim_revision = ?)"] * len(keys)
+        )
         conn = self._connect()
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT jobs.*, media_job_results.schema_version,
                        media_job_results.claim_revision AS result_claim_revision,
                        kind, sidecar_before_hash, sidecar_before_evidence_version,
@@ -1963,9 +1971,10 @@ class MediaJobStore:
                        payload_hash, media_job_results.ocr_generation AS result_ocr_generation,
                        target_hash, target_evidence_version, target_size, receipt_revision
                 FROM media_job_results JOIN jobs ON jobs.id = media_job_results.job_id
+                {wanted}
                 ORDER BY media_job_results.updated_at, jobs.id LIMIT ?
                 """,
-                (limit,),
+                (*(value for key in keys or () for value in key), limit),
             ).fetchall()
             results: list[MediaJobResult] = []
             for row in rows:

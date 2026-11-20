@@ -534,6 +534,7 @@ def reconcile_media(
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
     publication_intents: list[object] = []
+    rerun_with_commit_hold = False
 
     def _abort_publication_intents() -> None:
         if publication_intents:
@@ -546,12 +547,9 @@ def reconcile_media(
     def _write_sidecar(write: PlannedWrite) -> None:
         from .governance import catalog_publication
 
-        if queue_only:
-            # Only the runtime going unavailable after the plan reaches here. A write must not run in
-            # a hold that leaves the commit generation alone; the caller asks again.
-            raise MediaProcessingError(
-                "MEDIA_RUNTIME_UNAVAILABLE", "the media runtime became unavailable while the request was queued"
-            )
+        # A write needs the advancing hold. Queue-only mode plans no write and reruns with that hold
+        # when the runtime is unavailable, the one case that writes after the plan.
+        assert not queue_only, "a hold that leaves the commit generation alone never writes a sidecar"
         try:
             written = _preserve_module().commit_media_sidecar_writes(
                 vault,
@@ -628,6 +626,7 @@ def reconcile_media(
     def _commit_unit() -> tuple[bool, ReconcileResult | None]:
         """The guarded part: check that nothing changed since the plan, then commit. True with
         a result when reconcile_media returns it as it is."""
+        nonlocal rerun_with_commit_hold
         result: ReconcileResult | None = None
         commit_tier = access.access_tier(vault, rel_binary)
         if commit_tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
@@ -670,6 +669,12 @@ def reconcile_media(
             result = ReconcileResult(media_type, "completed", sidecar, None)
         else:
             assert pending is not None
+            unavailable = _runtime_unavailable(vault)
+            if queue_only and unavailable is not None:
+                # The runtime went down after the plan, so this path must also write a blocked sidecar:
+                # change nothing here and run it again with the advancing hold.
+                rerun_with_commit_hold = True
+                return False, None
             if original != pending:
                 expected = (
                     content_hash(original)
@@ -713,7 +718,6 @@ def reconcile_media(
                 durable_job = store.get(job_id)
             job_id = durable_job.id if durable_job is not None else None
             state = durable_job.state if durable_job is not None else media_jobs.PENDING
-            unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
                 reason, next_action = unavailable
                 if durable_job is None or not store.mark(
@@ -752,6 +756,11 @@ def reconcile_media(
     with _commit_scope():
         early, result = _committing(
             vault, queue_guard if queue_only else commit_guard, "media_reconcile_commit", _commit_unit
+        )
+    if rerun_with_commit_hold:
+        return reconcile_media(
+            vault, binary, explicit=explicit, commit_guard=commit_guard,
+            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request,
         )
     if early:
         return result

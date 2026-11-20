@@ -523,10 +523,11 @@ class MediaWorker:
         self._last_batch_at: float | None = None
         #: When the progress floor opens, from the last read of the queue; None until a gated drain reads it.
         self._floor_opens_at: float | None = None
-        #: Results whose publication failed alone, with when. They stay out of batches, so one cannot spoil the rest.
+        #: Results that failed to publish alone, with when. They stay out of batches until they are
+        #: retried alone, so one result cannot spoil the rest. An entry ends when its result ends.
         self._set_aside: dict[tuple[int, int], float] = {}
-        #: Results the next batch takes; a failed batch halves it, a published one doubles it back.
-        self._batch_cap = media_publication.BATCH_RESULT_LIMIT
+        #: The results of a failed batch, still to be bisected, in batch order.
+        self._suspects: list[tuple[int, int]] = []
         #: A stop of the dead child that the ledger has not recorded yet: its kind, cell and settings.
         self._unrecorded_stop: tuple[str, media_brakes.CellMemory, media_brakes.Settings] | None = None
         self._memory_hold_until = 0.0
@@ -2451,7 +2452,8 @@ class MediaWorker:
                     log.warning("media parent blocked presentation deferred", exc_info=True)
         if gated and not self._publication_due():
             return False
-        results = self._store.pending_results(limit=media_publication.BATCH_RESULT_LIMIT)
+        # Set-aside results can fill the front of the queue; the window leaves room for a whole batch behind them.
+        results = self._store.pending_results(limit=media_publication.BATCH_RESULT_LIMIT + len(self._set_aside))
         if results:
             self._publish_parent_results(results)
         self._floor_opens_at = None  # the queue changed; the next gated drain reads it again
@@ -2485,14 +2487,8 @@ class MediaWorker:
             )
         return now >= self._floor_opens_at
 
-    def _publish_parent_results(self, results: list[media_jobs.MediaJobResult]) -> None:
-        """Publish drained results as one batch: one hold, one commit, one generation advance, one fan-out.
-
-        A batch lands whole or rolls back, and a batch that rolls back leaves its results pending.
-        The next batch is half the size, so a result that cannot publish ends up alone and is set
-        aside, while the others publish: isolating it costs one failed hold a pass, never a burst of
-        holds. A set-aside result retries alone once it has waited the progress floor.
-        """
+    def _plan_parent_results(self, results: list[media_jobs.MediaJobResult]) -> list[media_jobs.MediaJobResult]:
+        """Settle the results that need no sidecar commit; return those that still need one."""
         planned: list[media_jobs.MediaJobResult] = []
         for result in results:
             try:
@@ -2500,44 +2496,69 @@ class MediaWorker:
                     planned.append(result)
             except Exception:  # noqa: BLE001 - durable result custody is retried
                 log.warning("media parent publication deferred for job %s", result.job_id, exc_info=True)
-        waiting = {_result_key(result) for result in results}
-        self._set_aside = {key: since for key, since in self._set_aside.items() if key in waiting}
-        batch = [result for result in planned if _result_key(result) not in self._set_aside][: self._batch_cap]
-        if batch:
-            self._publish_or_isolate(batch)
-        now = _clock()
-        retry = next(
-            (
-                result
-                for result in planned
-                if now - self._set_aside.get(_result_key(result), now) >= media_publication.MAX_DEFER_SECONDS
-            ),
-            None,
+        return planned
+
+    def _publish_parent_results(self, results: list[media_jobs.MediaJobResult]) -> None:
+        """Publish drained results as one batch: one hold, one commit, one generation advance, one fan-out.
+
+        A batch lands whole or rolls back, and a batch that rolls back leaves its results pending.
+        The next passes bisect exactly those results, one half a pass, until a result that cannot
+        publish stands alone; it is set aside while the others publish. Isolating it costs one failed
+        hold a pass, never a burst of holds. A set-aside result retries alone once it has waited the
+        progress floor.
+        """
+        suspects = (
+            self._plan_parent_results(self._store.pending_results(limit=len(self._suspects), keys=self._suspects))
+            if self._suspects
+            else []
         )
-        if retry is not None:
-            self._publish_or_isolate([retry])
+        if suspects:
+            rank = {key: place for place, key in enumerate(self._suspects)}
+            suspects.sort(key=lambda result: rank[_result_key(result)])
+            self._publish_or_isolate(suspects[: max(1, len(suspects) // 2)])
+        else:
+            self._suspects = []
+            batch = [r for r in self._plan_parent_results(results) if _result_key(r) not in self._set_aside]
+            if batch:
+                self._publish_or_isolate(batch)
+        self._retry_set_aside()
+
+    def _retry_set_aside(self) -> None:
+        """Retry one set-aside result alone once it has waited the progress floor; forget the ended ones."""
+        now = _clock()
+        due = [key for key, since in self._set_aside.items() if now - since >= media_publication.MAX_DEFER_SECONDS]
+        if not due:
+            return
+        waiting = self._store.pending_results(limit=len(due), keys=due)
+        for key in set(due) - {_result_key(result) for result in waiting}:
+            del self._set_aside[key]  # its result ended: published, failed or superseded
+        planned = self._plan_parent_results(waiting)
+        if planned:
+            self._publish_or_isolate(planned[:1])
 
     def _publish_or_isolate(self, batch: list[media_jobs.MediaJobResult]) -> None:
-        """Publish `batch`; on a failure shrink the next batch, or set a lone result aside."""
+        """Publish `batch`; when it fails, bisect its results, or set a lone result aside."""
+        keys = [_result_key(result) for result in batch]
         try:
-            self._publish_batch(batch)
+            finished = self._publish_batch(batch)
         except Exception as error:  # noqa: BLE001 - durable result custody is retried
-            if _ledger_busy(error):
-                # The boundary was refused and nothing ran: the same batch is due again, whole.
-                log.info("media parent publication waits: the boundary is busy (%d results)", len(batch))
-            elif len(batch) > 1:
-                self._batch_cap = max(1, len(batch) // 2)
+            if not _ledger_busy(error):
+                self._suspects = keys if len(batch) > 1 else [key for key in self._suspects if key != keys[0]]
+                if len(batch) == 1:
+                    self._set_aside[keys[0]] = _clock()
                 log.warning(
-                    "media parent batch of %d rolled back; the next batch takes %d",
-                    len(batch), self._batch_cap, exc_info=True,
+                    "media parent batch of %d rolled back; %s",
+                    len(batch), "bisecting its results" if len(batch) > 1 else "the result is set aside", exc_info=True,
                 )
-            else:
-                self._set_aside[_result_key(batch[0])] = _clock()
-                self._batch_cap = media_publication.BATCH_RESULT_LIMIT
-                log.warning("media parent publication set aside for job %s", batch[0].job_id, exc_info=True)
+                return
+            finished = None
+        if finished is None:
+            # The boundary was busy and nothing ran: the same batch is due again, whole.
+            log.info("media parent publication waits: the boundary is busy (%d results)", len(batch))
             return
-        self._batch_cap = min(media_publication.BATCH_RESULT_LIMIT, self._batch_cap * 2)
-        for result in batch:
+        # Every attempted result either ended or stayed pending without failing the batch, so none is suspect.
+        self._suspects = [key for key in self._suspects if key not in keys]
+        for result in finished:
             self._set_aside.pop(_result_key(result), None)
 
     def _plan_parent_result(self, result: media_jobs.MediaJobResult) -> media_jobs.MediaJobResult | None:
@@ -2751,12 +2772,13 @@ class MediaWorker:
         taken.update(write.path for write in writes)
         return _StagedResult(result, writes, receipts, surplus)
 
-    def _publish_batch(self, results: list[media_jobs.MediaJobResult]) -> None:
+    def _publish_batch(self, results: list[media_jobs.MediaJobResult]) -> list[media_jobs.MediaJobResult] | None:
         """Commit up to one hold's worth of `results` together, then fan out once.
 
         Inside one boundary hold: stage each result, commit every write as one batch and publish the
         graph epoch. Outside it: one fan-out for the batch, then each result ends. Results that did
-        not fit the hold's size or time cap stay pending for the next batch.
+        not fit the hold's size or time cap stay pending for the next batch. Returns the results this
+        call ended, or None when the boundary was busy and nothing ran.
         """
         publication_intents: list[object] = []
         staged: list[_StagedResult] = []
@@ -2775,10 +2797,9 @@ class MediaWorker:
                 try:
                     item = self._stage_parent_result(result, taken)
                 except Exception:  # noqa: BLE001 - one result's staging stops only itself
-                    # Staging is per result, so the failure names its result: set it aside and
-                    # commit the others, which costs no second hold.
-                    self._set_aside[_result_key(result)] = _clock()
-                    log.warning("media parent publication set aside for job %s", result.job_id, exc_info=True)
+                    # Staging is per result, so the failure names its result. It stays pending, and the
+                    # others commit in the same hold without a second one.
+                    log.warning("media parent staging failed for job %s", result.job_id, exc_info=True)
                     continue
                 if isinstance(item, _TerminalResult):
                     terminals.append(item)
@@ -2799,11 +2820,12 @@ class MediaWorker:
                 # rolled back: the next batch waits out the spacing.
                 self._last_batch_at = _clock()
         if published is _BUSY:
-            return  # a busy boundary leaves the prepared results for the next drain
+            return None  # a busy boundary leaves the prepared results for the next drain
         for terminal in terminals:
             self._store.terminalize_result(terminal.result, state=terminal.state, error=terminal.error)
+        ended = [terminal.result for terminal in terminals]
         if published is None:
-            return
+            return ended
         handoff, epoch_published = published
         if not self._complete_deferred_graph_completion(
             handoff,
@@ -2813,12 +2835,14 @@ class MediaWorker:
             parent_receipted_handoff=True,
             epoch_published=epoch_published,
         ):
-            return
+            return ended
         for item in staged:
             self._retire_surplus_parts(item.surplus)
             self._store.finalize_result(
                 item.result, requeue_remaining=item.result.kind in {"extraction", "pending"}
             )
+            ended.append(item.result)
+        return ended
 
     def _finish_prepared_target(
         self, result: media_jobs.MediaJobResult, *, expected_sidecar: str

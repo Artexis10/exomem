@@ -28,7 +28,7 @@ A keyed write's place in the arrival-order queue SHALL end when its attempt hold
 
 ### Requirement: Media publication lands in whole bounded batches
 
-The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending. The next batch SHALL then be smaller, down to one result, so that a result that cannot publish ends up alone and is set aside while the others publish, and no result is lost or published twice. A result that fails while it is staged SHALL be set aside without failing the batch. A refused boundary SHALL leave the batch pending, whole, and SHALL NOT start a hold for each result. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
+The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending. The supervisor SHALL then bisect exactly the results of the failed batch, one half per pass, so that a result that cannot publish ends up alone and is set aside while the others publish, and no result is lost or published twice. A set-aside result SHALL stay set aside until its own result ends. A result that fails while it is staged SHALL stay pending without failing the batch. A refused boundary SHALL leave the batch pending, whole, and SHALL NOT start a hold for each result. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
 
 #### Scenario: A batch of results takes one hold and advances the generation once
 
@@ -41,15 +41,15 @@ The media supervisor SHALL publish the durable results it drains as one batch un
 
 - **WHEN** the commit of a batch fails for one result
 - **THEN** no sidecar of the batch changes and every result stays pending
-- **AND** the next batches shrink until the failing result is alone, and that result is set aside
-- **AND** the other results publish once each
+- **AND** the next passes publish halves of exactly the failed results until the failing result is alone, and that result is set aside
+- **AND** the other results publish once each, also when more results wait than one batch takes
 - **AND** the set-aside result publishes once it has waited the progress floor and can commit
 
 #### Scenario: A result that cannot be staged costs the others no second hold
 
 - **WHEN** one result of a batch fails while it is staged
 - **THEN** the other results commit in the same hold, with one advance
-- **AND** the failing result stays pending and is set aside
+- **AND** the failing result stays pending
 
 #### Scenario: A refused boundary leaves the batch pending
 
@@ -88,11 +88,11 @@ The media supervisor SHALL take the boundary for a batch only after foreground w
 
 ### Requirement: A reprocess request queues without advancing the commit generation
 
-A `process_media reprocess` request SHALL plan each path, including the hash of its file and the hydration of an evicted original, outside any vault mutation boundary hold. A path whose transcript is complete SHALL queue its job under a hold that does not advance the commit generation, because the job store is machine-local and no stored content changes. A path that needs a sidecar commit SHALL commit it under its own hold, which advances the generation as any canonical write does, and its index and graph fan-out SHALL run after that hold. The request SHALL yield to waiting writes between paths.
+A `process_media reprocess` request SHALL plan each path, including the hash of its file and the hydration of an evicted original, outside any vault mutation boundary hold. A path whose transcript is complete SHALL queue its job under a hold that does not advance the commit generation, because the job store is machine-local and no stored content changes. A path that needs a sidecar commit SHALL commit it under its own hold, which advances the generation as any canonical write does, and its index and graph fan-out SHALL run after that hold. A path whose queueing finds the media runtime unavailable SHALL run again under that advancing hold, so its page, its job and its result row all show the blocked state. In a store-mode vault the sidecar step runs on the store thread under its own advancing guard, so a path advances the generation once there. The request SHALL yield to waiting writes between paths.
 
-#### Scenario: Six completed paths queue without an advance
+#### Scenario: Six completed paths queue without an advance in a file-mode vault
 
-- **WHEN** a reprocess request names six paths that have complete transcripts
+- **WHEN** a reprocess request names six paths that have complete transcripts in a file-mode vault
 - **THEN** the request does not advance the commit generation
 - **AND** every path has its job queued
 
@@ -101,3 +101,9 @@ A `process_media reprocess` request SHALL plan each path, including the hash of 
 - **WHEN** a reprocess request names paths with complete transcripts and a path that has no page yet
 - **THEN** no file is hashed or hydrated while the boundary is held
 - **AND** only the path that commits a new page advances the commit generation
+
+#### Scenario: A runtime that goes down after the plan still blocks the path
+
+- **WHEN** the media runtime becomes unavailable between a path's plan and its queueing hold
+- **THEN** the path's page, job and result row all show the blocked state
+- **AND** the queueing hold wrote no page

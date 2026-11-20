@@ -8,8 +8,8 @@ read this module, and the status read reports the queue they act on.
 
 from __future__ import annotations
 
-#: Results the supervisor takes from the queue for one batch. It only bounds the planning read: the hold
-#: itself ends at `BATCH_HOLD_SECONDS`, so a backlog publishes at the speed of the hold, one batch a spacing.
+#: Results the supervisor takes from the queue for one batch. It bounds the planning read and so the one
+#: batch commit; the staging stops at `BATCH_HOLD_SECONDS`, so a backlog publishes at the speed of the hold.
 BATCH_RESULT_LIMIT = 64
 
 #: A batch stops staging more results after this long inside one hold, so a slow page cannot grow the hold

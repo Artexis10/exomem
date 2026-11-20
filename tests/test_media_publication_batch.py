@@ -188,37 +188,45 @@ def test_a_batch_of_results_takes_one_hold_advances_the_generation_once_and_land
     assert media_jobs.status(vault)["jobs"] == []
 
 
-def test_a_batch_that_cannot_commit_rolls_back_whole_then_shrinks_until_the_failing_result_is_alone(
+def test_a_batch_that_cannot_commit_rolls_back_whole_and_the_failing_result_is_bisected_out(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed batch commit loses no result; the next batches halve until the failing one is set aside."""
+    """A failed commit loses no result; bisecting exactly the failed results isolates the failing one
+    in two failed holds, while others still wait behind a read window smaller than the backlog."""
     _speech_engine(monkeypatch)
-    worker, pairs = _recorded_results(vault, ["good-a.mp3", "poison.mp3", "good-b.mp3"])
-    poison = pairs[1][1]
+    monkeypatch.setattr(media_publication, "BATCH_RESULT_LIMIT", 2)
+    names = ["good-0.mp3", "good-1.mp3", "good-2.mp3", "poison.mp3", "good-4.mp3", "good-5.mp3"]
+    worker, pairs = _recorded_results(vault, names)
+    poison = pairs[3][1]
+    good = [sidecar for _binary, sidecar in pairs if sidecar != poison]
     real_commit = preserve.commit_media_sidecar_writes
-    refused = {"on": True}
+    refused = {"on": True, "commits": 0}
 
     def commit(vault_root, writes, **kwargs):
         if refused["on"] and any(write.path == poison for write in writes):
+            refused["commits"] += 1
             raise OSError("disk refused this page")
         return real_commit(vault_root, writes, **kwargs)
 
     monkeypatch.setattr(preserve, "commit_media_sidecar_writes", commit)
 
-    worker._drain_parent_results()
+    worker._drain_parent_results()  # good-0 and good-1
+    worker._drain_parent_results()  # good-2 and the poison: the batch rolls back whole
 
-    for _binary, sidecar in pairs:
-        assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
-    assert media_jobs.MediaJobStore(vault).pending_result_count() == 3
+    assert "extracted_by: pending" in good[2].read_text(encoding="utf-8")
+    assert "extracted_by: pending" in poison.read_text(encoding="utf-8")
+    assert media_jobs.MediaJobStore(vault).pending_result_count() == 4
     assert worker._last_batch_at is not None  # the hold ran and advanced the generation, so it spaces the next
 
     for _ in range(4):
         worker._drain_parent_results()
 
-    for _binary, sidecar in (pairs[0], pairs[2]):
+    for sidecar in good:
         assert media_processing.has_completed_transcript(sidecar.read_text(encoding="utf-8"), media_type="audio")
     assert "extracted_by: pending" in poison.read_text(encoding="utf-8")
-    assert media_jobs.MediaJobStore(vault).pending_result_count() == 1
+    (stuck,) = media_jobs.MediaJobStore(vault).pending_results()
+    assert list(worker._set_aside) == [(stuck.job_id, stuck.claim_revision)]
+    assert refused["commits"] == 2  # the failed batch, then the poison alone
 
     refused["on"] = False
     monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 0.0)  # the set-aside result has waited its floor
@@ -227,15 +235,16 @@ def test_a_batch_that_cannot_commit_rolls_back_whole_then_shrinks_until_the_fail
     published = poison.read_text(encoding="utf-8")
     assert media_processing.has_completed_transcript(published, media_type="audio")
     assert published.count("wrong words poison.mp3") == 1
+    assert worker._set_aside == {}
     assert deferred_index.snapshot_full(vault) == []
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
     assert media_jobs.status(vault)["jobs"] == []
 
 
-def test_a_result_that_cannot_stage_is_set_aside_while_the_others_commit_in_the_same_hold(
+def test_a_result_that_cannot_stage_stays_pending_while_the_others_commit_in_the_same_hold(
     vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Staging names its result, so the failure costs the others no second hold."""
+    """Staging names its result, so its failure costs the others no second hold and sets nothing aside."""
     _speech_engine(monkeypatch)
     worker, pairs = _recorded_results(vault, ["good-a.mp3", "poison.mp3", "good-b.mp3"])
     poison_sidecar = pairs[1][1]
@@ -256,6 +265,7 @@ def test_a_result_that_cannot_stage_is_set_aside_while_the_others_commit_in_the_
         assert media_processing.has_completed_transcript(sidecar.read_text(encoding="utf-8"), media_type="audio")
     assert "extracted_by: pending" in poison_sidecar.read_text(encoding="utf-8")
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 1
+    assert worker._set_aside == {} and worker._suspects == []
 
 
 def test_a_refused_boundary_leaves_the_whole_batch_pending_and_costs_one_attempt(
@@ -455,3 +465,32 @@ def test_a_reprocess_request_plans_every_path_outside_the_boundary_and_commits_a
     assert _advances_by_operation(caplog) == {"process_media_reprocess_commit": 1}  # the new page only
     assert (vault / f"{rels[1]}.md").is_file()
     assert {job["path"] for job in media_jobs.status(vault)["jobs"]} == set(rels)
+
+
+def test_a_runtime_that_goes_down_between_the_plan_and_the_queue_hold_blocks_the_path_as_before(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The queue hold writes no sidecar, so a path that must show a blocked page runs again with the
+    advancing hold: the request row, the job and the page all say blocked, as they do without the hold."""
+    _speech_engine(monkeypatch)
+    ((binary, sidecar),) = _preserve_recordings(vault, ["done.mp3"])
+    media_processing.reconcile_media(vault, binary, explicit=False)  # queued, not yet transcribed
+    rel = binary.relative_to(vault).as_posix()
+    real_committing = media_processing._committing
+
+    def runtime_goes_down(root, guard, operation, unit):
+        if operation == "media_reconcile_commit":
+            media_processing.set_media_runtime_unavailable(root, reason="engine unavailable", next_action="restart the engine")
+        return real_committing(root, guard, operation, unit)
+
+    monkeypatch.setattr(media_processing, "_committing", runtime_goes_down)
+    try:
+        (row,) = commands.op_process_media(vault, paths=[rel], operation="reprocess")["results"]
+    finally:
+        media_processing.set_media_runtime_available(vault)
+
+    assert (row["outcome"], row["state"], row["code"]) == ("failed", "blocked", "MEDIA_BLOCKED")
+    assert "processing_state: blocked" in sidecar.read_text(encoding="utf-8")
+    (job,) = media_jobs.status(vault)["jobs"]
+    assert job["state"] == "blocked"
+    assert job["error"] == "engine unavailable"
