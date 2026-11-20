@@ -20,6 +20,11 @@ from .cli_ops import OpError
 #: Pages of rows read to find one id. A collection larger than this refuses rather than guess.
 _MAX_SCAN_PAGES = 20
 _SCAN_LIMIT = 500
+#: The reply fields that can carry a row's id, in order: the first one the collection does not declare.
+#: They are this tool's own reply names, not data, so code fixes them.
+_ID_SLOTS = ("id", "row_id")
+#: Where a reply puts a row's id, said once for each message that sends a caller to it.
+_ID_SLOT_RULE = f"`{_ID_SLOTS[0]}` (`{_ID_SLOTS[1]}` where the collection declares its own `{_ID_SLOTS[0]}` field)"
 
 
 def names_a_manifest(selector: str) -> bool:
@@ -32,28 +37,34 @@ def names_a_manifest(selector: str) -> bool:
     )
 
 
-def resolve_collection(vault_root: Path, selector: str | None, *, profile: str) -> str | None:
+def resolve_collection(
+    vault_root: Path, selector: str | None, *, profile: str, unserved: Callable[[], str | None] | None = None
+) -> str | None:
     """The manifest path of the collection `selector` names by title; `selector` otherwise.
 
     A path, a reference or a UUID passes unchanged. A title that names no visible collection of this
     profile also passes unchanged, so the leaf's own refusal for an unknown collection still answers:
     a collection that the caller may not see answers as one that does not exist. Titles compare as
     the vault compares every title (`vault.title_key`: trimmed, normalized and case-insensitive).
+    `unserved` answers instead where no readable collection carries the title but a visible one lives
+    in a store this thread does not serve, so whether it carries the title is unknown here.
     """
     if selector is None or names_a_manifest(selector.strip()):
         return selector
     key = vault.title_key(selector)
-    matches = [
-        path for title, path in record_governance.visible_collection_titles(vault_root, semantic_profile=profile)
-        if vault.title_key(title) == key
-    ]
+    titles, unread = record_governance.visible_collection_titles(vault_root, semantic_profile=profile)
+    matches = sorted(path for title, path in titles if vault.title_key(title) == key)
     if len(matches) > 1:
+        # The refusal names these manifests, so each is recorded as released, as the inventory records it.
+        candidates = list(record_governance.released_manifest_paths(vault_root, matches))
         raise OpError(
             "AMBIGUOUS_COLLECTION",
-            f"{len(matches)} collections are titled {selector!r}; name one by its manifest path.",
-            details={"candidates": sorted(matches)},
+            f"{len(candidates)} collections are titled {selector!r}; name one by its manifest path.",
+            details={"candidates": candidates},
         )
-    return matches[0] if matches else selector
+    if matches:
+        return matches[0]
+    return unserved() if unread and unserved is not None else selector
 
 
 def row_id(profile: str, row: Mapping[str, Any]) -> str | None:
@@ -66,8 +77,8 @@ def row_id(profile: str, row: Mapping[str, Any]) -> str | None:
 def mark_rows(result: Any, *, profile: str) -> Any:
     """`result` with an `id` on each row that carries its key and version.
 
-    A field the collection declares is stored data and stays. The id goes under `id`, or under
-    `row_id` where the collection declares an `id`, and a row that declares both has no short id.
+    A field the collection declares is stored data and stays. The id goes under the first of
+    `_ID_SLOTS` that the collection does not declare, and a row that declares both has no short id.
     """
     rows = result.get("rows") if isinstance(result, Mapping) else None
     if not isinstance(rows, list):
@@ -75,7 +86,7 @@ def mark_rows(result: Any, *, profile: str) -> Any:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        slot = next((name for name in ("id", "row_id") if name not in row), None)
+        slot = next((name for name in _ID_SLOTS if name not in row), None)
         if slot is not None and (found := row_id(profile, row)) is not None:
             row[slot] = found
     return result
@@ -102,8 +113,8 @@ def bound_row(item_id: str, matches: Sequence[tuple[str, str]], snapshot: str | 
             raise OpError(
                 "ITEM_ID_IS_KEY",
                 f"{item_id} is the row's {label}. It names the row but no version of it, so it cannot guard an "
-                "edit. Edit by the row's `id` (`row_id` where the collection has its own `id` field). "
-                f"A query returns it beside {label}, and it changes with each edit.",
+                f"edit. Edit by the row's {_ID_SLOT_RULE}. A query returns it beside {label}, and it changes "
+                "with each edit.",
             )
         matches = []
     if not matches:

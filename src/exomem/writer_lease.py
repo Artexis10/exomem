@@ -8948,8 +8948,6 @@ def _collection_store_thread(func):
             if current is not None and current.root == Path(injected[0]).resolve():
                 return func(command, *injected, **kwargs)
 
-            # A title names a collection that the store may own; the request routes by the one it names.
-            kwargs = store_runtime.titled_arguments(command.name, injected[0], kwargs)
             import_request = kwargs.get("import_request")
             # Import status is a read-only protocol mode; polling must preserve maintenance backoff.
             import_status = (command.name == "record_memory" and kwargs.get("action") == "import"
@@ -8957,6 +8955,16 @@ def _collection_store_thread(func):
             read_only = _store_request_is_read_only(command, kwargs)
             # Keep demand visible between the routing proof and queue insertion.
             with foreground_priority.foreground():
+                # A title names a collection that the store may own; the request routes by the one it names.
+                entry = time.monotonic()
+                try:
+                    kwargs = store_runtime.titled_arguments(command.name, injected[0], kwargs)
+                except Exception as error:
+                    if not (read_only or import_status):
+                        # This refusal leaves before `invoke` runs, so a refused write records itself here.
+                        _record_store_queue_refusal(command, kwargs, Path(injected[0]).resolve(), error,
+                                                    time.monotonic() - entry)
+                    raise
                 if not (read_only or import_status) and _writes_absorb_contention():
                     routed = store_runtime.route(command.name, injected[0], kwargs, write=True)
                     if routed is not None:

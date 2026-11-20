@@ -9,8 +9,15 @@ title could not be seen.
 
 from __future__ import annotations
 
+import contextvars
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import pytest
 from record_fixtures import LEDGER_COLLECTION_PATH, LEDGER_MANIFEST_TEXT, ledger_item
+from test_collection_field_admission import GUEST
 from test_collection_store_migration import (  # noqa: F401
     MIGRATE,
     X3,
@@ -19,10 +26,16 @@ from test_collection_store_migration import (  # noqa: F401
     migrate,
     start_service,
 )
-from test_collection_store_service import ON, call
+from test_collection_store_s1_gate import _until
+from test_collection_store_service import ON, Service, call
+from test_governance_egress import write_rule, write_scope
 
+from exomem import commands, writer_lease
+from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
-from exomem.collection_store import capability
+from exomem.collection_store import capability, runtime
+from exomem.collection_store.connection import CollectionStoreError
+from exomem.governance.principal import request_scope
 from exomem.record_memory import record_memory
 
 DATASET = "Knowledge Base/Records/dataset/_collection.md"
@@ -31,13 +44,19 @@ FILE_TITLE = "Meter readings"  # held by the dataset, which stays in files
 
 
 @pytest.fixture
-def served(env, monkeypatch):  # noqa: F811
-    """A migrated vault under a running service, and its root: a store collection and a file one."""
+def migrated(env, monkeypatch):  # noqa: F811
+    """A migrated vault that no service serves yet, and its root: a store collection and a file one."""
     root = legacy_vault(env)
     assert migrate(root, "prepare", operator=False) == 0 and migrate(root, "apply") == 0
     monkeypatch.setattr(capability, "RELEASED", MIGRATE | ON)
-    service = start_service(root)
-    yield root
+    return root
+
+
+@pytest.fixture
+def served(migrated):
+    """The migrated vault under a running service that serves its store."""
+    service = start_service(migrated)
+    yield migrated
     service.stop()
 
 
@@ -90,6 +109,101 @@ def test_a_served_title_held_only_by_a_withheld_collection_answers_as_a_title_no
     assert _answer(served, STORE_TITLE) == _answer(served, "Evening sauna log")
 
 
+def test_a_served_title_answers_the_same_whether_its_file_collection_is_withheld_or_deleted(served) -> None:
+    (served / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Records/dataset\n")
+    withheld = _answer(served, FILE_TITLE)
+    (served / "Knowledge Base/_access.yaml").unlink()
+    shutil.rmtree(served / Path(DATASET).parent)
+
+    assert _answer(served, FILE_TITLE) == withheld
+
+
+# While the store opens, or cannot open, the store collections' titles are unknown, not absent.
+
+
+def _coordinator_unreachable(client):
+    raise writer_lease._coordinator_unavailable_error(ConnectionRefusedError("connection refused"))
+
+
+def test_a_title_while_the_store_cannot_open_gets_the_refusal_its_path_gets(migrated, monkeypatch) -> None:
+    monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", _coordinator_unreachable)
+    service = Service(migrated, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime._server(migrated.resolve()).refusal[0] == "WRITER_COORDINATOR_UNAVAILABLE")
+        by_path = _answer(migrated, X3)
+
+        assert by_path["code"] == "WRITER_COORDINATOR_UNAVAILABLE"
+        assert _answer(migrated, STORE_TITLE) == by_path
+    finally:
+        service.stop()
+
+
+def test_a_title_while_the_store_opens_waits_for_the_answer_its_path_waits_for(migrated, monkeypatch) -> None:
+    opening, opened = threading.Event(), threading.Event()
+    open_store = runtime.StoreServer._open
+
+    def slow_open(server):
+        opening.set()
+        assert opened.wait(30), "the test did not let the store open"
+        open_store(server)
+
+    monkeypatch.setattr(runtime.StoreServer, "_open", slow_open)
+    service = Service(migrated, writer_lease.start_server_lifecycle())
+    try:
+        assert opening.wait(10)
+        server = runtime._server(migrated.resolve())
+        with ThreadPoolExecutor(2) as pool:
+            by_path = pool.submit(contextvars.copy_context().run, _answer, migrated, X3)
+            by_title = pool.submit(contextvars.copy_context().run, _answer, migrated, STORE_TITLE)
+            _until(lambda: len(server._requests) == 2 or by_title.done())
+            assert not by_title.done(), by_title.result()  # it waits for the store, as the path does
+            opened.set()
+
+            assert by_path.result()[1], "the collection must hold rows, or the comparison proves nothing"
+            assert by_title.result() == by_path.result()
+    finally:
+        opened.set()
+        service.stop()
+
+
+def _guest_answer(root, collection):
+    """What a caller that may see no Records collection hears for a query by this reference."""
+    command = next(command for command in commands.product_commands_for("mcp") if command.name == "record_memory")
+    with request_scope(GUEST):
+        try:
+            return writer_lease.invoke_command(command, root, action="query", collection=collection)
+        except OpError as error:
+            return error.as_public_dict()
+        except (collections.CollectionError, CollectionStoreError) as error:
+            return error.code, str(error)
+
+
+@pytest.mark.parametrize("store", ["cannot open", "opening"])
+def test_store_collections_withheld_from_the_caller_leave_its_title_answer_unchanged_while_the_store_opens(
+        migrated, monkeypatch, store) -> None:
+    """A caller that may see no store collection learns nothing from the store's state: a store
+    collection's title answers as it does where no service runs."""
+    write_scope(migrated, paths="Records/**")
+    write_rule(migrated, ceiling=0)
+    without_service = _guest_answer(migrated, STORE_TITLE)
+    opened = threading.Event()
+    if store == "cannot open":
+        monkeypatch.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", _coordinator_unreachable)
+    else:
+        open_store = runtime.StoreServer._open
+        monkeypatch.setattr(runtime.StoreServer, "_open", lambda server: (opened.wait(30), open_store(server))[1])
+    service = Service(migrated, writer_lease.start_server_lifecycle())
+    try:
+        _until(lambda: runtime.served(migrated))
+        if store == "cannot open":
+            _until(lambda: runtime._server(migrated.resolve()).refusal[0] == "WRITER_COORDINATOR_UNAVAILABLE")
+
+        assert _guest_answer(migrated, STORE_TITLE) == without_service
+    finally:
+        opened.set()
+        service.stop()
+
+
 # A file vault, where the facade resolves on the calling thread.
 
 LEDGER_TITLE = "Publications ledger"
@@ -121,11 +235,14 @@ def test_a_title_resolves_to_the_file_collection_it_names(tmp_path) -> None:
     assert by_title["rows"] == record_memory(tmp_path, "query", collection=LEDGER_COLLECTION_PATH)["rows"]
 
 
-def test_a_title_held_only_by_a_withheld_file_collection_answers_as_a_title_nobody_holds(tmp_path) -> None:
-    _ledger(tmp_path)
-    (tmp_path / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Records/Publications\n")
+def test_a_title_answers_the_same_whether_its_file_collection_is_withheld_or_deleted(tmp_path) -> None:
+    withheld, deleted = tmp_path / "withheld", tmp_path / "deleted"
+    for vault in (withheld, deleted):
+        _ledger(vault)
+        (vault / "Knowledge Base/_access.yaml").write_text("excluded:\n  - Records/Publications\n")
+    shutil.rmtree(deleted / Path(LEDGER_COLLECTION_PATH).parent)
 
-    assert _refusal(tmp_path, LEDGER_TITLE) == _refusal(tmp_path, "Evening sauna log")
+    assert _refusal(withheld, LEDGER_TITLE) == _refusal(deleted, LEDGER_TITLE)
 
 
 def test_a_file_title_counts_only_the_collections_the_caller_may_see(tmp_path) -> None:

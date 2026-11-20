@@ -111,6 +111,16 @@ def journal_rows(tmp_path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
+def _retitle(root, path, title):
+    """Give a file Records collection another title, through its owner's revise."""
+    import yaml
+
+    front, body, _ = vault.parse_frontmatter((root / path).read_text(), strict=True)
+    guards = call(root, "record_memory", action="inspect", collection=path)["lifecycle_guards"]
+    call(root, "record_memory", action="revise", collection=path, why="retitle", **guards,
+         manifest_text="---\n" + yaml.safe_dump({**front, "title": title}, sort_keys=False) + "---\n" + body)
+
+
 def busy_total():
     from exomem import metrics
 
@@ -1503,12 +1513,15 @@ def test_import_status_polling_does_not_restart_blocked_summary_publication(serv
     _until(lambda: page.exists() and "1004 committed rows" in page.read_text())
 
 
-def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread(service, monkeypatch):
+@pytest.mark.parametrize("selector", [CID, "Work"], ids=["by id", "by title"])
+def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thread(service, monkeypatch, selector):
     """Defect: status queued behind a running batch on the one store thread, so a long batch made every
-    poll wait out its queue budget and refuse COLLECTION_STORE_BUSY."""
+    poll wait out its queue budget and refuse COLLECTION_STORE_BUSY. A title queued there too, only to
+    learn which collection it names."""
     from exomem.collection_store.writer import CollectionWriter
 
     root = service.root
+    _retitle(root, A_PATH, "Legacy")  # so that only C holds the title "Work"
     monkeypatch.setattr(importer, "MAX_BATCH_ROWS", 5)
     write_source(root, ndjson({"title": f"Imported {i}", "count": i} for i in range(40)), SOURCE)
     in_batch, release = threading.Event(), threading.Event()
@@ -1530,7 +1543,7 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     try:
         assert in_batch.wait(30)
         queued.clear()
-        status = imported(root, mode="status", continuation=job["continuation"])
+        status = imported(root, collection=selector, mode="status", continuation=job["continuation"])
         assert queued == []  # it never entered the store thread's queue, which the held batch keeps
         assert (status["state"], status["rows"]["imported"], status["resumable"], status["cancellable"]) == (
             "running", 10, False, True)
@@ -1549,6 +1562,56 @@ def test_import_status_answers_from_a_snapshot_while_a_batch_keeps_the_store_thr
     done = imported(root, mode="status", continuation=job["continuation"])
     # The job no longer runs here, so nothing this host timed describes it.
     assert set(done["activity"].values()) == {None} and (done["resumable"], done["cancellable"]) == (False, False)
+
+
+def test_a_file_collection_title_answers_while_the_store_thread_is_held(service, monkeypatch):
+    """Defect: a title queued on the store thread to learn which collection it names, so a file
+    collection's title waited out whatever held that thread, which the same collection's path never does."""
+    root = service.root
+    _retitle(root, A_PATH, "Legacy")
+    call(root, "record_memory", action="append", collection=A_PATH, item={"title": "Filed"}, why="file row")
+    held, release = threading.Event(), threading.Event()
+    serve = runtime.StoreServer._serve
+
+    def held_after_the_append(server, request):
+        serve(server, request)
+        if isinstance(request.result, dict) and request.result.get("item_key") == LATER:
+            held.set()
+            assert release.wait(30), "the test did not release the store thread"
+
+    monkeypatch.setattr(runtime.StoreServer, "_serve", held_after_the_append)
+    queued = []
+    serve_call = runtime.StoreServer._call
+    monkeypatch.setattr(runtime.StoreServer, "_call", lambda server, work, **kw: (
+        queued.append(threading.get_ident()), serve_call(server, work, **kw))[1])
+    try:
+        call(root, "record_memory", action="append", collection=CID, item_key=LATER, item={"title": "Holder"},
+             why="keep the store thread")
+        assert held.wait(5)
+        queued.clear()
+        by_title = call(root, "record_memory", action="query", collection="legacy")
+        assert queued == []  # the title resolved on this thread, beside the held store thread
+    finally:
+        release.set()
+    by_path = call(root, "record_memory", action="query", collection=A_PATH)
+    assert [row["title"] for row in by_title["rows"]] == ["Filed"]
+    assert (by_title["collection_id"], by_title["rows"]) == (KEY, by_path["rows"])
+
+
+def test_a_write_refused_while_its_title_resolves_is_journaled_once(service, tmp_path, monkeypatch):
+    """Defect: a refusal raised while a title resolved left before `invoke`, so a refused write was
+    never journaled. A and C both hold the title "Work"."""
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(tmp_path / "logs"))
+    root = service.root
+    with pytest.raises(OpError) as append:
+        call(root, "record_memory", action="append", collection="Work", item={"title": "Unplaced"}, why="capture")
+    assert append.value.code == "AMBIGUOUS_COLLECTION"
+    with pytest.raises(OpError) as query:
+        call(root, "record_memory", action="query", collection="Work")
+    assert query.value.code == "AMBIGUOUS_COLLECTION"
+
+    (refusal,) = [row for row in journal_rows(tmp_path) if row["outcome"] == "failed"]
+    assert (refusal["command"], refusal["error_code"]) == ("record_memory", "AMBIGUOUS_COLLECTION")
 
 
 def test_served_field_release_and_summary_use_canonical_authority_without_preview_binding(service):

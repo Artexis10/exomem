@@ -2040,24 +2040,40 @@ def _presentation_inspection(
 
 
 @canonical_read
-def visible_collection_titles(vault_root: Path, *, semantic_profile: str) -> tuple[tuple[str, str], ...]:
-    """The `(title, manifest_path)` of each collection of this profile whose manifest the caller may see.
+def visible_collection_titles(
+    vault_root: Path, *, semantic_profile: str
+) -> tuple[tuple[tuple[str, str], ...], int]:
+    """The `(title, manifest_path)` of each collection of this profile whose manifest the caller may see,
+    and how many more such collections live in a store this thread does not serve, so their titles are unknown.
 
     A title lives only in its manifest (a file's front matter, a store collection's manifest text), so
     the lookup reads the manifests that discovery already reads, one sweep and no census. It asks
     `_authorize` of each manifest path, as the manifest-path route does, so a collection that route
-    withholds is not listed. It decides visibility only and emits no release receipt, as a link
-    projector's `visible_path` does.
+    withholds is neither listed nor counted. It decides visibility only and emits no release receipt,
+    as a link projector's `visible_path` does; `released_manifest_paths` records what a reply lists.
     """
     root = Path(vault_root)
     with authorization_pass(root):
         # A duplicated identity is the refusal of the collection that carries it, not of every title.
-        manifests, _unreadable = collections.discover_collections_with_errors(
+        manifests, unreadable = collections.discover_collections_with_errors(
             root, authorize_path=lambda path: _authorize(root, path),
             reject_duplicates=False, semantic_profile=semantic_profile,
         )
-    return tuple((manifest.title, manifest.path) for manifest in manifests
-                 if manifest.semantic_profile == semantic_profile)
+    titles = tuple((manifest.title, manifest.path) for manifest in manifests
+                   if manifest.semantic_profile == semantic_profile)
+    # Discovery lists an unserved store collection under this fixed refusal code, and only where the
+    # caller may learn of it (`store_notice`); a file it could not parse is no store collection.
+    unserved = sum(1 for row in unreadable
+                   if row.code == "COLLECTION_STORE_UNAVAILABLE" and row.semantic_profile in (None, semantic_profile))
+    return titles, unserved
+
+
+@canonical_read(receipt_boundary="record_inspection")
+def released_manifest_paths(vault_root: Path, paths: Iterable[str]) -> tuple[str, ...]:
+    """Those of `paths` whose manifest the caller may see, each recorded as the inventory records the manifests it lists."""
+    root = Path(vault_root)
+    with authorization_pass(root):
+        return tuple(path for path in paths if _authorize(root, path, receipt=True))
 
 
 @canonical_read(receipt_boundary="record_inspection")
