@@ -10090,6 +10090,16 @@ def _process_media(
             holder_kind="command",
         )
 
+    def _queue_guard():
+        # The hold of a path that only queues a job: the job store is machine-local, so the
+        # commit generation stays put. Planning (hashing, hydration) runs before it, never inside.
+        return manager.projection_guard(
+            vault_root,
+            operation=f"process_media_{operation}_queue",
+            request_id=active_mutation_request_id(),
+            holder_kind="command",
+        )
+
     def _index_refresh_remaining() -> int:
         return int(index_sync.deferred_work_status(vault_root)["full_upserts"]["count"])
 
@@ -10171,12 +10181,12 @@ def _process_media(
                 "remediation": remediation,
             }
 
-        def run_one(binary: Path, relative: str, guard, *, queue_only: bool = False) -> dict[str, object]:
-            """One path's row; `guard` is the boundary hold its commits take."""
+        def run_one(binary: Path, relative: str) -> dict[str, object]:
+            """One path's row."""
             try:
                 result = _run_media_operation(
-                    vault_root, binary, operation, language, multilingual, guard,
-                    queue_only=queue_only,
+                    vault_root, binary, operation, language, multilingual, _commit_guard,
+                    queue_guard=_queue_guard,
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
@@ -10205,65 +10215,14 @@ def _process_media(
                 row["document_container"] = result.document_container
             return row
 
-        rows: list[dict[str, object] | None] = [None] * len(selected_paths)
-
-        def yield_between_holds() -> None:
-            # A keyed write that arrived meanwhile takes the boundary before the next hold, so a
-            # long request slows but never starves one.
-            manager.yield_to_waiting_writes(vault_root)
-
-        def queue_under_one_hold(positions: list[int], own_hold: list[int]) -> int:
-            """Queue paths under one hold until it has lasted its cap; return how many it settled.
-
-            A reprocess request queues paths whose transcript is complete, which changes only the
-            machine-local job store: one hold is one commit-generation advance, where a hold per
-            path advanced it twice for each. A path that needs a sidecar commit is put in
-            `own_hold` and runs after this hold, so no index or graph fan-out runs inside it.
-            """
-            from . import media_publication
-            from .vault_store import media as store_media
-
-            settled = 0
-
-            def unit() -> None:
-                nonlocal settled
-                deadline = time.monotonic() + media_publication.BATCH_HOLD_SECONDS
-                for position in positions:
-                    binary, relative = selected_paths[position]
-                    settled += 1
-                    try:
-                        # The hold is already ours, so a path's own commit step takes no second one.
-                        rows[position] = run_one(binary, relative, nullcontext, queue_only=True)
-                    except media_processing.SidecarCommitRequired:
-                        own_hold.append(position)
-                    if time.monotonic() >= deadline:
-                        return
-
-            store_media.holding_boundary(
-                vault_root, f"process_media_{operation}_commit", unit, _commit_guard
-            )
-            return settled
-
-        if operation == "reprocess":
-            waiting = list(range(len(selected_paths)))
-            own_hold: list[int] = []
-            held_once = False
-            while waiting:
-                if held_once:
-                    yield_between_holds()
-                held_once = True
-                waiting = waiting[queue_under_one_hold(waiting, own_hold):]
-            for position in own_hold:
-                yield_between_holds()
-                binary, relative = selected_paths[position]
-                rows[position] = run_one(binary, relative, _commit_guard)
-        else:
-            for position, (binary, relative) in enumerate(selected_paths):
-                if position:
-                    # Each path re-takes the boundary, with a yield in between.
-                    yield_between_holds()
-                rows[position] = run_one(binary, relative, _commit_guard)
-        results = [row for row in rows if row is not None]
+        results: list[dict[str, object]] = []
+        for index, (binary, relative) in enumerate(selected_paths):
+            if index:
+                # Each path re-takes the boundary; a keyed write that arrived
+                # meanwhile gets it first, so a long batch slows but never
+                # starves one.
+                manager.yield_to_waiting_writes(vault_root)
+            results.append(run_one(binary, relative))
         return {
             "operation": operation,
             "paths": [relative for _, relative in selected_paths],
@@ -10355,11 +10314,11 @@ def _process_media(
 
 def _run_media_operation(
     vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard,
-    *, queue_only: bool = False,
+    *, queue_guard=None,
 ):
     """Run one explicit media operation on one governed binary.
 
-    `queue_only` (reprocess only) refuses to commit a sidecar; see `reconcile_media`.
+    `queue_guard` (reprocess only) is the hold for queueing that commits no sidecar; see `reconcile_media`.
     """
     from . import document_containers, media_processing
 
@@ -10378,7 +10337,7 @@ def _run_media_operation(
     if operation == "reprocess":
         return media_processing.reprocess_media(
             vault_root, binary, language=language, multilingual=multilingual,
-            commit_guard=commit_guard, queue_only=queue_only,
+            commit_guard=commit_guard, queue_guard=queue_guard,
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 

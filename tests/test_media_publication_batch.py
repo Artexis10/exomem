@@ -7,6 +7,7 @@ engine and, where a test names it, one write are replaced.
 
 import logging
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,6 @@ from exomem import (
     deferred_index,
     epistemic_graph,
     extract,
-    find as find_module,
     foreground_activity,
     freshness,
     graph_sync,
@@ -28,8 +28,13 @@ from exomem import (
     preserve,
     prior_extraction,
 )
+from exomem import (
+    find as find_module,
+)
 from exomem import vault as vault_module
 from exomem.asr_facts import AsrFacts
+from exomem.cli_ops import OpError
+from exomem.vault_store import media as store_media
 
 
 @pytest.fixture(autouse=True)
@@ -178,14 +183,15 @@ def test_a_batch_of_results_takes_one_hold_advances_the_generation_once_and_land
         rels.append(sidecar.relative_to(vault).as_posix())
     assert epistemic_graph.EpistemicGraphIndex(vault).indexed_paths(rels) == set(rels)
     assert graph_sync.status(vault)["state"] == "current"
+    assert deferred_index.snapshot_full(vault) == []
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
     assert media_jobs.status(vault)["jobs"] == []
 
 
-def test_a_result_that_cannot_publish_stops_only_itself_and_publishes_once_when_it_can(
+def test_a_batch_that_cannot_commit_rolls_back_whole_then_shrinks_until_the_failing_result_is_alone(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed batch commit rolls the whole batch back; the retry loses no result and repeats none."""
+    """A failed batch commit loses no result; the next batches halve until the failing one is set aside."""
     _speech_engine(monkeypatch)
     worker, pairs = _recorded_results(vault, ["good-a.mp3", "poison.mp3", "good-b.mp3"])
     poison = pairs[1][1]
@@ -201,19 +207,88 @@ def test_a_result_that_cannot_publish_stops_only_itself_and_publishes_once_when_
 
     worker._drain_parent_results()
 
-    assert "extracted_by: pending" in poison.read_text(encoding="utf-8")
+    for _binary, sidecar in pairs:
+        assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
+    assert media_jobs.MediaJobStore(vault).pending_result_count() == 3
+    assert worker._last_batch_at is not None  # the hold ran and advanced the generation, so it spaces the next
+
+    for _ in range(4):
+        worker._drain_parent_results()
+
     for _binary, sidecar in (pairs[0], pairs[2]):
         assert media_processing.has_completed_transcript(sidecar.read_text(encoding="utf-8"), media_type="audio")
+    assert "extracted_by: pending" in poison.read_text(encoding="utf-8")
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 1
 
     refused["on"] = False
+    monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 0.0)  # the set-aside result has waited its floor
     worker._drain_parent_results()
 
     published = poison.read_text(encoding="utf-8")
     assert media_processing.has_completed_transcript(published, media_type="audio")
-    assert published.count("poison.mp3") == 1 or published.count("wrong words") == 1
+    assert published.count("wrong words poison.mp3") == 1
+    assert deferred_index.snapshot_full(vault) == []
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
     assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_a_result_that_cannot_stage_is_set_aside_while_the_others_commit_in_the_same_hold(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Staging names its result, so the failure costs the others no second hold."""
+    _speech_engine(monkeypatch)
+    worker, pairs = _recorded_results(vault, ["good-a.mp3", "poison.mp3", "good-b.mp3"])
+    poison_sidecar = pairs[1][1]
+    real_writes = worker._extraction_writes
+
+    def extraction_writes(job, *args, **kwargs):
+        if job.sidecar_path == poison_sidecar:
+            raise OSError("cannot render this page")
+        return real_writes(job, *args, **kwargs)
+
+    monkeypatch.setattr(worker, "_extraction_writes", extraction_writes)
+    caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+
+    worker._drain_parent_results()
+
+    assert _advances_by_operation(caplog) == {"background_media_parent_publication": 1}
+    for _binary, sidecar in (pairs[0], pairs[2]):
+        assert media_processing.has_completed_transcript(sidecar.read_text(encoding="utf-8"), media_type="audio")
+    assert "extracted_by: pending" in poison_sidecar.read_text(encoding="utf-8")
+    assert media_jobs.MediaJobStore(vault).pending_result_count() == 1
+
+
+def test_a_refused_boundary_leaves_the_whole_batch_pending_and_costs_one_attempt(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refused acquire ran nothing: the batch waits, whole, instead of retrying result by result."""
+    _speech_engine(monkeypatch)
+    worker, _pairs = _recorded_results(vault, ["one.mp3", "two.mp3", "three.mp3"])
+    real_hold = store_media.holding_boundary
+    attempts: list[str] = []
+
+    def refuse_once(root, operation, unit, guard):
+        attempts.append(operation)
+        if len(attempts) == 1:
+            raise OpError(
+                "MUTATION_BUSY", "another writer holds the vault", details={"status": "retryable", "committed": False}
+            )
+        return real_hold(root, operation, unit, guard)
+
+    monkeypatch.setattr(store_media, "holding_boundary", refuse_once)
+    caplog.set_level(logging.INFO, logger="exomem.writer_lease")
+
+    worker._drain_parent_results()
+
+    assert attempts == ["background_media_parent_publication"]
+    assert media_jobs.MediaJobStore(vault).pending_result_count() == 3
+    assert worker._last_batch_at is None  # no hold ran, so nothing spaces the retry
+    assert _advances_by_operation(caplog) == {}
+
+    worker._drain_parent_results()
+
+    assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
+    assert _advances_by_operation(caplog) == {"background_media_parent_publication": 1}
 
 
 def test_the_supervisor_waits_for_a_quiet_gap_but_publishes_once_a_result_has_waited_its_floor(
@@ -224,6 +299,9 @@ def test_the_supervisor_waits_for_a_quiet_gap_but_publishes_once_a_result_has_wa
     worker, pairs = _recorded_results(vault, ["one.mp3", "two.mp3"])
     monkeypatch.setattr(media_publication, "QUIET_GAP_SECONDS", 0.05)
     monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 3600.0)
+    elapsed = [0.0]
+    real_clock = media_worker._clock
+    monkeypatch.setattr(media_worker, "_clock", lambda: real_clock() + elapsed[0])
 
     with foreground_activity.foreground_scope(vault):
         assert worker._drain_parent_results(gated=True) is False
@@ -234,7 +312,7 @@ def test_the_supervisor_waits_for_a_quiet_gap_but_publishes_once_a_result_has_wa
             assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
 
         # Under continuous traffic the oldest result passes its floor and publishes anyway.
-        monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 0.0)
+        elapsed[0] = media_publication.MAX_DEFER_SECONDS + 1.0
         assert worker._drain_parent_results(gated=True) is True
 
     for _binary, sidecar in pairs:
@@ -263,10 +341,80 @@ def test_the_next_batch_waits_out_the_spacing_so_media_advances_the_generation_a
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
 
 
-def test_a_multi_path_reprocess_request_queues_all_paths_under_one_hold(
+def _age_recorded_results(vault: Path, seconds: float) -> None:
+    with sqlite3.connect(media_jobs.job_store_path(vault)) as conn:
+        conn.execute("UPDATE media_job_results SET created_at = created_at - ?", (seconds,))
+
+
+def test_a_result_that_never_stages_opens_the_progress_floor_once_per_floor_not_every_pass(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The oldest result stays old when it cannot publish; the floor also counts from the last batch."""
+    _speech_engine(monkeypatch)
+    _recorded_results(vault, ["stuck.mp3"])
+    _age_recorded_results(vault, 10 * media_publication.MAX_DEFER_SECONDS)
+    monkeypatch.setattr(media_publication, "QUIET_GAP_SECONDS", 3600.0)  # foreground writes never pause
+
+    def due(since_last_batch: float | None) -> bool:
+        worker = media_worker.MediaWorker(vault, execution_mode="process")
+        if since_last_batch is not None:
+            worker._last_batch_at = media_worker._clock() - since_last_batch
+        with foreground_activity.foreground_scope(vault):
+            return worker._publication_due()
+
+    assert due(None) is True  # before any batch, the result's own age opens the floor
+    assert due(media_publication.MIN_BATCH_SPACING_SECONDS + 1.0) is False
+    assert due(media_publication.MAX_DEFER_SECONDS + 1.0) is True
+
+
+def test_a_deferred_publication_reads_the_queue_once_not_every_pass(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The supervisor polls every half second while foreground writes are busy; the floor is read once."""
+    _speech_engine(monkeypatch)
+    worker, _pairs = _recorded_results(vault, ["one.mp3"])
+    monkeypatch.setattr(media_publication, "QUIET_GAP_SECONDS", 3600.0)
+    reads: list[None] = []
+    real_facts = worker._store.pending_result_facts
+    monkeypatch.setattr(worker._store, "pending_result_facts", lambda: reads.append(None) or real_facts())
+
+    with foreground_activity.foreground_scope(vault):
+        for _ in range(5):
+            assert worker._publication_due() is False
+
+    assert len(reads) == 1
+
+
+def test_the_status_says_unknown_when_the_queue_cannot_be_read_and_zero_when_the_table_is_absent() -> None:
+    class _Locked:
+        def execute(self, *_args):
+            raise sqlite3.OperationalError("database is locked")
+
+    absent = sqlite3.connect(":memory:")  # a store from before the results table existed
+
+    assert media_jobs._read_publication_facts(_Locked()) == (None, None)
+    assert media_jobs._read_publication_facts(absent) == (0, None)
+
+
+def _boundary_held_during(monkeypatch: pytest.MonkeyPatch, name: str) -> list[bool]:
+    """Wrap `media_processing.<name>` to record whether the vault boundary is held while it runs."""
+    seen: list[bool] = []
+    real = getattr(media_processing, name)
+
+    def wrapper(*args, **kwargs):
+        seen.append(mutation_lock.current_thread_holds_boundary())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(media_processing, name, wrapper)
+    return seen
+
+
+def test_a_multi_path_reprocess_request_queues_completed_paths_without_advancing_the_generation(
     vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A 16-path reprocess call took the boundary and advanced the generation twice for each path."""
+    """Queueing a path whose transcript is complete touches only the machine-local job store.
+
+    It used to take the boundary and advance the commit generation twice for each path, and every
+    advance sets off corpus-sized derived work in the serving process.
+    """
     _speech_engine(monkeypatch)
     names = [f"batch-{index}.mp3" for index in range(6)]
     pairs = _preserve_recordings(vault, names)
@@ -279,16 +427,15 @@ def test_a_multi_path_reprocess_request_queues_all_paths_under_one_hold(
 
     assert [row["path"] for row in result["results"]] == paths
     assert {row["outcome"] for row in result["results"]} == {"reprocessed"}
-    assert _advances_by_operation(caplog) == {"process_media_reprocess_commit": 1}
-    queued = {job["path"] for job in media_jobs.status(vault)["jobs"]}
-    assert queued == set(paths)
+    assert _advances_by_operation(caplog) == {}
+    assert {job["path"] for job in media_jobs.status(vault)["jobs"]} == set(paths)
 
 
-def test_a_reprocess_path_that_needs_a_sidecar_commits_it_outside_the_shared_hold(
-    vault, monkeypatch: pytest.MonkeyPatch
+def test_a_reprocess_request_plans_every_path_outside_the_boundary_and_commits_a_new_page_once(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A path with no page yet needs a sidecar commit, and its index and graph fan-out must not
-    run inside the hold that queues the other paths."""
+    """Planning hashes the whole file, and hydrates an evicted original first; neither may run under
+    the shared boundary, where one large file would stall every foreground write."""
     _speech_engine(monkeypatch)
     pairs = _preserve_recordings(vault, ["done-a.mp3", "done-b.mp3"])
     worker = media_worker.MediaWorker(vault, execution_mode="process")
@@ -296,21 +443,15 @@ def test_a_reprocess_path_that_needs_a_sidecar_commits_it_outside_the_shared_hol
     fresh = vault / "Knowledge Base" / "Evidence" / "Audio" / "fresh.m4a"
     fresh.parent.mkdir(parents=True, exist_ok=True)
     fresh.write_bytes(b"\x00\x00\x00\x18ftypM4A fake audio")
-    paths = [pairs[0][0], fresh, pairs[1][0]]
-    rels = [path.relative_to(vault).as_posix() for path in paths]
-    fanout_under_hold: list[bool] = []
-    real_fanout = media_processing.post_commit_batch_fanout
-
-    def fanout(*args, **kwargs):
-        fanout_under_hold.append(mutation_lock.current_thread_holds_boundary())
-        return real_fanout(*args, **kwargs)
-
-    monkeypatch.setattr(media_processing, "post_commit_batch_fanout", fanout)
+    rels = [path.relative_to(vault).as_posix() for path in (pairs[0][0], fresh, pairs[1][0])]
+    planning_under_boundary = _boundary_held_during(monkeypatch, "_read_provenance")
+    caplog.set_level(logging.INFO, logger="exomem.writer_lease")
 
     result = commands.op_process_media(vault, paths=rels, operation="reprocess")
 
     assert [row["path"] for row in result["results"]] == rels
     assert {row["outcome"] for row in result["results"]} == {"reprocessed"}
-    assert fanout_under_hold == [False]
+    assert planning_under_boundary and not any(planning_under_boundary)
+    assert _advances_by_operation(caplog) == {"process_media_reprocess_commit": 1}  # the new page only
     assert (vault / f"{rels[1]}.md").is_file()
     assert {job["path"] for job in media_jobs.status(vault)["jobs"]} == set(rels)

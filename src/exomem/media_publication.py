@@ -2,19 +2,19 @@
 
 The media child records each finished result durably (`media_job_results`), so the supervisor
 may publish it later without losing it. These budgets bound the boundary it takes and the
-foreground writes it waits for. Each is the only copy; the supervisor and the status read both
-use this module.
+foreground writes it waits for. Each is the only copy; the supervisor's gate and its batch publisher
+read this module, and the status read reports the queue they act on.
 """
 
 from __future__ import annotations
 
-#: Results published under one boundary hold. One hold carries one commit, one commit-generation
-#: advance and one fan-out, so a larger batch costs fewer advances; a smaller one keeps the hold short.
-BATCH_RESULT_LIMIT = 16
+#: Results the supervisor takes from the queue for one batch. It only bounds the planning read: the hold
+#: itself ends at `BATCH_HOLD_SECONDS`, so a backlog publishes at the speed of the hold, one batch a spacing.
+BATCH_RESULT_LIMIT = 64
 
-#: A batch stops taking more work after this long inside one hold, so a slow page cannot grow the hold
-#: with every item behind it. Publication commits what it staged and leaves the rest pending; a
-#: multi-path reprocess request queues what it reached and takes a second hold for the rest.
+#: A batch stops staging more results after this long inside one hold, so a slow page cannot grow the hold
+#: with every item behind it. The hold lasts this long plus one result's staging; the batch commits what it
+#: staged and leaves the rest pending for the next batch.
 BATCH_HOLD_SECONDS = 3.0
 
 #: Foreground writes must have been quiet this long before a batch takes the boundary. A foreground
@@ -30,19 +30,13 @@ MIN_BATCH_SPACING_SECONDS = 60.0
 MAX_DEFER_SECONDS = 180.0
 
 
-def publication_due(
-    *,
-    idle_seconds: float,
-    oldest_age_seconds: float,
-    since_last_batch_seconds: float | None,
-) -> bool:
-    """Whether a batch may take the boundary now.
+def floor_wait_seconds(*, oldest_age_seconds: float, since_last_batch_seconds: float | None) -> float:
+    """Seconds until the progress floor opens, counted from the later of the oldest result and the last batch.
 
-    `idle_seconds` is the foreground activity signal (`foreground_activity.idle_seconds`),
-    `oldest_age_seconds` the age of the oldest waiting result, and `since_last_batch_seconds` the time
-    since this process last committed a batch, None before the first. A batch needs the spacing, then
-    either a quiet gap or a result past its progress floor.
+    A result that cannot stage stays the oldest forever. Counting from the last batch too means it
+    opens the floor once per `MAX_DEFER_SECONDS`, not on every pass.
     """
-    if since_last_batch_seconds is not None and since_last_batch_seconds < MIN_BATCH_SPACING_SECONDS:
-        return False
-    return idle_seconds >= QUIET_GAP_SECONDS or oldest_age_seconds >= MAX_DEFER_SECONDS
+    waited = oldest_age_seconds
+    if since_last_batch_seconds is not None:
+        waited = min(waited, since_last_batch_seconds)
+    return max(0.0, MAX_DEFER_SECONDS - waited)

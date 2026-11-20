@@ -1985,8 +1985,8 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def pending_result_facts(self) -> tuple[int, float | None]:
-        """How many finished results wait to publish, and when the oldest was recorded (epoch seconds)."""
+    def pending_result_facts(self) -> tuple[int | None, float | None]:
+        """How many finished results wait to publish (None when the read failed), and when the oldest was recorded (epoch seconds)."""
         conn = self._connect()
         try:
             return _read_publication_facts(conn)
@@ -3028,12 +3028,22 @@ def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", paramete
     )
 
 
-def _read_publication_facts(conn: sqlite3.Connection) -> tuple[int, float | None]:
-    """The count and oldest `created_at` of the results that wait to publish."""
+def _read_publication_facts(conn: sqlite3.Connection) -> tuple[int | None, float | None]:
+    """The count and oldest `created_at` of the results that wait to publish.
+
+    A store from before the table existed holds no result. A read that failed for another reason
+    knows nothing, and answers None, never 0.
+    """
     try:
         count, oldest = conn.execute("SELECT count(*), min(created_at) FROM media_job_results").fetchone()
     except sqlite3.OperationalError:
-        return 0, None  # a store from before the table existed holds no result
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_job_results'"
+            ).fetchone()
+        except sqlite3.Error:
+            return None, None
+        return (None, None) if table is not None else (0, None)
     return int(count), None if oldest is None else float(oldest)
 
 

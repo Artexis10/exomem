@@ -225,7 +225,7 @@ def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_r
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args, **_kwargs: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
@@ -398,7 +398,7 @@ def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
         lambda *_args, **kwargs: publication_intents.extend(kwargs["publication_intents"]) or True,
     )
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
     assert publication_intents
@@ -433,7 +433,7 @@ def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     body = sidecar.read_text(encoding="utf-8")
     assert "processing_state: pending" in body
@@ -470,7 +470,7 @@ def test_parent_requeues_changed_binary_after_failure_result(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -506,7 +506,7 @@ def test_parent_keeps_ocr_enqueued_during_deferred_result_completion(
         return True
 
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", complete_then_enqueue)
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "first transcript" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -548,8 +548,8 @@ def test_parent_retires_failed_result_after_foreign_sidecar_change(
     else:
         sidecar.write_bytes(foreign_bytes)
 
-    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_result(
-        store.pending_results()[0]
+    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_results(
+        store.pending_results()[:1]
     )
 
     assert store.pending_result_count() == 0
@@ -780,7 +780,7 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
     )
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert sidecar.read_text(encoding="utf-8") == target
     assert recovered == [True]
@@ -4816,7 +4816,10 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
     def publish(batch):
         published.append(now[0])
         if len(published) == 1:
-            raise OSError("publication temporarily unavailable")
+            # A refused boundary ran nothing, so the same result is due again on the next poll.
+            raise media_worker.OpError(
+                "MUTATION_BUSY", "boundary busy", details={"status": "retryable", "committed": False}
+            )
         original_publish(batch)
         parent._stop_event.set()
 
