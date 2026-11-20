@@ -5561,11 +5561,12 @@ def _reusable_eligible_filter_paths(
     scope: str,
     plan: structured_filters.FilterPlan,
     snapshot: FreshnessSnapshot,
-) -> set[str]:
+) -> AbstractSet[str]:
     """`_managed_eligible_filter_paths` with no pending overlay, reused while its inputs hold.
 
     The set is the plan's, before any caller's admission: every caller narrows it with its own
-    admission after this, so a set computed for one caller never widens another's. A plan with a
+    admission after this, so a set computed for one caller never widens another's. A reused set is
+    the cached frozenset itself, so callers read it and never change it. A plan with a
     unit predicate is resolved every time, because its units follow a selected interpretation that
     no identity in the proof names.
     """
@@ -5577,15 +5578,16 @@ def _reusable_eligible_filter_paths(
         cached = _ELIGIBLE_CACHE.get(key)
         if cached is not None and cached[0] == proof:
             _ELIGIBLE_CACHE.move_to_end(key)
-            return set(cached[1])
+            return cached[1]
     eligible = _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
     # Captured before the read and checked before the insert, as for every reusable cache: a set
     # read across a Source erasure or a corpus change is answered but never stored.
     if len(eligible) <= _ELIGIBLE_CACHE_PATHS and _eligibility_proof(
         vault_root, scope, snapshot
     ) == proof:
+        frozen = frozenset(eligible)
         with _ELIGIBLE_CACHE_LOCK:
-            _ELIGIBLE_CACHE[key] = (proof, frozenset(eligible))
+            _ELIGIBLE_CACHE[key] = (proof, frozen)
             _ELIGIBLE_CACHE.move_to_end(key)
             held = sum(len(paths) for _proof, paths in _ELIGIBLE_CACHE.values())
             while len(_ELIGIBLE_CACHE) > _ELIGIBLE_CACHE_SIZE or held > _ELIGIBLE_CACHE_PATHS:

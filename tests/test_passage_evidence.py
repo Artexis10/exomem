@@ -521,6 +521,29 @@ def test_an_eligible_set_read_before_an_erasure_cutoff_is_not_served_after_it(va
     assert eligible() == {"Sources/kept.md"}
 
 
+def test_a_unit_filter_is_resolved_for_every_passage_search(vault, monkeypatch):
+    """A unit filter's matches follow the selected interpretation, which no part of the cache's
+    proof names, so a reused set could keep a unit that no longer matches."""
+    from exomem import structured_filters
+
+    publish_reference(vault)
+    current = {"paths": {"Sources/first.md"}}
+    monkeypatch.setattr(
+        find, "_managed_eligible_filter_paths", lambda *args, **kwargs: set(current["paths"])
+    )
+    plan = structured_filters.compile_filter({"unit.tags": {"$contains": "readers"}})
+
+    def eligible():
+        snapshot = find.FreshnessSnapshot(vault, require_live_recall=True)
+        return find._reusable_eligible_filter_paths(
+            vault, scope="vault", plan=plan, snapshot=snapshot
+        )
+
+    assert eligible() == {"Sources/first.md"}
+    current["paths"] = {"Sources/second.md"}
+    assert eligible() == {"Sources/second.md"}
+
+
 @pytest.mark.parametrize("anchor_state", ["visible", "tombstoned", "revoked"])
 def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     vault, passage_tools, monkeypatch, anchor_state
