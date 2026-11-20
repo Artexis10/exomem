@@ -41,13 +41,15 @@ backstop for debt this process never observed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
-from . import state_paths
+from . import foreground_priority, state_paths
 
 log = logging.getLogger(__name__)
 
@@ -83,7 +85,7 @@ WHOLE_VAULT_SETTLE_SECONDS = 5.0
 
 _LOCK = threading.Lock()
 _thread: threading.Thread | None = None
-_stop = threading.Event()
+_stop = foreground_priority.StopEvent()
 
 #: Set whenever graph debt is enqueued in this process. Module-level rather than
 #: per-vault: a server serves one vault, and a cross-vault signal costs at worst
@@ -703,13 +705,23 @@ def stall_seconds() -> float:
 
 
 def _run(vault_root: Path) -> None:
-    from . import foreground_priority
-
     try:
         with foreground_priority.cancellable(_stop):
             _run_owned(vault_root)
     except foreground_priority.BulkCancelled:
         log.info("graph drain cancelled; queued recovery remains pending")
+
+
+@contextlib.contextmanager
+def _bulk_pass() -> Iterator[None]:
+    """One drain pass as bulk work: it waits for a request in flight first, and its units yield to the next.
+
+    Each pass is its own scope, not one for the thread's life: an idle wait inside a long scope
+    would earn the pass wait allowance (`foreground_priority.PassBudget`) it never used.
+    """
+    with foreground_priority.bulk(stop=_stop):
+        foreground_priority.yield_to_foreground()
+        yield
 
 
 def _run_owned(vault_root: Path) -> None:
@@ -758,12 +770,14 @@ def _run_owned(vault_root: Path) -> None:
             # work behind a barrier is not held: it drains on every wake.
             if held_since is None:
                 held_since = _last_debt or time.monotonic()
-            drained = _per_path_work_once(vault_root)
+            with _bulk_pass():
+                drained = _per_path_work_once(vault_root)
             interval = min(hold, RETRY_SECONDS) if drained else hold
             continue
         # This attempt is no longer held; the next one gets its own ceiling.
         held_since = None
-        processed = _work_once(vault_root)
+        with _bulk_pass():
+            processed = _work_once(vault_root)
         if not _pending(vault_root):
             from . import epistemic_graph
 

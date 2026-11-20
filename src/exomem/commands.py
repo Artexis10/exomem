@@ -4027,10 +4027,11 @@ def _add_source(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse: bool = False,
     passages: list[source_capture.DeclaredPassage] | None = None,
     document_form: str | None = None,
+    custody_only: bool | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4065,6 +4066,7 @@ def _add_source(
                 reuse_payload=reuse,
                 passages=passages,
                 document_form=document_form,
+                custody_only=custody_only,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -4157,6 +4159,8 @@ def op_audit(
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
     - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
+    - `custody_source`: the same uncompiled condition on a Source marked
+      `custody_only: true`; the quiet count, always `info`
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
@@ -9305,6 +9309,7 @@ def op_capture_source(
     passages: Any = None,
     capture_reservation: capture_attempts_module.CaptureReservation | None = None,
     document_form: str | None = None,
+    custody_only: bool | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9333,7 +9338,10 @@ def op_capture_source(
             passages it keeps the stored original; fields the call omits carry over.
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
         document_form: What the document is as a record of a work; a new key registers.
+        custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
     """
+    if custody_only is not None and type(custody_only) is not bool:
+        raise ValueError("INVALID_CUSTODY_ONLY: custody_only must be true or false")
     if capture_reservation is not None:
         capture_attempts_module.require_active_capture(vault_root, capture_reservation)
     if passages is not None:
@@ -9363,10 +9371,30 @@ def op_capture_source(
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
         source_identity = source_capture.validate_identity(source_identity)
         source_capture.require_authority(vault_root)
-    # Resolved before any byte is fetched or written, for files and text alike. A metadata-only correction
-    # that names no kind keeps its predecessor's (`client_artifacts.capture_source_correction`).
+    carried: dict[str, Any] = {}
+    plan: source_corrections.CorrectionPlan | None = None
+    if correction is not None and not metadata_only:
+        # Prepared once, so a correction with a new file or new text keeps every field it omits, as a
+        # metadata-only one does (`client_artifacts.capture_source_correction`), and `add` reuses the plan.
+        plan = source_corrections.prepare_correction(vault_root, correction)
+        carried = add_module.correction_carry(plan.old_source)
+        url = url if url is not None else carried.get("url")
+        tags = tags if tags is not None else carried.get("tags")
+        why_captured = why_captured if why_captured is not None else carried.get("why_captured")
+        domain = domain if domain is not None else carried.get("domain")
+        projects = projects if projects is not None else carried.get("projects")
+        document_form = document_form if document_form is not None else carried.get("document_form")
+        custody_only = custody_only if custody_only is not None else carried.get("custody_only")
+        from .governance import raw_protection as raw_guard
+
+        # A successor is never less protected than its predecessor, as in the metadata-only route.
+        raw_protection = raw_protection or raw_guard.marked(plan.old_path)
+    named_kind = bool((source_type or "").strip() or (source_kind or "").strip())
+    # Resolved before any byte is fetched or written, for files and text alike. A correction that names no
+    # kind keeps its predecessor's.
     kind = (
-        None if metadata_only and not (source_type or "").strip() and not (source_kind or "").strip()
+        None if metadata_only and not named_kind
+        else str(carried["source_type"]) if not named_kind and carried.get("source_type")
         else _resolve_source_kind_argument(vault_root, source_type, source_kind)
     )
     from . import source_result_attribution
@@ -9380,6 +9408,7 @@ def op_capture_source(
             "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
             "domain": domain, "projects": projects, "raw_protection": raw_protection,
             "expected_sha256": expected_sha256, "document_form": document_form,
+            "custody_only": custody_only,
         }
         if metadata_only:
             captured = client_artifacts.capture_source_correction(
@@ -9388,7 +9417,7 @@ def op_capture_source(
         else:
             captured = client_artifacts.capture_source_artifacts(
                 vault_root, source_schema=source_schema, title=title, files=files, adoption=adoption,
-                correction=correction, **source_fields,
+                correction=plan, **source_fields,
             )
         _note_committed_artifact_targets(captured)
         out = captured
@@ -9417,12 +9446,15 @@ def op_capture_source(
             raw_protection=raw_protection,
             source_identity=source_identity,
             expected_sha256=expected_sha256,
-            correction=correction,
+            correction=plan,
             reuse=True,
             passages=passages,
             document_form=document_form,
+            custody_only=custody_only,
         )
-        out = {"source": source}
+        out = {"source": source, "text_only": True}
+        if custody_only is True:
+            out["custody_only"] = True
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"
@@ -10013,6 +10045,14 @@ def op_transfer_artifact(
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
+        if lane == "source":
+            # The unheld send is for a person or device that holds the file. It stores at once under the file name,
+            # with no url, identity check or duplicate check; the held send lets save_source carry all of them.
+            handoff["next_action"] = (
+                "If you hold the file, take its SHA-256 and call upload_files again with expected_sha256: that send "
+                "is held, and save_source then takes the document's own title, its source_kind and url. A POST to "
+                "this upload_url stores the file at once under its file name, with no url and no duplicate check."
+            )
     return handoff
 
 

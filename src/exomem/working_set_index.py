@@ -1411,7 +1411,7 @@ def _walk_page_entries(
         member=_kb_walk_member(conventions.skip_folders),
     )
     stored_signatures = find_corpus.stored_signatures(corpus)
-    for path in corpus:
+    for path in foreground_priority.yielding_in_bulk(corpus):
         foreground_priority.check_cancelled()
         folder = folders.get(path.parent)
         if folder is None:

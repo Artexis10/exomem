@@ -13,7 +13,15 @@ from typing import Any
 
 import pytest
 
-from exomem import deferred_index, epistemic_graph, freshness, graph_drain, graph_sync, index_sync
+from exomem import (
+    deferred_index,
+    epistemic_graph,
+    foreground_priority,
+    freshness,
+    graph_drain,
+    graph_sync,
+    index_sync,
+)
 from exomem import find as find_module
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
@@ -379,6 +387,57 @@ def test_a_queued_write_is_drained_without_waiting_for_the_reconcile_tick(
 
     assert drained.wait(timeout=5.0), "queued repair was never drained"
     assert calls == [graph_drain.DRAIN_LIMIT]
+
+
+def test_a_queued_repair_waits_for_a_request_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drain shares the service's one interpreter with every request, so a
+    pass starts after the request running beside it, and still drains its queue."""
+    drained = threading.Event()
+
+    def drain(_root: Path, *, limit: int | None = None) -> int:
+        drained.set()
+        return 1
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", drain)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: not drained.is_set())
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.01)
+
+    with foreground_priority.foreground():
+        graph_drain.start(tmp_path)
+        drained_beside_a_request = drained.wait(timeout=0.3)
+
+    assert not drained_beside_a_request
+    assert drained.wait(timeout=5.0), "queued repair was never drained"
+
+
+def test_stopping_the_drain_beside_a_request_ends_it_inside_the_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drain parked for a request must end when it is stopped, not after the grace wait:
+    `stop()` joins for 2 s, and a drain still alive after it refuses the next `start()`."""
+    drained = threading.Event()
+
+    def drain(_root: Path, *, limit: int | None = None) -> int:
+        drained.set()
+        return 1
+
+    monkeypatch.setattr(index_sync, "drain_graph_work", drain)
+    monkeypatch.setattr(graph_drain, "_queue_pending", lambda _root: True)
+    monkeypatch.setattr(graph_drain, "DEBOUNCE_SECONDS", 0.01)
+
+    with foreground_priority.foreground():
+        worker = graph_drain.start(tmp_path)
+        assert worker is not None
+        assert not drained.wait(timeout=0.3), "the drain was meant to be parked behind the request"
+        started = time.monotonic()
+        graph_drain.stop(timeout=foreground_priority.MAX_YIELD_SECONDS)
+        stopped_in = time.monotonic() - started
+
+    assert not worker.is_alive()
+    assert stopped_in < foreground_priority.MAX_YIELD_SECONDS / 2, stopped_in
+    assert not drained.is_set()
 
 
 def test_the_debt_signal_wakes_a_sleeping_drain(

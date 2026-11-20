@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from _identity_pdf import make_pdf, nested_forms_pdf, raw_info_pdf, text_bomb_pdf
+from _identity_pdf import make_pdf, nested_forms_pdf, raw_info_pdf, text_bomb_pdf, xmp_with_doi
 
 from exomem import (
     client_artifacts,
@@ -117,6 +117,23 @@ def test_a_caller_who_cannot_record_the_receipt_is_not_offered_the_correction_ca
     assert not list(source_corrections.receipt_root(vault).glob("*.json"))
 
 
+def test_a_content_capture_says_it_kept_text_not_the_original_file(
+    vault, source_schema, tmp_path, monkeypatch, owner_scope
+) -> None:
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Call notes", source_kind="session",
+        content="A transcript's pasted text.")
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert "text only; no original file stored" in reply["user_summary"]
+
+    # An exact-bytes capture gets the same sentence without the clause.
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    stored = _save_pdf(vault, source_schema, url=CLAIM)
+    assert "text only" not in stored["user_summary"]
+
+
 def test_a_source_in_shared_original_storage_is_corrected_without_re_upload(vault, source_schema, tmp_path, monkeypatch, owner_scope) -> None:
     # A new archive keeps originals in the content-addressed pool, where no file holds the logical path.
     from conftest import initialize_vault_state_offline
@@ -154,6 +171,8 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     assert "correction" in reply["next_action"]
     assert row["ref"] in reply["next_action"]
     assert "read_page" in reply["next_action"]
+    # The agent gets the DOI the document prints, so it can correct without asking the person to check.
+    assert '"https://doi.org/10.5555/aaa"' in reply["next_action"]
     predecessor_page, predecessor_original = row["page"], row["stored_path"]
     page_before = (vault / predecessor_page).read_bytes()
     original_before = (vault / predecessor_original).read_bytes()
@@ -180,6 +199,25 @@ def test_a_conflicting_doi_is_stated_in_the_reply_and_corrected_without_a_reuplo
     # The OpenAI-compatible search keeps string metadata only, so it carries the successor as JSON.
     result = next(result for result in commands.op_search(vault, query="harbour lanterns")["results"] if result["id"] == predecessor_page)
     assert json.loads(result["metadata"]["corrected_by"])["path"] == successor["page"]
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_template_doi_in_the_metadata_is_never_offered_as_the_corrected_url(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Publisher tools can leave a template DOI in XMP. Metadata outranks print, so the state is `conflict`,
+    # yet the url names the DOI page 1 prints: a directive to the template DOI would overwrite a correct url.
+    page = "Meltwater pulses in alpine basins. Published at https://doi.org/10.5555/paper.2021.0042"
+    pdf = make_pdf(tmp_path / "paper.pdf", [page], xmp=xmp_with_doi("10.5555/template.0001"))
+    _stage(monkeypatch, tmp_path, pdf)
+
+    reply = _save_pdf(vault, source_schema, url="https://doi.org/10.5555/paper.2021.0042")
+
+    assert reply["files"][0]["identity"]["state"] == "conflict"
+    assert "10.5555/template.0001" not in reply["next_action"]
+    # The maintenance sweep offers the same call, so it must not correct the Source to the template DOI either.
+    [finding] = _findings(vault)
+    assert "10.5555/template.0001" not in finding.proposed_fix
 
 
 # --- the correction route: guards and what it leaves behind ----------------------------------------
@@ -211,7 +249,7 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
         tags=["lanterns", "harbours"], document_form="full-text", why_captured="Cited in the harbour survey.",
     )["files"][0]
 
-    # What `next_action` asks for: no files, the same title, the right url and the correction; tags set anew.
+    # What `next_action` asks for: no files, a title, the right url and the correction; tags set anew.
     successor = _save_pdf(
         vault, source_schema, upload=False, source_kind=None, url="https://doi.org/10.5555/aaa", tags=["lighthouses"],
         correction=_correction(vault, row),
@@ -236,6 +274,19 @@ def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, sour
 
     assert successor["files"][0]["outcome"] == "stored"
     assert len(scans) == 1
+
+
+def test_a_corrected_source_is_queued_for_processing_when_it_is_saved(vault, source_schema, saved) -> None:
+    # Live, two corrected Sources were never processed: their pages kept no text, and reading the old ref
+    # redirected to them. Processing must not wait on a file-watcher event that can be missed.
+    from exomem import media_jobs
+
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
+                          correction=_correction(vault, saved))["files"][0]
+
+    assert _frontmatter(vault, successor["page"])["processing_state"] == "pending"
+    job = media_jobs.MediaJobStore(vault).get_by_binary(vault / successor["stored_path"])
+    assert job is not None and job.state == "pending"
 
 
 def test_a_changed_original_refuses_the_correction_and_writes_nothing(vault, source_schema, saved) -> None:
@@ -316,6 +367,43 @@ def test_a_text_source_cannot_be_corrected_without_content(vault, source_schema,
 
     with pytest.raises(ValueError, match="SOURCE_CORRECTION_CONTENT_REQUIRED"):
         commands.op_capture_source(vault, source_schema, title="Notes", source_kind="session", correction=correction)
+
+
+def test_a_text_correction_that_names_only_its_title_and_text_keeps_every_other_field(
+    vault, source_schema, owner_scope
+) -> None:
+    old = commands.op_capture_source(
+        vault, source_schema, title="Notes", source_kind="session", content="Lantern rota for the harbour.",
+        url="https://notes.example/lanterns", domain="urban-planning", projects=["riverside"], tags=["lanterns"],
+        custody_only=True,
+    )["source"]
+    correction = {"supersedes": old["path"], "expected_hash": mutation_hash(vault / old["path"]), "reason": "Fix the title."}
+
+    corrected = commands.op_capture_source(
+        vault, source_schema, title="Harbour lantern rota", content="Lantern rota for the harbour.", correction=correction,
+    )["source"]
+
+    kept = _frontmatter(vault, corrected["path"])
+    assert (kept["title"], kept["source_type"], kept["url"], kept["domain"], kept["projects"], kept["tags"]) == (
+        "Harbour lantern rota", "session", "https://notes.example/lanterns", "urban-planning", ["riverside"], ["lanterns"],
+    )
+    assert kept["custody_only"] is True
+
+
+def test_a_text_correction_of_an_owner_only_source_stays_owner_only(vault, source_schema, owner_scope) -> None:
+    from exomem.governance import raw_protection as raw_guard
+
+    old = commands.op_capture_source(
+        vault, source_schema, title="Ledger", source_kind="session", content="Private ledger lines.", raw_protection=True,
+    )["source"]
+    correction = {"supersedes": old["path"], "expected_hash": mutation_hash(vault / old["path"]), "reason": "Fix the title."}
+
+    corrected = commands.op_capture_source(
+        vault, source_schema, title="Household ledger", content="Private ledger lines.", correction=correction,
+    )["source"]
+
+    assert raw_guard.marked(old["path"])
+    assert raw_guard.marked(corrected["path"])
 
 
 # --- identity states a capture reports ----------------------------------------------------------------
@@ -517,3 +605,100 @@ def test_a_corrected_source_never_counts_as_unprocessed_while_a_live_note_cites_
 
     assert saved["page"] not in flagged
     assert successor["page"] not in flagged
+
+
+# --- custody: a Source kept only for safekeeping ------------------------------------------------------
+
+
+def test_a_custody_only_capture_marks_the_source_and_says_so(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "kept.pdf", ["A handed screenshot."]))
+    reply = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)
+    row = reply["files"][0]
+    assert _frontmatter(vault, row["page"])["custody_only"] is True
+    assert "(kept for custody only)" in reply["user_summary"]
+
+
+@pytest.mark.usefixtures("owner_scope", "duplicate_index")
+def test_a_batch_that_also_holds_an_already_stored_file_still_says_kept_for_custody_only(
+    vault, source_schema, tmp_path, monkeypatch
+) -> None:
+    # A batch with an already-stored file takes the partial sentence, which dropped the custody clause,
+    # so the person never saw the mark they might want to overrule.
+    payloads = {
+        "pdf-old": make_pdf(tmp_path / "old.pdf", ["The first handed page."]).read_bytes(),
+        "pdf-new": make_pdf(tmp_path / "new.pdf", ["The second handed page."]).read_bytes(),
+    }
+
+    def staged(file, _budget, **_kwargs):  # noqa: ANN001, ANN202
+        payload = payloads[file["file_id"]]
+        path = tmp_path / f"staged-{uuid.uuid4().hex}.bin"
+        path.write_bytes(payload)
+        return client_artifacts.StagedArtifact(
+            file_id=file["file_id"], path=path, size=len(payload), sha256=hashlib.sha256(payload).hexdigest(),
+            content_type="application/pdf", filename=f"{file['file_id']}.pdf",
+        )
+
+    monkeypatch.setattr(client_artifacts, "stage_artifact", staged)
+    old = {"file_id": "pdf-old", "download_url": "https://files.example/pdf-old"}
+    new = {"file_id": "pdf-new", "download_url": "https://files.example/pdf-new"}
+    commands.op_capture_source(vault, source_schema, title="First page", source_kind="session", files=[old])
+
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Both pages", source_kind="session", files=[old, new], custody_only=True)
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+
+    assert "1 already saved" in reply["user_summary"]
+    assert "(kept for custody only)" in reply["user_summary"]
+
+
+def test_a_custody_only_text_capture_adds_the_clause_after_text_only(vault, source_schema, owner_scope) -> None:
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Call notes", source_kind="session",
+        content="A transcript's pasted text.", custody_only=True)
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert "(text only; no original file stored) (kept for custody only)" in reply["user_summary"]
+
+
+def test_a_plain_capture_says_nothing_about_custody(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    reply = _save_pdf(vault, source_schema)
+    assert "custody" not in reply["user_summary"]
+
+
+def test_custody_only_accepts_only_a_boolean(vault, source_schema, owner_scope) -> None:
+    with pytest.raises(ValueError, match="custody_only"):
+        commands.op_capture_source(
+            vault, source_schema, title="Call notes", source_kind="session",
+            content="A transcript's pasted text.", custody_only="yes")
+
+
+def test_a_correction_carries_the_custody_mark(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    saved_row = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)["files"][0]
+    successor = _save_pdf(
+        vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
+        correction=_correction(vault, saved_row),
+    )["files"][0]
+    assert _frontmatter(vault, successor["page"])["custody_only"] is True
+
+
+def test_a_correction_that_sets_custody_off_leaves_the_successor_unmarked(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owner_scope
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "paper.pdf", [PRINTED_PAGE]))
+    saved_row = _save_pdf(vault, source_schema, url=CLAIM, custody_only=True)["files"][0]
+    successor = _save_pdf(
+        vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", custody_only=False,
+        correction=_correction(vault, saved_row),
+    )["files"][0]
+    assert "custody_only" not in _frontmatter(vault, successor["page"])

@@ -47,6 +47,9 @@ A move of raw bytes beside an unpaired card left the card and its referrers nami
 - [x] 5.3 Add `artifact_path` to reclassification as a pointer repair that records and reverts the previous values, and refuses a missing or mismatching target; prove repair and revert in `tests/test_source_pointer_custody.py`.
 - [x] 5.4 Write the unclassified kind, not `other`, in the sidecar of a binary artifact; prove it in `tests/test_preserve.py`.
 - [ ] 5.5 After release, run the audit category against the owner's vault and repair each card that names a missing path; record the finding count before and after.
+  - Done 2026-11-20 on 0.191.0: four dataset-export cards that cited a missing path were reclassified with `artifact_path`. Each was previewed, applied and checked on disk: kind, domain, classification history and an `evidence_file` that names the real file. The four artifacts' SHA-256 values are unchanged. Their captured prose still cites the old path, as a Source body is immutable.
+  - "path mentions were not checked" appeared on 2 of the 4 operations, because the search index was not current.
+  - Still open, so this task stays unchecked: on that vault the audit category stops at its 50 s budget with coverage `unknown`, and it takes no scope. The vault-wide finding count before and after is therefore unknown.
 
 ## Phase 1 released delivery evidence
 

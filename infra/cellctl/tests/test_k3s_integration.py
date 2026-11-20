@@ -2074,7 +2074,10 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster, pl
                                     topology_value="test-zone", occupancy=2,
                                     resources=ResourceSettings(cpu_request="1", memory_request="2Gi"), reserve_cpu="0", reserve_memory="0")
         _, placement = ClusterConfig(object_storage_bucket="test", shared_worker=policy).workload_for_cell(selected_id)
-        settings = ("--set-json", "cellctl.sharedWorker=" + json.dumps(asdict(policy)))
+        values = asdict(policy)
+        # The chart sets the budget once, in cellResources; cellctl copies it into these resources.
+        del values["resources"]["passage_matrix_budget"]
+        settings = ("--set-json", "cellctl.sharedWorker=" + json.dumps(values))
         if placement_mode == "all-shared":
             settings += ("--set-json", f'cellctl.dedicatedCellIds=["{other_id}"]')
     documents = _render_platform("templates/cellctl.yaml", settings=(

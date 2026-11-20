@@ -2658,7 +2658,8 @@ def _schedule_build(
 
     def _warm() -> None:
         try:
-            with foreground_priority.cancellable(stop):
+            # A bulk pass: its walks yield to a request in flight, never under a lock one waits on.
+            with foreground_priority.bulk(stop=stop):
                 if job is None:
                     _warm_index(root, freshness_stamp, stop)
                 else:
