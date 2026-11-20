@@ -7929,18 +7929,23 @@ class LeaseManager:
             store_mode = False
             try:
                 from . import epistemic_graph, graph_sync
-                from .vault_store import mode, read
+                from .vault_store import graph_state, mode, read
 
                 vault_root = Path(vault_or_cell)
                 store_mode = mode.store_mode_for_reads(vault_root)
                 if store_mode:
-                    # Store commits derive graph rows atomically; sidecar sync has no generation here.
-                    graph_status = {"state": "not_applicable", "generation": None}
+                    # Store commits derive graph rows atomically; sidecar sync has no generation here. The graph
+                    # reports the state that doctor reports: the registry pass's, or why it serves nothing.
+                    store_graph = graph_state.read(vault_root)
+                    graph_status = {
+                        "state": mode.UNKNOWN if store_graph is None else store_graph.state,
+                        "generation": None,
+                    }
                     with read.snapshot(vault_root) as view:
                         diagnostics["vault_store"] = {"state": "available", "revision": view.revision}
                 else:
                     graph_status = graph_sync.status(vault_root)
-                if graph_status["state"] == "current":
+                if not store_mode and graph_status["state"] == "current":
                     # A status probe reports; it never pays the O(corpus)
                     # source-bytes proof. It reads the remembered verdict, or
                     # says that nothing has proved the sidecar yet (#1454).
@@ -7956,7 +7961,7 @@ class LeaseManager:
                 diagnostics["graph_sync"] = graph_status
             except Exception:  # noqa: BLE001 - coordination diagnostics stay bounded
                 if store_mode:
-                    diagnostics["graph_sync"] = {"state": "not_applicable", "generation": None}
+                    diagnostics["graph_sync"] = {"state": mode.UNKNOWN, "generation": None}
                     diagnostics["vault_store"] = {"state": "unavailable", "revision": None}
                 else:
                     diagnostics["graph_sync"] = {"state": "unavailable", "generation": 0}

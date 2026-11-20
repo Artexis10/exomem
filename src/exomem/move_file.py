@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -1052,6 +1052,18 @@ def _move_file_local(
         addressed_binary = originals.digest_addressed(vault_root, paired_binary[0]) is not None and not (
             store_writer is not None and store_targets.holds(vault_root, paired_binary[0])
         )
+        # A shared original keeps no file at its path: renamed to a suffix-less name its companion
+        # would read as a note and the census could no longer name it to a restricted caller.
+        if addressed_binary and not originals.may_share_bytes(paired_binary[1]):
+            suffix = PurePosixPath(paired_binary[0]).suffix
+            example = f", such as '{paired_binary[1]}{suffix}'" if suffix else ""
+            raise MoveFileError(
+                code="SHARED_ORIGINAL_NEEDS_EXTENSION",
+                reason=(
+                    f"A shared original keeps its filename extension, so it cannot be renamed "
+                    f"to '{paired_binary[1]}'. Add an extension to the destination name{example}."
+                ),
+            )
     if not recovering_from_trash and old_rel.lower().endswith(".md"):
         # The hidden pages that hold the rest of a long extraction move with their page, paired
         # with an original or not.

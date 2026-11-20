@@ -106,6 +106,6 @@ def test_store_status_reports_an_unreadable_revision_as_unknown(vault, monkeypat
     monkeypatch.setattr(read, "snapshot", unavailable)
     status = writer_lease.coordination_status(vault)
 
-    assert status["graph_sync"] == {"state": "not_applicable", "generation": None}
+    assert status["graph_sync"] == {"state": "unknown", "generation": None}
     assert status["vault_store"] == {"state": "unavailable", "revision": None}
     assert status["coordinator_healthy"] is True

@@ -4511,6 +4511,187 @@ def search_eligible_parent_rows_result(
     return get_store(vault_root).search_eligible_parent_rows_result(eligibility, scope, freshness)
 
 
+class BrowseRow(NamedTuple):
+    """One page row as a browse reads it, before any view is decoded.
+
+    `own` and `via_parent` say whether the plan's columns hold for the row and for its in-scope
+    emitted parent. A row is a candidate when it is in scope and either holds: a child of a matching
+    parent is a candidate whatever its own columns say. With no plan `own` is always true.
+    """
+
+    path: str
+    updated: str
+    parent: str | None
+    in_scope: bool
+    has_view: bool
+    own: bool
+    via_parent: bool
+    has_children: bool = False
+
+
+def _browse_plan_sql(
+    vault_root: Path, eligibility: Any | None, col: str
+) -> tuple[str, str, list[object]]:
+    """`own` and `via_parent` as SQL over a `pages r` row, with the plan predicate's parameters.
+
+    The predicate is `_eligibility_predicate`'s, evaluated on a keyed lookup of the row (its
+    alias is `p`), so the same rendering serves the row, its parent and any outer alias. Its unit
+    arm reads `in_vault`: a unit row carries its page's scope flags, so for a page in scope it is
+    the scope's own predicate, and for an emitted parent outside the scope it holds as the exact
+    match does, which reads that parent's units whole.
+    """
+    if eligibility is None:
+        return "1", "0", []
+    labels = _selected_axis_labels(vault_root) if eligibility.has_unit_axis else None
+    predicate, params = _eligibility_predicate(eligibility, "in_vault", labels)
+    own = f"EXISTS (SELECT 1 FROM pages p WHERE p.path = r.path AND ({predicate}))"
+    via = (
+        "EXISTS (SELECT 1 FROM pages p WHERE p.path = r.emitted_parent_path "
+        f"AND p.{col} = 1 AND ({predicate}))"
+    )
+    return own, via, params
+
+
+def _browse_rows(rows: list[tuple]) -> list[BrowseRow]:
+    return [
+        BrowseRow(
+            str(path),
+            str(updated or "0000-00-00"),
+            None if parent is None else str(parent),
+            *map(bool, flags),
+        )
+        for path, updated, parent, *flags in rows
+    ]
+
+
+def _browse_scope_column(scope: str) -> str:
+    return "in_vault" if scope == "vault" else "in_kb"
+
+
+def browse_window_result(
+    vault_root: Path,
+    eligibility: Any | None,
+    *,
+    scope: str,
+    freshness: tuple | None,
+    after: tuple[str, str] | None,
+    size: int,
+) -> CatalogQueryResult[list[BrowseRow] | None]:
+    """The next `size` pages that a browse may report, newest first, from the browse index.
+
+    A page may be reported when it is in scope, or when it is the emitted parent of an in-scope
+    child. Each such page is listed at its own key and only when the plan's columns hold for it (a
+    superset of what the plan accepts). Which page a row is reported as is the caller's rule, read
+    at request time, so a row is listed whatever its stored parent: the stored rows may lag the
+    live access policy. The children of a listed parent come from `browse_children_result`.
+    `after` is the `(updated, path)` key of the last row of the previous window. The value is None
+    when the store has no browse index, so the caller takes the exhaustive route.
+    """
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    col = _browse_scope_column(scope)
+
+    def query(conn: sqlite3.Connection) -> list[BrowseRow] | None:
+        # The pragma reads the index's own entry, not a table of the store.
+        if not conn.execute("SELECT 1 FROM pragma_index_info(?)", (BROWSE_INDEX,)).fetchone():
+            return None
+        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        params: list[object] = [*plan_params, *plan_params]
+        keyset = ""
+        if after is not None:
+            keyset = "AND (r.updated, r.path) < (?, ?) "
+            params.extend(after)
+        listed = ""
+        if eligibility is not None:
+            listed = f"AND {own} "
+            params.extend(plan_params)
+        params.append(size)
+        return _browse_rows(
+            conn.execute(
+                f"SELECT r.path, r.updated, r.emitted_parent_path, r.{col}, "
+                f"r.eligibility_view_json IS NOT NULL, {own}, {via}, "
+                f"EXISTS (SELECT 1 FROM pages c WHERE c.emitted_parent_path = r.path AND c.{col} = 1) "
+                f"FROM pages r WHERE r.in_vault = 1 {keyset}{listed}"
+                f"AND (r.{col} = 1 OR (r.eligibility_view_json IS NOT NULL AND EXISTS ("
+                f"SELECT 1 FROM pages c WHERE c.emitted_parent_path = r.path AND c.{col} = 1))) "
+                "ORDER BY r.updated DESC, r.path DESC LIMIT ?",
+                params,
+            ).fetchall()
+        )
+
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope,
+        freshness,
+        query,
+        "lexical browse window query failed (%s); browse declines",
+    )
+
+
+def browse_children_result(
+    vault_root: Path,
+    parents: set[str],
+    eligibility: Any | None,
+    *,
+    scope: str,
+    freshness: tuple | None,
+) -> CatalogQueryResult[list[BrowseRow]]:
+    """The in-scope rows that name any of `parents` as their emitted parent, through the parent index."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    col = _browse_scope_column(scope)
+
+    def query(conn: sqlite3.Connection) -> list[BrowseRow]:
+        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        return _browse_rows(
+            conn.execute(
+                f"SELECT r.path, r.updated, r.emitted_parent_path, 1, "
+                f"r.eligibility_view_json IS NOT NULL, {own}, {via} FROM pages r "
+                f"WHERE r.{col} = 1 AND r.emitted_parent_path IN (SELECT value FROM json_each(?))",
+                [*plan_params, *plan_params, json.dumps(sorted(parents), ensure_ascii=False)],
+            ).fetchall()
+        )
+
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope,
+        freshness,
+        query,
+        "lexical browse children query failed (%s); browse declines",
+    )
+
+
+def browse_rows_result(
+    vault_root: Path,
+    paths: set[str],
+    eligibility: Any | None,
+    *,
+    scope: str,
+    freshness: tuple | None,
+) -> CatalogQueryResult[list[BrowseRow]]:
+    """The rows of these `paths`, by key. A path that is not a row of the vault has none."""
+    if not _catalog_usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    col = _browse_scope_column(scope)
+
+    def query(conn: sqlite3.Connection) -> list[BrowseRow]:
+        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        return _browse_rows(
+            conn.execute(
+                f"SELECT r.path, r.updated, r.emitted_parent_path, r.{col}, "
+                f"r.eligibility_view_json IS NOT NULL, {own}, {via} FROM pages r "
+                # `+` keeps the planner on the key lookup: the vault flag would pick a scan of the index.
+                "WHERE +r.in_vault = 1 AND r.path IN (SELECT value FROM json_each(?))",
+                [*plan_params, *plan_params, json.dumps(sorted(paths), ensure_ascii=False)],
+            ).fetchall()
+        )
+
+    return get_store(vault_root)._serve_from_ready_catalog_result(
+        scope,
+        freshness,
+        query,
+        "lexical browse rows query failed (%s); browse declines",
+    )
+
+
 @dataclass(frozen=True)
 class EligibilityMetadata:
     view: dict[str, Any] | None
@@ -5247,6 +5428,18 @@ BUILD_STAMP_TABLES = ("meta",)
 KEY_ONLY_TABLES = ("unit_revisions",)
 
 
+#: The store's browse index. `browse_window_result` walks it newest first, so a browse reads the
+#: pages that its limit needs, not every page in scope. Only the store creates it
+#: (`vault_store.migrate.create_owner_schema`): a file-mode sidecar shares
+#: `create_catalogue_schema` and keeps its own indexes, and its browse takes the exhaustive route.
+BROWSE_INDEX = "pages_browse"
+
+
+def create_browse_index(conn: sqlite3.Connection) -> None:
+    """Create the store's browse index on ``conn``. It owns no transaction."""
+    conn.execute(f"CREATE INDEX IF NOT EXISTS {BROWSE_INDEX} ON pages(in_vault, updated, path)")
+
+
 def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     """Create the catalogue's tables, indexes, triggers and full-text tables on ``conn``.
 
@@ -5255,8 +5448,26 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     store's tables are the ones this module declares. It owns no transaction and stamps no schema version.
     """
     LexicalStore._create_catalog_tables(conn)
+    _add_schema_17_page_columns(conn)
     LexicalStore._create_catalog_indexes(conn)
     LexicalStore._ensure_fts_schema(conn)
+
+
+def catalogue_schema_current(conn: sqlite3.Connection, *, raise_errors: bool = False) -> bool:
+    """Whether ``conn``'s catalogue carries this build's stamp and the page shape that goes with it.
+
+    The one rule that the lexical readers (`LexicalStore._schema_is_current`) and store mode's owner state
+    ask: a stamp over an older shape answers nothing, so it must not read as current. It emits no DDL.
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        if raise_errors:
+            raise
+        return False  # no catalogue tables yet
+    if not (row and row[0] == str(SCHEMA_VERSION)):
+        return False
+    return LexicalStore._pages_has_current_columns(conn, raise_errors=raise_errors)
 
 
 def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
@@ -5468,6 +5679,14 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
 
 #: The columns that schema 17 added to `pages`; a store that the released code created at schema 16 lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
+
+
+def _add_schema_17_page_columns(conn: sqlite3.Connection) -> None:
+    """Add the schema 17 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    for name in _SCHEMA_17_PAGE_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT")
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -6628,17 +6847,7 @@ class LexicalStore:
         ever creating, altering, or dropping anything. A missing `meta`/`pages`
         table or a legacy `pages` shape reads as not-current — the caller then
         defers to the atomic rebuild rather than mutating the old shape here."""
-        try:
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            if raise_errors:
-                raise
-            return False  # no `meta` table yet
-        if not (row and row[0] == str(SCHEMA_VERSION)):
-            return False
-        return self._pages_has_current_columns(conn, raise_errors=raise_errors)
+        return catalogue_schema_current(conn, raise_errors=raise_errors)
 
     @staticmethod
     def _create_catalog_tables(conn: sqlite3.Connection) -> None:

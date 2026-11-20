@@ -945,23 +945,35 @@ def _top_admitted(
     return [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
 
 
-def read_published_identity(vault_root: Path) -> recall_space.SpaceIdentity | None:
-    """Read only the serving space record; never initialize or migrate a sidecar."""
+class RecallSpaceUnread(Exception):
+    """This read could not decide which recall space is published; one may be."""
+
+
+def read_published_identity(vault_root: Path, *, wait_seconds: float = 0.0) -> recall_space.SpaceIdentity | None:
+    """Read only the serving space record; never initialize or migrate a sidecar.
+
+    None means no space is published. Raises RecallSpaceUnread when the store stays busy
+    for `wait_seconds` or the read fails, so a caller never reports a busy store as empty.
+    """
     try:
         path = index_paths.sidecar_path(vault_root, nonblocking=True)
         with reserved_paths._subsystem_authority_scope("embedding_index"), reserved_paths._identity_coordination_scope(
-            vault_root, descriptor_ids=("embeddings-store",), identity_may_change=False, deadline=time.monotonic(),
+            vault_root, descriptor_ids=("embeddings-store",), identity_may_change=False,
+            deadline=time.monotonic() + wait_seconds,
         ), reserved_paths._sqlite_owner_target_scope(vault_root, path, "embeddings-store", create=False) as retained:
             with contextlib.closing(_sqlite_connect_owned(
                 f"{retained.as_uri()}?mode=ro", uri=True, timeout=0.0
             )) as conn:
                 conn.execute("BEGIN")
                 identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-            if identity is None or identity.dim <= 0:
-                return None
-            return identity if index_paths.sidecar_path(vault_root, nonblocking=True) == path else None
-    except (OSError, sqlite3.DatabaseError, ValueError, RuntimeError, OpError):
+            moved = index_paths.sidecar_path(vault_root, nonblocking=True) != path
+    except FileNotFoundError:
         return None
+    except (OSError, sqlite3.DatabaseError, ValueError, RuntimeError, OpError) as error:
+        raise RecallSpaceUnread(type(error).__name__) from error
+    if moved:
+        raise RecallSpaceUnread("the serving sidecar changed during the read")
+    return identity if identity is not None and identity.dim > 0 else None
 
 
 class EmbeddingIndex:

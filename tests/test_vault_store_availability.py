@@ -291,7 +291,8 @@ def test_every_dispatched_subcommand_declares_what_it_touches_in_the_vault():
     declared = {name.split(" ")[0] for name in cli_fence.ACCESS}
     assert set(cli._COMMANDS) == declared
     assert cli._CLI_ONLY_SUBCOMMANDS <= set(cli._COMMANDS)
-    assert all(isinstance(access, cli_fence.VaultAccess) for access in cli_fence.ACCESS.values())
+    assert all(isinstance(entry.access, cli_fence.VaultAccess) for entry in cli_fence.ACCESS.values())
+    assert all(entry.remedy for entry in cli_fence.ACCESS.values() if entry.access is cli_fence.VaultAccess.PAGES)
 
 
 def _entry_arguments(name, vault, scratch):
@@ -332,19 +333,26 @@ def _entry_arguments(name, vault, scratch):
         "cell-export": ["cell-export", "--export-id", str(uuid.uuid4()), "--max-bytes", "1", "--vault", where,
                         "--termination-log", termination_log],
         "cell-init": ["cell-init", "--vault", where],
+        "media-replicas": ["media-replicas", "list", "--vault", where],
         "cell-media-census": ["cell-media-census", "--vault", where],
         "cell-media-manifest": ["cell-media-manifest", "--vault", where],
     }[name]
 
 
+#: A cell job's termination log carries only the refusal's code: a reason never leaves the Job.
+CODE_ONLY_ROUTES = frozenset({"cell-import", "cell-export", "cell-init"})
+
+
 @pytest.mark.parametrize("name", [
-    name for name, access in cli_fence.ACCESS.items() if access is cli_fence.VaultAccess.PAGES
+    name for name, declared in cli_fence.ACCESS.items() if declared.access is cli_fence.VaultAccess.PAGES
 ])
-def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_as_the_registry_path_does(
+def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_even_where_the_service_serves_it(
         store_mode_vault, monkeypatch, tmp_path, capsys, name):
     """Defect: a CLI subcommand that the dispatcher routes before the registry path reads or rewrites the
-    Markdown, projections or file-mode indexes of a vault whose pages live in the store."""
+    Markdown, projections or file-mode indexes of a vault whose pages live in the store, once the build can
+    serve store mode (`require_servable` passes, as the rehearsal and the 7.4 switch leave it)."""
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
+    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     if name == "warm":
         monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)  # `warm` skips the vault it has no model for
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "cell-check")  # a cell job's pod always sets it
@@ -358,8 +366,23 @@ def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_as_the_regis
     heard = capsys.readouterr()
     reported = "".join(path.read_text() for path in scratch.glob("*.log"))
     assert status != 0
-    assert availability.NOT_SERVED in heard.out + heard.err + reported
+    assert cli_fence.REFUSED in heard.out + heard.err + reported
+    if name not in CODE_ONLY_ROUTES:
+        assert cli_fence.ACCESS[name].remedy in heard.out + heard.err + reported
     assert _vault_bytes(store_mode_vault) == before
+
+
+def test_a_subcommand_that_touches_pages_refuses_a_vault_with_a_corrupt_manifest_in_one_line(
+        store_mode_vault, tmp_path, capsys):
+    """Defect: an unreadable manifest crashes a PAGES command with a traceback instead of a refusal."""
+    _corrupt_manifest(store_mode_vault)
+
+    status = cli._dispatch_main(["reclaim-schema", "--vault", str(store_mode_vault)])
+
+    heard = capsys.readouterr()
+    assert status != 0
+    assert "unreadable or invalid" in heard.out + heard.err
+    assert "Traceback" not in heard.out + heard.err
 
 
 def test_the_store_route_and_a_fresh_vault_still_run_beside_the_fence(

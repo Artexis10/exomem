@@ -3901,7 +3901,7 @@ def build_corpus_context_with_census(
     writer_visibility = vault.writer_link_visibility(root)
     selection = instances.DefinitionsSelection(root, _PAGE_DEFINITION_SUBJECTS)
     definitions = None
-    with egress.disclosure_boundary(root, "semantic_corpus_admission"):
+    with egress.disclosure_boundary(root, "semantic_corpus_admission", sink=True):
         visible = egress.restricted_release_filter(root)
         if visible is not None or writer_visibility is not None:
             memo_key = None
