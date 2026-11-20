@@ -25,7 +25,7 @@ Design basis: Anthropic, "Writing effective tools for agents": a destructive too
 
 ### 1. `items` becomes a view of the current rows
 
-Schema 18 renames the table `items` to `item_rows` and adds `retracted_txn INTEGER`. A `NULL` value means the row is current. A view named `items` selects the current rows with the exact column list of schema 17. A partial index `item_rows_current ON item_rows(collection_id, row_id) WHERE retracted_txn IS NULL` keeps current-row counts index-only.
+Schema 19 renames the table `items` to `item_rows` and adds `retracted_txn INTEGER`. A `NULL` value means the row is current. A view named `items` selects the current rows with the exact column list of schema 18. A partial index `item_rows_current ON item_rows(collection_id, row_id) WHERE retracted_txn IS NULL` keeps current-row counts index-only.
 
 - SQLite rewrites child foreign keys, indexes and trigger bodies on `ALTER TABLE ... RENAME`. The minimum supported SQLite (3.38) does this.
 - The view flattens onto the unique and partial indexes.
@@ -61,7 +61,7 @@ A later write with the same natural key finds the retracted row by `item_key`, c
 - A collection that renders one view per row refuses `RETRACT_UNAVAILABLE` in this change. Retiring and re-occupying its view paths needs its own design. Production creates use the summary view.
 - Derived collections keep their existing refusal.
 
-### 5. Migration 18
+### 5. Migration 19
 
 One immediate transaction:
 
@@ -70,18 +70,18 @@ One immediate transaction:
 3. Rebuild `audit_effects` with the widened check and its foreign key to `item_rows`. Drop its append-only triggers first and recreate its index, as earlier revisions did.
 4. Let schema setup recreate the triggers, then run `foreign_key_check`.
 
-A failure leaves schema 17.
+A failure leaves schema 18.
 
 ## Risks / Trade-offs
 
-- **Every earlier release refuses a schema-18 store.** Back up the store with the current release before the upgrade. To go back, restore that backup, which loses writes made after it, or roll forward.
+- **Every earlier release refuses a schema-19 store.** Back up the store with the current release before the upgrade. To go back, restore that backup, which loses writes made after it, or roll forward.
 - **A reader that must see retracted rows but reads the view** silently omits them. The history, identity and typed version reads are named in the tasks, and the history tests cover them.
 - **The import row counter assumed rows are never removed.** It becomes a count through the partial index.
 
 ## Migration Plan
 
 1. Release this change on its own, after the release that carries `harden-records-import-and-row-access`.
-2. Rehearse migration 18 on a byte copy of a production store. Compare integrity, foreign keys, history verification and per-collection current counts before and after.
+2. Rehearse migration 19 on a byte copy of a production store. Compare integrity, foreign keys, history verification and per-collection current counts before and after.
 3. Back up the store, then install.
 4. Retract the one stored row with a `null` key part, and verify the collection's current count and that no current row has a `null` key part, from stored state.
 

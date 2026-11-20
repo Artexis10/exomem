@@ -8,7 +8,7 @@ An agent or an import can admit a wrong row into a store-backed Records collecti
 - Retraction takes the row out of current state. Queries, counts, inspect and row-id binding then treat it as absent. Every version and audit effect of the row stays.
 - Retraction writes a `retract` audit effect into the history chain. Row history shows the retraction and its reason.
 - A later write with the same natural key brings the row back into current state as its next version.
-- Store schema 18 adds the representation. The table of rows keeps every row; `items` becomes a view of the current rows, so the existing current-state reads do not change. The migration also widens the audit effect check to admit `retract`.
+- Store schema 19 adds the representation. The table of rows keeps every row; `items` becomes a view of the current rows, so the existing current-state reads do not change. The migration also widens the audit effect check to admit `retract`.
 - Retraction is refused on file-canonical collections and on collections that render one view per row.
 
 ## Capabilities
@@ -23,6 +23,6 @@ None.
 
 ## Impact
 
-- Store schema 18. Every earlier release refuses a schema-18 store. To go back after the upgrade, restore the backup taken before it, or roll forward.
+- Store schema 19. Every earlier release refuses a schema-19 store. To go back after the upgrade, restore the backup taken before it, or roll forward.
 - `collection_store` writer, schema, history, typed storage, rollups, reference index and importer; `record_memory`, `operation_entries` and the generated capability docs.
 - Builds on the row-id binder and on the set-based batch reads of the change `harden-records-import-and-row-access`.
