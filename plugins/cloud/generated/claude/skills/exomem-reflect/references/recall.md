@@ -101,7 +101,8 @@ retain categorical baseline selection without supplemental task matching.
 Use focused `search_memory` for a remaining question. Use `deep=true` when a bounded
 evidence pack helps compare sources. Read a selected source when its qualifications
 or complete contents matter. A directory requires `read_page(page=<parent page>)`
-without `part="units"`. A unit read is not the whole page or directory.
+without `part="units"`. A unit read is not the whole page or directory. Read a
+listed connection when its reason bears on the answer.
 
 Before recommending an older action, reconcile newer supported outcomes about that
 action. Keep event time separate from the page's edit time. Treat an unresolved

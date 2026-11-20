@@ -123,9 +123,26 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
         return Verdict.GONE if _was_projected(facts) else Verdict.OWN
     if facts.held_kind == HELD_DELETE and disk.sha256 in facts.own_hashes:
         return Verdict.CLEAR
+    if page and _orphaned_manifest(facts):
+        return Verdict.ADOPT
     if disk.sha256 in facts.own_hashes or disk.sha256 in (facts.stored_sha256, facts.held_sha256):
         return Verdict.OWN
     return Verdict.ADOPT
+
+
+def _orphaned_manifest(facts: Facts) -> bool:
+    """Whether a manifest row outlives the page that it describes, with nothing of Exomem's pending.
+
+    An Exomem delete or move keeps the manifest row of its old path beside a queued intent until the
+    projector removes the file. A row with no page, intent, hold or audited removal is what a page
+    that the store lost leaves, so its file is a new page to adopt, whatever bytes the row records.
+    """
+    return (
+        facts.manifest is not None
+        and facts.page is None
+        and facts.intent is None
+        and not (facts.moves_away or facts.removed or facts.held)
+    )
 
 
 def _was_projected(facts: Facts) -> bool:
@@ -339,14 +356,21 @@ class Importer:
             return None
 
     def _known_hashes(self) -> dict[str, frozenset[str]]:
-        """The hashes that the store expects a file to hold at each path: manifest, page, binary."""
+        """The hashes that the store expects a file to hold at each path: manifest, page, binary.
+
+        A manifest row counts only beside its page. With no page it is an Exomem removal in flight or
+        a page that the store lost, which ``judge`` tells apart, so the sweep settles the file.
+        """
         known: dict[str, set[str]] = defaultdict(set)
         with read.snapshot(self._root) as view:
             for meta in view.pages():
                 known[meta.path].add(meta.sha256)
-            for table in ("store_manifest", "store_binaries"):
-                for path, sha256 in view.connection.execute(f"SELECT path, sha256 FROM {table}"):
-                    known[path].add(sha256)
+            for path, sha256 in view.connection.execute(
+                "SELECT path, sha256 FROM store_manifest WHERE path IN (SELECT path FROM store_pages)"
+            ):
+                known[path].add(sha256)
+            for path, sha256 in view.connection.execute("SELECT path, sha256 FROM store_binaries"):
+                known[path].add(sha256)
         return {path: frozenset(hashes) for path, hashes in known.items()}
 
     def _held_deletes(self) -> frozenset[str]:
@@ -604,9 +628,10 @@ class Importer:
             return
         base = facts.manifest or facts.page
         # One test says whether the store has moved since the file was projected: the commit's own.
+        # An orphaned manifest row is no base: the store holds no page there to overwrite.
         expect = (
             write.Expect(absent=True)
-            if base is None
+            if base is None or _orphaned_manifest(facts)
             else write.Expect(revision=base.revision, projected=True)
         )
         put = write.PagePut(rel, disk.body, on_disk_mtime_ns=disk.mtime_ns)

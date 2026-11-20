@@ -1949,13 +1949,21 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def pending_results(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJobResult]:
+    def pending_results(
+        self, *, limit: int = STATUS_JOB_LIMIT, keys: list[tuple[int, int]] | None = None
+    ) -> list[MediaJobResult]:
+        """The recorded results, oldest update first; `keys` (job id, claim revision) names the ones wanted."""
         if isinstance(limit, bool) or limit <= 0:
             raise ValueError("media result limit must be a positive integer")
+        if keys is not None and not keys:
+            return []
+        wanted = "" if keys is None else "WHERE " + " OR ".join(
+            ["(media_job_results.job_id = ? AND media_job_results.claim_revision = ?)"] * len(keys)
+        )
         conn = self._connect()
         try:
             rows = conn.execute(
-                """
+                f"""
                 SELECT jobs.*, media_job_results.schema_version,
                        media_job_results.claim_revision AS result_claim_revision,
                        kind, sidecar_before_hash, sidecar_before_evidence_version,
@@ -1963,9 +1971,10 @@ class MediaJobStore:
                        payload_hash, media_job_results.ocr_generation AS result_ocr_generation,
                        target_hash, target_evidence_version, target_size, receipt_revision
                 FROM media_job_results JOIN jobs ON jobs.id = media_job_results.job_id
+                {wanted}
                 ORDER BY media_job_results.updated_at, jobs.id LIMIT ?
                 """,
-                (limit,),
+                (*(value for key in keys or () for value in key), limit),
             ).fetchall()
             results: list[MediaJobResult] = []
             for row in rows:
@@ -1982,6 +1991,14 @@ class MediaJobStore:
         conn = self._connect()
         try:
             return int(conn.execute("SELECT count(*) FROM media_job_results").fetchone()[0])
+        finally:
+            conn.close()
+
+    def pending_result_facts(self) -> tuple[int | None, float | None]:
+        """How many finished results wait to publish (None when the read failed), and when the oldest was recorded (epoch seconds)."""
+        conn = self._connect()
+        try:
+            return _read_publication_facts(conn)
         finally:
             conn.close()
 
@@ -3020,6 +3037,34 @@ def _pending_speech_count(conn: sqlite3.Connection, selector: str = "", paramete
     )
 
 
+def _read_publication_facts(conn: sqlite3.Connection) -> tuple[int | None, float | None]:
+    """The count and oldest `created_at` of the results that wait to publish.
+
+    A store from before the table existed holds no result. A read that failed for another reason
+    knows nothing, and answers None, never 0.
+    """
+    try:
+        count, oldest = conn.execute("SELECT count(*), min(created_at) FROM media_job_results").fetchone()
+    except sqlite3.OperationalError:
+        try:
+            table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_job_results'"
+            ).fetchone()
+        except sqlite3.Error:
+            return None, None
+        return (None, None) if table is not None else (0, None)
+    return int(count), None if oldest is None else float(oldest)
+
+
+def _publication_status(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Finished results waiting for a quiet gap in foreground writes: how many, and how long the oldest has."""
+    count, oldest = _read_publication_facts(conn)
+    return {
+        "pending_count": count,
+        "oldest_age_seconds": None if oldest is None else round(max(0.0, time.time() - oldest), 1),
+    }
+
+
 def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tuple[object, ...]) -> dict[str, Any]:
     """The facts of `status` that jobs do not show: a busy GPU, the preflight, hidden CUDA, repeated child deaths."""
     wait = _read_meta_json(conn, GPU_WAIT_KEY)
@@ -3028,6 +3073,7 @@ def _read_runtime_facts(conn: sqlite3.Connection, selector: str, parameters: tup
     hidden = _read_meta_json(conn, SERVING_CUDA_HIDDEN_KEY)
     crashes = _read_meta_json(conn, CHILD_CRASHES_KEY)
     return {
+        "result_publication": _publication_status(conn),
         "waiting_count": waiting,
         "wait": None
         if wait is None or not waiting
@@ -3142,6 +3188,7 @@ def status(
         "gpu_preflight": None,
         "serving_worker_cuda_hidden": None,
         "child_crashes": None,
+        "result_publication": {"pending_count": 0, "oldest_age_seconds": None},
         "jobs": [],
         "errors": [],
         "hydration_policy_problem": None,
@@ -3197,6 +3244,7 @@ def status(
             "gpu_preflight": facts["preflight"],
             "serving_worker_cuda_hidden": facts["serving_worker_cuda_hidden"],
             "child_crashes": facts["child_crashes"],
+            "result_publication": facts["result_publication"],
             "jobs": [_status_job(row) for row in jobs],
             "errors": [_status_error(row) for row in errors],
             "hydration_policy_problem": empty["hydration_policy_problem"],
@@ -3208,7 +3256,9 @@ def status(
 #: The `status` fields a tool caller sees. The worker process, the store path and
 #: the per-reason counts are operator detail: a memory reason belongs on operator
 #: surfaces such as doctor, and a job row already shows waiting work as pending.
-TOOL_STATUS_FIELDS = ("healthy", "counts", "reconciliation_required_count", "jobs", "errors")
+TOOL_STATUS_FIELDS = (
+    "healthy", "counts", "reconciliation_required_count", "result_publication", "jobs", "errors",
+)
 #: Facts about the machine's GPU and media processes. On a personal install the caller owns the machine and
 #: a pending job gives no other sign of them, so the tool shows them. A Cloud cell's tenant does not own the
 #: node, so there they stay in doctor like the memory reasons (see the cloud-media runbook).

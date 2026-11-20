@@ -10103,6 +10103,16 @@ def _process_media(
             holder_kind="command",
         )
 
+    def _queue_guard():
+        # The hold of a path that only queues a job: the job store is machine-local, so the
+        # commit generation stays put. Planning (hashing, hydration) runs before it, never inside.
+        return manager.projection_guard(
+            vault_root,
+            operation=f"process_media_{operation}_queue",
+            request_id=active_mutation_request_id(),
+            holder_kind="command",
+        )
+
     def _index_refresh_remaining() -> int:
         return int(index_sync.deferred_work_status(vault_root)["full_upserts"]["count"])
 
@@ -10184,35 +10194,27 @@ def _process_media(
                 "remediation": remediation,
             }
 
-        results: list[dict[str, object]] = []
-        for index, (binary, relative) in enumerate(selected_paths):
-            if index:
-                # Each path re-takes the boundary; a keyed write that arrived
-                # meanwhile gets it first, so a long batch slows but never
-                # starves one.
-                manager.yield_to_waiting_writes(vault_root)
+        def run_one(binary: Path, relative: str) -> dict[str, object]:
+            """One path's row."""
             try:
                 result = _run_media_operation(
-                    vault_root, binary, operation, language, multilingual, _commit_guard
+                    vault_root, binary, operation, language, multilingual, _commit_guard,
+                    queue_guard=_queue_guard,
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
             except media_processing.MediaProcessingError as error:
-                results.append(failure_row(relative, error.code))
-                continue
+                return failure_row(relative, error.code)
             except ValueError as error:
                 if str(error).partition(":")[0] != "WRITE_REFUSED":
                     raise
-                results.append(failure_row(relative, "WRITE_REFUSED"))
-                continue
+                return failure_row(relative, "WRITE_REFUSED")
             except FileNotFoundError:
-                results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
-                continue
+                return failure_row(relative, "MEDIA_NOT_FOUND")
             state = media_jobs.tool_job_state(vault_root, result.state, result.job_id)
             terminal_row = terminal_job_row(relative, state)
             if terminal_row is not None:
-                results.append(terminal_row)
-                continue
+                return terminal_row
             row: dict[str, object] = {
                 "path": relative,
                 "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
@@ -10224,7 +10226,16 @@ def _process_media(
             }
             if result.document_container is not None:
                 row["document_container"] = result.document_container
-            results.append(row)
+            return row
+
+        results: list[dict[str, object]] = []
+        for index, (binary, relative) in enumerate(selected_paths):
+            if index:
+                # Each path re-takes the boundary; a keyed write that arrived
+                # meanwhile gets it first, so a long batch slows but never
+                # starves one.
+                manager.yield_to_waiting_writes(vault_root)
+            results.append(run_one(binary, relative))
         return {
             "operation": operation,
             "paths": [relative for _, relative in selected_paths],
@@ -10315,9 +10326,13 @@ def _process_media(
 
 
 def _run_media_operation(
-    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
+    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard,
+    *, queue_guard=None,
 ):
-    """Run one explicit media operation on one governed binary."""
+    """Run one explicit media operation on one governed binary.
+
+    `queue_guard` (reprocess only) is the hold for queueing that commits no sidecar; see `reconcile_media`.
+    """
     from . import document_containers, media_processing
 
     if document_containers.is_container(binary):
@@ -10334,7 +10349,8 @@ def _run_media_operation(
         )
     if operation == "reprocess":
         return media_processing.reprocess_media(
-            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+            vault_root, binary, language=language, multilingual=multilingual,
+            commit_guard=commit_guard, queue_guard=queue_guard,
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 

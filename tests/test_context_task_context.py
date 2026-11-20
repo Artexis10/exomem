@@ -703,7 +703,7 @@ def test_a_slow_link_lookup_never_costs_the_leads_their_projection(
     turn = "Inspect the optical alignment before the workshop"
 
     clock = _clock_at(monkeypatch)
-    read_links = working_set._task_links
+    read_links = working_set.read_connections
 
     def leaves_less_than_a_stage(*args, **kwargs):
         links = read_links(*args, **kwargs)
@@ -711,7 +711,7 @@ def test_a_slow_link_lookup_never_costs_the_leads_their_projection(
         clock[0] += request_budget.current().remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS / 2
         return links
 
-    monkeypatch.setattr(working_set, "_task_links", leaves_less_than_a_stage)
+    monkeypatch.setattr(working_set, "read_connections", leaves_less_than_a_stage)
     packet, _ = _activate_within(vault, 50, turn=turn, max_chars=8000)
     served = {item["source_ref"]: item for item in packet["task_context"]["candidates"]}
     assert leads <= set(served)

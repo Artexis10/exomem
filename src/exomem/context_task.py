@@ -81,8 +81,18 @@ def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
         return f"Method: {title}. Read the source for applicability and exclusions."
     line = f"{item.get('title', '')}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
-    links = [f"{link['relation']} {link['title']} {link['target_ref']}" for link in item.get("links") or ()]
+    # The title is page text, so it is quoted and escaped exactly as the hook renderer quotes it.
+    links = [
+        f"{json.dumps(str(link.get('title', '')), ensure_ascii=False)} "
+        f"[{link.get('target_ref', '')}]"
+        + (f": {link['why']}" if link.get("why") else "")
+        for link in item.get("links") or ()
+    ]
     return f"{line} Links: {'; '.join(links)}" if links else line
+
+
+#: Served once at the end of a block that carries at least one link.
+LINKS_ADVICE = "Read a link when its reason bears on the answer."
 
 
 def packet_chars(block: Mapping[str, Any]) -> int:
@@ -91,7 +101,27 @@ def packet_chars(block: Mapping[str, Any]) -> int:
     lines.extend(item_line(item, method=True) for item in methods.get("items", ()))
     if methods.get("reset"):
         lines.insert(0, RESET_ADVICE)
+    if any(item.get("links") for item in block.get("candidates", ())):
+        lines.append(LINKS_ADVICE)
     return len("\n".join(lines)) + (1 if lines else 0)
+
+
+def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
+    """Build a link's `why` when the allocation first tries it; False when it cannot be listed.
+
+    The reason reads pages, so a link the allowance never reaches costs no read; the line's length is part of
+    what the allowance charges, so it is built before the link is measured. A reader view that cannot be read
+    leaves the link unlisted and the lane reported failed, as an unreadable graph does.
+    """
+    build = link.pop("build_why", None)
+    if build is None:
+        return True
+    try:
+        link["why"] = build()
+    except egress.ReaderViewUnavailable:
+        _add_missing(block, "lane_failed")
+        return False
+    return True
 
 
 def _source(root: Path, source_ref: str, caller: Any):
@@ -623,15 +653,18 @@ def compile_context(
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
-        # The links come last: a lead served without them still answers the turn, a lead never read does not.
         target_paths: dict[str, str] = {}
         for reason in working_set.attach_task_links(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,
         ):
             _add_missing(block, reason)
+        # A lead is admitted together with its first connection when both fit; the rest fill the
+        # room every lead and method leaves, in lead order. A lead's own method outranks its first
+        # link, but a first link may take the room that a later lead would have used.
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
+        # The links each admitted lead may still list, by lead; its first link can return here.
+        tails: dict[int, list[dict[str, str]]] = {}
         for item in candidates:
-            # Links spend only what every lead and method leaves, so a link never displaces one.
             links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
             if item["ref"] not in covered and item["source_ref"] not in covered:
@@ -639,8 +672,14 @@ def compile_context(
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
                     _add_missing(block, "budget")
-                else:
-                    linked.append((item, links, False))
+                elif links and _reasoned(block, links[0]):
+                    item["links"] = links[:1]
+                    if packet_chars(block) > allowance:
+                        item.pop("links")
+                        item["links_omitted"] = item.get("links_omitted", 0) + len(links)
+                    else:
+                        tails[id(item)] = links[1:]
+                        linked.append((item, tails[id(item)], False))
             elif links:
                 # The turn slice carries no links, so a named lead returns here only to list them.
                 linked.append((item, links, True))
@@ -648,6 +687,13 @@ def compile_context(
                 if any(method is served for served in block["methods"]["items"]):
                     continue  # a page that is both a lead and a lead's declared method is served once
                 block["methods"]["items"].append(method)
+                if packet_chars(block) > allowance and item.get("links") and id(item) in tails:
+                    # The lead's own method outranks its first link, which returns if room remains.
+                    first = item.pop("links")
+                    if packet_chars(block) <= allowance:
+                        tails[id(item)][:0] = first
+                    else:
+                        item["links"] = first
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
                     _add_missing(block, "budget")
@@ -658,15 +704,23 @@ def compile_context(
                     block["candidates"].pop()
                     _add_missing(block, "budget")
                     continue
-            item["links"] = []
+            if not links:
+                continue
+            served = item.get("links")
+            if served is None:
+                served = item["links"] = []
+            before = len(served)
             for link in links:
-                item["links"].append(link)
-                if packet_chars(block) > allowance:
-                    item["links"].pop()
+                if not _reasoned(block, link):
                     break
-            if len(links) > len(item["links"]):
-                item["links_omitted"] = item.get("links_omitted", 0) + len(links) - len(item["links"])
-            if not item["links"]:
+                served.append(link)
+                if packet_chars(block) > allowance:
+                    served.pop()
+                    break
+            dropped = len(links) - (len(served) - before)
+            if dropped:
+                item["links_omitted"] = item.get("links_omitted", 0) + dropped
+            if not served:
                 del item["links"]
                 if named:
                     # A named lead without one listed link would only repeat the turn slice's route.

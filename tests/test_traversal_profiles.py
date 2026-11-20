@@ -12,10 +12,17 @@ from exomem import vault as vault_module
 
 def test_builtins_are_bounded_and_domain_distinct() -> None:
     profiles = traversal_profiles.builtin_profiles()
-    assert set(profiles) == {"epistemic", "provenance", "causal", "decision", "brief", "all"}
+    assert set(profiles) == {
+        "epistemic", "provenance", "causal", "decision", "brief", "recall", "all",
+    }
     assert "support" in profiles["epistemic"].families
     assert "causality" not in profiles["epistemic"].families
     assert "causality" in profiles["causal"].families
+    # Activation's profile adds links, entities and provenance to the epistemic families —
+    # never the operational implementation family.
+    assert profiles["epistemic"].families <= profiles["recall"].families
+    assert {"link", "entity", "derivation", "evidence", "citation"} <= profiles["recall"].families
+    assert "implementation" not in profiles["recall"].families
     assert all(profile.builtin for profile in profiles.values())
 
 

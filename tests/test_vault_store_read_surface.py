@@ -578,21 +578,10 @@ def prepare_sample(root, monkeypatch, request, sample):
     return command, arguments, source_schema
 
 
-#: The held listing of a store-mode folder takes each disk entry's identity before it drops the files
-#: at stored pages' paths, so it stats and opens every projected page in the folder. Answers are equal.
-HELD_LISTING_PROBES = (
-    "the store-mode folder listing (reserved_paths.list_generic_tree) stats and opens each projected "
-    "page file for its identity before it leaves the file out; the answer is the store's",
-    frozenset({"page filesystem read"}),
-)
 #: Each registered read that still breaks the store-mode read contract, why, and the only violations
 #: it may show. Its marker is strict, so a fix that makes the read pass fails here until its entry
 #: goes, and any other violation fails it as a regression.
-STORE_READ_GAPS = {
-    **dict.fromkeys((
-        "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
-        "manage_memory_file:list", "review_memory:audit",
-    ), HELD_LISTING_PROBES),
+STORE_READ_GAPS: dict[str, tuple[str, frozenset[str]]] = {
     "manage_memory_file:move": (
         "the store-mode move preview runs the move's own checks, which stat the moved page and walk "
         "its linkers on disk (store_targets.resolve_existing, store_targets.inbound_links, "

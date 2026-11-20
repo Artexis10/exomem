@@ -4,7 +4,7 @@ The runner starts this file with the arm's ``PYTHONPATH``, so the arm's own writ
 frontmatter parser and status registry seed the vault and read the seeded note back. The runner
 never parses a note itself.
 
-    python arm_side.py seed VAULT WORK          # note JSON (or null) on stdin; places WORK/CLAUDE.md; prints the note
+    python arm_side.py seed VAULT WORK          # note JSON, list of notes or null on stdin; places WORK/CLAUDE.md; prints the probe of each
     python arm_side.py seed_sources VAULT WORK  # list of Sources on stdin; captures each; prints the receipts
     python arm_side.py seed_collections VAULT   # list of collections on stdin; creates each; prints the pages written
     python arm_side.py prominence LEVEL         # sets the capture prominence; prints the level the arm then resolves
@@ -48,21 +48,39 @@ def probe(vault: Path, relative: str) -> dict:
     return {"path": relative, "exists": True, "body": body, "lifecycle_class": lifecycle}
 
 
-def seed(vault: Path, work: Path, note: dict | None) -> dict | None:
-    """Write the arm's learning instruction into ``work/CLAUDE.md`` and the case's note, if any, into the vault."""
+def seed(vault: Path, work: Path, notes: dict | list[dict] | None) -> dict | list[dict] | None:
+    """Write the arm's learning instruction into ``work/CLAUDE.md`` and the case's notes, if any, into the vault.
+
+    One note object gives its probe; a list gives the probe of each note, written in order. A note may carry
+    ``relation_disposition`` and ``relation_review_reason``, which go to the writer as given: the reviewed
+    outcome for a page that has no truthful relation to the others.
+    """
     from exomem import commands
     from exomem.client_config import place_learning_instruction
     from exomem.governance.principal import owner_principal, request_scope
     from exomem.prominence import LEARNING_INSTRUCTION
 
     place_learning_instruction(work / "CLAUDE.md", LEARNING_INSTRUCTION)
-    if note is None:
+    if notes is None:
         return None
+    paths = []
     with request_scope(owner_principal(surface="mcp")):
-        written = commands.op_note(
-            vault, title=note["title"], note_type=note["note_type"], content=note["content"]
-        )
-    return probe(vault, written["path"])
+        for note in notes if isinstance(notes, list) else [notes]:
+            review = {
+                key: note[key]
+                for key in ("relation_disposition", "relation_review_reason")
+                if key in note
+            }
+            written = commands.op_note(
+                vault,
+                title=note["title"],
+                note_type=note["note_type"],
+                content=note["content"],
+                **review,
+            )
+            paths.append(written["path"])
+    probes = [probe(vault, path) for path in paths]
+    return probes if isinstance(notes, list) else probes[0]
 
 
 def seed_sources(vault: Path, work: Path, sources: list[dict]) -> list[dict]:

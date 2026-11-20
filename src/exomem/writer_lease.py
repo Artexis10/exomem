@@ -5789,17 +5789,27 @@ class LeaseManager:
 
     @contextmanager
     def projection_guard(
-        self, vault_root: os.PathLike[str] | str, *, operation: str
+        self,
+        vault_root: os.PathLike[str] | str,
+        *,
+        operation: str,
+        request_id: str | None = None,
+        holder_kind: str = "background",
     ) -> Iterator[VaultMutationCoordinator]:
         """Hold the vault mutation boundary, with writer authority, to write a projection file.
 
         Only for a file that a canonical source rebuilds and no canonical read depends
-        on, such as the collection store's derived rows. The holder is background work,
-        and the commit generation does not move, so every captured validity stamp stays
-        current. A writer of canonical content takes `mutation_guard`.
+        on, such as the collection store's derived rows, or for machine-local job rows. The
+        holder is background work unless the caller names its own, and the commit generation
+        does not move, so every captured validity stamp stays current. A writer of canonical
+        content takes `mutation_guard`.
         """
         with self._mutation_boundary(
-            vault_root, operation=operation, holder_kind="background", advance_generation=False
+            vault_root,
+            request_id=request_id,
+            operation=operation,
+            holder_kind=holder_kind,
+            advance_generation=False,
         ) as mutation:
             yield mutation
 

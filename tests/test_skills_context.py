@@ -161,13 +161,14 @@ def test_a_projected_skill_carries_its_whole_description_or_none_of_it(skills_va
     _refresh(skills_vault)
 
     roomy = _activate(skills_vault, turn=NO_SKILL_NAMED, max_chars=6000)
-    tight = _activate(skills_vault, turn=NO_SKILL_NAMED, max_chars=2000)
+    # Half of 1,000 is the turn's share, too small for this description.
+    tight = _activate(skills_vault, turn=NO_SKILL_NAMED, max_chars=1000)
 
     assert [item["description"] for item in roomy["task_context"]["methods"]["items"]] == [description.strip()]
     assert roomy["budget"]["used_chars"] <= 6000
     assert tight["task_context"]["methods"]["items"] == []
     assert {"role": "task_context", "reason": "budget"} in tight["task_context"]["missing"]
-    assert tight["budget"]["used_chars"] <= 2000
+    assert tight["budget"]["used_chars"] <= 1000
     assert [item["summary"] for item in tight["skills"]["items"] if item["name"] == "zeta"] == ["Use when tuning the zeta engine."]
 
 

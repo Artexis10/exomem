@@ -19,3 +19,7 @@ profiles:
   # A topic brief reads one subject's neighbourhood: plain links, then the provenance a note cites.
   brief:
     add_families: [link, derivation, evidence, citation, observation]
+  # Activation reads an anchor's neighbourhood: the epistemic families plus links,
+  # the entities pages are about, and the note-to-source provenance edges.
+  recall:
+    add_families: [support, contradiction, refinement, duplication, supersession, question, answer, link, entity, derivation, evidence, citation]

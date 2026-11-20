@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.191.0](https://github.com/Artexis10/exomem/compare/v0.190.0...v0.191.0) (2026-11-20)
+
+
+### Features
+
+* **outcome:** seed several pages and give one arm its own Exomem setting ([#2925](https://github.com/Artexis10/exomem/issues/2925)) ([6044bc5](https://github.com/Artexis10/exomem/commit/6044bc592405307143d1659e986047cea4425307))
+
+
+### Bug Fixes
+
+* **activation:** finish typed connections: profiles, lazy reasons and raw links ([#2927](https://github.com/Artexis10/exomem/issues/2927)) ([5bd6e07](https://github.com/Artexis10/exomem/commit/5bd6e0775c24f267a278767b2457e52dfe69adc9))
+* **media:** publish media results in quiet-gap batches and keep the graph incremental ([#2940](https://github.com/Artexis10/exomem/issues/2940)) ([6d1e151](https://github.com/Artexis10/exomem/commit/6d1e151d54a8d82361855817955e69a0d27ad403))
+* **media:** say at boot when enrolled voiceprints cannot be matched ([#2937](https://github.com/Artexis10/exomem/issues/2937)) ([f6fc5f9](https://github.com/Artexis10/exomem/commit/f6fc5f950cff5741681cf1f1cdfc13d7125fe198))
+* **vault-store:** close the store writer gaps and make a folder recovery linear ([#2934](https://github.com/Artexis10/exomem/issues/2934)) ([5bf0025](https://github.com/Artexis10/exomem/commit/5bf00257454ec90e15e02437758c5e8d9e4c033b))
+* **vault-store:** read stored folders, links and plans from the store, not projected files ([#2892](https://github.com/Artexis10/exomem/issues/2892)) ([0472056](https://github.com/Artexis10/exomem/commit/0472056b146ac7000dad8994cb8b4d8a05dd9837))
+
+
+### Performance
+
+* **vault-store:** remember ownership per process and warm store-mode scope reads after start ([#2936](https://github.com/Artexis10/exomem/issues/2936)) ([266b3c1](https://github.com/Artexis10/exomem/commit/266b3c196db167aa28052baa9595db77badabaea))
+
+## [0.190.0](https://github.com/Artexis10/exomem/compare/v0.189.0...v0.190.0) (2026-11-19)
+
+
+### Features
+
+* **activation:** serve the graph's typed connections with reasons in recall ([#2924](https://github.com/Artexis10/exomem/issues/2924)) ([154f6fd](https://github.com/Artexis10/exomem/commit/154f6fdd190b4aefc214984e34a1005b6c22dcec))
+
+## [0.189.0](https://github.com/Artexis10/exomem/compare/v0.188.0...v0.189.0) (2026-11-19)
+
+
+### Features
+
+* **records:** route captures by declaration and serve a collection's capture method ([#2919](https://github.com/Artexis10/exomem/issues/2919)) ([aff95f5](https://github.com/Artexis10/exomem/commit/aff95f57ca39a7778c2b5eaccd99df3029c8b6ea))
+* **sources:** check a document's identity at capture, correct Sources without re-upload, and keep write receipts honest ([#2902](https://github.com/Artexis10/exomem/issues/2902)) ([3f332ca](https://github.com/Artexis10/exomem/commit/3f332ca93180b6b1e8650afd09668c894adc6834))
+
+
+### Bug Fixes
+
+* **brief:** keep only the second-hop notes nearest the seed ([#2913](https://github.com/Artexis10/exomem/issues/2913)) ([690e55f](https://github.com/Artexis10/exomem/commit/690e55fde7df377af7c8e4a3ed5b362a93b0bd35))
+* **sources:** offer the correction call only to a caller who can record it ([#2915](https://github.com/Artexis10/exomem/issues/2915)) ([9ef9da6](https://github.com/Artexis10/exomem/commit/9ef9da6fc9ebe3ffeaa9df51134afa0119accd0b))
+* **writer-lease:** stop batch media work from starving foreground writes ([#2917](https://github.com/Artexis10/exomem/issues/2917)) ([e8feb20](https://github.com/Artexis10/exomem/commit/e8feb20f3df85627a75273a81a215bbdd23c371d))
+
 ## [0.188.0](https://github.com/Artexis10/exomem/compare/v0.187.0...v0.188.0) (2026-11-17)
 
 

@@ -73,22 +73,22 @@ Maps activation SHALL discover bounded relevant candidates from admitted notes, 
 #### Scenario: A candidate lists what it links to
 
 - **WHEN** an unrestricted caller's task discovery finds a page that authors typed relations and plain links to other pages
-- **THEN** the candidate lists up to five of its outbound links, each with the relation, the target's canonical ref and the target's title, and no body
-- **AND** links with a typed relation, as the relation registry's declared family marks it, come before plain links, and the graph owner's order stands within each group
+- **THEN** the candidate lists up to five of its connections in either direction, each with the relation, the direction, the target's canonical ref, the target's title and a `why`, and no body
+- **AND** the connections are ranked as "Served connections carry a reason" of `follow-typed-edges-in-recall` requires
 - **AND** a candidate with more links than it lists carries the count of those it omits, and a link to a page the caller may not see is never listed
 - **AND** no linked page becomes a candidate by that link, so the agent decides which link to follow
 - **AND** a page the turn slice already carries returns as a candidate only to list its links, when at least one fits
 
-#### Scenario: Links cost the allowance last
+#### Scenario: A lead keeps its first link
 
 - **WHEN** the packet allowance cannot hold every listed link
-- **THEN** every lead and method that fits without links is served, and links fill only the room that remains, in lead order
+- **THEN** each lead is admitted with its first link when both fit and alone otherwise, no link displaces a method, and the remaining links fill only the room that remains, in lead order
 - **AND** the candidate counts the links it could not list
 
 #### Scenario: The hook shows each lead's links
 
 - **WHEN** the retrieve hook renders a lead that lists links
-- **THEN** it renders one line under the lead with each link's relation, quoted and escaped title, and ref, and the count of omitted links when there is one
+- **THEN** it renders one line under the lead with each link's quoted and escaped title, ref and `why`, and the count of omitted links when there is one
 - **AND** the hook charges link lines after every lead and method line, so a tight cap drops link lines before any lead or method line
 - **AND** a lead that the turn slice already lists renders no second lead line, only its link line named by the slice's ref
 
@@ -188,7 +188,7 @@ Maps, profiles, stance, candidate context and methods SHALL reuse the existing p
 
 ### Requirement: Read-only activation operation
 The product SHALL expose a read-only operation `activate_context` that accepts a raw
-original human turn (`turn`, non-empty text), an optional `max_chars` (default 4000, clamped
+original human turn (`turn`, non-empty text), an optional `max_chars` (default 6000, clamped
 to 500..8000), an optional declared `purpose`, an optional `include_timings`
 flag, and optional `client` and `session` attribution, and returns a working-memory
 packet. It SHALL accept an optional `trigger` with the closed protocol values

@@ -50,7 +50,7 @@ def material_vault(vault: Path) -> Path:
 def test_project_material_is_relevant_scoped_and_does_not_bypass_contact(material_vault: Path):
     # Catches both categorical exclusion and a recency sort erasing content rank.
     packet = working_set.compile_packet(material_vault, turn="harbor-study turbine calibration")
-    assert [r["id"] for r in packet["roles"]] == [
+    assert [r["id"] for r in context_roles.lenses(packet["roles"])] == [
         "preferences", "constraints", "recent_change", "active_plans", "material", "precedents",
     ]
     material = [u for u in packet["units"] if u["role"] == "material"]
@@ -353,7 +353,7 @@ def test_wider_material_query_still_filters_common_background(material_vault: Pa
 def test_role_ceiling_reports_material_omission(material_vault: Path):
     # Six higher-priority lanes cannot silently look like material was searched.
     packet = working_set.compile_packet(material_vault, turn="harbor-study who is currently turbine calibration")
-    assert len(packet["roles"]) == 6
+    assert len(context_roles.lenses(packet["roles"])) == 6
     assert "material" not in [r["id"] for r in packet["roles"]]
     assert {"role": "material", "reason": "role_limit"} in packet["missing"]
 
@@ -574,7 +574,7 @@ def test_default_lenses_of_a_broad_project_leave_room_for_the_turns_material(
               for role in ("preferences", "constraints", "recent_change", "material")}
     assert [u["provenance"]["path"] for u in served["material"]] == [crowded_project]
     assert all(served[role] for role in ("preferences", "constraints", "recent_change"))
-    assert packet["budget"]["used_chars"] <= 4000
+    assert packet["budget"]["used_chars"] <= working_set.DEFAULT_BUDGET_CHARS
 
 
 def test_a_name_only_turn_keeps_every_default_lens_of_a_broad_project(
@@ -602,7 +602,7 @@ def test_a_requested_constraint_survives_newer_unrelated_default_context(
     packet = commands.op_activate_context(material_vault, turn="harbor-study quarry relay handoff")
 
     assert any(unit["provenance"]["path"] == crowded_project for unit in packet["units"])
-    assert packet["budget"]["used_chars"] <= 4000
+    assert packet["budget"]["used_chars"] <= working_set.DEFAULT_BUDGET_CHARS
     recall = commands.op_ask_memory(material_vault, query="quarry relay handoff",
         mode="keyword", graph=False, rerank=False, result_level="unit", detail="full", limit=5)
     assert "quarry relay handoff" in str(recall)
