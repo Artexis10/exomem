@@ -257,6 +257,19 @@ def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, sour
     assert len(scans) == 1
 
 
+def test_a_corrected_source_is_queued_for_processing_when_it_is_saved(vault, source_schema, saved) -> None:
+    # Live, two corrected Sources were never processed: their pages kept no text, and reading the old ref
+    # redirected to them. Processing must not wait on a file-watcher event that can be missed.
+    from exomem import media_jobs
+
+    successor = _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa",
+                          correction=_correction(vault, saved))["files"][0]
+
+    assert _frontmatter(vault, successor["page"])["processing_state"] == "pending"
+    job = media_jobs.MediaJobStore(vault).get_by_binary(vault / successor["stored_path"])
+    assert job is not None and job.state == "pending"
+
+
 def test_a_changed_original_refuses_the_correction_and_writes_nothing(vault, source_schema, saved) -> None:
     (vault / saved["stored_path"]).write_bytes(b"replaced bytes")
     before = _sources(vault)
