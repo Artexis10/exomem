@@ -2505,8 +2505,8 @@ class MediaWorker:
         The next passes bisect exactly those results, one half a pass, until a result that cannot
         publish stands alone; it is set aside, which only keeps it out of the batches of the others.
         Isolating it costs one failed hold a pass, never a burst of holds. A set-aside result retries
-        alone in the first pass that has no other batch to publish, and otherwise once it has waited
-        the progress floor, so a transient failure recovers on the next pass as it did before.
+        alone in the first pass that has no other batch to publish, and otherwise at the first pass
+        after it has waited the progress floor. One set-aside result retries per pass, longest first.
         """
         suspects = (
             self._plan_parent_results(self._store.pending_results(limit=len(self._suspects), keys=self._suspects))
