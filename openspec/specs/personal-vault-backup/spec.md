@@ -42,7 +42,7 @@ The service SHALL pass the repository, the password file path and every backend 
 
 ### Requirement: A snapshot holds the vault and the non-rebuildable state, taken consistently
 
-A backup SHALL write one restic snapshot that holds the vault root and a staged copy of every machine-local state family that declares itself not rebuildable. It SHALL copy each SQLite database with SQLite's online backup API in one step, so the copy reads one snapshot of the database, through a connection that refuses writes. It SHALL NOT copy a write-ahead-log, shared-memory or journal file, and it SHALL NOT leave one beside a database that was closed cleanly. A stop request SHALL end staging between files. It SHALL exclude every rebuildable family. It SHALL NOT hold the vault mutation guard while it runs.
+A backup SHALL write one restic snapshot that holds the vault root and a staged copy of every machine-local state family that declares itself not rebuildable. It SHALL copy each SQLite database with SQLite's online backup API in one step, so the copy reads one snapshot of the database, through a connection that refuses statements that change data; SQLite's own recovery and checkpoint may still write the database file without changing its content. It SHALL NOT copy a write-ahead-log, shared-memory or journal file, and it SHALL NOT leave one beside a database that was closed cleanly. A stop request SHALL end staging between files. It SHALL exclude every rebuildable family. It SHALL NOT hold the vault mutation guard while it runs.
 
 When staging a state file fails, the backup SHALL still snapshot the vault, SHALL record the outcome `partial` with the failing code, and SHALL NOT apply retention.
 

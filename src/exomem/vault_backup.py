@@ -32,7 +32,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote_to_bytes
 
 from filelock import FileLock, Timeout
 
@@ -300,7 +300,7 @@ class _Restic:
     def tags(self) -> str:
         """The tags of this vault's snapshots, as restic's one comma-joined value. The root is percent-encoded,
         because restic splits a tag value at a comma."""
-        return f"{TAG},{ROOT_TAG}{quote(str(self.vault), safe='/')}"
+        return f"{TAG},{ROOT_TAG}{quote(os.fsencode(self.vault), safe='/')}"
 
     @property
     def own(self) -> list[str]:
@@ -568,7 +568,9 @@ def _backup(vault: Path, restic: _Restic, previous: dict[str, Any] | None) -> di
             entry["state_files"], entry["findings"] = stage_state(vault, stage, restic.stop)
         except (OSError, sqlite3.Error):
             entry["state_files"], entry["findings"] = None, [{"kind": "state", "code": "state_staging_failed"}]
-        arguments = ["backup", "--json", "--quiet", "--host", restic.host, "--tag", restic.tags]
+        # Group by host and tags, not paths: a backup without originals lists changing paths, and restic must still
+        # find this vault's previous snapshot as the parent, or it reads every listed file again.
+        arguments = ["backup", "--json", "--quiet", "--host", restic.host, "--tag", restic.tags, "--group-by", "host,tags"]
         if restic.config.include_originals:
             arguments.append(str(vault))
         else:
@@ -744,7 +746,7 @@ def _roots(snapshot: dict[str, Any]) -> tuple[str | None, str | None]:
     """The vault root a snapshot was taken from, named by its tag, and its staged-state root, found by the
     staging directory's name among the snapshot's paths."""
     staged = [path for path in snapshot["paths"] if PurePosixPath(path).name == STAGE_DIRNAME]
-    roots = [unquote(tag[len(ROOT_TAG):]) for tag in snapshot.get("tags") or [] if tag.startswith(ROOT_TAG)]
+    roots = [os.fsdecode(unquote_to_bytes(tag[len(ROOT_TAG):])) for tag in snapshot.get("tags") or [] if tag.startswith(ROOT_TAG)]
     return (roots[0] if len(roots) == 1 else None), (staged[0] if len(staged) == 1 else None)
 
 
