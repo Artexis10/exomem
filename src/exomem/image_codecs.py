@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import struct
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import BinaryIO
 
@@ -111,6 +112,29 @@ def _open_raw(path: Path | BinaryIO, max_pixels: int | None):
         exif[_DATE_TIME] = taken.strftime("%Y:%m:%d %H:%M:%S")
         image.info["exif"] = exif.tobytes()
     return image
+
+
+def read_raw_facts(path: Path) -> tuple[datetime | None, int, int] | None:
+    """A DNG's capture timestamp and stored size, read without demosaicing; None for any other file.
+
+    LibRaw's timestamp carries no UTC offset. It parses DateTime, DateTimeOriginal and DateTimeDigitized
+    in turn and keeps the last that it reads, so a raw that records only a modification time reports
+    that as its timestamp. The size is the stored grid: no orientation applied.
+    """
+    from .media_types import RAW_EXTS
+
+    if path.suffix.lower() not in RAW_EXTS or not _is_dng(path):
+        return None
+    import rawpy
+
+    with rawpy.imread(str(path)) as raw:
+        sizes = raw.sizes
+        try:
+            taken = raw.other.timestamp
+        except (ValueError, OverflowError, OSError):
+            taken = None
+        # A raw that records no capture time has timestamp 0.
+        return (taken if taken is not None and taken.timestamp() > 0 else None), sizes.width, sizes.height
 
 
 def _is_dng(path: Path | BinaryIO) -> bool:

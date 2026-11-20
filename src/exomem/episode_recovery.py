@@ -312,7 +312,7 @@ class EpisodeInputOwner:
             version_scheme = model.MATERIAL_EVIDENCE_SCHEME
         if (
             version_scheme == model.MATERIAL_EVIDENCE_SCHEME
-            and resolved.released.get("frontmatter") != page.frontmatter
+            and not egress.released_frontmatter_matches(resolved.released, page.frontmatter)
         ):
             raise _error("EPISODE_INPUT_UNAVAILABLE", "input is unavailable")
         return _ResolvedInput(
@@ -377,7 +377,7 @@ class EpisodeInputOwner:
             released = retained_inputs._release_snapshot(self.vault_root, snapshot)  # noqa: SLF001
             if (
                 version_scheme == model.MATERIAL_EVIDENCE_SCHEME
-                and released.released.get("frontmatter") != page.frontmatter
+                and not egress.released_frontmatter_matches(released.released, page.frontmatter)
             ):
                 return {"digest": digest}
             return self._page_evidence(page, canonical, version_scheme)

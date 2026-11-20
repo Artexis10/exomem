@@ -1,6 +1,6 @@
 # Proposal
 
-This change specifies indexed capture metadata for photos and videos. Implementation is not authorized yet; it needs its own approved plan.
+This change adds indexed capture metadata for photos and videos.
 
 ## Why
 
@@ -14,8 +14,8 @@ Capture time and place are also the join that contextual retrieval needs. An eve
   - The metadata records what the file says, and leaves out what the file does not say.
   - For images, only the EXIF original capture time counts, never the modification time that a scanner sets.
 - Search filters by capture date and by a geographic bounding box. The filters reuse the existing ordered operators on ISO dates and numbers over an index, so a filtered search stays bounded.
-- A caller who may not read the original sees no position on any surface, filters included.
-- An owner operation adds capture metadata to existing sidecars. It rewrites only the capture block, never the extracted text. It runs only when the owner starts it, because it is a stored-data write.
+- A caller who may not download the original sees no position on any surface, filters included.
+- An owner operation adds capture metadata to existing sidecars. It rewrites only the capture block, never the extracted text. It runs only when the owner starts it, because it is a stored-data write. This change ships the operation and runs it on no real vault.
 
 This change adds no place names, no geocoding, no face detection and no change to ranking.
 
@@ -27,8 +27,8 @@ This change adds no place names, no geocoding, no face detection and no change t
 
 ### Modified Capabilities
 
-- `structured-retrieval-filters`: A field withheld from the caller for a page reads as missing in every filter, generic frontmatter pointers included.
+- `structured-retrieval-filters`: A field withheld from the caller for a page reads as missing in every filter, generic frontmatter pointers included. The capture date and position are reserved filter fields.
 
 ## Impact
 
-The implementation extends image and video extraction, the sidecar writer, the structured filter fields and the metadata index. It reuses the existing EXIF reader and the media job ledger. It adds no dependency beyond the image library and the video probe the media worker already uses.
+The implementation extends image and video extraction, the sidecar writer, the structured filter fields and the metadata index. It adds one capture reader. The viewer's own display read of the EXIF time stays as it is. The owner operation is a new `maintain_memory` mode on the maintenance job ledger. It adds no dependency beyond the image library, the RAW reader and the video probe that the media worker already uses.

@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
+from . import accel, asr_runtime, capture_metadata, diarizer_sidecar, runtime_resources
 from .asr_facts import (
     DECODING_BATCHED,
     DECODING_SEQUENTIAL,
@@ -62,6 +62,7 @@ from .asr_facts import (
     LANGUAGE_REQUESTED,
     AsrFacts,
 )
+from .capture_metadata import CaptureFacts
 from .media_types import (
     DOC_READERS as _DOC_READERS,
 )
@@ -131,6 +132,9 @@ class ExtractResult:
     # What image OCR measured and kept out of `text`: the mean word confidence and the words
     # under the floor. None for every other media type, and for PDF pages, which keep whole text.
     ocr: OcrFacts | None = None
+    # What an image or video states about its own capture. None for every other media type and
+    # for a file that states nothing; the sidecar then records no capture fields.
+    capture: CaptureFacts | None = None
 
     @property
     def sidecar_text(self) -> str:
@@ -258,9 +262,14 @@ def extract_text(
             options["language"] = language
         if multilingual:
             options["multilingual"] = True
-        return _transcribe(p, mt, vault_root=vault_root, **options)
+        result = _transcribe(p, mt, vault_root=vault_root, **options)
+        if mt == "video":
+            result.capture = capture_metadata.read(p, mt)
+        return result
     if mt == "image":
-        return _ocr_image(p)
+        result = _ocr_image(p)
+        result.capture = capture_metadata.read(p, mt)
+        return result
     if mt == "pdf":
         return _extract_pdf(p)
     # The registry names each document kind's library; each one has its own code here.

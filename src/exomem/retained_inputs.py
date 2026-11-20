@@ -251,7 +251,7 @@ def recheck_retained_inputs(
         )
         if (
             released.released is None
-            or released.released.get("frontmatter") != snapshot.page.frontmatter
+            or not egress.released_frontmatter_matches(released.released, snapshot.page.frontmatter)
             or not exact_text_visible(vault_root, text)
         ):
             raise _unavailable()

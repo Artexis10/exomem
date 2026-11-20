@@ -205,6 +205,7 @@ SAMPLES = {
     "maintain_memory:fix": {"mode": "fix"},
     "maintain_memory:reconcile": {"mode": "reconcile", "dry_run": True},
     "maintain_memory:backfill-ids": {"mode": "backfill-ids"},
+    "maintain_memory:capture-metadata": {"mode": "capture-metadata"},
     "maintain_memory:convert-originals": {"mode": "convert-originals"},
     "maintain_memory:maintenance-job": {"mode": "maintenance-job"},
     "maintain_memory:structured-files": {"mode": "structured-files", "collection": DATASET},
