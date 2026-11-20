@@ -219,7 +219,7 @@ def test_a_batch_that_cannot_commit_rolls_back_whole_and_the_failing_result_is_b
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 4
     assert worker._last_batch_at is not None  # the hold ran and advanced the generation, so it spaces the next
 
-    for _ in range(4):
+    for _ in range(3):
         worker._drain_parent_results()
 
     for sidecar in good:
@@ -230,8 +230,7 @@ def test_a_batch_that_cannot_commit_rolls_back_whole_and_the_failing_result_is_b
     assert refused["commits"] == 2  # the failed batch, then the poison alone
 
     refused["on"] = False
-    monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 0.0)  # the set-aside result has waited its floor
-    worker._drain_parent_results()
+    worker._drain_parent_results()  # nothing else waits, so this pass retries the set-aside result alone
 
     published = poison.read_text(encoding="utf-8")
     assert media_processing.has_completed_transcript(published, media_type="audio")
@@ -240,6 +239,40 @@ def test_a_batch_that_cannot_commit_rolls_back_whole_and_the_failing_result_is_b
     assert deferred_index.snapshot_full(vault) == []
     assert media_jobs.MediaJobStore(vault).pending_result_count() == 0
     assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_a_set_aside_result_stays_out_of_the_others_batches_but_still_gets_its_turn_at_the_floor(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting a failing result aside keeps it from failing every batch of the others, and a queue that
+    never runs dry still retries it once it has waited the progress floor."""
+    _speech_engine(monkeypatch)
+    monkeypatch.setattr(media_publication, "BATCH_RESULT_LIMIT", 1)
+    worker, pairs = _recorded_results(vault, ["poison.mp3", "good-1.mp3", "good-2.mp3"])
+    poison, good_1, good_2 = (sidecar for _binary, sidecar in pairs)
+    real_commit = preserve.commit_media_sidecar_writes
+    refused = {"on": True, "commits": 0}
+
+    def commit(vault_root, writes, **kwargs):
+        if refused["on"] and any(write.path == poison for write in writes):
+            refused["commits"] += 1
+            raise OSError("disk refused this page")
+        return real_commit(vault_root, writes, **kwargs)
+
+    monkeypatch.setattr(preserve, "commit_media_sidecar_writes", commit)
+
+    worker._drain_parent_results()  # the poison alone fails and is set aside
+    worker._drain_parent_results()  # good-1 publishes; the poison waits for its floor
+
+    assert refused["commits"] == 1
+    assert media_processing.has_completed_transcript(good_1.read_text(encoding="utf-8"), media_type="audio")
+    assert "extracted_by: pending" in good_2.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(media_publication, "MAX_DEFER_SECONDS", 0.0)
+    worker._drain_parent_results()  # good-2 publishes, and the floor gives the poison its turn
+
+    assert media_processing.has_completed_transcript(good_2.read_text(encoding="utf-8"), media_type="audio")
+    assert refused["commits"] == 2
 
 
 def test_a_result_that_cannot_stage_stays_pending_while_the_others_commit_in_the_same_hold(

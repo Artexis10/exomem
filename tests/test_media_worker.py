@@ -4816,10 +4816,7 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
     def publish(batch):
         published.append(now[0])
         if len(published) == 1:
-            # A refused boundary ran nothing, so the same result is due again on the next poll.
-            raise media_worker.OpError(
-                "MUTATION_BUSY", "boundary busy", details={"status": "retryable", "committed": False}
-            )
+            raise OSError("publication temporarily unavailable")
         original_publish(batch)
         parent._stop_event.set()
 

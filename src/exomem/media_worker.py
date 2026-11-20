@@ -2503,9 +2503,10 @@ class MediaWorker:
 
         A batch lands whole or rolls back, and a batch that rolls back leaves its results pending.
         The next passes bisect exactly those results, one half a pass, until a result that cannot
-        publish stands alone; it is set aside while the others publish. Isolating it costs one failed
-        hold a pass, never a burst of holds. A set-aside result retries alone once it has waited the
-        progress floor.
+        publish stands alone; it is set aside, which only keeps it out of the batches of the others.
+        Isolating it costs one failed hold a pass, never a burst of holds. A set-aside result retries
+        alone in the first pass that has no other batch to publish, and otherwise once it has waited
+        the progress floor, so a transient failure recovers on the next pass as it did before.
         """
         suspects = (
             self._plan_parent_results(self._store.pending_results(limit=len(self._suspects), keys=self._suspects))
@@ -2515,18 +2516,27 @@ class MediaWorker:
         if suspects:
             rank = {key: place for place, key in enumerate(self._suspects)}
             suspects.sort(key=lambda result: rank[_result_key(result)])
-            self._publish_or_isolate(suspects[: max(1, len(suspects) // 2)])
+            batch = suspects[: max(1, len(suspects) // 2)]
         else:
             self._suspects = []
             batch = [r for r in self._plan_parent_results(results) if _result_key(r) not in self._set_aside]
-            if batch:
-                self._publish_or_isolate(batch)
-        self._retry_set_aside()
+            batch = batch[: media_publication.BATCH_RESULT_LIMIT]  # the read window also holds room for set-aside results
+        if batch:
+            self._publish_or_isolate(batch)
+        self._retry_set_aside(nothing_else_ran=not batch)
 
-    def _retry_set_aside(self) -> None:
-        """Retry one set-aside result alone once it has waited the progress floor; forget the ended ones."""
+    def _retry_set_aside(self, *, nothing_else_ran: bool) -> None:
+        """Retry one set-aside result alone, the one that waited longest; forget the ended ones.
+
+        It retries in a pass that had no other batch, and in any pass once it has waited the progress
+        floor, so a busy queue cannot hold it back forever.
+        """
         now = _clock()
-        due = [key for key, since in self._set_aside.items() if now - since >= media_publication.MAX_DEFER_SECONDS]
+        waited = sorted(self._set_aside.items(), key=lambda item: item[1])  # oldest attempt first
+        due = [
+            key for key, since in waited[: media_publication.BATCH_RESULT_LIMIT]
+            if nothing_else_ran or now - since >= media_publication.MAX_DEFER_SECONDS
+        ]
         if not due:
             return
         waiting = self._store.pending_results(limit=len(due), keys=due)
@@ -2534,6 +2544,7 @@ class MediaWorker:
             del self._set_aside[key]  # its result ended: published, failed or superseded
         planned = self._plan_parent_results(waiting)
         if planned:
+            planned.sort(key=lambda result: self._set_aside[_result_key(result)])
             self._publish_or_isolate(planned[:1])
 
     def _publish_or_isolate(self, batch: list[media_jobs.MediaJobResult]) -> None:

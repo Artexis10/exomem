@@ -28,7 +28,7 @@ A keyed write's place in the arrival-order queue SHALL end when its attempt hold
 
 ### Requirement: Media publication lands in whole bounded batches
 
-The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending. The supervisor SHALL then bisect exactly the results of the failed batch, one half per pass, so that a result that cannot publish ends up alone and is set aside while the others publish, and no result is lost or published twice. A set-aside result SHALL stay set aside until its own result ends. A result that fails while it is staged SHALL stay pending without failing the batch. A refused boundary SHALL leave the batch pending, whole, and SHALL NOT start a hold for each result. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
+The media supervisor SHALL publish the durable results it drains as one batch under one vault mutation boundary hold, with one commit-generation advance and one post-commit fan-out for the whole batch. A batch SHALL stop at a size cap and at a time cap inside the hold. A batch SHALL land whole or roll back: a failed batch commit SHALL leave every result of the batch pending. The supervisor SHALL then bisect exactly the results of the failed batch, one half per pass, so that a result that cannot publish ends up alone and is set aside while the others publish, and no result is lost or published twice. A set-aside result SHALL stay out of the batches of the other results until its own result ends, SHALL retry alone in the first pass that has no other batch to publish, and SHALL retry once it has waited the progress floor. A result that fails while it is staged SHALL stay pending without failing the batch. A refused boundary SHALL leave the batch pending, whole, and SHALL NOT start a hold for each result. The graph floor and its checkpoint SHALL be published inside the commit's own hold, and the post-commit fan-out SHALL name every page that the commit created. A media publication SHALL complete the graph incrementally and SHALL NOT schedule a full graph rebuild.
 
 #### Scenario: A batch of results takes one hold and advances the generation once
 
@@ -43,7 +43,7 @@ The media supervisor SHALL publish the durable results it drains as one batch un
 - **THEN** no sidecar of the batch changes and every result stays pending
 - **AND** the next passes publish halves of exactly the failed results until the failing result is alone, and that result is set aside
 - **AND** the other results publish once each, also when more results wait than one batch takes
-- **AND** the set-aside result publishes once it has waited the progress floor and can commit
+- **AND** the set-aside result publishes in the first pass that has no other batch, or once it has waited the progress floor while other batches keep coming
 
 #### Scenario: A result that cannot be staged costs the others no second hold
 
