@@ -422,7 +422,8 @@ def test_a_publication_made_during_a_rebuild_survives_it_whatever_the_clock_says
 def test_a_retry_after_a_lost_upload_reply_reuses_the_replica_name(vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     """A fresh name per attempt would leave a landed first attempt under a name that no binding lists."""
     monkeypatch.setattr(media_replicas, "_RETRY_SECONDS", 0)
-    monkeypatch.setattr(media_replicas, "check", lambda *args, **kwargs: 0)  # a check round would count as work and retry at once
+    for round_ in ("check", "sample"):  # a check or sample round counts as work, which would retry at once
+        monkeypatch.setattr(media_replicas, round_, lambda *args, **kwargs: 0)
     original = _preserved(vault)
     _offload(vault, original)
     upload = media_store.FilesystemStore.upload
@@ -816,3 +817,158 @@ def test_a_check_pick_reads_the_due_index_in_order_with_no_sort(vault: Path, sel
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DUE, (MIRROR, 0.0, 8)))
     assert "USING INDEX media_replicas_due" in plan and "TEMP B-TREE" not in plan
+
+
+# --- verify-stored-replicas: the sampled check ---------------------------------------------------------
+
+
+def _unproven(vault: Path) -> None:
+    """Forget every sample, as a replica that no round has decrypted yet."""
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET decrypted_at = 0, sample_month = 0")
+        ledger.execute("DELETE FROM media_replica_samples")
+
+
+def _sampled(vault: Path) -> list[tuple[str, int]]:
+    """Each mirror replica's path and whether a sample has decrypted it."""
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        return [(path, proven > 0) for path, proven in ledger.execute(
+            "SELECT binary_rel, decrypted_at FROM media_replicas WHERE store = ? ORDER BY binary_rel", (MIRROR,))]
+
+
+def test_a_sample_that_decrypts_to_the_binding_proves_the_key(vault: Path, selected_store, mirrored: Path) -> None:
+    """Only a decrypt shows that the key still opens a replica; a hash of its ciphertext cannot."""
+    _replicated(vault)
+    _unproven(vault)
+
+    assert media_replicas.sample(vault) == 2  # the eviction store's pointer and the mirror's replica
+
+    assert [proven for _path, proven in _sampled(vault)] == [True]
+    assert _replica_row(vault)["state"] == media_replicas.UPLOAD_VERIFIED
+
+
+def test_a_sample_writes_no_plaintext_to_disk(vault: Path, selected_store, mirrored: Path, tmp_path: Path,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """The sample's whole point is a hash: plaintext of a private original must not outlive it in a temporary file."""
+    _replicated(vault)
+    _unproven(vault)
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr("tempfile.tempdir", None)
+    before = sorted(path for path in vault.rglob("*"))
+
+    assert media_replicas.sample(vault) == 2
+
+    assert list(scratch.iterdir()) == [] and sorted(path for path in vault.rglob("*")) == before
+
+
+def test_a_store_that_spent_its_monthly_budget_is_not_sampled_until_the_next_month(
+        vault: Path, selected_store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget is the owner's egress bill: a sample that ignored it would spend a remote store's allowance in a day."""
+    mirror_root = tmp_path / "mirror"
+    _declare(vault, selected_store, mirror_root)
+    paths = [_preserved(vault, category=category) for category in ("a", "b", "c")]
+    for path in paths:
+        _offload(vault, path)
+    _replicate_all(vault)
+    one_replica = originals.original_state(vault, paths[0]).replicas[0].ciphertext_size
+    _declare(vault, selected_store, mirror_root, sample_bytes_per_month=one_replica)
+    _unproven(vault)
+
+    media_replicas.sample(vault)
+    media_replicas.sample(vault)
+    assert [proven for _path, proven in _sampled(vault)].count(True) == 1  # one replica fits the month
+
+    monkeypatch.setattr(media_replicas, "_month", lambda moment: 209912)
+    media_replicas.sample(vault)
+    assert [proven for _path, proven in _sampled(vault)].count(True) == 2  # the next month starts a new budget
+
+
+@pytest.mark.parametrize(("written", "budget", "available"), [
+    pytest.param(None, 1024**3, True, id="absent-is-the-default-of-1-GiB"),
+    pytest.param(0, 0, True, id="zero-turns-sampling-off-and-is-not-the-default"),
+    pytest.param(5_000_000, 5_000_000, True, id="the-owners-figure"),
+    pytest.param(-1, 1024**3, False, id="negative-makes-the-store-unavailable"),
+    pytest.param("1GiB", 1024**3, False, id="text-makes-the-store-unavailable"),
+    pytest.param(True, 1024**3, False, id="a-boolean-is-not-a-byte-count"),
+])
+def test_the_sample_budget_field_is_optional_and_a_wrong_value_is_shown_not_guessed(
+        vault: Path, selected_store, tmp_path: Path, written, budget: int, available: bool) -> None:
+    """A budget of 0 read as absent would spend a store's egress that the owner switched off; a wrong value must show."""
+    values, _config = selected_store
+    extra = {} if written is None else {"sample_bytes_per_month": written}
+    _declare(vault, selected_store, tmp_path / "mirror", **extra)
+
+    mirror = originals.store_entries(values)[MIRROR]
+
+    assert (mirror.available, mirror.sample_bytes_per_month if available else None) == (available,
+                                                                                         budget if available else None)
+    assert mirror.invalid == (() if available else ("sample_bytes_per_month",))
+
+
+def test_a_budget_of_zero_turns_sampling_off_for_that_store(vault: Path, selected_store, tmp_path: Path) -> None:
+    _declare(vault, selected_store, tmp_path / "mirror", sample_bytes_per_month=0)
+    _replicated(vault)
+    _unproven(vault)
+
+    media_replicas.sample(vault)
+
+    assert [proven for _path, proven in _sampled(vault)] == [False]
+
+
+def test_a_replica_that_this_install_cannot_decrypt_is_never_sampled_and_is_no_finding(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A moved identity file is the owner's to fix: it must not read as a damaged replica."""
+    values, _config = selected_store
+    _replicated(vault)
+    _unproven(vault)
+    Path(values["identity_path"]).chmod(0)
+
+    assert media_replicas.sample(vault) == 0
+
+    assert media_store.unreadable_reason(vault, MIRROR, "1") == "identity_unreadable"
+    assert [proven for _path, proven in _sampled(vault)] == [False]
+    assert _replica_row(vault)["state"] == media_replicas.UPLOAD_VERIFIED
+
+
+def test_a_replica_of_another_key_version_is_never_sampled_and_gives_its_reason(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    _replicated(vault)
+    _unproven(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET key_version = '0' WHERE store = ?", (MIRROR,))
+
+    media_replicas.sample(vault)
+
+    assert media_store.unreadable_reason(vault, MIRROR, "0") == "identity_unreadable"
+    assert [proven for _path, proven in _sampled(vault)] == [False]
+
+
+def test_a_sample_that_cannot_decrypt_a_stored_replica_quarantines_it(vault: Path, selected_store, mirrored: Path) -> None:
+    """A replica that the key cannot open is the finding the sample exists to make."""
+    relative, replica = _replicated(vault)
+    _unproven(vault)
+    [stored] = [path for path in _objects(mirrored) if path.parent.name == replica.object]
+    damaged = bytearray(stored.read_bytes())
+    damaged[-1] ^= 1
+    stored.write_bytes(bytes(damaged))
+
+    media_replicas.sample(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
+                                                            "decrypt_failed")
+
+
+def test_the_sample_pick_and_the_month_release_read_the_sample_index_with_no_sort(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A scan or a sort over every replica for each pick would make a sample round cost the size of the store."""
+    _replicated(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        pick = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._SAMPLE,
+                                                         (MIRROR, "1", 0.0)))
+        release = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._SAMPLE_RESET,
+                                                            (MIRROR, "1", 202611, 8)))
+    assert "USING INDEX media_replicas_sample" in pick and "TEMP B-TREE" not in pick
+    assert "USING INDEX media_replicas_sample" in release

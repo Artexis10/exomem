@@ -1802,19 +1802,25 @@ def store_reachable(vault: Path, name: str) -> bool | None:
 
 
 def replica_unusable(vault: Path, replica: StoredObject) -> str | None:
-    """Why automatic repair cannot read `replica` now, or None when it can.
+    """Why automatic repair cannot read `replica` now, or None when it can."""
+    return unreadable_reason(vault, replica.store, replica.key_version)
+
+
+def unreadable_reason(vault: Path, store: str, key_version: str) -> str | None:
+    """Why this install cannot download and decrypt a replica in `store` made under `key_version`, or None when it can.
 
     It needs a store that is available and `immediate`, and the decryption identity of the replica's key version.
-    This install holds one identity, so a replica of another key version stays for the owner.
+    This install holds one identity, so a replica of another key version stays for the owner. Repair and the sampled
+    check both read a replica only where this is None.
     """
     config = _settings(vault)
-    entry = originals.store_entry(config, replica.store)
+    entry = originals.store_entry(config, store)
     if entry is None or not entry.available or connection_refusal(entry) is not None:
         return "store_unavailable"
     if entry.retrieval_class != originals.IMMEDIATE:
         return "owner_restores"
     identity = config.get("identity_path")
-    if replica.key_version != str(config.get("key_version")) or not isinstance(identity, str) \
+    if key_version != str(config.get("key_version")) or not isinstance(identity, str) \
             or not os.access(identity, os.R_OK):
         return "identity_unreadable"
     return None

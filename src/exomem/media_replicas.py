@@ -770,7 +770,7 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
     if time.monotonic() - _checked.get(vault, -_CHECK_INTERVAL) < _CHECK_INTERVAL:
         return False
     _checked[vault] = time.monotonic()
-    return check(vault) > 0
+    return check(vault) + sample(vault) > 0
 
 
 # --- scheduled checks --------------------------------------------------------------------------------
@@ -790,6 +790,25 @@ def check_read_rate() -> float:
     return original_fixity.setting("EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND", DEFAULT_CHECK_READ_MIB_PER_SECOND) * 1024**2
 
 
+class _ReadCap:
+    """Keeps a round's reads under the read-rate cap: each read earns its own wait, and time spent elsewhere earns no burst.
+
+    A store's `head` and a sample read whole objects, so the cap applies per object, after its read.
+    """
+
+    def __init__(self, rate: float, limit: float) -> None:
+        self.rate, self.limit, self.due = rate, limit, 0.0
+
+    def spend(self, size: int) -> bool:
+        """Account for a read of `size` bytes and wait out its share; False when the wait would pass the round's end."""
+        now = time.monotonic()
+        self.due = max(self.due, now) + size / self.rate
+        if self.due >= self.limit:
+            return False
+        foreground_priority.wait_for_retry(max(0.0, self.due - now))
+        return True
+
+
 def scheduled_level(entry: originals.StoreEntry) -> str | None:
     """The check that a store's descriptor allows: content when its `head` recomputes, presence when it does not.
 
@@ -804,19 +823,21 @@ def scheduled_level(entry: originals.StoreEntry) -> str | None:
 _BINDING_UNREADABLE = (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
 
 
-def _listed(vault: Path, binary_rel: str, row: sqlite3.Row) -> originals.StoredObject | None:
-    """The entry that the binding lists for the row's store now; the table follows the binding when they differ.
+def _bound(vault: Path, row: sqlite3.Row) -> tuple[originals.OriginalSnapshot, originals.StoredObject] | None:
+    """The binding and the entry that it lists for the row's store now; the table follows the binding when they differ.
 
     None when the binding lists no replica in the store, or cannot be read: the next rebuild drops such a row.
     """
     try:
-        snapshot = originals.original_state(vault, binary_rel)
+        snapshot = originals.original_state(vault, row["binary_rel"])
     except _BINDING_UNREADABLE:
         return None
     entry = next((found for found in _replicas_of(snapshot) if found.store == row["store"]), None)
-    if entry is not None and (entry.object, entry.version) != (row["object"], row["version"]):
-        record(vault, binary_rel, entry, verified_at=None)  # a newer version, which starts unchecked
-    return entry
+    if entry is None:
+        return None
+    if (entry.object, entry.version) != (row["object"], row["version"]):
+        record(vault, row["binary_rel"], entry, verified_at=None)  # a newer version, which starts unchecked
+    return snapshot, entry
 
 
 def _passed(vault: Path, binary_rel: str, replica: originals.StoredObject, level: str) -> None:
@@ -866,7 +887,8 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
     ledger = MediaJobStore(vault)
     cycle, rate = check_cycle(), check_read_rate()
     limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
-    checked, due = 0, 0.0  # `due` is when the read-rate cap lets the next content check start
+    checked = 0
+    cap = _ReadCap(rate, limit)
     for name, entry in originals.store_entries(config).items():
         level = scheduled_level(entry)
         if level is None:
@@ -881,9 +903,10 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
             if time.monotonic() >= limit or (level == CONTENT and spent >= budget):
                 break
             foreground_priority.yield_to_foreground()
-            replica = _listed(vault, row["binary_rel"], row)
-            if replica is None:
+            bound = _bound(vault, row)
+            if bound is None:
                 continue
+            replica = bound[1]
             try:
                 failure = media_store.check_replica(vault, replica)
             except (media_store.MediaStoreError, ValueError):
@@ -895,12 +918,130 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
             checked += 1
             if level == CONTENT:
                 spent += replica.ciphertext_size
-                now = time.monotonic()
-                due = max(due, now) + replica.ciphertext_size / rate
-                if due >= limit:
+                if not cap.spend(replica.ciphertext_size):
                     break  # The cap would hold the worker past the round: the next round goes on.
-                foreground_priority.wait_for_retry(max(0.0, due - now))
     return checked
+
+
+# --- sampled checks ----------------------------------------------------------------------------------
+
+#: The replicas that one round samples in a store, the replicas it may skip in one for size, and the skipped ones that a
+#: new month releases in one write.
+_SAMPLE_READS = 8
+_SAMPLE_SKIPS = 64
+_SAMPLE_RELEASE = 256
+#: `sample_month` of a row that no sample can read (its binding lists no exact plaintext digest, or cannot be read).
+_UNSAMPLEABLE = -1
+
+#: The replica of a store whose last decrypt proof is oldest, never-proven first, among those not skipped this month and
+#: not proved within the cycle: a range of `media_replicas_sample` in its own order. The key version is the one whose
+#: identity this install holds. A replica is sampled once per cycle, so a small store does not spend its budget twice.
+_SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
+           f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
+           "AND decrypted_at <= ? ORDER BY decrypted_at LIMIT 1")
+#: A new month gives the replicas that the last one skipped for size another chance, a bounded batch at a time.
+_SAMPLE_RESET = ("UPDATE media_replicas SET sample_month = 0 WHERE (binary_rel, store) IN ("
+                 "SELECT binary_rel, store FROM media_replicas WHERE store = ? AND key_version = ? "
+                 f"AND state <> '{QUARANTINED}' AND sample_month > 0 AND sample_month < ? LIMIT ?)")
+
+
+def _month(moment: float) -> int:
+    """The UTC calendar month of `moment` as YYYYMM: the period of a store's sample budget."""
+    stamp = datetime.fromtimestamp(moment, timezone.utc)
+    return stamp.year * 100 + stamp.month
+
+
+def _mark_sample(vault: Path, row: sqlite3.Row, month: int) -> None:
+    """Take a replica out of the sample picks for `month` (or for good, for `_UNSAMPLEABLE`)."""
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET sample_month = ? WHERE binary_rel = ? AND store = ?",
+                     (month, row["binary_rel"], row["store"]))
+
+
+def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, store: str, month: int) -> None:
+    """Record a sample that matched and charge its bytes to the month; a replica quarantined meanwhile stays so."""
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET decrypted_at = ?, failure = NULL WHERE binary_rel = ? AND store = ? "
+                     f"AND object = ? AND version = ? AND state <> '{QUARANTINED}'",
+                     (time.time(), row["binary_rel"], store, replica.object, replica.version))
+        _charge(conn, store, month, replica.ciphertext_size)
+
+
+def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
+    conn.execute("INSERT INTO media_replica_samples(store, month, bytes) VALUES (?, ?, ?) "
+                 "ON CONFLICT(store, month) DO UPDATE SET bytes = bytes + excluded.bytes", (store, month, size))
+
+
+def sample(vault: Path, *, deadline: float | None = None) -> int:
+    """One bounded round of sampled checks; return the replicas it sampled.
+
+    A sample downloads a replica, decrypts it into a sink that keeps nothing, and hashes the plaintext against the
+    binding. Each store spends at most its `sample_bytes_per_month` in a UTC calendar month (zero turns it off), and a
+    replica that does not fit the month's remainder is skipped for the month. It reads only where repair could read:
+    an `immediate` store and the key version whose identity this install holds. A store that does not answer as
+    itself, or an unreadable identity, is no finding: nothing changes.
+    """
+    from . import media_store
+
+    vault = Path(vault).resolve()
+    config = originals.configuration(vault)
+    if config is None or config.get("enabled") is not True:
+        return 0
+    ledger = MediaJobStore(vault)
+    limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
+    cap, cycle = _ReadCap(check_read_rate(), limit), check_cycle()
+    month, key_version, sampled = _month(time.time()), str(config.get("key_version")), 0
+    for name, entry in originals.store_entries(config).items():
+        if entry.sample_bytes_per_month <= 0 or media_store.unreadable_reason(vault, name, key_version) is not None:
+            continue
+        if (answer := media_store.store_reachable(vault, name)) is not None:
+            _note_reach(vault, name, answer)
+        if answer is False:
+            continue
+        with closing(ledger._connect()) as conn, conn:
+            conn.execute(_SAMPLE_RESET, (name, key_version, month, _SAMPLE_RELEASE))
+        reads = skips = 0
+        while reads < _SAMPLE_READS and skips < _SAMPLE_SKIPS and time.monotonic() < limit:
+            with closing(ledger._connect(readonly=True)) as conn:
+                row = conn.execute(_SAMPLE, (name, key_version, time.time() - cycle)).fetchone()
+                held = conn.execute("SELECT bytes FROM media_replica_samples WHERE store = ? AND month = ?",
+                                    (name, month)).fetchone()
+            if row is None:
+                break
+            remaining = entry.sample_bytes_per_month - (held["bytes"] if held is not None else 0)
+            if remaining <= 0:
+                break
+            if row["size"] > remaining:  # a size of 0 is not yet known: the binding gives it below
+                _mark_sample(vault, row, month)
+                skips += 1
+                continue
+            foreground_priority.yield_to_foreground()
+            bound = _bound(vault, row)
+            if bound is None or bound[0].binary_sha256 is None or bound[0].binary_size is None:
+                _mark_sample(vault, row, _UNSAMPLEABLE)
+                skips += 1
+                continue
+            snapshot, replica = bound
+            if replica.ciphertext_size > remaining:
+                _mark_sample(vault, row, month)
+                skips += 1
+                continue
+            try:
+                failure = media_store.sample_replica(
+                    vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
+            except (media_store.MediaStoreError, ValueError):
+                break  # The store cannot answer now: unavailable is no proof of loss, so no row changes.
+            if failure is None:
+                _proved(vault, row, replica, name, month)
+            else:
+                with closing(ledger._connect()) as conn, conn:
+                    _charge(conn, name, month, replica.ciphertext_size)
+                quarantine(vault, row["binary_rel"], replica, level=DECRYPTED, failure=failure)
+            reads += 1
+            sampled += 1
+            if not cap.spend(replica.ciphertext_size):
+                break
+    return sampled
 
 
 # --- the thread -------------------------------------------------------------------------------------
