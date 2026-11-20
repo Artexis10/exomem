@@ -26,7 +26,7 @@ from fastmcp.server.transforms import Transform
 from fastmcp.utilities.versions import dedupe_with_versions
 from starlette.middleware import Middleware as ASGIMiddleware
 
-from . import capabilities, cloud_cell, edit_operations, guards, multi_edit, source_offer
+from . import __version__, capabilities, cloud_cell, edit_operations, guards, multi_edit
 from . import commands as commands_module
 from .access_log import AccessLogMiddleware, WorkerRequestTimingMiddleware
 from .command_surface import DEFAULT_TOOL_SHAPE
@@ -868,6 +868,9 @@ def _find_call_summary(message) -> str:
 #: such hook and sees only this text and the tool descriptions, so this is the
 #: one channel that can ask it to activate context without a user reminder.
 #: Kept short, because some clients cut server instructions off.
+#: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
+SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
+
 SERVER_INSTRUCTIONS = (
     "This server is the user's long-term governed memory. Named tools belong to this server. "
     'Reuse live policy; read_instructions first if absent/stale. Connection grants no recall/save. off: '
@@ -960,13 +963,12 @@ def build_server(
         lifespan = health_listener.lifespan(lifespan)
     mcp = ExomemFastMCP(
         "exomem",
-        # A cloud cell is a network service run by the operator, so AGPL section 13 asks it
-        # to offer its source. Self-hosted servers hold their source already, and their
-        # instructions stay the shared text that tests and the prompt observer hash.
-        instructions=(
-            f"{SERVER_INSTRUCTIONS} {source_offer.offer_text()}" if cloud else SERVER_INSTRUCTIONS
-        ),
-        website_url=source_offer.SERVER_REPOSITORY_URL,
+        instructions=SERVER_INSTRUCTIONS,
+        # AGPL section 13: a client sees the running release and the source repository in the
+        # initialize handshake. The instructions carry a hard 900-character limit, so the offer
+        # does not live there; without `version`, serverInfo would report the framework's own.
+        version=__version__,
+        website_url=SOURCE_REPOSITORY_URL,
         auth=auth,
         icons=server_icons(),
         lifespan=lifespan,

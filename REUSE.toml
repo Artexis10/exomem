@@ -1,9 +1,0 @@
-version = 1
-
-# Per-path licences for what the root LICENSE does not cover. `_scaffold` cannot hold a
-# LICENSE file of its own because `exomem init` copies that whole tree into a vault.
-[[annotations]]
-path = ["plugins/**", "src/exomem/_scaffold/**"]
-precedence = "aggregate"
-SPDX-FileCopyrightText = "Exomem contributors"
-SPDX-License-Identifier = "Apache-2.0"

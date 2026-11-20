@@ -1317,18 +1317,13 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
             for p in (vault / "Knowledge Base" / lane).rglob("*.md")} == before
 
 
-def test_cloud_cell_offers_its_source_and_a_personal_server_does_not(
+def test_cloud_cell_handshake_names_its_release_and_source_repository(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AGPL section 13: the operator's service names its source and running release."""
+    """AGPL section 13: the operator's service names the release it runs and where its source is."""
     from exomem import __version__
 
     cloud, _ = _build_cloud_server(monkeypatch)
-    assert "https://github.com/Artexis10/exomem" in cloud.instructions
-    assert "https://github.com/substrate-systems/substrate" in cloud.instructions
-    assert f"v{__version__}" in cloud.instructions
+    assert cloud.version == __version__
     assert cloud.website_url == "https://github.com/Artexis10/exomem"
-
-    monkeypatch.delenv("EXOMEM_CLOUD_CELL")
-    local = server.build_server(require_auth=False)
-    assert local.instructions == server.SERVER_INSTRUCTIONS
+    assert cloud.instructions == server.SERVER_INSTRUCTIONS

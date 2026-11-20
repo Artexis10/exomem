@@ -573,6 +573,9 @@ The server, CLI and everything not listed below are AGPL-3.0-or-later. See
 | `src/exomem/_scaffold/` (the starter skill and vault scaffold) | Apache-2.0, see [`src/exomem/_licenses/Apache-2.0.txt`](src/exomem/_licenses/Apache-2.0.txt) |
 | `infra/topolvm/` | Apache-2.0, upstream's own licence |
 
-Exomem Cloud offers its running source from the app and from the MCP server
-instructions. The names Exomem and Substrate Systems follow
+The plugin hooks under `plugins/claude-code/hooks/` are copies of `src/exomem/_hooks/`. The
+source stays AGPL-3.0-or-later; the copies the plugin ships are Apache-2.0.
+
+Exomem Cloud offers its source from the app and from the MCP handshake, which names the
+running release and this repository. The names Exomem and Substrate Systems follow
 [TRADEMARK.md](TRADEMARK.md). Contributions need a signed [CLA](CLA.md).
