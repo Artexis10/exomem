@@ -369,6 +369,27 @@ def test_a_text_source_cannot_be_corrected_without_content(vault, source_schema,
         commands.op_capture_source(vault, source_schema, title="Notes", source_kind="session", correction=correction)
 
 
+def test_a_text_correction_that_names_only_its_title_and_text_keeps_every_other_field(
+    vault, source_schema, owner_scope
+) -> None:
+    old = commands.op_capture_source(
+        vault, source_schema, title="Notes", source_kind="session", content="Lantern rota for the harbour.",
+        url="https://notes.example/lanterns", domain="urban-planning", projects=["riverside"], tags=["lanterns"],
+        custody_only=True,
+    )["source"]
+    correction = {"supersedes": old["path"], "expected_hash": mutation_hash(vault / old["path"]), "reason": "Fix the title."}
+
+    corrected = commands.op_capture_source(
+        vault, source_schema, title="Harbour lantern rota", content="Lantern rota for the harbour.", correction=correction,
+    )["source"]
+
+    kept = _frontmatter(vault, corrected["path"])
+    assert (kept["title"], kept["source_type"], kept["url"], kept["domain"], kept["projects"], kept["tags"]) == (
+        "Harbour lantern rota", "session", "https://notes.example/lanterns", "urban-planning", ["riverside"], ["lanterns"],
+    )
+    assert kept["custody_only"] is True
+
+
 # --- identity states a capture reports ----------------------------------------------------------------
 
 

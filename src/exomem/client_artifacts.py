@@ -1916,16 +1916,7 @@ def capture_source_correction(
 
     plan = source_corrections.prepare_correction(vault_root, correction)
     metadata, _body, _front = parse_frontmatter(plan.old_source)
-    # The frontmatter keys `add._render_source` writes for these capture fields, read back with their types.
-    carried: dict[str, object] = {
-        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
-           if isinstance(metadata.get(name), str) and metadata[name]},
-        **({"custody_only": True} if metadata.get("custody_only") is True else {}),
-        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
-           if isinstance(metadata.get(name), list) and metadata[name]},
-    }
-    if why := add_module.stored_why(plan.old_source):
-        carried["why_captured"] = why
+    carried = add_module.correction_carry(plan.old_source)
     source_fields = {**source_fields, **{name: value for name, value in carried.items() if source_fields.get(name) is None}}
     if source_fields.get("source_type") is None:
         raise add_module.kind_required(vault_root, supplied=None)

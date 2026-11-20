@@ -4026,7 +4026,7 @@ def _add_source(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse: bool = False,
     passages: list[source_capture.DeclaredPassage] | None = None,
     document_form: str | None = None,
@@ -9370,10 +9370,26 @@ def op_capture_source(
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
         source_identity = source_capture.validate_identity(source_identity)
         source_capture.require_authority(vault_root)
-    # Resolved before any byte is fetched or written, for files and text alike. A metadata-only correction
-    # that names no kind keeps its predecessor's (`client_artifacts.capture_source_correction`).
+    carried: dict[str, Any] = {}
+    plan: source_corrections.CorrectionPlan | None = None
+    if correction is not None and not metadata_only:
+        # Prepared once, so a correction with a new file or new text keeps every field it omits, as a
+        # metadata-only one does (`client_artifacts.capture_source_correction`), and `add` reuses the plan.
+        plan = source_corrections.prepare_correction(vault_root, correction)
+        carried = add_module.correction_carry(plan.old_source)
+        url = url if url is not None else carried.get("url")
+        tags = tags if tags is not None else carried.get("tags")
+        why_captured = why_captured if why_captured is not None else carried.get("why_captured")
+        domain = domain if domain is not None else carried.get("domain")
+        projects = projects if projects is not None else carried.get("projects")
+        document_form = document_form if document_form is not None else carried.get("document_form")
+        custody_only = custody_only if custody_only is not None else carried.get("custody_only")
+    named_kind = bool((source_type or "").strip() or (source_kind or "").strip())
+    # Resolved before any byte is fetched or written, for files and text alike. A correction that names no
+    # kind keeps its predecessor's.
     kind = (
-        None if metadata_only and not (source_type or "").strip() and not (source_kind or "").strip()
+        None if metadata_only and not named_kind
+        else str(carried["source_type"]) if not named_kind and carried.get("source_type")
         else _resolve_source_kind_argument(vault_root, source_type, source_kind)
     )
     from . import source_result_attribution
@@ -9396,7 +9412,7 @@ def op_capture_source(
         else:
             captured = client_artifacts.capture_source_artifacts(
                 vault_root, source_schema=source_schema, title=title, files=files, adoption=adoption,
-                correction=correction, **source_fields,
+                correction=plan, **source_fields,
             )
         _note_committed_artifact_targets(captured)
         out = captured
@@ -9425,7 +9441,7 @@ def op_capture_source(
             raw_protection=raw_protection,
             source_identity=source_identity,
             expected_sha256=expected_sha256,
-            correction=correction,
+            correction=plan,
             reuse=True,
             passages=passages,
             document_form=document_form,

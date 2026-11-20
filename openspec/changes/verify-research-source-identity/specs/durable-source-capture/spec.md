@@ -41,6 +41,17 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 - **WHEN** an agent corrects the successor back to the predecessor's metadata
 - **THEN** a second successor and receipt are written, and every earlier page and receipt remains
 
+### Requirement: Every Source correction keeps the fields it omits
+
+A correction that supplies a new file, new `content` or new `passages` SHALL take its URL, kind, domain, projects, tags, document form, reason for capture and custody mark from the call when the call sets them, and from the predecessor when the call omits them, as a metadata-only correction does.
+It SHALL NOT require `source_kind` when the predecessor records one.
+
+#### Scenario: A text Source's title is corrected
+
+- **WHEN** an agent corrects a text Source with a new title, its text and the correction, and omits every other field
+- **THEN** the successor has the new title
+- **AND** the successor keeps the predecessor's kind, URL, domain, projects, tags and custody mark
+
 ### Requirement: Search marks a corrected Source
 
 A search result for a Source that has a correction receipt SHALL carry `corrected_by` with the title and path of the current successor, when the caller may read that successor.

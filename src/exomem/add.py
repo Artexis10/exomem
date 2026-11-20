@@ -1172,6 +1172,25 @@ def stored_why(page_text: str) -> str | None:
     return "\n".join(quoted) or None
 
 
+def correction_carry(old_source: str) -> dict[str, object]:
+    """The capture fields a correction keeps from the Source it replaces wherever the call omits them.
+
+    Read back from the frontmatter keys `_render_source` writes, with their types, so a correction that names
+    only what was wrong keeps the rest, whether it supplies a new file, new text or neither.
+    """
+    metadata, _body, _front = parse_frontmatter(old_source)
+    carried: dict[str, object] = {
+        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
+           if isinstance(metadata.get(name), str) and metadata[name]},
+        **({"custody_only": True} if metadata.get("custody_only") is True else {}),
+        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
+           if isinstance(metadata.get(name), list) and metadata[name]},
+    }
+    if why := stored_why(old_source):
+        carried["why_captured"] = why
+    return carried
+
+
 def _reused_capture(
     hit: duplicates.Duplicate, *, title: str, kind: str, url: str | None, tags: list[str],
     why_captured: str | None, domain: str | None, projects: list[str],
