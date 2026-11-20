@@ -8098,17 +8098,29 @@ def _op_activate_context_body(
         # carries none, and the caller then gets the whole map.
         held_map = working_set_runtime_module.decode_continuity(continuity)
 
+        # The paths of the pages the task context serves for this turn; the positions block reads only these.
+        reach: set[str] = set()
+        # Already bounded by the caller; bounding a bounded value again would return none.
+        task_conversation = conversation if conversation is not None else working_set_conversation_module.NONE
+
         def task_context(caller, catalogue, allowance, prepare_slice):
             from . import context_task
 
             return context_task.compile_context(
                 vault_root, caller=caller, catalogue=catalogue, turn=turn,
-                # Already bounded by the caller; bounding a bounded value again would return none.
-                conversation=conversation if conversation is not None else working_set_conversation_module.NONE,
+                conversation=task_conversation,
                 snapshot=snapshot,
                 held=(held_map or {}).get("method_versions", ()), max_chars=allowance, timings=timings,
                 index_token=evidence_token,
                 prepare_slice=prepare_slice,
+                reach=reach,
+            )
+
+        def recorded_positions(caller):
+            from . import positions
+
+            return positions.compile_block(
+                vault_root, caller, reach=reach, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
             )
 
         try:
@@ -8128,6 +8140,7 @@ def _op_activate_context_body(
                     known_profiles=(held_map or {}).get("profile_generations"),
                     turn=turn, snapshot=snapshot,
                     task_context=task_context,
+                    positions=recorded_positions,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
                 )

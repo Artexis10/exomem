@@ -1275,6 +1275,7 @@ def activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1299,6 +1300,10 @@ def activation_packet(
     slice already encoded and from one keyword query, and repeats no held profile. The block has its own bound
     that takes nothing from `max_chars`. `snapshot` is the request's freshness snapshot: the keyword query reads the
     lexical catalogue at its pinned checkpoint, as the turn slice does, and walks no vault. Without one it does not run.
+
+    `positions` compiles the recorded-positions block once the task context is served, from the caller view. It
+    reads no page that supplies the stance or a domain profile. The block has its own bound and takes nothing from
+    `max_chars`.
     """
     with working_set_runtime.turn_vector_scope():
         if purpose is not None:
@@ -1307,13 +1312,13 @@ def activation_packet(
                     vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
                     packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
                     native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-                    known_profiles=known_profiles, turn=turn, snapshot=snapshot,
+                    known_profiles=known_profiles, turn=turn, snapshot=snapshot, positions=positions,
                 )
         return _activation_packet(
             vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
             packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
             native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
-            known_profiles=known_profiles, turn=turn, snapshot=snapshot,
+            known_profiles=known_profiles, turn=turn, snapshot=snapshot, positions=positions,
         )
 
 
@@ -1326,6 +1331,7 @@ def _activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1471,6 +1477,17 @@ def _activation_packet(
                     except Exception:  # noqa: BLE001 - optional profiles must leave the map, stance, skills and turn context available
                         log.warning("domain profiles unavailable", exc_info=True)
                         packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
+        if positions is not None:
+            from . import positions as positions_block
+
+            # Compiled once the task context has recorded its reach. The block has its own bound, the vault's
+            # `positions_max_chars`, so it neither reduces `max_chars` nor counts as spent from it.
+            with find_types.timing_span(timings, "working_set.positions"):
+                try:
+                    packet["positions"] = positions(prepared.caller)
+                except Exception:  # noqa: BLE001 - optional positions must leave the map and the task context available
+                    log.warning("positions unavailable", exc_info=True)
+                    packet["positions"] = positions_block._empty("unavailable")  # noqa: SLF001
         packet["abstained"] = False
         packet.pop("abstention", None)
         return packet

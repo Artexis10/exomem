@@ -48,6 +48,7 @@
 #     profile_semantic_floor: 0.5                  # a profile page's best chunk score that selects it, 0..1
 #     profile_lexical_floor: 8.5                   # a profile page's keyword score that selects it, 0..100
 #     profile_domains_max: 2                       # domains whose profile one turn selects, 1..8
+#     positions_max_chars: 4000                    # recorded positions per turn, 0..8000
 #   referential:
 #     # Words that make a turn point back at recent work ("continue", "where
 #     # were we") in YOUR language. A turn is referential only when it speaks
@@ -129,7 +130,10 @@ resolution:
 # A turn selects a domain's profile page when its best chunk scores at least `profile_semantic_floor`
 # against the turn (0..1) or its keyword score reaches `profile_lexical_floor` (0..100). At most
 # `profile_domains_max` domains (1..8) are selected, and each is followed by its parent domains.
-# Override any of them with `budgets: {stance_max_chars: 2400}`.
+# `positions_max_chars` caps the person's recorded positions that a turn's leads reach
+# (0..8000). A position is served whole when it fits, so the default leaves room for one
+# long position and a short one; the rest are listed as references within the same
+# bound, and 0 turns the block off. Override any of them with `budgets: {stance_max_chars: 2400}`.
 budgets:
   stance_max_chars: 1600
   skills_max_chars: 3500
@@ -139,6 +143,7 @@ budgets:
   profile_semantic_floor: 0.5
   profile_lexical_floor: 8.5
   profile_domains_max: 2
+  positions_max_chars: 3000
 
 # The shipped referential seed: what makes a turn point back at recent work.
 # A cue is matched on whole words, never inside a longer one. The filler

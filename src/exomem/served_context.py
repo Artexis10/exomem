@@ -23,7 +23,8 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS served_context (
     id TEXT PRIMARY KEY, timestamp REAL NOT NULL, principal TEXT NOT NULL,
     view TEXT NOT NULL, session_key TEXT, map_generation TEXT, map_unchanged INTEGER NOT NULL,
     stance_state TEXT, stance_refs TEXT NOT NULL, slice_state TEXT, slice_refs TEXT NOT NULL,
-    next_action_state TEXT, upkeep TEXT NOT NULL, task_context TEXT NOT NULL DEFAULT '{}'
+    next_action_state TEXT, upkeep TEXT NOT NULL, task_context TEXT NOT NULL DEFAULT '{}',
+    positions TEXT NOT NULL DEFAULT '{}'
 )"""
 
 
@@ -42,9 +43,12 @@ def _connect(root: Path) -> sqlite3.Connection:
         # A lost final metadata row on power loss is allowed; the read never waits on a FULL fsync.
         connection.execute("PRAGMA synchronous=NORMAL")
         connection.execute(_SCHEMA)
-        # Existing private rows predate task identities; absence means unrecorded, never an empty task response.
-        if "task_context" not in {row[1] for row in connection.execute("PRAGMA table_info(served_context)")}:
+        # Existing private rows predate task identities and positions; absence means unrecorded, never an empty response.
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(served_context)")}
+        if "task_context" not in columns:
             connection.execute("ALTER TABLE served_context ADD COLUMN task_context TEXT NOT NULL DEFAULT '{}'")
+        if "positions" not in columns:
+            connection.execute("ALTER TABLE served_context ADD COLUMN positions TEXT NOT NULL DEFAULT '{}'")
     except BaseException:
         connection.close()
         raise
@@ -90,6 +94,7 @@ def metadata(packet: dict[str, Any]) -> dict[str, Any]:
                 identity["queue_item_id"] = parse_upkeep_ref(context_ref)
         identities.append(identity)
     task = packet.get("task_context") or {}
+    positions = packet.get("positions") or {}
     def routes(items):
         # Only these response identity fields belong in private metadata, never source or prompt prose.
         return [{key: item[key] for key in ("ref", "source_ref", "source_version", "read_ref") if key in item}
@@ -113,6 +118,12 @@ def metadata(packet: dict[str, Any]) -> dict[str, Any]:
             "methods": {"reset": (task.get("methods") or {}).get("reset"),
                         "items": routes((task.get("methods") or {}).get("items", ()))},
         } if task else {},
+        # Unit refs only, never the position text or the page title.
+        "positions": {
+            "state": positions.get("state"), **({"reason": positions["reason"]} if positions.get("reason") else {}),
+            "refs": [item["ref"] for item in positions.get("items", ())],
+            "overflow_refs": list(positions.get("overflow_refs", ())),
+        } if positions else {},
         "map_generation": map_block.get("generation", (packet.get("generation") or {}).get("map_generation")),
         "map_unchanged": map_block.get("unchanged") is True,
         "stance_state": stance.get("state"), "stance_refs": [item["ref"] for item in stance.get("items", ())],
@@ -134,11 +145,15 @@ def append(root: Path, packet: dict[str, Any], *, session: str | None = None, pu
         session_key = _existing_session_key(root, session)
         with closing(_connect(root)) as connection, connection:
             connection.execute(
-                "INSERT INTO served_context VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                # Named columns: a column that a later release added sits wherever its migration put it.
+                "INSERT INTO served_context (id, timestamp, principal, view, session_key, map_generation, map_unchanged,"
+                " stance_state, stance_refs, slice_state, slice_refs, next_action_state, upkeep, task_context, positions)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (identifier, time.time(), who.audience_id, view.binding, session_key,
                  values["map_generation"], int(values["map_unchanged"]), values["stance_state"],
                  json.dumps(values["stance_refs"]), values["slice_state"], json.dumps(values["slice_refs"]),
-                 values["next_action_state"], json.dumps(values["upkeep"]), json.dumps(values["task_context"])),
+                 values["next_action_state"], json.dumps(values["upkeep"]), json.dumps(values["task_context"]),
+                 json.dumps(values["positions"])),
             )
         return identifier
     except Exception:  # noqa: BLE001 - a private record must never fail a read or expose row fields in logs
@@ -220,26 +235,33 @@ def read(root: Path, *, served_context_id: str | None = None) -> dict[str, Any]:
                 return {"state": "absent", "served_context_id": served_context_id, "expiry": "unknown"}
             record = dict(row)
             record.setdefault("task_context", "{}")
-            for key in ("stance_refs", "slice_refs", "upkeep", "task_context"):  # Closed JSON columns of this table's schema.
+            record.setdefault("positions", "{}")
+            # Closed JSON columns of this table's schema.
+            for key in ("stance_refs", "slice_refs", "upkeep", "task_context", "positions"):  # nosemgrep: ep-word-set -- column names
                 record[key] = json.loads(record[key])
-            if not record["task_context"]:
-                # This audit state distinguishes older unrecorded metadata from an empty task response.
-                record["task_context"] = {"state": "unknown", "reason": "not_recorded"}
+            for key in ("task_context", "positions"):  # nosemgrep: ep-word-set -- column names
+                if not record[key]:
+                    # This audit state distinguishes older unrecorded metadata from an empty response block.
+                    record[key] = {"state": "unknown", "reason": "not_recorded"}
             record["map_unchanged"] = bool(record["map_unchanged"])
             record["session_state"] = "present" if record["session_key"] else "absent"
             task = record["task_context"]
             task_items = [*task.get("candidates", ()), *((task.get("methods") or {}).get("items", ()))]
             refs = [*record["stance_refs"], *(item["ref"] for item in record["slice_refs"]),
-                    *(item["read_ref"] for item in task_items if item.get("read_ref"))]
+                    *(item["read_ref"] for item in task_items if item.get("read_ref")),
+                    *record["positions"].get("refs", ())]
             return {"state": "ready", "record": record, "current_resolution": [_current(root, ref) for ref in refs],
                     "served_context_evidence": _composition_evidence(),
                     "meaning": "Composed authorized response metadata; not proof of client receipt or use. Refs retain no historical text.",
                     "usage": _unknown_usage()}
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(served_context)")}
         task_count = (" + COALESCE(json_array_length(task_context, '$.candidates'), 0)"
                       " + COALESCE(json_array_length(task_context, '$.methods.items'), 0)"
-                      if "task_context" in {row[1] for row in connection.execute("PRAGMA table_info(served_context)")} else "")
+                      if "task_context" in columns else "")
+        positions_count = " + COALESCE(json_array_length(positions, '$.refs'), 0)" if "positions" in columns else ""
         row = connection.execute(
-            "SELECT COUNT(*), COALESCE(SUM(json_array_length(stance_refs) + json_array_length(slice_refs)" + task_count + "), 0), "
+            "SELECT COUNT(*), COALESCE(SUM(json_array_length(stance_refs) + json_array_length(slice_refs)"
+            + task_count + positions_count + "), 0), "
             "MIN(timestamp), MAX(timestamp), COUNT(DISTINCT session_key), SUM(session_key IS NULL) FROM served_context"
         ).fetchone()
         missing = int(row[5] or 0)
