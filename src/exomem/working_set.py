@@ -1706,9 +1706,11 @@ def task_candidates(
 
 def attach_task_links(
     vault_root: Path, candidates: Sequence[dict[str, Any]], *, link_targets: Mapping[str, Any], caller: Any,
-    timings: Any = None,
+    timings: Any = None, target_paths: dict[str, str] | None = None,
 ) -> list[str]:
     """List each served lead's ranked connections on it, and return the task-context missing reasons of a skipped lookup.
+
+    `target_paths`, when given, receives each listed link's `target_ref` mapped to its page path.
 
     Links are read only for the leads that projection kept, and only with the time that projection left: a lead
     without its links still serves the turn, but a link lookup that ran first could spend the deadline that
@@ -1744,6 +1746,8 @@ def attach_task_links(
         return ["lane_failed"]
     for candidate in candidates:
         listed, omitted = links.get(candidate["source_ref"], ((), 0))
+        if target_paths is not None:
+            target_paths.update((connection.target_ref, connection.target_path) for connection in listed)
         if listed:
             candidate["links"] = [
                 {

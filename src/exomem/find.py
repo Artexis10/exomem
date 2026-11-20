@@ -5621,6 +5621,8 @@ def _managed_page_metadata(
                                     state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
                                     json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
                                     raw.line, raw.end_line, order,
+                                    # `lexstore._OCCURRENCE_COLUMNS` order; the stored page date the index keeps.
+                                    page.updated or lexstore.UNDATED,
                                 )
                                 unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
                                 unit_view.update(category=selected_unit.category, kind=selected_unit.kind)

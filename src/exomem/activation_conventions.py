@@ -112,6 +112,7 @@ BUDGET_BOUNDS: Mapping[str, tuple[int | float, int | float]] = {
     "profile_semantic_floor": (0.0, 1.0),
     "profile_lexical_floor": (0.0, 100.0),
     "profile_domains_max": (1, 8),
+    "positions_max_chars": (0, 8000),
 }
 
 

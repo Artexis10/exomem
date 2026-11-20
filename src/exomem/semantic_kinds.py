@@ -19,9 +19,10 @@ from . import semantic_labels
 from .vocabulary import registry as vocabulary_registry
 
 #: The closed kind-trait set. Each member is something code does with a unit of that kind, read
-#: through `SemanticLanguageRegistry.has`, `traits_of` and `kinds_with`. Adding a member is a code
-#: change and a schema change, because a trait is a promise code keeps; the pack and a vault
-#: assign members to kinds, and an assignment that names another trait is refused.
+#: through `SemanticLanguageRegistry.has`, `traits_of` and `kinds_with`, or of that category, read
+#: through `categories_with`. Adding a member is a code change and a schema change, because a trait
+#: is a promise code keeps; the pack and a vault assign members to kinds and categories, and an
+#: assignment that names another trait is refused.
 # nosemgrep: ep-word-set -- the closed set this schema declares and code implements, not text
 KIND_TRAITS = frozenset(
     (
@@ -34,6 +35,9 @@ KIND_TRAITS = frozenset(
         "closable",
         "credence",
         "dated_event",
+        # `position` marks a unit as the person's own standing position, which recall carries with
+        # attribution. A category can carry it as well as a kind.
+        "position",
     )
 )
 
