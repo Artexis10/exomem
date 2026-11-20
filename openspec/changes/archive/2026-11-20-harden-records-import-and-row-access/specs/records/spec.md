@@ -83,7 +83,7 @@ A row withheld from the caller SHALL be reported exactly as an absent row. A sta
 - **THEN** the page returns at p95 within 300 ms, and its rows equal the legacy evaluation of the same request
 
 ### Requirement: Import work holds the write boundary briefly and status stays available
-An import batch of new rows SHALL take a number of store `execute` calls bounded by the tables it writes, not by its rows. Its fetched rows SHALL be a fixed number plus at most one per row written. A batch that updates or restates existing rows is outside this bound. An import batch SHALL close when its elapsed time reaches the documented hold budget, as well as at its row and byte limits. Between batches it SHALL end its hold for a waiting interactive writer.
+An import batch of new rows SHALL take a number of store `execute` calls bounded by the tables it writes, not by its rows. Its fetched rows SHALL be a fixed number plus at most one per row written. A batch that updates or restates existing rows is outside this bound. An import batch on a store collection SHALL close at its row and byte limits, or once reading its rows has taken the documented read budget, measured before the batch takes the vault mutation boundary. Between batches it SHALL end its hold for a waiting interactive writer.
 
 Import `status` SHALL answer from a read snapshot without waiting for the collection store thread. It SHALL report:
 
@@ -100,7 +100,7 @@ Import `status` SHALL answer from a read snapshot without waiting for the collec
 
 #### Scenario: An unrelated write during an import
 - **WHEN** a 4,795-row import runs while background passes that yield to foreground requests keep the process busy, and the agent saves an unrelated note
-- **THEN** the note commits without `MUTATION_BUSY`, and no import batch holds the boundary longer than the hold budget
+- **THEN** the note commits without `MUTATION_BUSY`, and no import batch holds the boundary longer than the load target's bound for a single hold, except the first batch after the process starts
 
 #### Scenario: Status during a batch
 - **WHEN** a caller asks for status while a batch is running
