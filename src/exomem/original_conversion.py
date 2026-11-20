@@ -168,9 +168,8 @@ def _read_inventory(vault: Path) -> _Inventory:
             inventory.unreadable.append(
                 {"path": rel, "reason": "the page names an original without a complete digest and size"})
             continue
-        if originals.is_note_path(binary.path) or "data_file" in fields \
-                or not originals.may_share_bytes(binary.path):
-            continue  # Notes, datasets and suffix-less filings stay ordinary files (design D1), as new filings do.
+        if originals.is_note_path(binary.path) or "data_file" in fields:
+            continue  # Notes and datasets stay ordinary files (design D1), as new filings do.
         digest = hashlib.sha256(data).hexdigest()
         # The verdict that reads take once no file holds the original, so the conversion never pools a filing that
         # reads would then take for deleted.
@@ -193,7 +192,7 @@ def _read_inventory(vault: Path) -> _Inventory:
         else:
             if size != binary.size:
                 inventory.unreadable.append({"path": binary.path, "reason": "the original's size differs from its page"})
-            else:
+            elif originals.may_share_bytes(binary.path):  # A suffix-less file stays an ordinary file, as new filings do.
                 inventory.convert.append(filing)
             continue
         try:

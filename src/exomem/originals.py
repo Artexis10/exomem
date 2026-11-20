@@ -298,7 +298,8 @@ def may_share_bytes(relative: str) -> bool:
     suffix (`LICENSE`, or a dotfile like `.blob`) gives a companion indistinguishable from a note,
     so such an original keeps an ordinary file at its logical path instead, like a dataset.
     """
-    return bool(PurePosixPath(relative).suffix)
+    # A trailing dot reads as a suffix of "." on newer Python and as none on older, so both count as none.
+    return PurePosixPath(relative).suffix not in ("", ".")
 
 
 def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
