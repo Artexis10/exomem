@@ -508,6 +508,7 @@ def add(
     document_form: str | None = None,
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -597,6 +598,7 @@ def add(
                 expected_sha256=expected_sha256,
                 correction=correction_plan,
                 document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
+                custody_only=custody_only,
                 _allocation=_allocation,
                 _prepare=prepare_raw if _prepare is not None else None,
                 _validate_inputs=_validate_inputs,
@@ -839,6 +841,7 @@ def add(
         document_form=form_plan.key,
         identity_check=identity_check,
         ingested_into=ingested_into,
+        custody_only=custody_only,
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
@@ -1167,6 +1170,25 @@ def stored_why(page_text: str) -> str | None:
     lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
     quoted = [line[2:] for line in lines if line.startswith("> ")]
     return "\n".join(quoted) or None
+
+
+def correction_carry(old_source: str) -> dict[str, object]:
+    """The capture fields a correction keeps from the Source it replaces wherever the call omits them.
+
+    Read back from the frontmatter keys `_render_source` writes, with their types, so a correction that names
+    only what was wrong keeps the rest, whether it supplies a new file, new text or neither.
+    """
+    metadata, _body, _front = parse_frontmatter(old_source)
+    carried: dict[str, object] = {
+        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
+           if isinstance(metadata.get(name), str) and metadata[name]},
+        **({"custody_only": True} if metadata.get("custody_only") is True else {}),
+        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
+           if isinstance(metadata.get(name), list) and metadata[name]},
+    }
+    if why := stored_why(old_source):
+        carried["why_captured"] = why
+    return carried
 
 
 def _reused_capture(
@@ -1698,6 +1720,7 @@ def _render_source(
     document_form: str | None = None,
     identity_check: Mapping[str, object] | None = None,
     ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -1730,6 +1753,8 @@ def _render_source(
     lines.extend(extra_lines)
     if document_form:
         lines.append(f"document_form: {document_form}")
+    if custody_only:
+        lines.append("custody_only: true")
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
         # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).

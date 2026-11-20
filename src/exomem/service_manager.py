@@ -2453,8 +2453,10 @@ def main(argv: list[str] | None = None) -> int:
         # Native pools keep their first-import limits, even after environment changes.
         preload_local_dotenv_policy()
         bootstrap()
-        from . import server
+        from . import logging_config, server, thread_dump
 
+        # `kill -USR1 <worker pid>` writes a per-thread CPU and stack dump to the log directory.
+        thread_dump.install(logging_config.resolve_log_dir())
         private_directory(args.socket.parent)
         server.run(
             transport="streamable-http",

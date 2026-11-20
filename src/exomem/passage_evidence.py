@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import re
 import threading
 from array import array
@@ -25,7 +27,10 @@ from . import (
     structured_filters,
 )
 from .find_types import ParsedPage
+from .log_events import log_event
 from .source_coverage import CAPTURE_HEADING
+
+_log = logging.getLogger(__name__)
 
 # This heading and fence are the fixed declaration format, never a vocabulary of key meanings.
 _KEY_BLOCK_START = "## Passage keys\n\n```json\n"
@@ -333,6 +338,26 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
             raise _publication_unavailable() from None
 
 
+def _stop_if_caller_left(phase: str) -> None:
+    """End a search whose caller has gone, at the boundary before `phase`.
+
+    FastMCP keeps a synchronous tool running after its caller times out, and only the
+    serving host's cancel scope records the departure. The finished result would have no
+    reader, while the work keeps an admission slot that a live caller is refused for.
+    Other tools keep running on purpose: a capture's caller adopts its settled write.
+    """
+    from anyio import from_thread
+
+    try:
+        from_thread.check_cancelled()
+    # The documented error of every anyio that mcp admits; `NoEventLoopError` exists only from 4.11.
+    except RuntimeError:
+        return  # A CLI or in-process call has no serving host, so no caller can leave it.
+    except asyncio.CancelledError:
+        log_event(_log, logging.INFO, "passage_search_abandoned", fields={"phase": phase})
+        raise
+
+
 def _publication_unavailable() -> cli_ops.OpError:
     return cli_ops.OpError(
         "PASSAGE_INDEX_UNAVAILABLE",
@@ -347,18 +372,15 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     from . import semantic_contract
 
     limit, scope, query = request["limit"], request["scope"], request["query"]
+    _stop_if_caller_left("eligibility")
     publication = semantic_contract.borrow_published_corpus(vault_root)
     if publication is None:
         raise _publication_unavailable()
     snapshot = find_module.FreshnessSnapshot(vault_root, require_live_recall=True)
     walk_scope = "vault" if scope == "vault" else "kb"
     eligible = (
-        find_module._managed_eligible_filter_paths(
-            vault_root,
-            scope=walk_scope,
-            plan=plan,
-            snapshot=snapshot,
-            pending=None,
+        find_module._reusable_eligible_filter_paths(
+            vault_root, scope=walk_scope, plan=plan, snapshot=snapshot
         )
         if plan.root is not None
         else None
@@ -380,15 +402,18 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         allowed.intersection_update(eligible)
     if admit is not None:
         allowed = {path for path in allowed if admit(path)}
+    _stop_if_caller_left("encode")
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
     with runtime_resources.model_execution(), recall_space.encoding_for(index):
         query_vector = embeddings.embed_texts([query], is_query=True)[0]
     recall_space.require_same_space(index, identity, query_vector)
+    _stop_if_caller_left("selection")
     selection = index.select_passage_chunks(
         query_vector, limit, allowed_paths=allowed, encoded_for=identity
     )
     selected = selection.hits
+    _stop_if_caller_left("verification")
     pages = {
         path: find_module._resolve_page(vault_root, path)
         for path in dict.fromkeys(path for path, _number, _stored, _score in selected)

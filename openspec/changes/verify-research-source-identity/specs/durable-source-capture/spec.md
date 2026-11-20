@@ -9,6 +9,7 @@ The successor SHALL take its title from the call.
 It SHALL take its URL, kind, domain, projects, tags, document form and reason for capture from the call when the call sets them, and from the predecessor when the call omits them.
 It SHALL take its compiled-note backlinks from the predecessor.
 The successor SHALL receive its own identity check.
+The successor's original SHALL be queued for media processing when it is committed, as every binary Source capture SHALL be, so its page receives the document's text without waiting for a file-watcher event.
 A correction SHALL NOT be answered with an earlier Source that holds the same bytes.
 The predecessor page and its original SHALL remain byte-identical, and every existing correction guard SHALL apply.
 
@@ -18,6 +19,11 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 - **THEN** one successor and one receipt are written
 - **AND** the successor's original has the predecessor's SHA-256 and the successor lists the predecessor's backlinks
 - **AND** the predecessor page and original are unchanged
+
+#### Scenario: A corrected Source is processed
+
+- **WHEN** a metadata-only correction of a PDF Source commits
+- **THEN** the successor's page records `processing_state: pending` and a media job exists for its original
 
 #### Scenario: A correction that names only what was wrong keeps the rest
 
@@ -34,6 +40,18 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 
 - **WHEN** an agent corrects the successor back to the predecessor's metadata
 - **THEN** a second successor and receipt are written, and every earlier page and receipt remains
+
+### Requirement: Every Source correction keeps the fields it omits
+
+A correction that supplies a new file, new `content` or new `passages` SHALL take its URL, kind, domain, projects, tags, document form, reason for capture and custody mark from the call when the call sets them, and from the predecessor when the call omits them, as a metadata-only correction does.
+It SHALL NOT require `source_kind` when the predecessor records one.
+Its successor SHALL keep owner-only raw protection when the predecessor has it, whatever the call sets.
+
+#### Scenario: A text Source's title is corrected
+
+- **WHEN** an agent corrects a text Source with a new title, its text and the correction, and omits every other field
+- **THEN** the successor has the new title
+- **AND** the successor keeps the predecessor's kind, URL, domain, projects, tags and custody mark
 
 ### Requirement: Search marks a corrected Source
 

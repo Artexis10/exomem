@@ -32,3 +32,5 @@
 - [x] 6.2 Time PDF capture before and after on 1 MB, 20 MB and 300-page generated PDFs.
 - [ ] 6.3 Add the research-provenance incident cases and the `source_saved`, `source_count`, `current_source` and `compiled_with_backlinks` checks. Run base against changed on real models and record the per-case result.
 - [x] 6.4 Regenerate derived artifacts and run the public-artifact privacy gate.
+- [x] 6.5 Name the DOI the document shows, and the document's own title, in the correction call on `conflict`. The 2026-11-20 independent acceptance found an agent that asked the person instead of correcting.
+- [x] 6.6 Process a metadata-only correction's successor like any new Source, so it gets the document's text. On 2026-11-20 two live successors stayed `extracted_by: pending` with no job.

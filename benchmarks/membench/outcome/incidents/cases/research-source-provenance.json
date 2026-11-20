@@ -45,6 +45,13 @@
         "Annals of Ice and Water, volume 9, 2017\nhttps://doi.org/10.5555/glx.2017.0094\n\nDye-tracing evidence for seasonal conduit growth beneath a small ice cap\n\nTeodor Quillfeather and Ines Okparaeke\nInstitute of Polar Hydrology, Northfjell University\n\nAbstract\nWe inject dye at five moulins on a small ice cap at monthly intervals through one melt season and time its return at the margin. Early in the season the dye takes 8 to 10 days. By late season it takes 3 to 4 days. The speed-up is explained by conduit enlargement, and a growth rule that opens channels once discharge passes a threshold reproduces the returns.\n\n1. Introduction\nThe timing of meltwater pulses depends on the paths that water takes beneath the ice. Dye tracing measures the transit time directly.",
         "2. Methods\nDye was injected at five moulins on the first day of each month from May to September. Returns were measured with fluorometers at two margin outlets.\n\n3. Results\nTransit time fell in every month. The fall was largest between June and July, when discharge first passed the threshold of the growth rule.\n\n4. Discussion\nThe seasonal speed-up is a property of the ice cap's own drainage. It does not depend on where the gauge is placed."
       ]
+    },
+    "cave-beetles.pdf": {
+      "kind": "pdf",
+      "pages": [
+        "Hollowmere Journal of Speleobiology\nVolume 22, Number 4, 2022, pp. 411-436\nDOI: 10.5555/hjs.2022.0384\nReceived 2 February 2022; accepted 30 May 2022\n\nHow blind cave beetles keep a heading in still air\n\nAmadou Verhoeven-Lindqvist, Sigrun Tallowfield and Jorge Anwuli\nCentre for Underground Ecology, Marrowdale University\n\nAbstract\nBlind cave beetles cross open cave floors in nearly straight lines, although no light or wind is available to steer by. We released 160 beetles in a darkened arena and recorded their paths. Beetles with intact antennae deviated by less than 9 degrees over one metre. Beetles with one antenna shortened curved toward the intact side. We propose that the beetles steer by comparing the humidity gradients sensed by the two antennae.\n\n1. Introduction\nStraight movement in featureless space is difficult. Most animals correct their heading with light, wind or the earth's magnetic field, and caves offer none of these.",
+        "2. Methods\nBeetles were collected from two caves and kept at 11 degrees Celsius. Each beetle was released once at the centre of a circular arena two metres across, floored with damp clay. Paths were filmed from above with an infrared camera.\n\n3. Results\nIntact beetles reached the arena edge after a median of 94 seconds. Beetles with one shortened antenna took 131 seconds and curved toward the intact side in 71 of 80 trials.\n\n4. Discussion\nThe result fits a two-sensor comparison of humidity, much as a mole is thought to compare scent between its nostrils. A humidity-neutral arena is the next experiment.\n\nHow to cite\nVerhoeven-Lindqvist, A., Tallowfield, S., & Anwuli, J. (2022). How blind cave beetles keep a heading in still air. Hollowmere Journal of Speleobiology, 22(4), 411-436. https://doi.org/10.5555/hjs.2022.0384"
+      ]
     }
   },
   "cases": [
@@ -278,6 +285,32 @@
           "recall_context",
           "read_page"
         ]
+      }
+    },
+    {
+      "id": "transposed-doi-terse",
+      "about": "A terse request quotes a DOI whose last two digits are swapped relative to the DOI the PDF prints on page 1 and in its citation line. The saved Source's url must carry the printed DOI. Promoted from a held-out set after it exposed an agent that asked instead of correcting (2026-11-20).",
+      "transport": "http",
+      "files": [
+        "cave-beetles.pdf"
+      ],
+      "prompt": "save cave-beetles.pdf from this folder to exomem - doi 10.5555/hjs.2022.0348",
+      "pass": {
+        "current_source": {
+          "file": "cave-beetles.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "contains",
+              "value": "hjs.2022.0384"
+            },
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "0348"
+            }
+          ]
+        }
       }
     }
   ]

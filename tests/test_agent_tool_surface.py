@@ -382,6 +382,8 @@ def test_a_family_disposition_set_through_the_write_door_shows_in_the_read_door(
 
 
 def test_upload_files_returns_an_upload_step_and_writes_nothing(build, vault, monkeypatch) -> None:
+    # An agent that sent the file without hold stored a second, bare copy of a file the vault already kept: the file
+    # name as its title, no url and no duplicate check. The step tells a holder of the file how to send it held.
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "synthetic-upload-secret")
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
     before = sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*"))
@@ -393,6 +395,7 @@ def test_upload_files_returns_an_upload_step_and_writes_nothing(build, vault, mo
 
     assert step["upload_url"] == "https://capture.example/upload" and step["lane"] == "source"
     assert step["committed"] is False
+    assert "expected_sha256" in step["next_action"] and "save_source" in step["next_action"]
     assert sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*")) == before
 
 
