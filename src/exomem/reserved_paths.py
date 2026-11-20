@@ -523,7 +523,9 @@ _REGISTRY = (
         "governance-store",
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
-        rebuildable=True,
+        # The compiled policy rebuilds from `_Governance`, but schema v4 also keeps authorization sessions, session
+        # grants and withhold tokens here, and nothing else records them.
+        rebuildable=False,
         exact=_sqlite_family(".governance.sqlite"),
         migrates_from_vault=True,
     ),
