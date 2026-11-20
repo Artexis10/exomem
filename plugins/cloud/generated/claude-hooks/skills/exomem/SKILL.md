@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 84f2e5e3ab4320f05f2a2bacc9dd0661bf9c7a8560a5672f2831d9347a1e0608
+  skill_contract: e2ed77498dbdecb52a3bd410931b9eee9a7aae8f993415c154ba59bd7bcf1234
   version: "0.32.0"
 ---
 
@@ -197,8 +197,8 @@ a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
 and diagnosed failure route respectively to a how-to note, experiment, and failure.
 A landing also includes a held view (attributed, with its uncertainty, not as fact), a
-question left open (as an open question), and settled values (in full, not file
-pointers). Mid-thought exploration, tentative events, and incidental names stay unwritten.
+question left open (as an open question, not doubt about whether something happened),
+and settled values (in full, not file pointers). Mid-thought exploration, tentative events, and incidental names stay unwritten.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a

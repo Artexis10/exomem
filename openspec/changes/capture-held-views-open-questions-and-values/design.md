@@ -29,7 +29,11 @@ The full rule is one sentence in the activation `capture_policy` block, after th
 
 ### The block has a hard budget
 
-The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 171 characters and brings the longest to 1,592, so 8 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+The longest rendering was 1,420 characters, at `silent` with `link_acceptance` `confirm-shortcut`. The new sentence is 177 characters and brings the longest to 1,598, so 2 characters remain. A longer sentence would push the block over the cap and the hook would silently keep only the disposition. The sentence is shortened to fit. The cap and the other constants stay as they are. One test renders the block at every non-`off` disposition and link-acceptance value and fails when the rendering lacks the sentence.
+
+### An open question is not doubt about an event
+
+A real-model probe showed the open-question class absorbing tentative events: a person unsure which day they posted a parcel had the doubt saved as an open question. Doubt about whether something happened is a tentative event, and the existing lifecycle rule keeps it unwritten unless a collection offers a note field for it. The served sentence and the scaffold say so.
 
 ### The copyable instruction blocks stay within their caps
 
@@ -43,4 +47,4 @@ The copy-paste blocks in `docs/prominence.md`, `docs/ai-assistant-guide.md` and 
 ## Risks / Trade-offs
 
 - The model may now save material that was mid-thought. The classes say "held" and "left open" and keep the exclusion of exploration and tangents. The real-model probe includes a control for that.
-- The activation block has 8 characters left. The next addition must shorten something deliberately.
+- The activation block has 2 characters left. The next addition must shorten something deliberately.

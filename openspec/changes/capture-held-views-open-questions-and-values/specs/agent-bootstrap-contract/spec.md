@@ -8,7 +8,7 @@ At a stepping stone, the capture predicate SHALL include three classes besides t
 - a question the work leaves open, saved as an open question;
 - the concrete values a task settled, such as times, prices, terms, contacts and limits, saved in full and never as a pointer to a working file.
 
-The activation `capture_policy` block, at every disposition except `off`, SHALL carry the three classes. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten.
+The activation `capture_policy` block, at every disposition except `off`, SHALL carry the three classes. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten. Doubt about whether an event happened is a tentative event, not a question left open, and SHALL remain unwritten unless a collection offers a note field for it.
 
 #### Scenario: A held view is saved attributed, with its uncertainty
 
@@ -33,3 +33,9 @@ The activation `capture_policy` block, at every disposition except `off`, SHALL 
 - **WHEN** a person says in passing that they might switch gyms
 - **THEN** the agent performs no durable write for that statement
 - **AND** mid-thought exploration also stays unwritten
+
+#### Scenario: Doubt about whether something happened stays unwritten
+
+- **WHEN** a person says they think something happened but are not sure, and no collection offers a note field for it
+- **THEN** the agent writes nothing about it
+- **AND** it does not save the doubt as an open question
