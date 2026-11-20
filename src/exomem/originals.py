@@ -519,12 +519,16 @@ def original_state(
         # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field. So does a
         # suffix-less original of a pooled archive, whose evicted bytes could otherwise turn pool-only (`may_share_bytes`).
         offloadable=not is_note_path(relative) and "data_file" not in fields
-        and not (not may_share_bytes(relative) and _pooled_archive(vault, archive)),
+        and not resident_suffixless(vault, relative, archive),
         local_path=local_path,
     )
 
 
-def _pooled_archive(vault: Path, archive: ArchiveReads | None) -> bool:
+def resident_suffixless(vault: Path, relative: str, archive: ArchiveReads | None = None) -> bool:
+    """Whether an original named `relative` stays on the volume, never offloaded, because a pooled archive
+    keeps a suffix-less one resident (`may_share_bytes`). The one rule that offload and upload admission share."""
+    if may_share_bytes(relative):
+        return False
     from . import original_pool
 
     return archive.pooled() if archive is not None else original_pool.enabled(vault)
