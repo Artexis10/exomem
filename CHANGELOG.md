@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.190.0](https://github.com/Artexis10/exomem/compare/v0.189.0...v0.190.0) (2026-11-19)
+
+
+### Features
+
+* **activation:** serve the graph's typed connections with reasons in recall ([#2924](https://github.com/Artexis10/exomem/issues/2924)) ([154f6fd](https://github.com/Artexis10/exomem/commit/154f6fdd190b4aefc214984e34a1005b6c22dcec))
+
+## [0.189.0](https://github.com/Artexis10/exomem/compare/v0.188.0...v0.189.0) (2026-11-19)
+
+
+### Features
+
+* **records:** route captures by declaration and serve a collection's capture method ([#2919](https://github.com/Artexis10/exomem/issues/2919)) ([aff95f5](https://github.com/Artexis10/exomem/commit/aff95f57ca39a7778c2b5eaccd99df3029c8b6ea))
+* **sources:** check a document's identity at capture, correct Sources without re-upload, and keep write receipts honest ([#2902](https://github.com/Artexis10/exomem/issues/2902)) ([3f332ca](https://github.com/Artexis10/exomem/commit/3f332ca93180b6b1e8650afd09668c894adc6834))
+
+
+### Bug Fixes
+
+* **brief:** keep only the second-hop notes nearest the seed ([#2913](https://github.com/Artexis10/exomem/issues/2913)) ([690e55f](https://github.com/Artexis10/exomem/commit/690e55fde7df377af7c8e4a3ed5b362a93b0bd35))
+* **sources:** offer the correction call only to a caller who can record it ([#2915](https://github.com/Artexis10/exomem/issues/2915)) ([9ef9da6](https://github.com/Artexis10/exomem/commit/9ef9da6fc9ebe3ffeaa9df51134afa0119accd0b))
+* **writer-lease:** stop batch media work from starving foreground writes ([#2917](https://github.com/Artexis10/exomem/issues/2917)) ([e8feb20](https://github.com/Artexis10/exomem/commit/e8feb20f3df85627a75273a81a215bbdd23c371d))
+
+## [0.188.0](https://github.com/Artexis10/exomem/compare/v0.187.0...v0.188.0) (2026-11-17)
+
+
+### Features
+
+* **ownership:** ask the connected agent whether a page belongs in its project ([#2903](https://github.com/Artexis10/exomem/issues/2903)) ([32e22c0](https://github.com/Artexis10/exomem/commit/32e22c042a64a1250aa91048b133c7b8805fdce8))
+* **storage:** keep one copy of identical originals in shared storage ([#2887](https://github.com/Artexis10/exomem/issues/2887)) ([fd2c06f](https://github.com/Artexis10/exomem/commit/fd2c06ff59d8ac807a58d85891a2a6d149fabcfd))
+
 ## [0.187.0](https://github.com/Artexis10/exomem/compare/v0.186.0...v0.187.0) (2026-11-17)
 
 

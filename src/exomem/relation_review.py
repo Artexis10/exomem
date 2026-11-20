@@ -172,6 +172,13 @@ class RelationReviewError(ValueError):
         return {"code": self.code, "reason": self.reason}
 
 
+class AuxiliaryGuardMoved(RelationReviewError):
+    """A server-planned auxiliary's guard moved between the write's plan and
+    its pre-commit recheck. It keeps the guard's own PATH_GUARD_* code and
+    message for direct callers; the writer lease converts only this — never a
+    guard on the write's own basis — into an absorbable, re-plannable busy."""
+
+
 # The three request parameters of a relation review, fixed by the tool schema
 # (a closed protocol set, not a vocabulary a vault or customer defines).
 # nosemgrep: ep-word-set -- the three tool-schema parameter names of a relation review; a closed API token set, not vocabulary.
@@ -3918,7 +3925,15 @@ def _detach_auxiliaries(
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
                 )
-            value.guard.recheck(root)
+            try:
+                value.guard.recheck(root)
+            except vault.PathGuardError as error:
+                # A writer ahead in line committed between this write's plan
+                # and its pre-boundary prepare: the auxiliary it moved is
+                # re-planned on the absorbed retry, as it already is when the
+                # in-boundary commit reports the same race. The subclass keeps
+                # the guard's own code for callers that plan no retry.
+                raise AuxiliaryGuardMoved(error.code, error.reason) from error
         else:
             try:
                 from .vault_store import read as store_read

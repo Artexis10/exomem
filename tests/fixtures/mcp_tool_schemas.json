@@ -1085,7 +1085,7 @@
           "type": "string"
         },
         "max_chars": {
-          "default": 4000,
+          "default": 6000,
           "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
           "type": "integer"
         },

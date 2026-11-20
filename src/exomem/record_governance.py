@@ -233,6 +233,17 @@ def _inspection_claims(value: Any) -> dict[str, list[str]] | None:
     return claims
 
 
+def _inspection_declared_capture(value: Any) -> dict[str, str] | None:
+    """The `capture` block as the manifest declares it: one bounded reference, never resolved here."""
+    if not isinstance(value, Mapping) or set(value) != {"method"}:
+        return None
+    method = value["method"]
+    # The manifest parser bounds the reference in characters; inspection holds it to the same bound.
+    if type(method) is not str or not method or len(method) > collections.MAX_CAPTURE_METHOD_CHARS:
+        return None
+    return {"method": method}
+
+
 def effective_claims(
     manifest: collections.CollectionManifest,
     observed: Mapping[str, Mapping[Any, Any]] | None,
@@ -685,6 +696,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "storage",
             "plans",
             "claims",
+            "capture",
         } or not {
             "collection_id",
             "path",
@@ -739,6 +751,9 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         claims = _inspection_claims(contract.get("claims")) if "claims" in contract else None
         if "claims" in contract and claims is None:
             return None
+        capture = _inspection_declared_capture(contract.get("capture")) if "capture" in contract else None
+        if "capture" in contract and capture is None:
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -748,6 +763,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "storage": {"strategy": strategy, "source": source, "format_version": format_version},
             "plans": [plan for plan in normalized_plans if plan is not None],
             **({"claims": claims} if claims is not None else {}),
+            **({"capture": capture} if capture is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -1807,6 +1823,9 @@ def inspect_collection(
                     guards = records.lifecycle_guards(manifest, snapshot)
             except collections.CollectionError:
                 pass
+        # After the guards: a method that does not resolve costs the collection nothing, so it never
+        # suppresses them the way a template finding does.
+        _inspection_capture(root, manifest, diagnostics)
         payload = _RecordEnvelope(
             {
                 "kind": "collection",
@@ -2206,6 +2225,8 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             if manifest.claims is not None
             else {}
         ),
+        # The reference as the author wrote it: manifest text the caller already reads, resolved only on delivery.
+        **({"capture": {"method": manifest.capture_method}} if manifest.capture_method is not None else {}),
     }
 
 
@@ -2266,6 +2287,26 @@ def _inspection_templates(
             diagnostics.append(
                 {"code": "TEMPLATE_UNAVAILABLE", "reason": "declared template is unavailable"}
             )
+
+
+def _inspection_capture(
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]],
+    *, policy: Any | None = None, authorize_path: Callable[[str], bool] | None = None,
+) -> None:
+    """Report a declared capture method that this caller cannot be pointed to.
+
+    One reason covers an unresolved reference and a page the caller may not read, so the finding never
+    shows that a withheld page exists.
+    """
+    if manifest.capture_method is None or len(diagnostics) >= 64:
+        return
+    from . import capture_method
+
+    readable = authorize_path or (lambda path: _authorize(root, path, policy=policy))
+    if capture_method.resolve(root, manifest.capture_method, readable=readable) is None:
+        diagnostics.append(
+            {"code": "CAPTURE_METHOD_UNAVAILABLE", "reason": "declared capture method is unavailable"}
+        )
 
 
 def _inspection_audit(audit: Any) -> dict[str, Any]:

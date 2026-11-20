@@ -38,6 +38,17 @@ class SourceCaptureError(ValueError):
     """A coded refusal before a durable capture effect."""
 
 
+class RawEnumerationMoved(SourceCaptureError):
+    """A staged directory or page vanished mid-enumeration.
+
+    Still `SOURCE_IDENTITY_UNAVAILABLE`: a concurrent mutation may have moved
+    the vanished entry to a final path the walk already passed, so the
+    remaining enumeration cannot prove complete. Callers that are only
+    planning (nothing committed yet) may retry; everything else keeps the
+    fail-closed `SourceCaptureError` contract.
+    """
+
+
 class DeclaredPassage(TypedDict):
     key: str
     text: str
@@ -266,6 +277,10 @@ def classify_capture_inputs(inputs: dict[str, CapturePageInput]) -> tuple[frozen
 def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
     """Canonical raw-lane membership and alias checks, shared by capture and its publisher."""
     def unavailable(error=None):
+        if isinstance(error, FileNotFoundError):
+            raise RawEnumerationMoved(
+                "SOURCE_IDENTITY_UNAVAILABLE: canonical raw enumeration is incomplete"
+            ) from error
         raise SourceCaptureError("SOURCE_IDENTITY_UNAVAILABLE: canonical raw enumeration is incomplete") from error
 
     roots = tuple(managed_join(lane) for lane in vault.APPEND_ONLY_KB_SUBPATHS)
@@ -305,14 +320,20 @@ def raw_markdown_files(root: Path, *, subtrees: tuple[str, ...] = ()):
             unavailable()
         for folder, directories, files in os.walk(directory, onerror=unavailable, followlinks=False):
             for name in directories:
-                info = (Path(folder) / name).lstat()
+                try:
+                    info = (Path(folder) / name).lstat()
+                except FileNotFoundError as error:
+                    unavailable(error)
                 if stat.S_ISLNK(info.st_mode) or vault._is_reparse(info):
                     unavailable()
             for name in files:
                 page = Path(folder) / name
                 if page.suffix.lower() != ".md":  # Fixed canonical Markdown format.
                     continue
-                info = page.lstat()
+                try:
+                    info = page.lstat()
+                except FileNotFoundError as error:
+                    unavailable(error)
                 if not stat.S_ISREG(info.st_mode) or vault._is_reparse(info):
                     unavailable()
                 yield page.relative_to(root).as_posix(), info

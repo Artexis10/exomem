@@ -67,6 +67,10 @@ class _RecordingMutationManager:
         with self.mutation_guard(vault, **metadata, holder_kind="background"):
             yield
 
+    def yield_to_waiting_writes(self, vault, **kwargs) -> float:
+        assert vault == self.vault
+        return 0.0
+
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
     """Preserve a media binary with no text → a `pending` stub sidecar."""
@@ -2263,6 +2267,9 @@ def test_reembed_publishes_under_canonical_mutation_guard(
         def mutation_guard(self, _vault, **_metadata):
             guard_metadata.append(_metadata)
             yield
+
+        def yield_to_waiting_writes(self, _vault, **_kwargs) -> float:
+            return 0.0
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingManager())
     reembedded: list[Path] = []

@@ -63,12 +63,13 @@ def can_record(root: Path, reference: str) -> bool:
     A restricted writer's grant does not reach the receipt root, so its commit would be refused after
     the work; asking first lets the capture offer a correction only to a caller who can make one.
     """
-    from .governance import connector_boundary
+    from .governance import connector_boundary, membership
 
     try:
         path = _receipt_path(root, reference).relative_to(root).as_posix()
         connector_boundary.require_write(root, path, content=None)
-    except (SourceCorrectionUnavailable, ValueError, connector_boundary.BoundaryUnavailable):
+    except (SourceCorrectionUnavailable, ValueError, OSError, connector_boundary.BoundaryUnavailable,
+            membership.MembershipUnresolved):
         return False
     return True
 

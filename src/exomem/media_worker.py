@@ -1219,6 +1219,11 @@ class MediaWorker:
         from .vault_store import media as store_media
         from .vault_store import projector as store_projector
 
+        # The worker re-takes the boundary per unit; a keyed write that waits
+        # in line or at the boundary takes it first (batch work slows, never
+        # starves a writer).
+        get_manager().yield_to_waiting_writes(self._vault_root)
+
         def guard() -> contextlib.AbstractContextManager[Any]:
             return get_manager().mutation_guard(
                 self._vault_root, operation=operation, holder_kind="background"

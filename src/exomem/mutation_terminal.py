@@ -1075,6 +1075,7 @@ _ROUTING_OPTIONAL_KEYS = frozenset(
         "instruction",
         "question",
         "missing_fields",
+        "method",
     }
 )
 _ROUTING_DISPOSITIONS = frozenset({"file", "ask", "hold", "append_occurrence"})
@@ -1295,6 +1296,9 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
         disposition = _routing_disposition_projection(value, collection)
         if disposition is None:
             continue
+        method = _routing_method_projection(value["method"]) if "method" in value else {}
+        if method is None:
+            continue
         return {
             "collection": collection,
             "title": title,
@@ -1303,8 +1307,27 @@ def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
             "natural_key": list(natural_key),
             "strength": strength,
             **disposition,
+            **method,
         }
     return None
+
+
+def _routing_method_projection(value: Any) -> dict[str, Any] | None:
+    """The page a routed collection declares as its capture method; None when malformed.
+
+    A path bound limits the ref, which is a memory ref or, for a page that holds no id, a vault path.
+    """
+    if not isinstance(value, Mapping) or set(value) != {"title", "read_ref"}:
+        return None
+    title, read_ref = value["title"], value["read_ref"]
+    if not (
+        isinstance(title, str)
+        and 0 < len(title) <= _MAX_ROUTING_TITLE_CHARS
+        and isinstance(read_ref, str)
+        and 0 < len(read_ref) <= _MAX_ROUTING_COLLECTION_CHARS
+    ):
+        return None
+    return {"method": {"title": title, "read_ref": read_ref}}
 
 
 def _routing_disposition_projection(
@@ -2336,7 +2359,9 @@ def _correction_next_action(row: Mapping[str, Any], flagged: int) -> str:
     # No page hash rides the receipt: processing rewrites the page after capture, so the guard a correction
     # names comes from read_page, which gives the current hash.
     ref = row.get("ref")
-    if not ref or row.get("correctable") is False:
+    if row.get("correctable") is False:
+        return "Compare the opening text with the url, then tell the person which one is wrong."
+    if not ref:
         return "Compare the opening text with the url, then correct the Source's url or tell the person which one is wrong."
     more = f" The other {flagged - 1} flagged files carry their own ref." if flagged > 1 else ""
     return document_identity.correction_call(str(ref), None) + more

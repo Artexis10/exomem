@@ -9,9 +9,10 @@ only which spellings count as the same term.
 
 A collection may also declare `claims.match` frontmatter predicates. A page
 satisfying every predicate belongs to that collection by declaration, so it
-routes there as `strong` whatever its words share. A page whose `type` or
-`project` contradicts the declaration (another project, say) never routes
-there, not even by shared words.
+routes there as `strong` whatever its words share. A page that holds only some
+of them ranks that collection ahead of undeclared word routes, as `moderate`.
+A page whose `type` or `project` contradicts the declaration (another project,
+say) never routes there, not even by shared words.
 """
 
 from __future__ import annotations
@@ -45,6 +46,8 @@ class RoutingTarget:
     natural_key_values: frozenset[str] = frozenset()
     #: Folded `claims.match` predicates: every key must hold, any value may match.
     match: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    #: `capture.method` as the author wrote it; unresolved here, because only a delivery needs the page.
+    capture_method: str | None = None
 
 
 def normalize_text(value: object) -> str:
@@ -111,19 +114,26 @@ def normalize_match(values: Mapping[str, Iterable[object]] | None) -> dict[str, 
     return out
 
 
+def held_predicates(
+    target: RoutingTarget, facets: Mapping[str, frozenset[str]]
+) -> list[str]:
+    """`key:value` evidence for each declared predicate the page holds, by key."""
+    evidence: list[str] = []
+    for key, allowed in sorted(target.match.items()):
+        hits = sorted(facets.get(key, frozenset()) & allowed)
+        if hits:
+            evidence.append(f"{key}:{hits[0]}")
+    return evidence
+
+
 def matched_predicates(
     target: RoutingTarget, facets: Mapping[str, frozenset[str]]
 ) -> list[str] | None:
     """`key:value` evidence when every declared predicate holds, else None."""
     if not target.match:
         return None
-    evidence: list[str] = []
-    for key, allowed in sorted(target.match.items()):
-        hits = sorted(facets.get(key, frozenset()) & allowed)
-        if not hits:
-            return None
-        evidence.append(f"{key}:{hits[0]}")
-    return evidence
+    evidence = held_predicates(target, facets)
+    return evidence if len(evidence) == len(target.match) else None
 
 
 #: The keys that say what a page IS. Only these can contradict a declaration;
@@ -249,7 +259,11 @@ def route(
     A collection whose `match` predicates all hold wins as `strong` before any
     word coverage is counted. Several such collections rank by the number of
     predicates held, then by coverage, and stay silent on a tie. Otherwise the
-    coverage route runs over every collection the page does not contradict.
+    collections the page does not contradict compete by coverage; among them,
+    any that holds a declared predicate and is itself a valid word route (at the
+    coverage floor, with a subject signal) ranks ahead by predicates held, then
+    coverage. A partial declaration orders candidates and never makes a route
+    `strong`. With no such candidate, or no facets, the coverage route is unchanged.
     """
     raw_terms = [str(value) for value in terms]
     normalized = normalize_terms(raw_terms)
@@ -288,22 +302,45 @@ def route(
     # excluding a collection never makes a shared term look rarer than it is.
     frequency = _claim_document_frequency([claims for _, claims in target_claims])
     total_targets = len(target_claims)
-    ranked = sorted(
+    open_targets = [
+        (target, claims, matched_claims(normalized, claims))
+        for target, claims in target_claims
+        if not contradicts(target, observed)
+    ]
+    # A partly held declaration outranks words only when its collection is itself
+    # a valid word route: coverage at the floor and a subject signal.
+    partial = sorted(
         (
-            (len(matched_claims(normalized, claims)), target.collection, target, claims)
-            for target, claims in target_claims
-            if not contradicts(target, observed)
+            (len(held), len(matched), target.collection, target, matched)
+            for target, _claims, matched in open_targets
+            if (held := held_predicates(target, observed))
+            and len(matched) >= MIN_CLAIM_COVERAGE
+            and _has_subject_signal(raw_terms, target, matched, frequency, total_targets)
         ),
+        key=lambda row: (-row[0], -row[1], row[2]),
+    )
+    if partial:
+        if len(partial) > 1 and partial[0][:2] == partial[1][:2]:
+            return None
+        return _coverage_route(raw_terms, partial[0][3], partial[0][4])
+    ranked = sorted(
+        ((len(matched), target.collection, target, matched) for target, _claims, matched in open_targets),
         key=lambda row: (-row[0], row[1]),
     )
     if not ranked or ranked[0][0] < MIN_CLAIM_COVERAGE:
         return None
     if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
         return None
-    _, _, target, claims = ranked[0]
-    matched = matched_claims(normalized, claims)
+    _, _, target, matched = ranked[0]
     if not _has_subject_signal(raw_terms, target, matched, frequency, total_targets):
         return None
+    return _coverage_route(raw_terms, target, matched)
+
+
+def _coverage_route(
+    raw_terms: Sequence[str], target: RoutingTarget, matched: frozenset[str]
+) -> dict[str, object]:
+    """A route by shared words: `strong` only on a natural-key anchor, never on a partial match."""
     return {
         "collection": target.collection,
         "title": target.title,

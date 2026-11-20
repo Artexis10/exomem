@@ -313,9 +313,19 @@ def publish_corpus_delta(
     deleted_values = tuple(deleted)
     if not changed_values and not deleted_values:
         return True
-    observation = graph_read_publication.begin_observation(
-        vault_root, changed_values, deleted_values,
+    adopted = graph_read_publication.ADOPTED_OBSERVATION.get(
+        graph_read_publication._OBSERVATION_UNSET  # noqa: SLF001
     )
+    if adopted is graph_read_publication._OBSERVATION_UNSET:  # noqa: SLF001
+        observation = graph_read_publication.begin_observation(
+            vault_root, changed_values, deleted_values,
+        )
+        finish = True
+    else:
+        # A boundary holder began this observation and handed the publication
+        # to a worker: adopt it and leave the finish to the binding side.
+        observation = adopted
+        finish = False
     bounded_attempts = max(1, min(int(attempts), 2))
     failure: semantic_contract.CorpusPublicationFailure | None = None
     for attempt in range(1, bounded_attempts + 1):
@@ -334,7 +344,8 @@ def publish_corpus_delta(
                 semantic_contract.CORPUS_PUBLICATION_REGISTRY_ADVANCE, error
             )
         if failure is None:
-            graph_read_publication.finish_observation(vault_root, observation)
+            if finish:
+                graph_read_publication.finish_observation(vault_root, observation)
             return True
         log.warning(
             "canonical corpus publication failed (attempt %d/%d, stage=%s)",
@@ -777,9 +788,7 @@ def replay_deferred_embedding(
     | None = None,
 ):
     """Replay one durable embedding batch and clear only its completed revisions."""
-    from . import embeddings
-
-    from . import mode, semantic_drain
+    from . import embeddings, mode, semantic_drain
 
     if mode.service_profile_enabled():
         count = semantic_drain.request(vault_root, paths, edited=False)

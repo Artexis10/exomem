@@ -1,0 +1,524 @@
+{
+  "incident": "2026-11-17: an assistant saved a product failure as a note and never filed it in the Records collection that declares such failures; the cases reproduce the mechanism with invented names.",
+  "cases": [
+    {
+      "id": "existing-workflow",
+      "about": "A collection declares failures of one product, with a method page that files the row first. A same-product collection of wins declares nothing. The failure must be filed in the declared collection and only there.",
+      "prominence": "maximal",
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Incidents/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "3b0f6c1e-7a52-4d6e-9c41-52f0a8d1b7e1",
+            "title": "Incidents",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "incident"
+              ],
+              "fields": {
+                "incident": {
+                  "type": "string",
+                  "required": true
+                },
+                "observed_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "product": {
+                  "type": "string"
+                },
+                "symptom": {
+                  "type": "string"
+                },
+                "related_notes": {
+                  "type": "array",
+                  "items": {
+                    "type": "link"
+                  }
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "mossgate",
+                "failures"
+              ],
+              "terms": [
+                "failure",
+                "error",
+                "crash",
+                "stall",
+                "regression",
+                "broken",
+                "lost",
+                "data loss",
+                "mossgate"
+              ],
+              "match": {
+                "type": [
+                  "failure"
+                ],
+                "project": [
+                  "mossgate"
+                ]
+              }
+            }
+          },
+          "body": "Product failure incidents for the invented Mossgate app.\n",
+          "rows": [
+            {
+              "incident": "Mossgate start-up crash after the 2.1 update",
+              "observed_on": "2026-10-02",
+              "product": "mossgate",
+              "symptom": "the app closes on launch"
+            }
+          ],
+          "method_page": {
+            "title": "Mossgate incident capture method",
+            "note_type": "insight",
+            "content": "## Decision\n\nWhen a Mossgate failure comes up in conversation, file it in the Incidents collection first: one row with the incident title, the date it was observed and the symptom. Then, if the cause is worth keeping, write a diagnosis note and link it from the row's related_notes.\n"
+          }
+        },
+        {
+          "manifest_path": "Records/Wins/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "9d4a1b7c-2e68-4f3a-8b05-6c7e1f2a9d30",
+            "title": "Wins",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "win"
+              ],
+              "fields": {
+                "win": {
+                  "type": "string",
+                  "required": true
+                },
+                "achieved_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "product": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "mossgate",
+                "wins"
+              ],
+              "terms": [
+                "mossgate",
+                "win",
+                "wins",
+                "success",
+                "successes",
+                "worked",
+                "shipped",
+                "milestone"
+              ]
+            }
+          },
+          "body": "Things that went well for the invented Mossgate app.\n",
+          "rows": [
+            {
+              "win": "Mossgate offline mode shipped",
+              "achieved_on": "2026-10-05",
+              "product": "mossgate"
+            }
+          ]
+        }
+      ],
+      "prompt": "mossgate just did it again: the sync stalls at \"uploading 3 of 40\" and never finishes, no error shown. hit it on the Android app this morning and on desktop yesterday. what usually makes a sync hang like that?",
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Incidents/_collection.md",
+          "absent_in": [
+            "Records/Wins/_collection.md"
+          ]
+        },
+        "write_receipt": {
+          "tools": [
+            "create_note"
+          ],
+          "before": [
+            "add_record"
+          ],
+          "contains": "not filed in Incidents"
+        },
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "claim_matches_committed": {
+                "type": "boolean",
+                "description": "True if the answer claims no Records row, or every Records row it says it filed or recorded appears in the committed Records shown. Saving a note is not a Records claim. False if it says it filed or recorded a Records row that is not shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "claim_matches_committed",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "claim_matches_committed": true
+          }
+        }
+      },
+      "transport": "http",
+      "remote_owner": true
+    },
+    {
+      "id": "newly-introduced",
+      "about": "A collection that exists only in this case declares the experiment notes of an invented gardening log, and its method page requires one field that the manifest does not. The trial must be filed with that field.",
+      "prominence": "maximal",
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Seedling trials/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "c5e2a8d4-1f93-47b6-a0d8-3b9e6f1c4a72",
+            "title": "Seedling trials",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "trial"
+              ],
+              "fields": {
+                "trial": {
+                  "type": "string",
+                  "required": true
+                },
+                "ended_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "bench": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "seedlings",
+                "trials"
+              ],
+              "terms": [
+                "seedling",
+                "sowing",
+                "germination",
+                "greenhouse",
+                "trial",
+                "experiment",
+                "treatment",
+                "control"
+              ],
+              "match": {
+                "type": [
+                  "experiment"
+                ]
+              }
+            }
+          },
+          "body": "Greenhouse sowing trials for an invented allotment.\n",
+          "rows": [
+            {
+              "trial": "Basil under a cloche",
+              "ended_on": "2026-09-20",
+              "bench": "G1",
+              "outcome": "ten days to emerge"
+            }
+          ],
+          "method_page": {
+            "title": "Seedling trial capture method",
+            "note_type": "insight",
+            "content": "## Decision\n\nWhen a seedling trial comes up in conversation, keep it in the Seedling trials collection first: one row with the trial title, the date it ended and the bench, which is the greenhouse bench code such as G2. A row without a bench is incomplete, because trials on different benches are never compared.\n"
+          }
+        },
+        {
+          "manifest_path": "Records/Harvests/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "e7b1d3f9-6c08-4a52-8e14-0d2a5b9c7f63",
+            "title": "Harvests",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "harvest"
+              ],
+              "fields": {
+                "harvest": {
+                  "type": "string",
+                  "required": true
+                },
+                "picked_on": {
+                  "type": "date",
+                  "required": true
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "harvests"
+              ],
+              "terms": [
+                "harvest",
+                "harvests",
+                "yield",
+                "crop",
+                "picked",
+                "success",
+                "worked",
+                "greenhouse"
+              ]
+            }
+          },
+          "body": "What the invented allotment yielded.\n",
+          "rows": [
+            {
+              "harvest": "First basil cut",
+              "picked_on": "2026-09-30"
+            }
+          ]
+        }
+      ],
+      "prompt": "finished the basil sowing trial on bench G2 this afternoon: the seeds under 3 cm of compost took twice as long to come up as the 1 cm ones. why would depth matter that much?",
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Seedling trials/_collection.md",
+          "absent_in": [
+            "Records/Harvests/_collection.md"
+          ],
+          "where": [
+            {
+              "field": "bench",
+              "op": "ne",
+              "value": ""
+            }
+          ]
+        }
+      },
+      "transport": "http",
+      "remote_owner": true
+    },
+    {
+      "id": "changed-method",
+      "about": "As existing-workflow, but the method page was revised before the session to require that the row links its diagnosis note. The seed writes the first version and then the revision, so the page's current version is the one the row must satisfy.",
+      "prominence": "maximal",
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Incidents/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "a8c4e1f7-5b26-4d90-b3a8-7e1f0c6d2b49",
+            "title": "Incidents",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "incident"
+              ],
+              "fields": {
+                "incident": {
+                  "type": "string",
+                  "required": true
+                },
+                "observed_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "product": {
+                  "type": "string"
+                },
+                "symptom": {
+                  "type": "string"
+                },
+                "related_notes": {
+                  "type": "array",
+                  "items": {
+                    "type": "link"
+                  }
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "driftnote",
+                "failures"
+              ],
+              "terms": [
+                "failure",
+                "error",
+                "crash",
+                "stall",
+                "regression",
+                "broken",
+                "lost",
+                "data loss",
+                "driftnote"
+              ],
+              "match": {
+                "type": [
+                  "failure"
+                ],
+                "project": [
+                  "driftnote"
+                ]
+              }
+            }
+          },
+          "body": "Product failure incidents for the invented Driftnote app.\n",
+          "rows": [
+            {
+              "incident": "Driftnote start-up crash after the 2.1 update",
+              "observed_on": "2026-10-02",
+              "product": "driftnote",
+              "symptom": "the app closes on launch"
+            }
+          ],
+          "method_page": {
+            "title": "Driftnote incident capture method",
+            "note_type": "insight",
+            "content": "## Decision\n\nWhen a Driftnote failure comes up in conversation, file it in the Incidents collection first: one row with the incident title, the date it was observed and the symptom.\n",
+            "revisions": [
+              "## Decision\n\nWhen a Driftnote failure comes up in conversation, write a diagnosis note for it, then file it in the Incidents collection: one row with the incident title, the date it was observed and the symptom. The row's related_notes must link the diagnosis note; a row without that link is incomplete.\n"
+            ]
+          }
+        },
+        {
+          "manifest_path": "Records/Wins/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "f2d6b0a3-8e47-4c15-9a7b-1c3e5d8f0a26",
+            "title": "Wins",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "win"
+              ],
+              "fields": {
+                "win": {
+                  "type": "string",
+                  "required": true
+                },
+                "achieved_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "product": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "driftnote",
+                "wins"
+              ],
+              "terms": [
+                "driftnote",
+                "win",
+                "wins",
+                "success",
+                "successes",
+                "worked",
+                "shipped",
+                "milestone"
+              ]
+            }
+          },
+          "body": "Things that went well for the invented Driftnote app.\n",
+          "rows": [
+            {
+              "win": "Driftnote offline mode shipped",
+              "achieved_on": "2026-10-05",
+              "product": "driftnote"
+            }
+          ]
+        }
+      ],
+      "prompt": "driftnote lost the last hour of edits when I reopened my project today, even though the autosave indicator said saved. is that a known pitfall with autosave in editors like it?",
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Incidents/_collection.md",
+          "absent_in": [
+            "Records/Wins/_collection.md"
+          ],
+          "where": [
+            {
+              "field": "related_notes",
+              "op": "ne",
+              "value": ""
+            },
+            {
+              "field": "related_notes",
+              "op": "ne",
+              "value": "[]"
+            }
+          ]
+        }
+      },
+      "transport": "http",
+      "remote_owner": true
+    }
+  ]
+}

@@ -147,7 +147,11 @@ is the work its title names. `state` is one of:
 - `not_shown`: the metadata and first page show no DOI.
 - `unavailable`: the PDF could not be read, and `reason` says why. A scanned PDF is checked again after OCR.
 
-`opening` holds the first 600 characters of the pages read. `claimed_dois`,
+`correctable` says whether this connection may record a Source correction. `false`
+means it cannot, so the reply asks you to tell the person which value is wrong instead
+of offering the correction call; `true` means only that the correction receipt may be
+written — the content-hash and page guards can still refuse. `opening` holds the first
+600 characters of the pages read. `claimed_dois`,
 `declared_dois` and `printed_dois` list the DOIs found. Compare the opening text with
 the work the person asked for. On `conflict` or `not_shown`, the sentence in the reply
 names the finding, and `next_action` is the correction call when this connection may record

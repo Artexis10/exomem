@@ -81,8 +81,18 @@ def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
         return f"Method: {title}. Read the source for applicability and exclusions."
     line = f"{item.get('title', '')}: {item.get('reason', '')}"
     # The listed links are served beside the lead, so the allowance charges them with it.
-    links = [f"{link['relation']} {link['title']} {link['target_ref']}" for link in item.get("links") or ()]
+    # The title is page text, so it is quoted and escaped exactly as the hook renderer quotes it.
+    links = [
+        f"{json.dumps(str(link.get('title', '')), ensure_ascii=False)} "
+        f"[{link.get('target_ref', '')}]"
+        + (f": {link['why']}" if link.get("why") else "")
+        for link in item.get("links") or ()
+    ]
     return f"{line} Links: {'; '.join(links)}" if links else line
+
+
+#: Served once at the end of a block that carries at least one link.
+LINKS_ADVICE = "Read a link when its reason bears on the answer."
 
 
 def packet_chars(block: Mapping[str, Any]) -> int:
@@ -91,7 +101,27 @@ def packet_chars(block: Mapping[str, Any]) -> int:
     lines.extend(item_line(item, method=True) for item in methods.get("items", ()))
     if methods.get("reset"):
         lines.insert(0, RESET_ADVICE)
+    if any(item.get("links") for item in block.get("candidates", ())):
+        lines.append(LINKS_ADVICE)
     return len("\n".join(lines)) + (1 if lines else 0)
+
+
+def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
+    """Build a link's `why` when the allocation first tries it; False when it cannot be listed.
+
+    The reason reads pages, so a link the allowance never reaches costs no read; the line's length is part of
+    what the allowance charges, so it is built before the link is measured. A reader view that cannot be read
+    leaves the link unlisted and the lane reported failed, as an unreadable graph does.
+    """
+    build = link.pop("build_why", None)
+    if build is None:
+        return True
+    try:
+        link["why"] = build()
+    except egress.ReaderViewUnavailable:
+        _add_missing(block, "lane_failed")
+        return False
+    return True
 
 
 def _source(root: Path, source_ref: str, caller: Any):
@@ -304,8 +334,13 @@ def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expe
 
 
 def skill_ref(source: SourceProjection) -> str:
-    """The identity of a skill page as a method: its own ref, as the catalogue serves it."""
+    """The identity of a page served as one method as a whole: its own ref, as the catalogue serves it."""
     return source.ref or source.public["path"]
+
+
+def _holds_method(source: SourceProjection, ref: str) -> bool:
+    """Whether `source` still offers `ref`: a method it lists, or itself when it lists none and is served whole."""
+    return source.methods is not None and (ref in source.methods or (not source.methods and ref == skill_ref(source)))
 
 
 def _with_skill(methods: tuple[str, ...] | None, public: Mapping[str, Any], reference: str | None) -> tuple[str, ...] | None:
@@ -384,8 +419,7 @@ def _revalidate(root: Path, held: Sequence[Mapping[str, str]], caller: Any, sour
     for item in held:
         try:
             source = project_source(root, item["source_ref"], caller, cache=sources)
-            if (source is None or source.version != item["source_version"]
-                    or source.methods is None or item["ref"] not in source.methods):
+            if source is None or source.version != item["source_version"] or not _holds_method(source, item["ref"]):
                 return True
             checked.append((item, source))
         except Exception:  # noqa: BLE001 - absent, withheld and uncheckable invalidate identically
@@ -409,6 +443,90 @@ def _remember_sources(root: Path, caller: Any, sources: Mapping[str, SourceProje
         store[("task_context_sources", str(root), caller.binding)] = {
             path: source.raw_hash for path, source in sources.items() if source is not None
         }
+
+
+def _method_items(source: SourceProjection, source_ref: str, *, whole: bool = False) -> list[dict[str, Any]]:
+    """The method items one released source offers.
+
+    `whole` serves a page that lists no method as one method itself, for a page its owner named as the method.
+    """
+    skill = vault_skills.recognise(source.public["path"], source.public.get("frontmatter"))
+    references = source.methods or ((skill_ref(source),) if whole and source.methods == () else ())
+    items = []
+    for reference in references:
+        method = {
+            "ref": reference,
+            "source_ref": source_ref, "source_version": source.version,
+            "applicability": "read_required", "read_ref": source_ref,
+        }
+        if skill is not None and reference == skill_ref(source):
+            # A skill page is one method as a whole: it carries its full description and no unit attribution.
+            method.update(
+                kind=SKILL_KIND, name=skill.name, read_ref=skill_ref(source),
+                description=" ".join(egress.without_wikilinks(skill.description).split()),
+            )
+        elif source.title:
+            method["attribution"] = source.title
+        items.append(method)
+    return items
+
+
+def _declared_methods(
+    root: Path, caller: Any, leads: Sequence[Mapping[str, Any]], sources: dict, methods_by_source: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, str], bool, bool]:
+    """The page each collection-manifest lead declares as its capture method, projected as a method.
+
+    A lead's declaration is read from its own released frontmatter, so it names a page only to a caller who
+    read the manifest. The named page is then projected by its own release decision, exactly as a lead is: a
+    page the caller may not read is omitted, and reads as a declaration that names no page. A title or a stem
+    reference resolves only through the broad resolver that is already resident, since building it reads the
+    whole vault; a cold one costs this turn the method and schedules the build. A path or a ref costs one
+    lookup. Each declaring lead costs at most one source projection. The method is advisory, so a failure
+    on it costs the method and never the task context. Returns the method page by lead, whether the
+    deadline cut the projection short, and whether a cold resolver left a reference unresolved.
+    """
+    from . import capture_method, find, structured_collections, vault
+
+    cold = False
+
+    def resident_resolver():
+        nonlocal cold
+        # A process with no watcher owner would schedule a build that nothing keeps current, as `working_set` decides.
+        resolver = find.borrow_query_resolver(
+            root, caller.visible, schedule_rebuild=vault.inbound_recovery_available(root),
+        )
+        cold = cold or resolver is None
+        return resolver
+
+    declared: dict[str, str] = {}
+    for lead in leads:
+        source = sources.get(lead["source_ref"])
+        if source is None or source.public["path"].rpartition("/")[2] != structured_collections.MANIFEST_FILENAME:
+            continue
+        try:
+            reference = structured_collections.parse_capture(source.public.get("frontmatter", {}).get("capture"))
+        except structured_collections.CollectionError:
+            continue  # a malformed declaration is the manifest's finding to report; it declares no method here
+        if not reference:
+            continue
+        try:
+            # Checked before the lookup, so a withheld page and a missing one behave alike on a spent budget.
+            _deadline_check()
+            path = capture_method.locate(root, reference, resolver_for=resident_resolver)
+            if path is None or path == lead["source_ref"]:
+                continue
+            method = project_source(root, path, caller, cache=sources)
+        except TaskDeadline:
+            return declared, True, cold
+        except Exception:  # noqa: BLE001 - the method is advisory: a failure on it costs the method, never the turn
+            # Not reported: for a path-form reference, an error would reveal that a withheld page exists.
+            continue
+        if method is None:
+            continue
+        declared[lead["source_ref"]] = path
+        if method.methods is not None and path not in methods_by_source and (items := _method_items(method, path, whole=True)):
+            methods_by_source[path] = items
+    return declared, False, cold
 
 
 def compile_context(
@@ -495,22 +613,14 @@ def compile_context(
             candidates.append(item)
             if source.methods is None:
                 _add_missing(block, "lane_failed")
-            skill = vault_skills.recognise(source.public["path"], source.public.get("frontmatter"))
-            for reference in source.methods or ():
-                method = {
-                    "ref": reference,
-                    "source_ref": candidate["source_ref"], "source_version": source.version,
-                    "applicability": "read_required", "read_ref": candidate["source_ref"],
-                }
-                if skill is not None and reference == skill_ref(source):
-                    # A skill page is one method as a whole: it carries its full description and no unit attribution.
-                    method.update(
-                        kind=SKILL_KIND, name=skill.name, read_ref=skill_ref(source),
-                        description=" ".join(egress.without_wikilinks(skill.description).split()),
-                    )
-                elif source.title:
-                    method["attribution"] = source.title
-                methods_by_source.setdefault(candidate["source_ref"], []).append(method)
+            if items := _method_items(source, candidate["source_ref"]):
+                methods_by_source.setdefault(candidate["source_ref"], []).extend(items)
+        declared_by_lead, cut_short, resolver_cold = _declared_methods(root, caller, candidates, sources, methods_by_source)
+        if cut_short:
+            _add_missing(block, "budget")
+        if resolver_cold:
+            # The miss comes before any page is looked up, so it says nothing of a page the caller may not read.
+            _add_missing(block, "lane_failed")
         from . import context_fit
 
         with find_types.timing_span(timings, "working_set.context_fit"):
@@ -519,6 +629,7 @@ def compile_context(
             )
         with find_types.timing_span(timings, "working_set.approvals"):
             kept = {item["source_ref"] for item in candidates}
+            kept |= {declared_by_lead[path] for path in kept if path in declared_by_lead}
             verdicts, checked = approvals(
                 root, {path: sources[path] for path in methods_by_source if path in kept},
             )
@@ -537,14 +648,17 @@ def compile_context(
                     method["attribution"] = approved_title(sources[path])
                     # The read handle is the stable ref, never the path: a rename must not put words into the line.
                     method["read_ref"] = sources[path].ref
-        # The links come last: a lead served without them still answers the turn, a lead never read does not.
         for reason in working_set.attach_task_links(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings,
         ):
             _add_missing(block, reason)
+        # A lead is admitted together with its first connection when both fit; the rest fill the
+        # room every lead and method leaves, in lead order. A lead's own method outranks its first
+        # link, but a first link may take the room that a later lead would have used.
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
+        # The links each admitted lead may still list, by lead; its first link can return here.
+        tails: dict[int, list[dict[str, str]]] = {}
         for item in candidates:
-            # Links spend only what every lead and method leaves, so a link never displaces one.
             links = item.pop("links", [])
             # Guarded turn leads already carry this route; keep only the additional method projection.
             if item["ref"] not in covered and item["source_ref"] not in covered:
@@ -552,13 +666,28 @@ def compile_context(
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
                     _add_missing(block, "budget")
-                else:
-                    linked.append((item, links, False))
+                elif links and _reasoned(block, links[0]):
+                    item["links"] = links[:1]
+                    if packet_chars(block) > allowance:
+                        item.pop("links")
+                        item["links_omitted"] = item.get("links_omitted", 0) + len(links)
+                    else:
+                        tails[id(item)] = links[1:]
+                        linked.append((item, tails[id(item)], False))
             elif links:
                 # The turn slice carries no links, so a named lead returns here only to list them.
                 linked.append((item, links, True))
-            for method in methods_by_source.get(item["source_ref"], ()):
+            for method in (*methods_by_source.get(item["source_ref"], ()), *methods_by_source.get(declared_by_lead.get(item["source_ref"], ""), ())):
+                if any(method is served for served in block["methods"]["items"]):
+                    continue  # a page that is both a lead and a lead's declared method is served once
                 block["methods"]["items"].append(method)
+                if packet_chars(block) > allowance and item.get("links") and id(item) in tails:
+                    # The lead's own method outranks its first link, which returns if room remains.
+                    first = item.pop("links")
+                    if packet_chars(block) <= allowance:
+                        tails[id(item)][:0] = first
+                    else:
+                        item["links"] = first
                 if packet_chars(block) > allowance:
                     block["methods"]["items"].pop()
                     _add_missing(block, "budget")
@@ -569,15 +698,23 @@ def compile_context(
                     block["candidates"].pop()
                     _add_missing(block, "budget")
                     continue
-            item["links"] = []
+            if not links:
+                continue
+            served = item.get("links")
+            if served is None:
+                served = item["links"] = []
+            before = len(served)
             for link in links:
-                item["links"].append(link)
-                if packet_chars(block) > allowance:
-                    item["links"].pop()
+                if not _reasoned(block, link):
                     break
-            if len(links) > len(item["links"]):
-                item["links_omitted"] = item.get("links_omitted", 0) + len(links) - len(item["links"])
-            if not item["links"]:
+                served.append(link)
+                if packet_chars(block) > allowance:
+                    served.pop()
+                    break
+            dropped = len(links) - (len(served) - before)
+            if dropped:
+                item["links_omitted"] = item.get("links_omitted", 0) + dropped
+            if not served:
                 del item["links"]
                 if named:
                     # A named lead without one listed link would only repeat the turn slice's route.
@@ -634,7 +771,7 @@ def guarded(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) ->
                     )
                 source = sources[path]
                 if (source is None or source.version != item["source_version"]
-                        or (method and (source.methods is None or item["ref"] not in source.methods))):
+                        or (method and not _holds_method(source, item["ref"]))):
                     return empty("partial", reset=True)
             except Exception:  # noqa: BLE001 - source races and admission failures release no projection
                 return empty("partial", reset=True)
