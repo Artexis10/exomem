@@ -6,10 +6,12 @@ import asyncio
 import hashlib
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
 
+import anyio
 import numpy as np
 import pytest
 from fastmcp import Client
@@ -979,6 +981,56 @@ def test_full_model_admission_refuses_passage_request_without_encoding(passage_t
         finally:
             release.set()
         holder.result()
+
+
+def test_abandoned_passage_search_stops_before_it_encodes(vault, passage_tools, monkeypatch):
+    """A caller that times out must end its search, not leave it running unseen in its admission slot."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    walking, caller_left = threading.Event(), threading.Event()
+    walk = find._managed_eligible_filter_paths
+
+    def walk_that_outlasts_its_caller(*args, **kwargs):
+        walking.set()
+        deadline = time.monotonic() + 10
+        while not caller_left.is_set() and time.monotonic() < deadline:
+            try:
+                # The serving host's cancel scope is where a departed caller is recorded.
+                anyio.from_thread.check_cancelled()
+            except asyncio.CancelledError:
+                caller_left.set()
+            time.sleep(0.01)
+        return walk(*args, **kwargs)
+
+    monkeypatch.setattr(find, "_managed_eligible_filter_paths", walk_that_outlasts_its_caller)
+    mcp = server.build_server(require_auth=False)
+    before = len(encoder.texts)
+
+    async def search_then_leave():
+        async with Client(mcp) as client:
+            async with anyio.create_task_group() as caller:
+                caller.start_soon(
+                    client.call_tool,
+                    "search_memory",
+                    {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+                )
+                assert await anyio.to_thread.run_sync(walking.wait, 10)
+                caller.cancel_scope.cancel()
+
+    asyncio.run(search_then_leave())
+    assert caller_left.is_set()
+    assert encoder.texts[before:] == []
 
 
 def test_non_owner_cannot_bypass_passage_authority_with_an_admission_predicate(
