@@ -60,6 +60,24 @@ A field that any correction sets to an empty value SHALL be empty in the success
 - **THEN** the successor has no url and its identity check claims no DOI
 - **AND** the successor keeps the predecessor's tags
 
+### Requirement: An agent reaches a correction from what it reads
+
+`options.correction.supersedes` SHALL accept every name `read_page` accepts for the Source: a ref, a path, a short id or a title.
+A correction refused for missing fields SHALL name every missing field in one refusal.
+A refusal for a wrong `expected_hash` SHALL say that it is the Source page's `content_hash` from `read_page`, not the file's SHA-256.
+A refusal for an unknown or withheld Source SHALL say what to pass, in the same words for both.
+A frontmatter edit of a captured Source that no pointer route owns SHALL be refused with the correction call for that Source.
+
+#### Scenario: A Source is corrected by the id that search showed
+
+- **WHEN** an agent corrects a Source and names it in `supersedes` by its short id or its title
+- **THEN** the correction is written as if the agent had named the Source's ref
+
+#### Scenario: An edit of a Source's title points to the correction
+
+- **WHEN** an agent edits a captured Source's title in place
+- **THEN** the edit is refused with `APPEND_ONLY`, and the refusal names `options.correction` with that Source's ref
+
 ### Requirement: Search marks a corrected Source
 
 A search result for a Source that has a correction receipt SHALL carry `corrected_by` with the title and path of the current successor, when the caller may read that successor.

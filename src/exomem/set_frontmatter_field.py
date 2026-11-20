@@ -149,6 +149,15 @@ def set_frontmatter_field(
         )
         if field in page_fields.pointer_fields(vault_root):
             reason += " " + (owned_field_route(vault_root, field) or _curation_route())
+        else:
+            from . import source_corrections
+
+            try:
+                route = source_corrections.correction_route(vault_root, abs_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                route = None
+            if route:
+                reason += " " + route
         raise SetFrontmatterError(code="APPEND_ONLY", reason=reason)
 
     curated = in_curated_tree(rel_path)

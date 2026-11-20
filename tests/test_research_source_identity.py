@@ -264,6 +264,32 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
     assert "> Cited in the harbour survey." in (vault / successor["page"]).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("name", ["id", "title"])
+def test_a_correction_names_the_source_by_any_name_read_page_takes(vault, source_schema, saved, name) -> None:
+    # Agents passed the short id or the title that search and read_page showed, and were refused.
+    from exomem import page_names
+
+    identity = page_names.read_identity(vault, saved["page"])
+    successor = _save_pdf(
+        vault, source_schema, upload=False, title="A study of harbour lanterns", url="https://doi.org/10.5555/aaa",
+        correction=_correction(vault, saved, supersedes=identity.id if name == "id" else identity.title),
+    )["files"][0]
+
+    assert _frontmatter(vault, successor["page"])["supersedes"]
+
+
+def test_editing_a_sources_title_is_refused_with_the_correction_that_does_it(vault, source_schema, saved) -> None:
+    from exomem import set_frontmatter_field
+
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as caught:
+        set_frontmatter_field.set_frontmatter_field(
+            vault, path=saved["page"], field="title", value="A study of harbour lanterns", why="Fix the title.",
+        )
+
+    assert caught.value.code == "APPEND_ONLY"
+    assert "options.correction" in caught.value.reason and saved["ref"] in caught.value.reason
+
+
 @pytest.mark.usefixtures("owner_scope")
 def test_a_correction_with_an_empty_url_drops_a_doi_the_document_never_shows(
     vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
