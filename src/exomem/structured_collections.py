@@ -90,6 +90,9 @@ _CLAIM_LISTS = ("tags", "terms", "entity_types", "evidence_kinds")
 #: an arbitrary key would make membership depend on fields no router reads.
 _CLAIM_MATCH_KEYS = ("type", "category", "project", "tags")
 _MAX_CLAIM_MATCH_VALUES = 24
+#: `capture` keys. One today: the vault page that holds how to capture into this collection.
+_CAPTURE_KEYS = ("method",)
+MAX_CAPTURE_METHOD_CHARS = 512
 _MUTABLE_FILENAME_FIELDS = frozenset(
     {
         "status",
@@ -292,6 +295,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "item_filename": _item_filename_json_schema(),
             "item_presentation": _item_presentation_json_schema(),
             "claims": _claims_json_schema(),
+            "capture": _capture_json_schema(),
         },
         "additionalProperties": True,
         "$defs": {"field": field_schema},
@@ -375,6 +379,16 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
                 "satisfying every predicate routes here as strong regardless of word overlap; "
                 "predicates only widen routing and two collections declaring the same membership "
                 "stay silent"
+            ),
+        },
+        "capture": {
+            "keys": list(_CAPTURE_KEYS),
+            "purpose": (
+                "the one vault page that holds how to capture into this collection; a write or a turn "
+                "that routes here names it so the agent reads and follows it. Prefer an exomem:// ref: it "
+                "survives a rename or a move and needs no link resolver. A quoted wiki link, method: "
+                "\"[[Page title]]\", may not be served on a turn until the link resolver is warm. "
+                "Routing never depends on it"
             ),
         },
         "item_representation": {
@@ -744,6 +758,17 @@ def _claims_json_schema() -> dict[str, Any]:
     }
 
 
+def _capture_json_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "required": list(_CAPTURE_KEYS),
+        "properties": {
+            "method": {"type": "string", "minLength": 1, "maxLength": MAX_CAPTURE_METHOD_CHARS},
+        },
+        "additionalProperties": False,
+    }
+
+
 def _record_presentation_json_schema() -> dict[str, Any]:
     """Expose the parser's closed, bounded v1 authoring shape."""
     descriptor = {
@@ -1062,6 +1087,8 @@ class CollectionManifest:
     claims: Mapping[str, tuple[str, ...]] | None = None
     #: `claims.match`: frontmatter predicates that declare membership outright.
     claim_match: Mapping[str, tuple[str, ...]] | None = None
+    #: `capture.method`: the wiki link or ref of the one vault page that holds how to capture here, as authored.
+    capture_method: str | None = None
     #: `items` (default) renders a view per row; `summary` keeps rows store-only.
     view_mode: str = "items"
     #: A derived summary collection takes rows only from imports and rebuilds them from its import log.
@@ -2063,6 +2090,7 @@ def _manifest_from_frontmatter(
     )
     claims = _parse_claims(frontmatter.get("claims"))
     claim_match = _parse_claim_match(frontmatter.get("claims"))
+    capture_method = parse_capture(frontmatter.get("capture"))
     derived = _parse_derived(frontmatter.get("derived", False), view_mode)
     if derived and (found := declared_references(schema)):
         raise CollectionError(
@@ -2095,6 +2123,7 @@ def _manifest_from_frontmatter(
         item_presentation=item_presentation,
         claims=claims,
         claim_match=claim_match,
+        capture_method=capture_method,
         view_mode=view_mode,
         derived=derived,
         ignored_recipes=ignored_recipes,
@@ -3397,6 +3426,36 @@ def _parse_claim_match(value: object) -> Mapping[str, tuple[str, ...]] | None:
                 )
         match[key] = tuple(entries)
     return MappingProxyType(match)
+
+
+def parse_capture(value: object) -> str | None:
+    """Parse `capture`: the one page that holds how to capture here, kept as the author wrote it.
+
+    Resolving the reference is the reader's job (`capture_method`): the manifest is parsed far more often
+    than a write or a turn routes to it, and a page's existence is not manifest validity.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise CollectionError(
+            "INVALID_COLLECTION_CAPTURE", f"capture must be a mapping of {', '.join(_CAPTURE_KEYS)}; offending entry: {value!r}"
+        )
+    unknown = sorted(str(key) for key in value if key not in _CAPTURE_KEYS)
+    if unknown:
+        raise CollectionError("INVALID_COLLECTION_CAPTURE", f"capture has unknown key: {unknown[0]}")
+    if "method" not in value:
+        raise CollectionError("INVALID_COLLECTION_CAPTURE", "capture.method is required")
+    method = value["method"]
+    if type(method) is not str or not method.strip():
+        raise CollectionError(
+            "INVALID_COLLECTION_CAPTURE",
+            f"capture.method must be a string naming one page (quote a wiki link); offending entry: {method!r}",
+        )
+    if len(method) > MAX_CAPTURE_METHOD_CHARS:
+        raise CollectionError(
+            "INVALID_COLLECTION_CAPTURE", f"capture.method exceeds {MAX_CAPTURE_METHOD_CHARS} characters"
+        )
+    return method.strip()
 
 
 def _parse_templates(root: Path, manifest_rel: str, value: object) -> tuple[TemplateSpec, ...]:

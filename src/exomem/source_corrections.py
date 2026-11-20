@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -49,6 +49,29 @@ def validate_correction(value: object) -> SourceCorrection:
 
 def receipt_root(root: Path) -> Path:
     return vault.kb_root(root) / "_Sources" / "corrections"
+
+
+_NOT_PERMITTED = (
+    "SOURCE_CORRECTION_NOT_PERMITTED: this connection cannot record a Source correction; "
+    "tell the person which value is wrong, and the vault owner can correct it"
+)
+
+
+def can_record(root: Path, reference: str) -> bool:
+    """Whether this caller may write the correction receipt of `reference`, checked as the commit checks it.
+
+    A restricted writer's grant does not reach the receipt root, so its commit would be refused after
+    the work; asking first lets the capture offer a correction only to a caller who can make one.
+    """
+    from .governance import connector_boundary, membership
+
+    try:
+        path = _receipt_path(root, reference).relative_to(root).as_posix()
+        connector_boundary.require_write(root, path, content=None)
+    except (SourceCorrectionUnavailable, ValueError, OSError, connector_boundary.BoundaryUnavailable,
+            membership.MembershipUnresolved):
+        return False
+    return True
 
 
 def _receipt_path(root: Path, reference: str) -> Path:
@@ -153,6 +176,34 @@ def has_correction(root: Path, metadata: dict) -> bool:
         raise SourceCorrectionUnavailable from None
 
 
+def corrected_by(root: Path, sources: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """`{title, path}` of the page that now stands for each Source in `sources`, keyed by that Source's path.
+
+    `sources` maps the path of each Source on one page of results to its ref. One receipt lookup decides an
+    uncorrected Source; only a corrected one resolves its chain, and every chain is read under one release
+    filter built for the page. A Source with no successor, or whose chain the caller may not read or that
+    does not validate, is absent, as a page read of that chain refuses.
+    """
+    authorize: Callable[[str], bool] | None = None
+    found: dict[str, dict[str, str]] = {}
+    for path, ref in sources.items():
+        try:
+            entry, _guard = _receipt(root, ref)
+            if entry is None:
+                continue
+            authorize = authorize or _authorizer(root)
+            current = resolve_current(root, path, authorize_path=authorize)
+            metadata, _body, _marker = vault.parse_frontmatter(current.source)
+        except (OSError, ValueError, TypeError, KeyError, memory_refs.ReferenceError, reserved_paths.ReservedPathLeafError):
+            continue
+        if current.selected_path == current.requested_path:
+            continue
+        title = metadata.get("title")
+        found[path] = {"title": title if isinstance(title, str) and title else Path(current.selected_path).stem,
+                       "path": current.selected_path}
+    return found
+
+
 @dataclass(frozen=True, slots=True)
 class CurrentSourceResolution:
     requested_path: str
@@ -253,6 +304,8 @@ class CorrectionPlan:
                 or egress.write_target_withheld(root, self.old_path)):
             raise SourceCorrectionUnavailable
         connector_boundary.require_write(root, self.old_path, content=self.old_source.encode("utf-8"))
+        if not can_record(root, self.old_ref):
+            raise ValueError(_NOT_PERMITTED)
 
     def receipt(self, root: Path, *, new_ref: str, new_path: str, timestamp: str) -> vault.PlannedWrite:
         entry = {

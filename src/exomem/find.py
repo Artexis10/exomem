@@ -46,6 +46,7 @@ from . import (
     request_budget,
     runtime_resources,
     semantic_units,
+    source_custody,
     structured_filters,
     view_lag,
 )
@@ -1477,6 +1478,9 @@ def _with_catalog_scope(function):
             # Direct store readers pin the same host constants as dispatched read commands.
             state_paths.resolution_scope() if lexstore.store_catalogue() else ExitStack(),
         ):
+            # Passage selection owns its published view; generic pending hydration opens unselected Sources.
+            if kwargs.get("result_level") == "passage":
+                return function(vault_root, *args, **kwargs)
             if (
                 not _managed_reader() or not freshness.event_indexes_enabled()
                 or lexstore.backend() == "python"
@@ -1642,7 +1646,7 @@ def find(
     _cache_probe: bool = False,
     _prepared_queries: find_candidates.PreparedQueryInputs | None = None,
     _defer_finish: bool = False,
-) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
+) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit] | dict[str, Any]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -1766,16 +1770,27 @@ def find(
     ranked, classified or counted. Omitted, it is `caller_admission`, so a
     restricted caller's find can never run unadmitted.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.find(vault_root, locals())
     if admit_path is None:
         admit_path = caller_admission(vault_root)
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     type_basis = type_basis or note_types.Basis(vault_root)
 
-    def _dependency() -> tuple[tuple[str, str], tuple[str, str]]:
-        return (status_basis.dependency, type_basis.dependency)
+    # Source erasure moves this at its cutoff: a result read before it is never stored or served after it.
+    retired_through = source_custody.retirement_generation(vault_root)
 
-    def _current(dependency: tuple[tuple[str, str], tuple[str, str]]) -> bool:
-        return status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+    def _publishable() -> bool:
+        return retired_through is not None and retired_through == source_custody.retirement_generation(vault_root)
+
+    def _dependency() -> tuple[tuple[str, str], tuple[str, str], int | None]:
+        return (status_basis.dependency, type_basis.dependency, retired_through)
+
+    def _current(dependency: tuple[tuple[str, str], tuple[str, str], int | None]) -> bool:
+        return (status_basis.matches(dependency[0]) and type_basis.matches(dependency[1])
+                and dependency[2] == source_custody.retirement_generation(vault_root))
 
     if catalog_proof_out is not None:
         catalog_proof_out.clear()
@@ -2311,7 +2326,7 @@ def find(
                 catalog_view=catalog_view,
             )
             _note_projection_lag()
-            if unit_cache_key is not None and not degraded and not failed:
+            if unit_cache_key is not None and not degraded and not failed and _publishable():
                 with _FIND_CACHE_LOCK:
                     _FIND_CACHE[unit_cache_key] = (copy.deepcopy(verified), _dependency())
                     _FIND_CACHE_CHECKPOINTS.pop(unit_cache_key, None)
@@ -3037,6 +3052,7 @@ def find(
             and not failed
             and not budget_skipped_rerank
             and not unproven_graph_key
+            and _publishable()
         ):
             with _FIND_CACHE_LOCK:
                 _FIND_CACHE[cache_key] = (copy.deepcopy(hits), _dependency())
@@ -4935,6 +4951,7 @@ def _resolve_relation_filter(
     relation_direction: str,
     snapshot: FreshnessSnapshot,
     keep: Callable[[str], bool] | None = None,
+    anchor_visible: Callable[[str], bool] | None = None,
 ) -> tuple[frozenset[str] | None, dict[str, Any], tuple[dict[str, str], ...]]:
     """Resolve the relation filter to a participant path set (None when inactive),
     plus per-path provenance and advisory findings. `keep` is the request's content
@@ -4943,6 +4960,8 @@ def _resolve_relation_filter(
     would hold them. A caller with such a view re-derives the links that resolve
     differently for it, with the resolver of the request's `snapshot`.
     A withheld anchor yields an authoritative empty before registry selection.
+    `anchor_visible` can supply an existing namespace-authority check without
+    opening an unselected anchor. It does not replace graph freshness or release.
 
     Each requested relation is canonicalized through the registry; an unknown key
     raises ``INVALID_RELATION_FILTER`` with nearest-canonical suggestions (never a
@@ -4959,7 +4978,12 @@ def _resolve_relation_filter(
 
     if relation_of:
         relation_of = epistemic_graph._page_rel(relation_of)
-        if not egress.quick_page_visible(vault_root, relation_of):
+        visible = (
+            anchor_visible(relation_of)
+            if anchor_visible is not None
+            else egress.quick_page_visible(vault_root, relation_of)
+        )
+        if not visible:
             return frozenset(), {}, ()
     graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
     # An anchored filter inherits its anchor page's instance; otherwise public.
@@ -5597,6 +5621,8 @@ def _managed_page_metadata(
                                     state.parser_version, raw.form, raw.category_raw, raw.category_key, raw.content,
                                     json.dumps(raw.tags), raw.context, raw.source_hash, raw.anchor,
                                     raw.line, raw.end_line, order,
+                                    # `lexstore._OCCURRENCE_COLUMNS` order; the stored page date the index keeps.
+                                    page.updated or lexstore.UNDATED,
                                 )
                                 unit_view = structured_filters.unit_view(raw, instance=state.instance_id)
                                 unit_view.update(category=selected_unit.category, kind=selected_unit.kind)
@@ -8240,27 +8266,31 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     """
     from . import freshness as freshness_module
     from .vault import WikilinkResolver
+    from .vault_store import read as store_read
 
     root = Path(vault_root)
-    if freshness is None:
-        freshness = FreshnessSnapshot(root).vault()
-    checkpoint = freshness_module.consumer_checkpoint(root, "vault")
-    if checkpoint.triple != freshness:
-        checkpoint = None
-    cached = _RESOLVER_CACHE.get(root)
-    if cached and cached[0] == freshness:
-        return cached[1]
-    with _RESOLVER_LOCK:
+    # A store-mode key is the revision that it read, so the key and the build read one revision: a resolver
+    # keyed at R1 that listed the pages of R1+1 would show a reader still pinned at R1 a page it cannot see.
+    with store_read.request_snapshot(root):
+        if freshness is None:
+            freshness = FreshnessSnapshot(root).vault()
+        checkpoint = freshness_module.consumer_checkpoint(root, "vault")
+        if checkpoint.triple != freshness:
+            checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
         if cached and cached[0] == freshness:
             return cached[1]
-        resolver = WikilinkResolver(root)
-        _RESOLVER_CACHE[root] = (freshness, resolver)
-        if checkpoint is not None:
-            _RESOLVER_CHECKPOINTS[root] = checkpoint
-        else:
-            _RESOLVER_CHECKPOINTS.pop(root, None)
-    return resolver
+        with _RESOLVER_LOCK:
+            cached = _RESOLVER_CACHE.get(root)
+            if cached and cached[0] == freshness:
+                return cached[1]
+            resolver = WikilinkResolver(root)
+            _RESOLVER_CACHE[root] = (freshness, resolver)
+            if checkpoint is not None:
+                _RESOLVER_CHECKPOINTS[root] = checkpoint
+            else:
+                _RESOLVER_CHECKPOINTS.pop(root, None)
+        return resolver
 
 
 def borrow_query_resolver(
@@ -8281,8 +8311,17 @@ def borrow_query_resolver(
     Set `schedule_rebuild=False` for an advisory read that must not start a rebuild.
     Writers and explicit operations keep `_get_query_resolver`.
     """
+    from . import lexstore
+
     root = Path(vault_root)
-    triple = freshness.consumer_checkpoint(root, "vault").triple
+    # A store-mode resolver is keyed on the snapshot's revision (`FreshnessSnapshot._scope_key`), which no
+    # file registry holds; the revision moves with every commit, so a resolver that a commit passed is a miss.
+    if lexstore.store_rows_serve(root):
+        from .vault_store import read as store_read
+
+        triple = store_read.scope_triple(root, "vault")
+    else:
+        triple = freshness.consumer_checkpoint(root, "vault").triple
     cached = _RESOLVER_CACHE.get(root)
     if triple is not None and cached is not None and cached[0] == triple:
         return cached[1]
@@ -8510,6 +8549,8 @@ def recall_resolver_snapshot_at_checkpoint(
 ):
     """Borrow a read-only resolver only when exact event lineage is resident.
 
+    The resolver alone; `recall_resolver_publication_at_checkpoint` also returns its token.
+
     Incremental graph maintenance must not rebuild a resolver from current disk
     and label it with an older live checkpoint: that loses the pre-delta
     topology needed to prove bounded edge repair. A cache miss is therefore an
@@ -8521,6 +8562,20 @@ def recall_resolver_snapshot_at_checkpoint(
     body-only path stay O(delta) without copying every resolver map. A caller
     that needs to mutate or reconstruct topology must fork explicitly.
     """
+    borrowed = recall_resolver_publication_at_checkpoint(vault_root, checkpoint)
+    return borrowed[0] if borrowed is not None else None
+
+
+def recall_resolver_publication_at_checkpoint(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+) -> tuple[WikilinkResolver, object] | None:
+    """`recall_resolver_snapshot_at_checkpoint` with the token of the maps it borrowed.
+
+    The token is read under the lock that a publisher patches the maps under, so a caller that
+    compares it later learns whether a patch landed after this borrow; read from the resolver
+    after the lock, it could already name patched maps.
+    """
     root = Path(vault_root)
     identity = _recall_checkpoint_identity(checkpoint)
     with _RESOLVER_LOCK:
@@ -8531,7 +8586,7 @@ def recall_resolver_snapshot_at_checkpoint(
             or _RECALL_RESOLVER_CHECKPOINTS.get(root) != checkpoint
         ):
             return None
-        return cached[1]
+        return cached[1], cached[2]
 
 
 def borrow_recall_resolver(

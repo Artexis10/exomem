@@ -710,7 +710,7 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
 
     actions = set(front_door)
     for command in commands.PRODUCT_COMMANDS:
-        assert command.product_surface in {"primary", "advanced"}
+        assert command.product_surface in {"primary", "advanced", "service"}
         assert set(command.product_actions) <= actions
 
 
@@ -725,7 +725,8 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
     checks the other direction -- every route names a known command -- which is
     why the gap survived: the catalog reached 18 of 29 commands, `adopt`,
     `maintain` and `record` resolved UNAVAILABLE on the shipped hosted profile,
-    and nothing failed.
+    and nothing failed. A service command is a calling system's protocol step, which
+    no agent listing names, so no action reaches it.
     """
     catalog = commands.simple_action_catalog()
     reachable: set[str] = set()
@@ -741,7 +742,7 @@ def test_simple_action_catalog_reaches_every_product_command() -> None:
     mcp_commands = (*commands.product_commands_for("mcp"),
                     *commands.product_commands_for("mcp", cloud=True))
     unreachable = {command.public_name for command in mcp_commands
-                   if not set(command.callable_names) & reachable}
+                   if command.agent_listed and not set(command.callable_names) & reachable}
     assert unreachable == {"bootstrap"}, (
         "every product command must be reachable from some action; unreachable: "
         f"{sorted(unreachable - {'bootstrap'})}"

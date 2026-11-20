@@ -124,3 +124,4 @@ def test_resolution_failure_never_raises(monkeypatch: pytest.MonkeyPatch) -> Non
     r = extract._transcribe(Path("x.wav"), "audio")
 
     assert r.text == "[Speaker A]: hello there\n[Speaker B]: general kenobi"
+

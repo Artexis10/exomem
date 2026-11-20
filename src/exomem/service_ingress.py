@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 INTERNAL_HEADER_PREFIX = b"x-exomem-internal-"
 INGRESS_STAMP_HEADER = b"x-exomem-internal-ingress"
 INGRESS_PROOF_HEADER = b"x-exomem-internal-ingress-proof"
+#: How long a managed worker keeps an idle connection from its supervisor. The
+#: supervisor's pool of every release keeps one for httpx's default 5 s. A worker
+#: that also closes it after 5 s can close it while a reused request is in flight,
+#: and the ingress answers 503 for a request the worker never read. At 30 s the pool
+#: drops the connection first unless reading a response takes the supervisor 25 s.
+WORKER_KEEP_ALIVE_SECONDS = 30
 #: How a manager hands its per-process proof to the workers it spawns. A worker
 #: without it honours no stamp, which keeps a new worker inert under a manager
 #: that predates stripping.

@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import functools
+import hashlib
+import io
 import json
 import os
 import sqlite3
@@ -43,6 +45,7 @@ from test_collection_store_s1_gate import (
 )
 from test_collection_store_summary import sqlite_text
 from test_collection_store_writer import CID, manifest_path, manifest_text
+from test_media_store import selected_store as selected_store
 from test_typed_history_generations import previous_release
 
 from exomem import __main__ as cli
@@ -259,6 +262,46 @@ def service(tmp_path, monkeypatch):
         finally:
             if not started.manager._stop.is_set():
                 started.stop()
+
+
+@pytest.fixture
+def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch):  # noqa: F811
+    """Serve a selected collection beside an enrolled Source with an evicted encrypted original."""
+    import atexit
+    import shutil
+
+    from test_media_store import _offload
+
+    from exomem import add, indexes, media_store
+
+    root = _served_vault(tmp_path / "served", monkeypatch)
+    shutil.copytree(vault / "Knowledge Base/_Schema", root / "Knowledge Base/_Schema", dirs_exist_ok=True)
+    (root / "Knowledge Base/Sources").mkdir()
+    (root / "Knowledge Base/Sources/index.md").write_text(
+        f"# Sources\n\n{indexes.SOURCES_BY_TYPE_HEADER}\n\n{indexes.SOURCES_RECENT_HEADER}\n")
+    (root / "Knowledge Base/index.md").write_text("# Knowledge Base\n")
+    selected_store[1].write_text(json.dumps({"vaults": {str(root): selected_store[0]}}))
+    monkeypatch.setenv("EXOMEM_SOURCE_ERASURE_POLICY", '{"enabled_systems":["archive"]}')
+    with coordinator(tmp_path / "original-coordinator.sqlite"):
+        assert offline_create(root, tmp_path / "served/c.md", manifest_path(), why="new store collection") == 0
+        started = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            _until(lambda: runtime.served(root))
+            expected = b"An encrypted original retained for a selected collection.\n"
+            with request_scope(OWNER), started.manager.mutation_guard(root):
+                saved = add.add(root, source_schema, title="Original observation", content="", source_type="session",
+                    artifact=add.SourceArtifact(io.BytesIO(expected), "transcript.txt", "text/plain"),
+                    source_identity={"system": "archive", "record_id": "observation", "revision": "one"})
+            path = root / saved.artifact_path
+            _offload(root, path)
+            assert media_store.evict(root, path)
+            yield started, saved.ref, path, expected, saved.path
+        finally:
+            try:
+                if not started.manager._stop.is_set():
+                    started.stop()
+            finally:
+                atexit.unregister(started.manager.close)
 
 
 def test_an_upgraded_service_migrates_its_fenced_store_from_the_previous_schema_and_stays_writable(
@@ -1841,6 +1884,369 @@ def test_pending_create_cannot_publish_over_an_arriving_file_declaration(service
     assert call(root, "record_memory", action="append", collection=DAILY, item={"title": "Recovered C row"},
                 item_key=LATER, why="recovered publication")["outcome"] == "committed"
     assert titles(root, late_id) == ["File during interruption"]
+
+
+@pytest.mark.parametrize("action", ["append", "bulk_upsert"])
+def test_original_download_allows_a_plain_write_and_refuses_its_changed_basis(original_service, monkeypatch, action):
+    """A real paused download leaves SQL available; the final unit cannot silently recompute its stale batch."""
+    from exomem import media_jobs, media_store, provenance, runtime_resources, source_custody
+    from exomem.collection_store import preview
+
+    service, reference, original, expected, source_path = original_service
+    root, server = service.root, runtime._server(service.root)
+    monkeypatch.setenv(runtime_resources.SYNC_WORKERS_ENV, "2")
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    arguments = dict(action=action, collection=CID, why="retain the acquired observation", response_detail="full")
+    if action == "bulk_upsert":
+        arguments.update(rows=[{"item": {"title": "Acquired"}, "body": body}], source=source_path, on_reject="skip",
+            expected_container_hash=call(root, "record_memory", action="inspect", collection=CID)["snapshot"])
+    else:
+        arguments.update(item={"title": "Acquired"}, body=body)
+    entered, release = threading.Event(), threading.Event()
+    failures, results = [], []
+    decrypt = media_store._decrypt_into
+
+    def paused_download(*args):
+        assert threading.current_thread() is not server.thread
+        assert preview.bound_writer(root) is None
+        assert not service.manager._mutation_coordinator_for(root).current_thread_holds_boundary()
+        entered.set()
+        assert release.wait(20), "test did not release the real original download"
+        return decrypt(*args)
+
+    def invoke():
+        try:
+            results.append(call(root, "record_memory", **arguments))
+        except BaseException as error:  # noqa: BLE001 - report the caller's original failure on the test thread
+            failures.append(error)
+
+    monkeypatch.setattr(media_store, "_decrypt_into", paused_download)
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        if not entered.wait(10):
+            pytest.fail(f"original download never started: replies={json.dumps(results) if results else None}; "
+                        f"failures={failures}")
+        assert call(root, "record_memory", action="append", collection=CID, item={"title": "While downloading"},
+                    item_key=LATER, why="independent write")["outcome"] == "committed"
+        assert titles(root, CID) == ["While downloading"]
+    finally:
+        release.set()
+        caller.join(20)
+    assert not caller.is_alive() and not results
+    assert len(failures) == 1 and failures[0].code == "COLLECTION_STORE_INPUT_CHANGED"
+    assert original.read_bytes() == expected
+    with service.manager.mutation_guard(root):
+        manifest, _ = source_custody.read_manifest(root, reference)
+        assert "collection_records" not in manifest.dependency_epochs
+    with closing(media_jobs.MediaJobStore(root)._connect()) as conn:
+        assert conn.execute("SELECT count(*) FROM media_access").fetchone()[0] == 0
+    arguments["expected_container_hash"] = call(root, "record_memory", action="inspect", collection=CID)["snapshot"]
+    def views_ready():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None
+
+    _until(views_ready)
+    retried = call(root, "record_memory", **arguments)
+    assert operational(retried)["status"] == "committed"
+    if action == "bulk_upsert":
+        assert retried["diagnostics"]["counts"]["inserted"] == 1
+    assert titles(root, CID) == ["Acquired", "While downloading"]
+
+
+def test_one_acquisition_worker_leaves_plain_writes_available_for_the_same_client(service, monkeypatch):
+    """A paused acquisition must not occupy the store thread or admit a second envelope for its client."""
+    from exomem import runtime_resources
+    from exomem.collection_store import preview
+
+    monkeypatch.setenv(runtime_resources.SYNC_WORKERS_ENV, "2")
+    server = runtime._server(service.root)
+    entered, release = threading.Event(), threading.Event()
+    results, failures = [], []
+
+    def work():
+        assert threading.current_thread() is not server.thread
+        assert preview.bound_writer(service.root) is None
+        entered.set()
+        assert release.wait(10), "test did not release accepted acquisition"
+        return server.call(lambda: preview.bound_writer(service.root).connection.execute(
+            "SELECT COUNT(*) FROM items WHERE collection_id=?", (CID,)).fetchone()[0], wake_maintenance=False)
+
+    def invoke():
+        with request_scope(OWNER):
+            try:
+                results.append(server.call_record_request(work, wake_maintenance=False))
+            except BaseException as error:  # noqa: BLE001 - report the worker failure on the test thread
+                failures.append(error)
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(5), "the acquisition envelope was not accepted"
+        with request_scope(OWNER), pytest.raises(OpError, match="acquisition is busy"):
+            server.call_record_request(lambda: pytest.fail("a second acquisition bypassed its client's limit"))
+        assert call(service.root, "record_memory", action="append", collection=CID,
+            item={"title": "While acquiring"}, item_key=LATER, why="independent write")["outcome"] == "committed"
+        assert "While acquiring" in titles(service.root, CID)
+    finally:
+        release.set()
+        caller.join(10)
+    assert not caller.is_alive() and failures == []
+    assert results == [2]
+
+
+def test_a_held_original_acquires_only_after_correction_and_uses_the_request_worker(original_service, monkeypatch):
+    """An invalid candidate stays held without a download; its corrected resume owns acquisition outside SQL."""
+    from exomem import media_store, provenance
+    from exomem.collection_store import preview
+
+    service, reference, original, expected, _source_path = original_service
+    root, server = service.root, runtime._server(service.root)
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    decrypt, downloads = media_store._decrypt_into, []
+
+    def download(*args):
+        assert threading.current_thread() is not server.thread
+        assert preview.bound_writer(root) is None
+        assert not service.manager._mutation_coordinator_for(root).current_thread_holds_boundary()
+        downloads.append(True)
+        return decrypt(*args)
+
+    monkeypatch.setattr(media_store, "_decrypt_into", download)
+    with pytest.raises(OpError) as refused:
+        call(root, "record_memory", action="append", collection=CID,
+            item={"title": "Held original", "count": "invalid"}, body=body, why="retain the candidate")
+    assert refused.value.code == "SCHEMA_FIELD_TYPE"
+    held = refused.value.details["held"]["held_id"]
+    assert downloads == [] and not original.exists()
+    result = call(root, "record_memory", action="append", collection=CID,
+        held=held, item={"count": 1}, why="correct the candidate", response_detail="full")
+    assert operational(result)["status"] == "committed"
+    assert downloads == [True] and original.read_bytes() == expected
+    assert titles(root, CID) == ["Held original"]
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM held_candidates WHERE held_id=?", (held,)).fetchone()[0] == 0
+
+
+def test_acquired_bulk_commit_error_keeps_its_terminal_uncertain_and_retry_replays(original_service, monkeypatch):
+    """A final unit's error cannot lose the canonical commit flag when it returns to the request worker."""
+    from exomem import provenance
+    from exomem.collection_store.writer import CollectionWriter
+
+    service, reference, _original, expected, source_path = original_service
+    root = service.root
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    arguments = dict(action="bulk_upsert", collection=CID,
+        rows=[{"item": {"title": "Committed before the reply failed"}, "body": body}],
+        source=source_path, why="retain the acquired observation", response_detail="full",
+        mutation_request_id="bulk-original-post-commit",
+        expected_container_hash=call(root, "record_memory", action="inspect", collection=CID)["snapshot"])
+    checks = []
+
+    def fail_after_commit(_writer, _result, _manifest, _rows):
+        checks.append(True)
+        raise RuntimeError("the reply failed after the canonical commit")
+
+    monkeypatch.setattr(CollectionWriter, "_reference_check", fail_after_commit)
+    with pytest.raises(OpError) as uncertain:
+        call(root, "record_memory", **arguments)
+    assert uncertain.value.code == "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN"
+    assert uncertain.value.committed is True
+    assert titles(root, CID) == ["Committed before the reply failed"]
+    replay = call(root, "record_memory", **arguments)
+    assert operational(replay)["status"] == "replayed" and operational(replay)["mutated"] is False
+    assert checks == [True]
+    assert titles(root, CID) == ["Committed before the reply failed"]
+
+
+def test_changed_arguments_during_original_acquisition_cannot_change_the_committed_request_identity(
+        original_service, monkeypatch):
+    """An accepted candidate owns its values; an exact original retry must never identify another payload."""
+    from exomem import media_store, provenance
+
+    service, reference, _original, expected, _source_path = original_service
+    root = service.root
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    item = {"title": "Accepted observation"}
+    arguments = dict(action="append", collection=CID, item=item, body=body, why="retain the acquired observation",
+        mutation_request_id="original-argument-identity", response_detail="full")
+    entered, release = threading.Event(), threading.Event()
+    failures, replies = [], []
+    decrypt = media_store._decrypt_into
+
+    def paused_download(*args):
+        entered.set()
+        assert release.wait(15), "test did not release the original acquisition"
+        return decrypt(*args)
+
+    def invoke():
+        try:
+            replies.append(call(root, "record_memory", **arguments))
+        except BaseException as error:  # noqa: BLE001 - preserve the asynchronous caller's original outcome
+            failures.append(error)
+
+    monkeypatch.setattr(media_store, "_decrypt_into", paused_download)
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(10), "the accepted request never acquired its original"
+        item["title"] = "Changed during acquisition"
+    finally:
+        release.set()
+        caller.join(15)
+    assert not caller.is_alive()
+    if failures:
+        assert not replies and len(failures) == 1 and failures[0].code == "COLLECTION_STORE_INPUT_CHANGED"
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (CID,)).fetchone()[0] == 0
+    else:
+        assert len(replies) == 1 and operational(replies[0])["status"] == "committed"
+        assert titles(root, CID) == ["Accepted observation"]
+    arguments["item"] = {"title": "Accepted observation"}
+
+    def views_ready():
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return reader.execute("SELECT 1 FROM projection_state WHERE state='pending' LIMIT 1").fetchone() is None
+
+    _until(views_ready)
+    retry = call(root, "record_memory", **arguments)
+    assert operational(retry)["status"] == ("committed" if failures else "replayed")
+    assert titles(root, CID) == ["Accepted observation"]
+
+
+def test_shutdown_during_an_original_download_prevents_a_late_collection_commit(original_service, monkeypatch):
+    """A request that outlives the service cannot commit through a retired store after its download finishes."""
+    from exomem import media_store, provenance
+
+    service, reference, _original, expected, source_path = original_service
+    root = service.root
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    before = call(root, "record_memory", action="inspect", collection=CID)["snapshot"]
+    entered, release = threading.Event(), threading.Event()
+    failures, replies = [], []
+    decrypt = media_store._decrypt_into
+
+    def paused_download(*args):
+        entered.set()
+        assert release.wait(15), "test did not finish the download after shutdown"
+        return decrypt(*args)
+
+    def invoke():
+        try:
+            replies.append(call(root, "record_memory", action="bulk_upsert", collection=CID,
+                rows=[{"item": {"title": "Must not commit after shutdown"}, "body": body}],
+                source=source_path, why="retain the acquired observation", expected_container_hash=before))
+        except BaseException as error:  # noqa: BLE001 - preserve the request failure for the test thread
+            failures.append(error)
+
+    monkeypatch.setattr(media_store, "_decrypt_into", paused_download)
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(10), "the request never reached its original download"
+        with pytest.raises(OpError) as pending:
+            service.stop(deadline=time.monotonic() + 0.25)
+        assert pending.value.code == "COLLECTION_STORE_FLUSH_PENDING"
+    finally:
+        release.set()
+        caller.join(15)
+    assert not caller.is_alive() and not replies
+    assert len(failures) == 1 and isinstance(failures[0], (OpError, CollectionStoreError))
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (CID,)).fetchone()[0] == 0
+
+
+def test_acquisition_acknowledgement_timeout_keeps_accepted_capacity_until_execution_finishes(service, monkeypatch):
+    """A caller timeout cannot release a live envelope's slot or its owned inputs."""
+    from exomem import request_budget, runtime_resources
+
+    monkeypatch.setenv(runtime_resources.SYNC_WORKERS_ENV, "2")
+    server = runtime._server(service.root)
+    release, completed = threading.Event(), threading.Event()
+
+    def work():
+        assert release.wait(10), "test did not release late acquisition"
+        completed.set()
+        return "finished"
+
+    with request_scope(OWNER):
+        token = request_budget.set_current(request_budget.RequestBudget(
+            seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.3))
+        try:
+            with pytest.raises(OpError) as pending:
+                server.call_record_request(work, wake_maintenance=False)
+            assert pending.value.code == "MUTATION_ACKNOWLEDGEMENT_PENDING"
+            assert pending.value.as_public_dict()["committed"] is None
+        finally:
+            request_budget.reset_current(token)
+        try:
+            with pytest.raises(OpError, match="acquisition is busy"):
+                server.call_record_request(lambda: pytest.fail("timed-out accepted work lost its slot"))
+        finally:
+            release.set()
+        assert completed.wait(5), "accepted execution stopped with the caller"
+        replies = []
+
+        def next_acquisition():
+            try:
+                replies.append(server.call_record_request(lambda: "next", wake_maintenance=False))
+                return True
+            except OpError as error:
+                assert error.code == "COLLECTION_STORE_BUSY"
+                return False
+
+        _until(next_acquisition)
+        assert replies == ["next"]
+
+
+def test_accepted_store_unit_keeps_its_envelopes_inputs_past_the_unit_wait_deadline(service, monkeypatch):
+    """A delayed accepted SQL unit cannot outlive the input lifetime held by its request worker."""
+    from exomem.collection_store import preview
+
+    monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", 1.0)
+    server = runtime._server(service.root)
+    entered, release, inputs_released = threading.Event(), threading.Event(), threading.Event()
+    replies, failures = [], []
+
+    def unit():
+        entered.set()
+        assert release.wait(10), "test did not finish the accepted unit"
+        return preview.bound_writer(service.root).connection.execute(
+            "SELECT COUNT(*) FROM items WHERE collection_id=?", (CID,)).fetchone()[0]
+
+    def work():
+        try:
+            return server.call(unit, wake_maintenance=False)
+        finally:
+            inputs_released.set()
+
+    def invoke():
+        with request_scope(OWNER):
+            try:
+                replies.append(server.call_record_request(work, wake_maintenance=False))
+            except BaseException as error:  # noqa: BLE001 - surface the accepted caller's failure on the test thread
+                failures.append(error)
+
+    caller = threading.Thread(target=invoke)
+    caller.start()
+    try:
+        assert entered.wait(5), "the store did not accept its unit"
+        assert not inputs_released.wait(1.2), "an accepted unit lost its inputs at the acknowledgement deadline"
+    finally:
+        release.set()
+        caller.join(10)
+    assert not caller.is_alive() and failures == []
+    assert inputs_released.is_set() and replies == [1]
 
 
 def test_accepted_mutation_timeout_retains_late_commit_and_keyed_replay(service, monkeypatch, tmp_path):

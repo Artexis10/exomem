@@ -98,7 +98,7 @@ def test_citing_a_stored_media_artifact_lands_the_back_reference(vault: Path) ->
     result = _cite(vault, stored.path, "Traffic changed after the pier reopened")
 
     assert _backref_skipped(result.warnings) is None, result.warnings
-    assert "traffic-changed" in _ingested_into(vault, stored.sidecar_path)
+    assert Path(result.path).stem in _ingested_into(vault, stored.sidecar_path)
 
 
 def test_citing_a_stored_text_artifact_lands_the_back_reference(vault: Path) -> None:
@@ -109,7 +109,7 @@ def test_citing_a_stored_text_artifact_lands_the_back_reference(vault: Path) -> 
     result = _cite(vault, stored.path, "Pier reopening changed the traffic")
 
     assert _backref_skipped(result.warnings) is None, result.warnings
-    assert "pier-reopening" in _ingested_into(vault, stored.sidecar_path)
+    assert Path(result.path).stem in _ingested_into(vault, stored.sidecar_path)
 
 
 def test_citing_the_page_directly_resolves_to_the_same_page(vault: Path) -> None:
@@ -118,7 +118,7 @@ def test_citing_the_page_directly_resolves_to_the_same_page(vault: Path) -> None
     result = _cite(vault, stored.sidecar_path, "Cited by page path")
 
     assert _backref_skipped(result.warnings) is None, result.warnings
-    assert "cited-by-page-path" in _ingested_into(vault, stored.sidecar_path)
+    assert Path(result.path).stem in _ingested_into(vault, stored.sidecar_path)
 
 
 def test_an_ordinary_source_page_citation_is_unchanged(
@@ -144,7 +144,7 @@ def test_an_ordinary_source_page_citation_is_unchanged(
     result = _cite(vault, cited, "Compiled from an ordinary source")
 
     assert _backref_skipped(result.warnings) is None, result.warnings
-    assert "compiled-from-an-ordinary-source" in _ingested_into(vault, added.path)
+    assert Path(result.path).stem in _ingested_into(vault, added.path)
 
 
 def test_the_artifact_page_form_is_tried_before_extension_replacement(vault: Path) -> None:
@@ -509,7 +509,7 @@ def test_an_attached_source_is_citable_immediately(
     result = _cite(vault, added.artifact_path, "Compiled from an attachment")
 
     assert _backref_skipped(result.warnings) is None, result.warnings
-    assert "compiled-from-an-attachment" in _ingested_into(vault, added.path)
+    assert Path(result.path).stem in _ingested_into(vault, added.path)
 
 
 def test_an_attached_image_survives_reconciliation(
@@ -784,9 +784,15 @@ def test_the_moved_page_points_at_the_moved_bytes(
         promotion_reason="the appliance failed; this is the proof of purchase",
     )
 
+    from exomem import page_lineage, record_formats
+
     page = (vault / f"{destination}.md").read_text(encoding="utf-8")
     assert f"evidence_file: {destination}" in page
-    assert added.artifact_path not in page
+    # The page's lineage keeps the path it left; nothing else names the old bytes.
+    unmoved = record_formats.splice_markdown_frontmatter(
+        page, {}, delete_fields=(page_lineage.LINEAGE_FIELD,)
+    )
+    assert added.artifact_path not in unmoved
     # Identity survives the move: this is the same captured item, reclassified.
     assert "title: Warranty receipt" in page
     assert "original_filename: receipt.png" in page
@@ -1315,6 +1321,18 @@ def test_transfer_artifact_refuses_an_unknown_lane(vault: Path) -> None:
 
     with pytest.raises(ValueError, match="INVALID_MODE"):
         commands.op_transfer_artifact(vault, operation="upload", lane="wherever")
+
+
+def test_an_upload_without_a_token_names_the_held_route(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agents that asked for a plain upload on a server without a token gave up and saved nothing."""
+    from exomem import commands
+
+    monkeypatch.delenv("EXOMEM_UPLOAD_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="hold=true and expected_sha256"):
+        commands.op_transfer_artifact(vault, operation="upload", lane="source")
 
 
 def test_an_upload_lands_in_the_lane_its_token_was_minted_for(

@@ -32,6 +32,7 @@ _SEPARATORS_RE = re.compile(r"[\s_-]+")
 _DEFINITION_FIELDS = frozenset(
     {"description", "aliases", "status", "replaced_by", "scope"}
 )
+_CATEGORY_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"traits"}
 _KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases", "traits", "labels"}
 
 
@@ -69,9 +70,14 @@ class CategoryDefinition:
     page_types: frozenset[str] = frozenset()
     status: str = "active"
     replaced_by: str | None = None
+    # Members of the closed trait set (`semantic_kinds.KIND_TRAITS`) that units of this category have.
+    traits: frozenset[str] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
-        return _definition_dict(self)
+        out = _definition_dict(self)
+        if self.traits:
+            out["traits"] = sorted(self.traits)
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +291,9 @@ class SemanticLanguageRegistry:
     # The labels a vault wrote under a shipped kind's key, which carry nothing else: key to its
     # (language tag, label) pairs. A vault kind keeps its labels in its own definition.
     kind_label_entries: Mapping[str, tuple[tuple[str, str], ...]] = field(default_factory=dict)
+    # The traits a vault wrote under a core category's key, which carry nothing else. They add to the
+    # core category's traits; its definition, aliases and description stay code-owned.
+    category_trait_entries: Mapping[str, frozenset[str]] = field(default_factory=dict)
     # Each label registry's effective entries and its folded-spelling index, built on first
     # use. The registry is immutable and one instance serves a whole pass, so a unit row
     # resolves by one lookup instead of a rebuild. The kinds are one more entry under
@@ -304,6 +313,7 @@ class SemanticLanguageRegistry:
             "core_categories",
             "core_category_aliases",
             "kind_label_entries",
+            "category_trait_entries",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
         for name in ("core_label_entries", "label_entries"):
@@ -346,6 +356,35 @@ class SemanticLanguageRegistry:
             for key, definition in definitions.items()
             if trait in definition.traits
         )
+
+    def categories_with(self, trait: str) -> frozenset[str]:
+        """Every core category and every vault category that has `trait`, whatever its status or scope.
+
+        The keys are canonical. A unit written under an alias resolves to its category's key, so the
+        alias carries the category's traits. A core category has its own traits and those the vault
+        adds to it (`added_category_traits`); a vault category that shadows a core key adds nothing
+        else. A name outside `KIND_TRAITS` raises instead of answering with an empty set."""
+        semantic_kinds.require_trait(trait)
+        added = self.added_category_traits()
+        return frozenset(
+            key for key, definition in self.core_categories.items()
+            if trait in definition.traits or trait in added.get(key, ())
+        ) | frozenset(
+            key for key, definition in self.categories.items()
+            if trait in definition.traits and key not in _all_core_category_labels()
+        )
+
+    def added_category_traits(self) -> dict[str, frozenset[str]]:
+        """The traits the vault adds to core categories, by canonical key.
+
+        They come from an entry under a core key that carries only `traits`, and from the `traits` of
+        a core-key entry whose other fields stay inert. They apply as a vault category's traits do.
+        """
+        added = dict(self.category_trait_entries)
+        for key, definition in self.categories.items():
+            if key in self.core_categories and definition.traits:
+                added[key] = added.get(key, frozenset()) | definition.traits
+        return added
 
     def label_definitions(self, registry: LabelRegistry) -> dict[str, LabelDefinition]:
         """The entries of `registry` a reader may use, by key: the shipped ones, then the vault's.
@@ -453,6 +492,9 @@ class SemanticLanguageRegistry:
             "kinds": {key: self.kinds[key].as_dict() for key in sorted(self.kinds)},
             "kind_label_entries": {
                 key: dict(labels) for key, labels in sorted(self.kind_label_entries.items())
+            },
+            "category_trait_entries": {
+                key: sorted(traits) for key, traits in sorted(self.category_trait_entries.items())
             },
             "category_aliases": dict(sorted(self.category_aliases.items())),
             "kind_aliases": dict(sorted(self.kind_aliases.items())),
@@ -803,10 +845,10 @@ def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
     }
     proposal: dict[str, Any] = {
         "schema_version": registry.schema_version,
-        "categories": {
-            key: _definition_proposal(registry.categories[key])
-            for key in sorted(registry.categories)
-        },
+        "categories": dict(sorted({
+            **{key: _definition_proposal(definition) for key, definition in registry.categories.items()},
+            **{key: {"traits": sorted(traits)} for key, traits in registry.category_trait_entries.items()},
+        }.items())),
         "kinds": dict(sorted(kinds.items())),
     }
     for labels in semantic_labels.REGISTRIES:
@@ -994,8 +1036,9 @@ def _parse_registry_data(
             findings,
         )
 
+    category_trait_entries, raw_categories = _split_category_traits(raw_categories, findings)
     categories = _parse_definitions(
-        raw_categories, "categories", CategoryDefinition, _DEFINITION_FIELDS, findings
+        raw_categories, "categories", CategoryDefinition, _CATEGORY_DEFINITION_FIELDS, findings
     )
     kinds = _parse_definitions(
         raw_kinds, "kinds", KindDefinition, _KIND_DEFINITION_FIELDS, findings
@@ -1047,7 +1090,26 @@ def _parse_registry_data(
         core_label_entries=core.core_label_entries,
         label_entries=label_entries,
         kind_label_entries=kind_label_entries,
+        category_trait_entries=category_trait_entries,
     )
+
+
+def _split_category_traits(
+    raw_categories: dict[Any, Any], findings: list[RegistryFinding],
+) -> tuple[dict[str, frozenset[str]], dict[Any, Any]]:
+    """The traits a vault wrote under a core category's key, and the other category entries.
+
+    An entry under a core key that carries anything but `traits` stays among the others, which
+    report it as shadowing the core category, as they always did; its traits still apply.
+    """
+    traits: dict[str, frozenset[str]] = {}
+    others: dict[Any, Any] = {}
+    for raw_key, value in raw_categories.items():
+        if raw_key in _core_categories() and isinstance(value, dict) and set(value) == {"traits"}:
+            traits[raw_key] = _traits(value["traits"], f"categories.{raw_key}", findings)
+        else:
+            others[raw_key] = value
+    return traits, others
 
 
 def _split_kind_labels(
@@ -1538,6 +1600,7 @@ def _parse_definitions(
             "page_types": page_types,
             "status": status,
             "replaced_by": replaced_by,
+            "traits": _traits(value.get("traits", []), span, findings),
         }
         if definition_type is KindDefinition:
             common["heading_aliases"] = tuple(
@@ -1548,7 +1611,6 @@ def _parse_definitions(
                     findings,
                 )
             )
-            common["traits"] = _kind_traits(value.get("traits", []), span, findings)
             common["labels"] = _read_labels(value.get("labels", {}), span, findings)
         definitions[key] = definition_type(**common)
     return definitions
@@ -1766,7 +1828,7 @@ def _definition_proposal(
         out["labels"] = dict(definition.labels)
     if isinstance(definition, KindDefinition) and definition.heading_aliases:
         out["heading_aliases"] = sorted(definition.heading_aliases)
-    if isinstance(definition, KindDefinition) and definition.traits:
+    if definition.traits:
         out["traits"] = sorted(definition.traits)
     if definition.status != "active":
         out["status"] = definition.status
@@ -1782,8 +1844,9 @@ def _definition_proposal(
     return out
 
 
-def _kind_traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozenset[str]:
-    """The traits a vault kind declares; one outside `KIND_TRAITS` is an error naming the rest."""
+def _traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozenset[str]:
+    """The traits a vault kind or category declares; one outside `KIND_TRAITS` is an error naming
+    the rest."""
     names = _strings(raw, f"{span}.traits", findings)
     unknown = sorted(set(names) - semantic_kinds.KIND_TRAITS)
     if unknown:
@@ -1791,7 +1854,7 @@ def _kind_traits(raw: Any, span: str, findings: list[RegistryFinding]) -> frozen
             _finding(
                 "unknown_trait",
                 f"{span}.traits",
-                f"{unknown} are not kind traits; use any of {sorted(semantic_kinds.KIND_TRAITS)}",
+                f"{unknown} are not traits; use any of {sorted(semantic_kinds.KIND_TRAITS)}",
             )
         )
     return frozenset(names) - set(unknown)
@@ -1814,32 +1877,37 @@ def _valid_label(label: str) -> bool:
     return all(char.isalpha() or char.isdigit() or char == "_" for char in label)
 
 
-# The sixteen code-owned core categories and their exact built-in alias table.
+# The sixteen code-owned core categories, their exact built-in alias table and their traits.
 # Descriptions are deliberately generic and public-safe; no vault identifiers.
-_CORE_CATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("decision", "A choice that was made together with its rationale.", ("decisions",)),
-    ("fact", "A verified statement taken to be true.", ("facts",)),
-    ("finding", "Something learned from investigation or observation.", ("findings",)),
-    ("insight", "A non-obvious realization or interpretation.", ("insights",)),
-    ("constraint", "A limit or boundary that must be respected.", ("constraints",)),
-    ("requirement", "Something that must be satisfied.", ("requirements",)),
-    ("assumption", "Something taken as given without proof.", ("assumptions",)),
-    ("risk", "A possible future problem and its potential impact.", ("risks",)),
-    ("problem", "A described issue that needs resolution.", ("problems",)),
+# Known debt: these categories are vocabulary kept in code rather than in a shipped pack.
+_CORE_CATEGORY_DEFINITIONS: tuple[tuple[str, str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("decision", "A choice that was made together with its rationale.", ("decisions",), ()),
+    ("fact", "A verified statement taken to be true.", ("facts",), ()),
+    ("finding", "Something learned from investigation or observation.", ("findings",), ()),
+    ("insight", "A non-obvious realization or interpretation.", ("insights",), ()),
+    ("constraint", "A limit or boundary that must be respected.", ("constraints",), ()),
+    ("requirement", "Something that must be satisfied.", ("requirements",), ()),
+    ("assumption", "Something taken as given without proof.", ("assumptions",), ()),
+    ("risk", "A possible future problem and its potential impact.", ("risks",), ()),
+    ("problem", "A described issue that needs resolution.", ("problems",), ()),
     (
         "question",
         "An open question awaiting an answer.",
         ("questions", "open_question", "open_questions"),
+        (),
     ),
-    ("action", "A task or next step to carry out.", ("actions",)),
-    ("technique", "A reusable method or approach.", ("techniques",)),
-    ("preference", "A stated inclination or choice of style.", ("preferences",)),
-    ("code", "A code snippet or code-level detail.", ()),
-    ("design", "A design description, plan, or approach.", ("designs",)),
+    ("action", "A task or next step to carry out.", ("actions",), ()),
+    ("technique", "A reusable method or approach.", ("techniques",), ()),
+    # Only `preference` records the person's own view in every vault. `decision` and `constraint`
+    # also hold project choices and technical limits, so they carry no `position` trait.
+    ("preference", "A stated inclination or choice of style.", ("preferences",), ("position",)),
+    ("code", "A code snippet or code-level detail.", (), ()),
+    ("design", "A design description, plan, or approach.", ("designs",), ()),
     (
         "config",
         "A configuration value or setting.",
         ("configs", "configuration", "configurations"),
+        (),
     ),
 )
 
@@ -1851,8 +1919,11 @@ def _core_label_entries() -> dict[str, dict[str, LabelDefinition]]:
 @lru_cache(maxsize=1)
 def _core_categories() -> dict[str, CategoryDefinition]:
     return {
-        key: CategoryDefinition(key=key, description=description, aliases=aliases)
-        for key, description, aliases in _CORE_CATEGORY_DEFINITIONS
+        key: CategoryDefinition(
+            key=key, description=description, aliases=aliases,
+            traits=frozenset(semantic_kinds.require_trait(trait) for trait in traits),
+        )
+        for key, description, aliases, traits in _CORE_CATEGORY_DEFINITIONS
     }
 
 
@@ -1884,11 +1955,13 @@ def _core_category_shadow_findings(
     for key in sorted(categories):
         definition = categories[key]
         if key in core_labels:
+            applies = key in _core_categories() and definition.traits
             findings.append(
                 _finding(
                     "core_category_shadowed",
                     f"categories.{key}",
-                    f"category {key!r} shadows a built-in core category and is ignored",
+                    f"category {key!r} shadows a built-in core category; "
+                    + ("only its traits apply" if applies else "it is ignored"),
                     severity="warning",
                 )
             )
@@ -1951,6 +2024,7 @@ class _CategoryAdapter:
 
     def entries(self, typed: SemanticLanguageRegistry) -> dict[str, vocabulary_registry.Entry]:
         out: dict[str, vocabulary_registry.Entry] = {}
+        added = typed.added_category_traits()
         for origin, definitions in (("pack", typed.core_categories), ("vault", typed.categories)):
             for key, definition in definitions.items():
                 scope = {
@@ -1958,13 +2032,17 @@ class _CategoryAdapter:
                     for name in ("projects", "page_types")
                     if getattr(definition, name)
                 }
+                attributes: dict[str, Any] = {"scope": scope} if scope else {}
+                traits = definition.traits | (added.get(key, frozenset()) if origin == "pack" else frozenset())
+                if traits:
+                    attributes["traits"] = sorted(traits)
                 out[key] = vocabulary_registry.Entry(
                     key=key,
                     description=definition.description,
                     aliases=definition.aliases,
                     status=definition.status,
                     replaced_by=definition.replaced_by,
-                    attributes=MappingProxyType({"scope": scope} if scope else {}),
+                    attributes=MappingProxyType(attributes),
                     origin=origin,
                 )
         return out
@@ -2001,10 +2079,10 @@ class _CategoryAdapter:
         *,
         existing: bool,
     ) -> None:
-        if key in _core_categories():
-            raise vocabulary_registry.RegistryError(
-                f"PACK_ENTRY_FIXED: {key!r} is a core semantic category"
-            )
+        core = _core_categories().get(key)
+        if core is not None:
+            self._put_core_traits(document, core, entry)
+            return
         row: dict[str, Any] = {"description": entry.description}
         if entry.aliases:
             row["aliases"] = sorted(normalize_label(alias) for alias in entry.aliases)
@@ -2015,7 +2093,40 @@ class _CategoryAdapter:
         scope = entry.attributes.get("scope")
         if scope:
             row["scope"] = {name: sorted(values) for name, values in dict(scope).items()}
+        traits = entry.attributes.get("traits")
+        if traits:
+            # A malformed value is written as given, so the parse names it instead of this writer.
+            row["traits"] = sorted(traits) if isinstance(traits, list | tuple) else traits
         document["categories"][key] = row
+
+    @staticmethod
+    def _put_core_traits(
+        document: dict[str, Any], core: CategoryDefinition, entry: vocabulary_registry.Entry
+    ) -> None:
+        """Write the traits a save adds to a core category; the rest of it stays code-owned."""
+        key = core.key
+        traits = entry.attributes.get("traits") or []
+        fixed = (
+            entry.description != core.description
+            or set(entry.aliases) != set(core.aliases)
+            or entry.status != core.status
+            or entry.replaced_by != core.replaced_by
+            or entry.attributes.get("scope")
+            or (isinstance(traits, list | tuple) and not core.traits <= set(traits))
+        )
+        if fixed:
+            raise vocabulary_registry.RegistryError(
+                f"PACK_ENTRY_FIXED: {key!r} is a core semantic category; a save may only add traits"
+            )
+        if not isinstance(traits, list | tuple):
+            # A malformed value is written as given, so the parse names it instead of this writer.
+            document["categories"][key] = {"traits": traits}
+            return
+        added = sorted(set(traits) - core.traits)
+        if added:
+            document["categories"][key] = {"traits": added}
+        else:
+            document["categories"].pop(key, None)
 
     def remove(self, document: dict[str, Any], key: str) -> None:
         document["categories"].pop(key, None)
@@ -2044,7 +2155,7 @@ CATEGORY_SPEC = vocabulary_registry.RegistrySpec(
     overlay=registry_path,
     adapter=_CategoryAdapter(),
     fields=frozenset({"description", "aliases", "status", "replaced_by", "attributes"}),
-    attributes=frozenset({"scope"}),
+    attributes=frozenset({"scope", "traits"}),
     cap=512,
     usage=_category_usage,
 )

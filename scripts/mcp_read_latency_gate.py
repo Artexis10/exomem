@@ -438,8 +438,8 @@ class Arm:
         finally:
             await self.stop()
 
-    async def start(self, *, quiescence_limit: float) -> dict[str, float]:
-        """Start the coordinator and the worker, join the worker as a local client and wait for quiet."""
+    async def start(self, *, quiescence_limit: float | None) -> dict[str, float | None]:
+        """Start the worker and client; a route with its own readiness phase can defer quiet."""
         import httpx2 as httpx
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
@@ -483,8 +483,10 @@ class Arm:
                                                      httpx_client_factory=factory), timeout=120)
         await self.client.__aenter__()
         progress(f"arm-ready arm={self.name} ready_s={ready:.0f}")
-        quiescent = await self.quiesce(limit=quiescence_limit)
-        progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
+        quiescent = None
+        if quiescence_limit is not None:
+            quiescent = await self.quiesce(limit=quiescence_limit)
+            progress(f"arm-quiet arm={self.name} quiescent_s={quiescent:.0f}")
         return {"ready_s": ready, "quiescent_s": quiescent}
 
     @staticmethod
@@ -509,6 +511,9 @@ class Arm:
         A worker that re-embeds or rebuilds after startup stays busy and is refused here.
         """
         def cpu_seconds() -> float:
+            # An exited worker can retain a flat zombie CPU counter; it cannot qualify as quiet.
+            if self.worker is None or self.worker.poll() is not None:
+                raise MeasurementRefused("arm-worker-exited", phase=phase)
             fields = Path(f"/proc/{self.worker.pid}/stat").read_text().rsplit(")", 1)[1].split()
             return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
 

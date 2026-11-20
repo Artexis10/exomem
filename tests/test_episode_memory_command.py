@@ -262,7 +262,7 @@ def _withhold_notes_from(vault: Path, audience: str) -> None:
         "governance_version: 1\n"
         "id: 01ARZ3NDEKTSV4RRFFQ69G5FAC\n"
         "name: Withheld notes\n"
-        'paths: ["Notes/Insights/withheld-*.md"]\n',
+        'paths: ["Notes/Insights/Withheld *.md"]\n',
         encoding="utf-8",
     )
     (root / "rules" / "withheld-notes.yaml").write_text(

@@ -49,6 +49,7 @@ from .vault import (
     prepend_log_entry,
     read_guarded_text,
     read_operation_log,
+    relative_posix,
     resolve_under_vault,
     unique_path,
     yaml_scalar,
@@ -233,6 +234,13 @@ def _resolve_manifest_path(root: Path, manifest_path: str | None, today: dt.date
         rel = target.relative_to(root).as_posix()
     elif target.exists():
         raise AdoptError("MANIFEST_EXISTS", f"manifest already exists: {rel}")
+    else:
+        from . import prior_claims
+
+        try:
+            prior_claims.require_unreserved(root, rel)
+        except prior_claims.ReservedPathError as error:
+            raise AdoptError(error.code, error.reason) from None
     return target, rel
 
 
@@ -299,6 +307,8 @@ def _add_manifest_index_writes(
     rel_path: str,
     today: dt.date,
 ) -> list[str]:
+    from .vault_store import read as store_read
+
     warnings: list[str] = []
     kb = kb_root(root)
     rel_no_ext = rel_path[:-3] if rel_path.endswith(".md") else rel_path
@@ -318,12 +328,15 @@ def _add_manifest_index_writes(
     else:
         warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     log_file = kb / "log.md"
-    if log_file.exists():
+    log_rel = relative_posix(log_file, root)
+    # A store-mode log is a stored page that may have no file yet, so the store answers before the disk.
+    if store_read.holds_file(root, log_rel):
+        stored_log = store_read.owned_bytes(root, log_rel)
         writes.append(
             PlannedWrite(
                 path=log_file,
                 content=prepend_log_entry(
-                    log_file.read_text(encoding="utf-8"),
+                    log_file.read_text(encoding="utf-8") if stored_log is None else stored_log.decode("utf-8"),
                     date_iso=today.isoformat(),
                     op="adopt",
                     rel_path_no_ext=rel_no_ext,
@@ -532,6 +545,7 @@ def _draft_arguments(
         "note_type": note["note_type"],
         "title": note["title"],
         "slug": note.get("slug"),
+        "_name_number": note.get("name_number"),
         "project": note.get("project"),
         "domain": note.get("domain"),
         "tags": list(planned.get("tags") or []),
@@ -1046,7 +1060,9 @@ def commit_import_items(
         if reconcile and operation_token:
             history = read_operation_log(root)
             # A missing optional live log never blocked import; an unreadable existing log cannot prove deduplication.
-            missing_live_log = not os.path.lexists(root / managed_join("log.md"))
+            missing_live_log = not (
+                os.path.lexists(root / managed_join("log.md")) or history["live_log_present"]
+            )
             if history["files_unreadable"] > int(missing_live_log):
                 raise AdoptError("IMPORT_RECOVERY_UNRESOLVED", "the import log cannot establish the chunk's publication state")
             logged = any(entry.get("op") == "adopt-copy" and

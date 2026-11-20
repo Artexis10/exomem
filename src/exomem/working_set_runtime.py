@@ -141,6 +141,39 @@ _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
 )
 
 
+#: The vectors this activation encoded, by the text each one encodes, held by `turn_vector_scope` so a later stage
+#: reads a vector and never encodes the turn a second time. A box shared by reference, so a stage that runs in a
+#: copy of the request's context still writes where the request reads.
+_TURN_VECTOR: ContextVar[dict[str, Any] | None] = ContextVar("activation_turn_vector", default=None)
+
+
+@contextmanager
+def turn_vector_scope() -> Iterator[None]:
+    """Hold the activation's encoded vectors for the stages that run inside this scope."""
+    token = _TURN_VECTOR.set({})
+    try:
+        yield
+    finally:
+        _TURN_VECTOR.reset(token)
+
+
+def remember_turn_vector(text: str, vector: Any) -> None:
+    """Record the vector the activation encoded for `text`; a no-op outside `turn_vector_scope`.
+
+    Two stages encode the same turn (the signature lane and the task-context dense lane) with the same
+    encoder, so the first vector stands.
+    """
+    box = _TURN_VECTOR.get()
+    if box is not None and vector is not None:
+        box.setdefault(text, vector)
+
+
+def remembered_turn_vector(turn: str) -> Any:
+    """The vector the activation encoded for exactly `turn`, or None when no stage encoded it."""
+    box = _TURN_VECTOR.get()
+    return None if box is None else box.get(turn)
+
+
 #: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
 _DEFERRED_LEXICAL_REPAIRS: ContextVar[set[Path] | None] = ContextVar(
     "activation_deferred_lexical_repairs", default=None
@@ -213,6 +246,11 @@ CONTINUITY_ABSENT = "absent"
 CONTINUITY_MAX_CHARS = 8192
 CONTINUITY_MAX_REFS = 32
 CONTINUITY_MAX_ROLES = 32
+#: The profile generations a token holds (the most recently served), and the longest domain key or generation it
+#: accepts. Sixteen entries at these bounds stay far under `CONTINUITY_MAX_CHARS`, so only the method versions
+#: ever shrink to fit it. An older held profile is sent again when a later turn touches it.
+CONTINUITY_MAX_PROFILES = 16
+CONTINUITY_PROFILE_FIELD_MAX_CHARS = 64
 
 #: The token's THREAD: an opaque random value naming one keyless caller's
 #: conversation, echoed back on every turn so a caller that supplies no
@@ -420,6 +458,40 @@ def held_session_generation(block: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def held_profile_generations(
+    block: Mapping[str, Any] | None, held: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The profiles a caller holds after a domain profiles block: those it was just served, then those it held before.
+
+    A `ready` or `unchanged` entry names what the caller now holds. A held profile this turn did not touch is
+    kept, so a later turn on its domain repeats nothing. At most `CONTINUITY_MAX_PROFILES` are kept, the most
+    recently served first, and the oldest are dropped.
+    """
+    served = {}
+    if isinstance(block, Mapping):
+        served = {
+            entry["domain"]: entry["generation"]
+            for entry in block.get("profiles") or ()
+            if isinstance(entry, Mapping) and entry.get("state") in ("ready", "unchanged")
+            and isinstance(entry.get("domain"), str) and isinstance(entry.get("generation"), str)
+        }
+    kept = {**served, **{domain: generation for domain, generation in (held or {}).items() if domain not in served}}
+    return dict(list(kept.items())[:CONTINUITY_MAX_PROFILES])
+
+
+def _profile_generations(value: object) -> dict[str, str]:
+    """The valid entries of a profile-generations map, at most `CONTINUITY_MAX_PROFILES`. Never raises."""
+    if not isinstance(value, Mapping):
+        return {}
+    bound = CONTINUITY_PROFILE_FIELD_MAX_CHARS
+    valid = {
+        domain: generation for domain, generation in value.items()
+        if isinstance(domain, str) and isinstance(generation, str)
+        and 0 < len(domain) <= bound and 0 < len(generation) <= bound
+    }
+    return dict(list(valid.items())[:CONTINUITY_MAX_PROFILES])
+
+
 def encode_continuity(
     *,
     identity: str,
@@ -436,6 +508,7 @@ def encode_continuity(
     method_versions: Sequence[Mapping[str, str]] = (),
     skills_generation: str | None = None,
     stance_generation: str | None = None,
+    profile_generations: Mapping[str, str] | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -482,6 +555,8 @@ def encode_continuity(
         payload["skills_generation"] = str(skills_generation)
     if stance_generation:
         payload["stance_generation"] = str(stance_generation)
+    if profile_generations:
+        payload["profile_generations"] = _profile_generations(profile_generations)
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -615,6 +690,8 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     # Optional: a token minted before the stance was generation-gated holds none, and its holder is sent the stance.
     if isinstance(payload.get("stance_generation"), str):
         decoded["stance_generation"] = payload["stance_generation"]
+    # Optional: a token minted before domain profiles holds none, and its holder is sent each profile it touches.
+    decoded["profile_generations"] = _profile_generations(payload.get("profile_generations"))
     # Optional: a token minted before the capture policy rode the packet names none.
     if isinstance(payload.get("capture_policy"), str):
         decoded["capture_policy"] = payload["capture_policy"]

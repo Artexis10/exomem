@@ -1,6 +1,6 @@
 # Page Types
 
-Nine page types in the Knowledge Base. Each has a required location, naming
+The page types in the Knowledge Base. Each has a required location, naming
 convention, and content shape. See `frontmatter.md` for the YAML spec per type.
 
 For every active compiled-note type below, the fenced content shape includes a
@@ -20,7 +20,7 @@ relation is refused. Write no edge when no meaning is known.
 
 **Location:** `Sources/<Kind>/` — the directory is a *projection* of `source_type`, with `domain` adding one level below it when present, e.g. `Sources/Articles/`, `Sources/Papers/`, `Sources/Reports/Travel/`, `Sources/Invoices/Equipment/`. The semantic metadata is authoritative; the folder is derived from it and is never deeper than `Sources/<Kind>/<Domain>/`.
 **Naming:** `YYYY-MM-DD-<slug>.md` (e.g., `2026-05-09-retrieval-patterns.md`)
-**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `inspect_memory/manage_memory(operation="files.reclassify", arguments={…})` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically.
+**Mutability:** Append-only in body. Never edit the captured content. The classification is a capture-time judgement and stays correctable: `inspect_memory/manage_memory(operation="files.reclassify", arguments={…})` rewrites `source_type`/`domain`, moves the file to the location the corrected classification projects to, and rewrites every inbound reference, all with the body byte-identical and a stated reason recorded. Nothing reclassifies a source automatically. When a page that a source links to moves, the move repoints that link span and changes no other byte; a registered pointer field such as `project` is corrected the same way, with a reason.
 **Required frontmatter:** `type: source`, `source_type`, `captured`, `url` (if applicable), `tags`, `ingested_into` (initially empty list, updated when compiled into notes). `domain` and `projects` are optional.
 
 **Content shape:**
@@ -59,7 +59,7 @@ dump the conversation verbatim under `## Capture`.
 (see SKILL.md § Research scope keys and `_Schema/project-keys.yaml`) — an open
 set, **not a closed enum**: new scopes auto-register on first use when you write
 with a new `project:` slug.
-**Naming:** `<topic-slug>.md` — concise, dash-separated, lowercase. No date prefix (research notes evolve).
+**Naming:** `<Title>.md` — the title as written (a `slug` filename style gives a lowercase dash-separated name instead). No date prefix (research notes evolve).
 **Mutability:** Editable. Replace via supersession when a major rewrite is needed.
 **Required frontmatter:** `type: research-note`, `project`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `supersedes`, `superseded_by`.
 
@@ -104,7 +104,7 @@ The substance. Multiple subsections OK.
 ## insight
 
 **Location:** `Notes/Insights/`
-**Naming:** `<insight-slug>.md` — phrased as a claim or a noun phrase, not a question.
+**Naming:** `<Title>.md` — phrased as a claim or a noun phrase, not a question.
 **Mutability:** Editable; supersession preferred for substantial rewrites.
 **Required frontmatter:** `type: insight`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects` (list of projects this insight applies to).
 
@@ -152,7 +152,7 @@ What could weaken or invalidate this insight.
 ## failure
 
 **Location:** `Notes/Failures/`
-**Naming:** `<failure-slug>.md`
+**Naming:** `<Title>.md`
 **Required frontmatter:** `type: failure`, `status`, `created`, `updated`, `sources`, `tags`. Optional: `projects`, `severity` (minor / moderate / serious / critical — qualitative, not numeric).
 
 **Content shape:**
@@ -287,6 +287,39 @@ Situations where this procedure does not apply, such as a hotfix.
 - depends_on [[...]]
 ```
 
+## profile
+
+**Location:** `Notes/Profiles/`
+**Naming:** `<domain>.md` for a domain profile, `global.md` for the global profile.
+**Required frontmatter:** `type: profile`, `status`, `created`, `updated`. A domain profile has exactly one `topics` entry. The global profile has none.
+
+A profile holds the owner's standing preferences, one short confirmed line each, and links the
+long note that holds the detail. A governed write to it needs the proof of its preview; read
+[profiles](profiles.md) before seeding or changing one.
+
+**Content shape:**
+
+```markdown
+---
+type: profile
+status: active
+created: 2026-05-09
+updated: 2026-05-09
+topics: [games]
+---
+
+# Games
+
+## Observations
+
+- [rule] Prefer tactical play over luck.
+- [rule] Keep sessions under two hours.
+
+## Relations
+
+- derived_from [[Notes/Insights/how-i-play]]
+```
+
 ## experiment
 
 **Location:** `Notes/Experiments/<Domain>/`, where the folder is the domain's path
@@ -294,7 +327,7 @@ label (`workflow` lives in `Workflow/`), or another sub-domain that emerges
 (`Research`, `Ops`, etc.). A write reuses a folder that differs only in case or
 Unicode form, and refuses with `AMBIGUOUS_DOMAIN_DESTINATION` while two such folders
 exist. Add a new sub-domain only when the first experiment in that domain is being written.
-**Naming:** `YYYY-MM-<slug>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
+**Naming:** `YYYY-MM-<Title>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
 **Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
 **Required frontmatter:** `type: experiment`, `domain`, `status`, `created`, `updated`, `started`, `duration`, `tags`. Optional: `n` (sample size, default 1), `concluded`, `outcome`, `hypothesis`, `sources`, `supersedes`, `superseded_by`.
 
@@ -449,7 +482,7 @@ about* something and synthesize? First → experiment. Second → research-note.
 **Location:** `Notes/Productions/<medium>/` where medium is `Posts`, `Articles`,
 `PDFs`, `Episodes`, or another medium that emerges. Add a new medium subfolder only
 when the first production in that medium is being written.
-**Naming:** `YYYY-MM-<slug>.md` — date-prefixed by start month.
+**Naming:** `YYYY-MM-<Title>.md` — date-prefixed by start month.
 **Mutability:** Editable across the production lifecycle (planned → recorded → edited → published → reflected). Once complete and reflection is logged, treat as read-only except for supersession.
 **Required frontmatter:** `type: production-log`, `medium`, `status`, `created`, `updated`, `tags`. Optional but typically present: `projects`, `host`, `editor`, `recorded`, `published`, `sources`, `related`, `supersedes`, `superseded_by`.
 
@@ -683,12 +716,20 @@ What this commits us to and what it forecloses.
 ## Naming conventions summary
 
 The filename is a stable machine address; `title:` and the canonical H1 are the
-human display identity. Titles support arbitrary Unicode. Callers may pass an
-explicit lowercase ASCII kebab-case `slug` (maximum 100 characters) for a new
-source, note, or entity without changing the stored title. When omitted, the
-legacy automatic filename policy remains for compatibility. Exomem does not
-attempt language-aware transliteration, and it never renames existing pages on
-upgrade or reconcile.
+human display identity. Titles support arbitrary Unicode. By default a new note
+or entity takes its title as its filename, keeping case, diacritics and spaces and
+dropping only what a filesystem or a link cannot carry; a captured Source keeps
+its dated lowercase slug name. A vault chooses a style with `filename_style` or
+`EXOMEM_FILENAME_STYLE`. Callers may pass an explicit lowercase ASCII kebab-case
+`slug` (maximum 100 characters) for a new source, note, or entity: it overrides
+the derived name under every style and does not change the stored title. Exomem
+does not attempt language-aware transliteration, and it never renames existing
+pages on upgrade or reconcile.
+
+These examples show the `slug` style. The default `title` style names a note, an
+experiment, a production log or an entity by its title instead, after the same date
+prefix where it has one: an experiment becomes `2026-05-Day low-carb.md`. A Source
+keeps its slug name until the vault sets a style.
 
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
 - Notes (research, insight, failure, pattern, procedure): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`

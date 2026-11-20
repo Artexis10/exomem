@@ -40,6 +40,8 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     config = tmp_path / "media.json"
     config.write_text(json.dumps({"vaults": {str(vault): values}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # Ordinary workflows run below the eviction target; pressure cases set their own volume.
+    monkeypatch.setattr(shutil, "disk_usage", _volume(1 << 40, 1 << 38))
     return values, config
 
 
@@ -938,6 +940,23 @@ def test_watcher_can_read_an_existing_ledger_before_the_media_schema_upgrade(vau
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE).do_offload
 
 
+def test_a_media_event_that_the_store_cannot_judge_still_reaches_the_debounce(vault: Path, tmp_path: Path, selected_store):
+    """A media event whose original the store cannot resolve, such as a link in the Knowledge Base, raised out of the
+    watchdog handler and stopped the watcher from seeing any later change."""
+    from exomem import file_watcher
+
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"bytes kept outside the vault")
+    link = vault / "Knowledge Base" / "Notes" / "linked.txt"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside)
+    watcher = file_watcher.FileWatcher(vault)
+
+    watcher._record(link, deleted=False)
+
+    assert link in watcher._pending_media
+
+
 def test_placement_before_cache_row_crash_recovers_without_provenance_rewrite(vault: Path, selected_store, monkeypatch):
     from exomem import media_jobs, media_processing, media_store
 
@@ -1516,6 +1535,50 @@ def test_authorized_path_download_serves_an_evicted_original(vault: Path, select
     response = client.get("/download", params={"path": path.relative_to(vault).as_posix()},
                           headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 200 and response.content == expected
+
+
+def test_authorized_path_download_serves_a_cached_original_that_the_owner_edited(
+        vault: Path, selected_store, monkeypatch):
+    """Catches the `?path=` download answering 503 "retry later" for good once an offloaded file is edited on the cell."""
+    from starlette.testclient import TestClient
+
+    from exomem import server, upload_tokens
+
+    path = _preserved(vault)
+    _offload(vault, path)
+    with path.open("r+b") as handle:
+        handle.write(b"edited")
+    edited = path.read_bytes()
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+
+    response = client.get("/download", params={"path": path.relative_to(vault).as_posix()},
+                          headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200, response.text
+    assert response.content == edited
+
+
+def test_authorized_path_download_serves_a_pooled_filing_from_its_shared_object(vault: Path, monkeypatch):
+    """Catches the `?path=` download answering 404 for a filing whose bytes live only in the shared pool."""
+    from starlette.testclient import TestClient
+    from test_pooled_move_trash import DATA, _filing, _pool
+
+    from exomem import server, upload_tokens
+
+    binary, _page = _filing(vault)
+    _pool(vault, monkeypatch, binary)
+    monkeypatch.setattr(server, "load_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "test-secret")
+    client = TestClient(server.build_server(require_auth=False).http_app())
+    token = upload_tokens.mint_bound("test-secret", audience="owner")
+
+    response = client.get("/download", params={"path": binary}, headers={"Authorization": f"Bearer {token}"})
+
+    assert response.status_code == 200, response.text
+    assert response.content == DATA
 
 
 def test_dataset_original_stays_local_so_query_data_reads_it(vault: Path, selected_store):
@@ -2708,16 +2771,16 @@ def test_the_ledger_queries_of_each_eviction_pass_and_claim_read_through_an_inde
     or job table. The reservation query lost its index this way (design.md D3, query plans)."""
     from exomem import media_jobs, media_store
 
-    sql = {
-        "eviction batch": "SELECT binary_rel, size " + media_store._ELIGIBLE + " " + media_store._EVICTION_ORDER
-                          + " LIMIT :batch OFFSET :offset",
-        "eligible bytes": "SELECT COALESCE(SUM(size), 0) " + media_store._ELIGIBLE,
-        "hydrated claims": media_jobs._HYDRATED_CLAIMS,
-    }[query]
     parameters = {"hydration": 1 << 30, "idle_before": 0.0, "batch": 64, "offset": 0}
 
     # Without ANALYZE statistics, as at runtime, an empty ledger gets the same plan as a populated one.
     with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
+        eligible, order, parameters = media_store._cache_selection(vault, connection, parameters)
+        sql = {
+            "eviction batch": "SELECT binary_rel, size " + eligible + " " + order + " LIMIT :batch OFFSET :offset",
+            "eligible bytes": "SELECT COALESCE(SUM(size), 0) " + eligible,
+            "hydrated claims": media_jobs._HYDRATED_CLAIMS,
+        }[query]
         plan = [row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, parameters)]
 
     # SQLite's plan names a read of a whole table or index SCAN, and a lookup through an index SEARCH.
@@ -3904,23 +3967,35 @@ def test_a_census_is_unknown_when_the_companion_of_an_evicted_original_is_damage
     assert not media_drain_record.record_path(vault).exists()
 
 
-@pytest.mark.parametrize("released", ["deleted", "forgotten"])
-def test_a_census_clears_the_row_of_an_original_that_its_companion_no_longer_references(vault: Path, selected_store, released):
+def test_a_census_clears_the_row_of_an_original_whose_companion_was_deleted(vault: Path, selected_store):
     """Catches a census that stays unknown for an original that is gone for good, so its cell never drains."""
     from exomem import media_store
 
     path = _stored(vault, "gone", 300)
     assert media_store.evict(vault, path)
     _retained(selected_store, vault)
-    if released == "deleted":
-        _companion(path).unlink()
-    else:
-        media_store.forget_original(vault, path)
+    _companion(path).unlink()
 
     assert media_store.drain_census(vault) == (0, 0)
 
     assert _ledger_rows(vault)[path.relative_to(vault).as_posix()][0] == 0
     assert media_store.drain_record(vault).latched
+
+
+def test_removing_only_a_recovery_reference_does_not_release_an_existing_filing(vault: Path, selected_store):
+    """An unbacked canonical identity must not disappear from the all-binding zero proof."""
+    from exomem import media_store
+
+    path = _stored(vault, "unbacked", 300)
+    assert media_store.evict(vault, path)
+    _retained(selected_store, vault)
+    media_store.forget_original(vault, path)
+
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault)
+
+    assert not media_store.drain_record(vault).latched
+    assert media_store.drain_record(vault).blocked_by == (path.relative_to(vault).as_posix(),)
 
 
 def test_a_census_is_unknown_when_the_companion_of_a_cached_row_that_lost_its_bytes_is_damaged(vault: Path, selected_store):
@@ -4190,7 +4265,8 @@ def test_the_retained_status_shows_a_census_attempt_that_failed_after_the_last_c
 
     census = commands.op_adoption_studio(vault, action="status")["retained_store"]["census"]
 
-    assert set(census) == {"unknown", "attempted_at", "last_complete"}
+    assert set(census) == {"unknown", "attempted_at", "last_complete", "blocked_by"}
+    assert census["blocked_by"] == [path.relative_to(vault).as_posix()]
     assert census["last_complete"]["evicted"] == 1
 
 
@@ -4254,6 +4330,178 @@ def test_an_evicted_original_in_trash_is_counted_and_drained_back_into_trash(vau
     assert originals.original_state(vault, trashed).state == "cached"
     assert media_store.drain_census(vault) == (0, 0)
     assert media_store.drain_record(vault).latched
+
+
+@pytest.mark.parametrize("transition", ["interrupted reference removal", "edited companion", "legacy metadata", "changed trash reference"])
+def test_a_trash_transfer_without_its_exact_retirement_proof_keeps_the_drain_unknown(
+        vault: Path, selected_store, monkeypatch, transition):
+    """A historical transfer must never erase a current or unresolved source binding from zero proof."""
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        trash_metadata,
+    )
+    from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+
+    path = vault / "Knowledge Base/Notes/Media/retained.txt"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"a retained original")
+    media_processing.reconcile_media(vault, path)
+    companion = originals.sidecar_path(path)
+    preserve.update_sidecar_extraction(vault, companion, text="searchable text", engine="text")
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    before = companion.read_bytes()
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    trash = vault / trashed.trash_path
+    if transition == "interrupted reference removal":
+        companion.write_bytes(before)
+    elif transition == "edited companion":
+        companion.write_bytes(companion.read_bytes() + b"\nAn unwitnessed edit.\n")
+    elif transition == "legacy metadata":
+        metadata = vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)
+        fields = json.loads(metadata.read_bytes())
+        fields.pop("original_retirement")
+        metadata.write_text(json.dumps(fields), encoding="utf-8")
+    else:
+        target = originals.sidecar_path(trash)
+        fields, body, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
+        fields["stored_object"]["version"] = "a-different-version"
+        target.write_text(render_frontmatter_document(serialize_frontmatter(fields), body), encoding="utf-8")
+    _retained(selected_store, vault)
+
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault)
+    assert not media_store.drain_record(vault).latched
+    assert trash.read_bytes() == b"a retained original"
+
+
+@pytest.mark.parametrize("change", ["companion edit", "identical new original"])
+def test_retirement_follows_canonical_edits_and_never_hides_an_identical_new_original_without_its_derived_index(
+        vault: Path, selected_store, change):
+    """Lost derived facts must not disable bounded retirement carry or same-path publication invalidation."""
+    import io
+
+    from exomem import (
+        delete_file,
+        media_jobs,
+        media_processing,
+        media_store,
+        preserve,
+        trash_metadata,
+    )
+    from exomem.vault import (
+        MISSING_CONTENT_HASH,
+        PlannedWrite,
+        PreparedBinaryContent,
+        batch_atomic_write,
+        parse_frontmatter,
+    )
+
+    path = vault / "Knowledge Base/Notes/Media/reused.txt"
+    path.parent.mkdir(parents=True)
+    data = b"the same original bytes"
+    path.write_bytes(data)
+    media_processing.reconcile_media(vault, path)
+    companion = originals.sidecar_path(path)
+    preserve.update_sidecar_extraction(vault, companion, text="searchable text", engine="text")
+    ledger = media_jobs.MediaJobStore(vault)
+    ledger.retire_ocr(path, "text")
+    _offload(vault, path)
+    trashed = delete_file.delete_file(vault, path=path.relative_to(vault).as_posix(), confirm=True)
+    retired = companion.read_text(encoding="utf-8")
+    metadata = vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)
+    with sqlite3.connect(ledger.path) as connection:
+        connection.execute("DELETE FROM media_bindings")
+        connection.execute("DELETE FROM meta WHERE key = 'physical-bindings-v1'")
+    if change == "companion edit":
+        batch_atomic_write([PlannedWrite(companion, retired + "\nAn updated observation.\n")], vault_root=vault)
+        assert json.loads(metadata.read_bytes())["original_retirement"]["after"] == hashlib.sha256(companion.read_bytes()).hexdigest()
+        assert media_store.drain_census(vault) == (0, 0)
+    else:
+        binary = PreparedBinaryContent(io.BytesIO(data), len(data), hashlib.sha256(data).hexdigest())
+        batch_atomic_write([
+            PlannedWrite(path, binary, create_only=True, expected_hash=MISSING_CONTENT_HASH),
+            PlannedWrite(companion, retired),
+        ], vault_root=vault)
+        assert "original_retirement" not in json.loads(metadata.read_bytes())
+        # The new original's page names no Trash entry, so emptying that entry later cannot read it as deleted.
+        assert "original_retirement_meta" not in parse_frontmatter(companion.read_text(encoding="utf-8"))[0]
+        assert path.read_bytes() == data
+        path.unlink()  # An unexpected later loss must remain visible despite byte-identical historical metadata.
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+            media_store.drain_census(vault)
+    assert (vault / trashed.trash_path).read_bytes() == data
+
+
+@pytest.mark.parametrize("removed", ["whole entry", "recovery page only"])
+def test_a_page_stays_editable_after_its_deleted_originals_trash_entry_is_removed_by_hand(
+        vault: Path, selected_store, removed):
+    """Catches every later edit of a page refusing because the owner removed its deleted original's Trash entry by
+    hand, as the delete tells them to, in an archive that never shared its bytes."""
+    from test_vault_store_media import offloaded
+
+    from exomem import delete_file, edit, trash_metadata
+
+    original = "Knowledge Base/Notes/Media/kept-page.txt"
+    offloaded(vault, original)
+    trashed = delete_file.delete_file(vault, path=original, confirm=True)
+    page = f"{original}.md"
+    edit.edit(vault, path=page, why="note a first observation", old_string="extracted text", new_string="first note")
+    entry = vault / trashed.trash_path
+    originals.sidecar_path(entry).unlink()
+    if removed == "whole entry":
+        entry.unlink()
+        (vault / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).unlink()
+
+    edit.edit(vault, path=page, why="note a second observation", old_string="first note", new_string="second note")
+
+    assert "second note" in (vault / page).read_text(encoding="utf-8")
+
+
+def test_a_page_stays_editable_and_deleted_after_a_compatibility_export_invalidates_its_originals_witness(
+        vault: Path, selected_store):
+    """Catches an edit refused with a raw VOCABULARY_AUXILIARY_CHANGED, because the batch rewrote the page that the
+    edit had bound to drop a backlink, after a compatibility export invalidated the deleted original's witness."""
+    from test_vault_store_media import offloaded
+
+    from exomem import delete_file, edit, trash_metadata
+    from exomem.vault import parse_frontmatter
+
+    original = "Knowledge Base/Notes/Media/exported.txt"
+    offloaded(vault, original)
+    trashed = delete_file.delete_file(vault, path=original, confirm=True)
+    metadata = trashed.trash_path + trash_metadata.METADATA_SUFFIX
+    (vault / metadata).write_bytes(trash_metadata.without_retirement(vault, metadata))
+    page = f"{original}.md"
+
+    edit.edit(vault, path=page, why="note an observation", old_string="extracted text", new_string="a later note")
+
+    fields, body, _marker = parse_frontmatter((vault / page).read_text(encoding="utf-8"))
+    assert "a later note" in body
+    assert fields["original_retirement_meta"] == metadata  # The original stays deleted: its page keeps the record.
+    assert originals.original_state(vault, original).state == "missing"
+
+
+def test_an_archive_that_has_trashed_a_page_takes_writes_while_its_reserved_identity_catalogue_is_unavailable(
+        vault: Path, monkeypatch):
+    """Catches every write in an archive with a Trash folder refusing while the reserved identity catalogue cannot
+    acquire the vault (descriptor exhaustion, say), as writes did not before deleted originals left a witness."""
+    from exomem import delete_file, reserved_paths, traversal_profiles
+
+    (vault / "Knowledge Base/Notes/discarded.md").write_text("# Discarded\n", encoding="utf-8")
+    delete_file.delete_file(vault, path="Knowledge Base/Notes/discarded.md", confirm=True)
+
+    def unavailable(_vault):
+        raise RuntimeError("reserved identity catalogue could not acquire the vault")
+
+    monkeypatch.setattr(reserved_paths, "_baseline_identity_catalogue", unavailable)
+    saved = traversal_profiles.save_profiles(vault, {"schema_version": 1, "profiles": {}})
+
+    assert saved["created"] is True
 
 
 def test_a_drain_inside_the_margin_band_hydrates_nothing_and_evicts_nothing(vault: Path, selected_store, monkeypatch):
@@ -4359,7 +4607,7 @@ def test_the_retained_status_reports_the_census_the_latch_and_the_originals_too_
     assert set(before["census"]) == {"unknown"} and before["drained"] is False
     assert (after["census"]["evicted"], after["census"]["bytes"]) == (2, 700)
     assert after["drained"] is False
-    assert after["above_hydration_capacity"] == {"count": 1}
+    assert after["above_hydration_capacity"] == {"count": 1, "unit": "physical_objects"}
 
 
 def _malformed_notes(vault: Path, count: int) -> list[str]:
@@ -4401,7 +4649,13 @@ def test_a_census_that_the_walk_itself_cannot_finish_names_no_note(vault: Path, 
     from exomem import media_allowance, media_store
 
     _malformed_notes(vault, 1)
-    monkeypatch.setattr(media_allowance, "_binding", lambda *args: (_ for _ in ()).throw(OSError("disk")))
+    parse = media_allowance.parse_frontmatter
+
+    def disk_fails_after_parse(*args, **kwargs):
+        parse(*args, **kwargs)  # A damaged note still fails as itself first.
+        raise OSError("disk")
+
+    monkeypatch.setattr(media_allowance, "parse_frontmatter", disk_fails_after_parse)
     census = media_store.take_census(vault)
 
     assert census.used_bytes is None and census.blockers == ()
@@ -4511,3 +4765,27 @@ def test_the_meters_say_unknown_with_a_reason_when_their_readings_fail(vault: Pa
 
     assert "bytes" not in status["vault_storage"] and "locked" in status["vault_storage"]["unknown"]
     assert "used_bytes" not in status["media_storage"] and status["media_storage"]["unknown"]
+
+
+def test_a_download_pins_its_original_without_reading_the_companions_beside_it(vault: Path, selected_store, monkeypatch):
+    """Resolving one file walked its whole folder, so one download read every companion in a Source folder:
+    tens of thousands of reads per request in a large archive."""
+    from contextlib import closing
+
+    from exomem import media_jobs, media_store, preserve
+
+    with library_scope():
+        first = preserve.preserve(vault, scope="Test", category="samples", filename="first.txt", content="first")
+        second = preserve.preserve(vault, scope="Test", category="samples", filename="second.txt", content="second")
+    assert Path(first.path).parent == Path(second.path).parent
+    reads: list[str] = []
+    read = reserved_paths.read_generic_bytes
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes",
+                        lambda root, rel, *args, **kwargs: (reads.append(rel), read(root, rel, *args, **kwargs))[1])
+
+    with media_store.local_originals(vault, (first.path,), read=True):
+        with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+            pinned = ledger.execute("SELECT binary_rel FROM media_access").fetchall()
+
+    assert pinned == [(first.path,)]
+    assert second.sidecar_path not in reads

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,7 @@ def test_compensation_mapping_is_closed_and_reverses_committed_order() -> None:
         {"step_id": "edit", "kind": "edit"},
         {"step_id": "supersede", "kind": "supersede"},
         {"step_id": "move", "kind": "move"},
+        {"step_id": "repoint", "kind": "repoint-links"},
         {"step_id": "delete", "kind": "delete"},
         {"step_id": "recover", "kind": "recover"},
     ]
@@ -47,7 +49,8 @@ def test_compensation_mapping_is_closed_and_reverses_committed_order() -> None:
     assert curation.compensation_descriptors(forward) == [
         {"forward_step_id": "recover", "kind": "delete"},
         {"forward_step_id": "delete", "kind": "recover"},
-        {"forward_step_id": "move", "kind": "move"},
+        {"forward_step_id": "repoint", "kind": "unrepoint-links"},
+        {"forward_step_id": "move", "kind": "unmove"},
         {"forward_step_id": "supersede", "kind": "supersede"},
         {"forward_step_id": "edit", "kind": "supersede"},
         {"forward_step_id": "relation", "kind": "supersede"},
@@ -130,10 +133,48 @@ def test_compensation_proposal_refuses_drift_from_forward_witness(vault: Path) -
         encoding="utf-8",
     )
 
-    with pytest.raises(curation.CurationError, match="CURATION_OUTCOME_UNCERTAIN"):
+    # Work after the step is no uncertain outcome: the step's effect is known, and the page moved on.
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
         curation.propose_compensation(vault, run_id=proposed["run_id"])
 
     assert "changed later" in target.read_text(encoding="utf-8")
+
+
+def test_an_undo_prepares_without_the_vault_lock_and_refuses_a_step_the_run_commits_meanwhile(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The undo of a large run prepares for minutes, so it must leave the vault to other writers
+    # meanwhile; a forward step that commits during that time must not be left out of the undo.
+    from exomem import commands, writer_lease
+
+    _first_path, first_step = _edit_step(vault, "first", "undo-race-first")
+    second_path, second_step = _edit_step(vault, "second", "undo-race-second")
+    proposed = _propose(vault, first_step, second_step)
+    _apply(vault, proposed)
+    prepare = curation._prepare_manifest
+    locked: list[bool] = []
+
+    def prepare_while_the_run_resumes(root: Path, steps):  # noqa: ANN001, ANN202
+        locked.append(writer_lease.active_manager().holds_mutation_boundary(root))
+        # Another writer, outside this request.
+        contextvars.Context().run(
+            curation.resume, vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"]
+        )
+        return prepare(root, steps)
+
+    monkeypatch.setattr(curation, "_prepare_manifest", prepare_while_the_run_resumes)
+    command = next(c for c in commands.PRODUCT_COMMANDS if c.name == "maintain_memory")
+
+    with pytest.raises(curation.CurationError, match="CURATION_BINDING_STALE"):
+        writer_lease.invoke_command(
+            command, vault, mode="curation", curation_action="propose-compensation",
+            run_id=proposed["run_id"],
+        )
+
+    assert locked == [False]
+    assert "new text" in (vault / second_path).read_text(encoding="utf-8")
+    compensations = curation.CurationStore(vault).compensation_root(proposed["run_id"])
+    assert not list(compensations.glob("*/plan.json"))
 
 
 def test_content_compensation_after_leaf_crash_recovers_without_second_effect(

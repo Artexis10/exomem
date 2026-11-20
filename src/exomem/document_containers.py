@@ -191,6 +191,16 @@ class Plan:
         return {**self.inspection.metadata(), "payloads": list(self.children)}
 
 
+def _require_unclaimed(vault_root: Path, page: str) -> None:
+    """Refuse a member page at a path that a moved member page still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, page)
+    except prior_claims.ReservedPathError as error:
+        raise ValueError(f"CONTAINER_CONFLICT: {error.reason}") from None
+
+
 @contextmanager
 def plan(
     vault_root: Path, *, parent: str, parent_page: str, digest: str, size: int,
@@ -225,9 +235,14 @@ def plan(
             page_path = vault_root / page
             # An evicted member counts as absent here: the container holds its bytes, so recovery rebuilds it from
             # the container stream, with no store download, and keeps working during a store outage.
+            # A pooled member keeps no file at its logical path; its bytes live once in the shared pool, so it needs the
+            # same identity proof as a present file and no second, ordinary copy.
             if existing and binary_path.exists():
                 _require_identity(vault_root, artifact, member.sha256, member.size)
                 result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="content", expected_content_hash=member.sha256))
+            elif existing and originals.pooled(vault_root, artifact) is not None:
+                _require_identity(vault_root, artifact, member.sha256, member.size)
+                result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="absent"))
             else:
                 result.writes.append(PlannedWrite(binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256), create_only=True, expected_hash=MISSING_CONTENT_HASH))
             if existing and page_path.exists():
@@ -247,6 +262,7 @@ def plan(
                 if previous is None:
                     result.writes.append(PlannedWrite(page_path, annotate(before, "container_member", binding), expected_hash=content_hash(before)))
             else:
+                _require_unclaimed(vault_root, page)
                 result.writes.append(PlannedWrite(page_path, rendered, create_only=True, expected_hash=MISSING_CONTENT_HASH))
             result.children.append(artifact)
         yield result
@@ -279,9 +295,19 @@ def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact
             actual = proof.sha256, proof.size
         except reserved_paths.ReservedPathLeafError:
             stored = originals.original_state(root, path)
-            if stored.state != "evicted" or stored.reference is None:
+            if stored.local_path is not None:
+                # A present pooled original: read the shared object behind the binding check, never assume its digest.
+                from . import media_store
+
+                try:
+                    head = media_store.pooled_head(root, path, stored)
+                except (reserved_paths.ReservedPathLeafError, OSError):
+                    raise ValueError("container original is missing or unsafe") from None
+                actual = head.sha256, head.size
+            elif stored.state != "evicted" or stored.reference is None:
                 raise ValueError("container original is missing or unsafe") from None
-            actual = stored.binary_sha256, stored.binary_size
+            else:
+                actual = stored.binary_sha256, stored.binary_size
     if actual != (digest, size):
         raise ValueError("container original identity does not match its provenance")
     return originals.BinaryBinding(path, actual[0], actual[1])

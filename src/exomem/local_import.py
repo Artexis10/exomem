@@ -31,6 +31,7 @@ from platformdirs import user_state_dir
 from . import held_fs, import_selection, import_stage
 from .cli_progress import Progress, files_are, files_phrase, human_bytes
 from .import_selection import Kept
+from .vault_store import cli_fence
 
 JOURNAL_DIR = "local-imports"
 _OPEN_SUFFIX = ".partial.jsonl"
@@ -588,11 +589,16 @@ def main(argv=None) -> int:
                 vault = resolve_vault()
             except RuntimeError:
                 raise LocalImportError("VAULT_NOT_FOUND", "set EXOMEM_VAULT_PATH or pass --vault") from None
+        cli_fence.require("import", vault)
         result = stage(args.folder, vault, include_hidden=args.include_hidden,
                        use_gitignore=not args.no_gitignore, progress=progress)
     except LocalImportError as error:
         progress.say(f"The import stopped: {error.code}. {error.message}.")
         print(json.dumps({"ok": False, "code": error.code, "message": error.message, "import_id": error.import_id}))
+        return 1
+    except cli_fence.StoreFenceRefusal as refused:
+        progress.say(f"The import stopped: {refused.code}. {refused.reason}.")
+        print(json.dumps({"ok": False, "code": refused.code, "message": refused.reason, "import_id": None}))
         return 1
     print(json.dumps(result), flush=True)
     for line in _closing_lines(result):

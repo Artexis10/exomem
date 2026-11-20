@@ -1348,3 +1348,22 @@ def test_a_video_parent_cannot_remove_a_frames_residual_scope(vault: Path) -> No
     (vault / _VIDEO).unlink()
     with pytest.raises(membership.MembershipUnresolved):
         membership.evaluate_snapshot(frame, compiled, content_hash=content_hash)
+
+
+def test_a_frame_whose_folder_differs_only_in_case_keeps_its_video_scopes_under_windows_paths(
+    monkeypatch,
+):
+    """NTFS folds case, so a frame there must still narrow to its video's scopes; else it is released wider."""
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(membership, "Path", PureWindowsPath)
+
+    edge = membership.inheritance_edge(
+        "KB/Sources/Media/clip.frames/frame-001.md",
+        part_of=False,
+        parent_media="kb/sources/media/clip",
+    )
+
+    assert edge is not None
+    assert edge.kind == membership.FRAME_EDGE
+    assert edge.parent == "kb/sources/media/clip.md"

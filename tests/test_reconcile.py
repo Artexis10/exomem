@@ -28,6 +28,7 @@ from exomem import (
     semantic_writes,
 )
 from exomem import audit as audit_module
+from exomem import delete_file as delete_module
 from exomem import find as find_module
 from exomem import reconcile as reconcile_module
 from exomem import (
@@ -377,6 +378,68 @@ def test_reconcile_preserves_exact_trashed_committed_slot(tmp_path: Path) -> Non
     assert prepared.read_bytes() == prepared_bytes
     assert trash.read_bytes() == trash_bytes
     assert sidecar.read_bytes() == sidecar_bytes
+
+
+def test_reconcile_cleans_stale_slot_beside_trash_of_file_outside_knowledge_base(
+    tmp_path: Path,
+) -> None:
+    stale_page, stale, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-beside-outside-trash.md",
+    )
+    kept_id = _LIFECYCLE_IDS["trashed_committed"]
+    kept_path = "Knowledge Base/Notes/Insights/trashed-beside-outside-trash.md"
+    kept_page, kept, _, _ = _install_lifecycle_slot(
+        tmp_path, state="trashed_committed", page_id=kept_id, path=kept_path
+    )
+    _trash_exact_committed_page(
+        tmp_path, page=kept_page, original_path=kept_path, page_id=kept_id
+    )
+    outside = tmp_path / "Elsewhere/plain.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("# Plain\n", encoding="utf-8", newline="\n")
+    deleted = delete_module.delete_file(tmp_path, path="Elsewhere/plain.md", confirm=True)
+    outside_sidecar = tmp_path / f"{deleted.trash_path}.meta.json"
+    assert json.loads(outside_sidecar.read_text(encoding="utf-8"))["original_path"] == (
+        "Elsewhere/plain.md"
+    )
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert payload["lifecycle_prepared_issues"] == []
+    assert payload["lifecycle_prepared_cleaned"] == [
+        stale.relative_to(tmp_path).as_posix()
+    ]
+    assert not stale.exists()
+    assert kept.exists()
+
+
+def test_reconcile_blocks_cleanup_for_trash_sidecar_with_miscased_root_name(
+    tmp_path: Path,
+) -> None:
+    _, stale, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-miscased-trash.md",
+    )
+    miscased = tmp_path / "Knowledge Base/_trash/2026-07-15/miscased.md.meta.json"
+    miscased.parent.mkdir(parents=True, exist_ok=True)
+    miscased.write_text(
+        json.dumps({"original_path": "knowledge base/Notes/Insights/miscased.md"}),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert "LIFECYCLE_TRASH_INVALID" in {
+        item["code"] for item in payload["lifecycle_prepared_issues"]
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert stale.exists()
 
 
 def test_reconcile_recognizes_directory_trash_root_suffix_proof(

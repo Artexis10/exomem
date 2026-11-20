@@ -323,6 +323,11 @@ class LocalRuntimeActivation:
         watcher = self.file_watcher
         if watcher is None or not freshness.event_indexes_enabled():
             return
+        if not watcher.seeds_recall_projections:
+            # A store-mode watcher's first pass is the importer's whole-vault sweep, which outlasts the
+            # wait on a large vault. A downgrade would then stop the importer for the life of the
+            # process, and readers answer from the store whether or not it has seeded.
+            return
         try:
             seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
         except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
@@ -510,9 +515,10 @@ class LocalRuntimeActivation:
         from . import maintenance_jobs
 
         maintenance_jobs.sweep_dead(vault_root)
-        from . import served_context
+        from . import brief_watermarks, served_context
 
         served_context.sweep(vault_root)
+        brief_watermarks.sweep(vault_root)
 
     def _start_derived_drain(self, vault_root: Path) -> None:
         self.derived_drain = _start_derived_drain(vault_root)
@@ -756,13 +762,14 @@ def drain_vocabulary_recovery(
     stops as soon as a pass processes nothing, when the projection never becomes
     current, or when the runtime shuts down. Returns the number of jobs drained.
     """
-    from . import graph_sync, vocabulary_delivery
+    from . import vocabulary_delivery
     from .governance.principal import library_scope
+    from .vault_store import graph_state
 
     deadline = time.monotonic() + wait_seconds
     while not shutdown.is_set():
         try:
-            current = graph_sync.status(vault_root)["state"] == "current"
+            current = graph_state.is_current(vault_root)
         except Exception:  # noqa: BLE001 - a background drain never breaks activation
             current = False
         if current:
@@ -839,9 +846,16 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
     try:
         from . import cloud_cell
 
-        # service-v1 retains no matrix; warming repeats a complete disk scan
-        # while foreground recall is already serving.
+        # Optional passage residency applies only after published metadata identifies passages.
         if cloud_cell.resource_policy() == "service-v1":
+            from . import embeddings, passage_evidence, passage_matrix, semantic_contract
+
+            if passage_matrix.ceiling():
+                publication = semantic_contract.borrow_published_corpus(vault_root)
+                if publication is not None and passage_evidence.declared_sources(vault_root, publication):
+                    loading = embeddings.get_embedding_index(vault_root).prepare_passage_matrix()
+                    if loading is not None:
+                        loading.join()
             return
         from . import embeddings
 

@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "measured_source_commit": "181fbe9ec1c79e3ca1881ffb4f290b93b700860c",
+  "baseline": "unavailable: new route",
+  "boundary": "mcp-worker-socket-v1",
+  "sample_window_utc": {
+    "first": "2026-11-14T17:28:42.779803+00:00",
+    "last": "2026-11-14T17:29:02.196699+00:00"
+  },
+  "reference": {
+    "canonical_sources": 20000,
+    "declared_passage_chunks": 540000,
+    "cpus": 2,
+    "memory_limit_bytes": 3221225472,
+    "swap_bytes": 0,
+    "callers": 1,
+    "storage_mode": "file",
+    "query_encoder": "none",
+    "corpus_vectors": "deterministic normalized synthetic"
+  },
+  "conditions": [
+    {
+      "limit": 2,
+      "attempts": 300,
+      "terminals": 300,
+      "failures": 0,
+      "outcomes": {
+        "ok": 300
+      },
+      "p50_ms": 11.526,
+      "p95_ms": 14.244,
+      "max_ms": 475.99220304982737,
+      "strict_p95_ceiling_ms": 200.0,
+      "sql_statements_per_call": 9,
+      "latency_passed": true
+    },
+    {
+      "limit": 200,
+      "attempts": 300,
+      "terminals": 300,
+      "failures": 0,
+      "outcomes": {
+        "ok": 300
+      },
+      "p50_ms": 43.914,
+      "p95_ms": 53.859,
+      "max_ms": 94.11351301241666,
+      "strict_p95_ceiling_ms": 200.0,
+      "sql_statements_per_call": 9,
+      "latency_passed": true
+    }
+  ],
+  "proof": {
+    "required_item_bindings": 60600,
+    "complete_limit_200_traversals": 3,
+    "sources_per_traversal": 20000,
+    "timed_native_joins": 600,
+    "warmup_terminals": 1331,
+    "warmup_readiness_retries": 1231,
+    "source_and_input_hashes_unchanged": true,
+    "request_source_reader_calls": 0,
+    "request_source_read_opens": 0,
+    "request_source_descriptor_read_ops": 0,
+    "request_source_descriptor_read_bytes": 0,
+    "request_encoder_calls": 0
+  },
+  "startup_reported": {
+    "inventory_readiness_s": 1339.8083799899905,
+    "quiescent_s": 10.009241292020306,
+    "ready_s": 6.077959374990314,
+    "timing_ready_s": 1349.8178859229665,
+    "source": "final producer report; exact monotonic durations not independently rederived"
+  },
+  "startup_raw_wall_bounds": {
+    "first_warmup_to_first_timed_start_seconds": 1341.807,
+    "last_warmup_terminal_to_first_timed_start_seconds": 10.388,
+    "source": "native ledger wall timestamps"
+  },
+  "resources": {
+    "observations": 1432,
+    "peak_bytes": 3221233664,
+    "memory_max_events": 123357,
+    "oom_events": 0,
+    "oom_kills": 0,
+    "headroom": "unqualified; observed memory reaches the cap"
+  },
+  "independent_audit": {
+    "verdict": "APPROVE frozen reference",
+    "review_sha256": "ed85848a9143d065dc90f889e9e53e4faea13212281e0f2eb7b6b76c4453668f"
+  },
+  "receipt_sha256": {
+    "inventory-measure-report.json": "170e11707613668f62a2fb2497362e995f3a1f31a61422f6bce04b70b7bd78d6",
+    "samples.jsonl": "920f59597fdd329d531222534be817e8fc020cdeedc2c060bd3ca1edb7096433",
+    "terminals.jsonl": "7058d21f285a9c867f2accbe7d8b9f98825c931a136320fa588e60297183fc1a",
+    "request-work.jsonl": "1498d52b0c77e44aff480d46e5dcb1a6bbedee6f58cb0f6cf83e5ce910d7c0a3",
+    "resources.jsonl": "f6fb83d47873a65f890ff96e03b8001c9f140e9441bbf8750457d2aaed888655",
+    "frozen-protocol.json": "69d5c972f2aa6cbbbdd3a5a457029160ac46e2c719bf6181f069655efb138e44",
+    "frozen-cases.json": "2c88c796f8c3d1dd085d9480e1dfc6b8f1a637d4451aa0727a7d96e7d7cb118c",
+    "expected-sources.json": "2b34d7f0ec87172aadf07f3b074f7f36ca85c626d610e3bc4249349546ede668"
+  },
+  "limitations": [
+    "Ready static file-mode fixture and one worker-socket caller; external HTTP/store startup and production capacity are unqualified.",
+    "All timings and pressure remain included; p95 is not a maximum-call guarantee.",
+    "Synthetic vectors establish binding and work, not retrieval quality.",
+    "Later changed paths require their own evidence; this is not final-current-candidate or erasure acceptance."
+  ]
+}

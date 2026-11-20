@@ -617,6 +617,24 @@ def test_literal_hash_paths_keep_template_and_collection_authority_separate(stor
             store.inspect_collection(CID)
 
 
+def test_store_inspection_reports_a_capture_method_the_caller_cannot_be_pointed_to(store):
+    """A withheld method page and a missing one give one finding, so the finding never shows the page exists."""
+    page = "Knowledge Base/Notes/Dock capture method.md"
+    text = manifest_text().replace("\n---\n", f'\ncapture:\n  method: "[[{page}]]"\n---\n')
+    store.create_collection(manifest_path(), text, why="create")
+    finding = "CAPTURE_METHOD_UNAVAILABLE"
+    with request_scope(_external()):
+        assert finding in str(store.inspect_collection(CID))
+    (store.root / page).parent.mkdir(parents=True, exist_ok=True)
+    (store.root / page).write_text("# Dock capture method\n\nRecord the berth first.\n")
+    with request_scope(_external()):
+        assert finding not in str(store.inspect_collection(CID))
+    write_scope(store.root, paths=page.removeprefix("Knowledge Base/"))
+    write_rule(store.root, ceiling=0)
+    with request_scope(_external()):
+        assert finding in str(store.inspect_collection(CID))
+
+
 def test_discarded_held_saved_view_cannot_fall_back_to_stale_file_authority(store):
     """Restoring a discarded candidate's old view cannot restore its canonical authority."""
     text = manifest_text().replace("    count:", "    related: {type: link}\n    count:")

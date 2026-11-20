@@ -267,6 +267,7 @@ def stage(
     expected_sha256: str | None = None,
     expected: dict | None = None,
     byte_proofs: dict | None = None,
+    materialize: bool = True,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
@@ -284,15 +285,34 @@ def stage(
                     else time.monotonic() + seconds
                 )
                 path, metadata = _resolve(root, selected)
-                stack.enter_context(media_store.local_originals(root, (path,), read=True))
-                held = stack.enter_context(
-                    reserved_paths.hold_generic_file(
-                        root,
-                        path,
-                        recorded_sha256=lambda version: media_store.cached_sha256(root, path, version),
-                        deadline=deadline,
+                if materialize:
+                    stack.enter_context(media_store.local_originals(root, (path,), read=True))
+
+                def recorded(version):
+                    return media_store.cached_sha256(root, path, version)
+
+                try:
+                    # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
+                    # that differ from the binding. A pin taken here, or by a caller that passes
+                    # `materialize=False`, has already fetched an evicted file.
+                    held = stack.enter_context(
+                        reserved_paths.hold_generic_file(root, path, recorded_sha256=recorded, deadline=deadline)
                     )
-                )
+                except reserved_paths.ReservedPathLeafError as error:
+                    if error.code != "MISSING":
+                        raise
+                    # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                    # Only an object the pool already holds is read: an ordinary file that went missing is
+                    # unavailable, and this read never fetches another copy.
+                    try:
+                        pooled = originals.pooled(root, path) is not None
+                    except originals.RetirementUnconfirmed:
+                        pooled = False
+                    if not pooled:
+                        raise
+                    held = stack.enter_context(
+                        media_store.hold_original(root, path, recorded_sha256=recorded, deadline=deadline)
+                    )
                 descriptor = _descriptor(path, metadata, held)
                 if (
                     expected_sha256 is not None

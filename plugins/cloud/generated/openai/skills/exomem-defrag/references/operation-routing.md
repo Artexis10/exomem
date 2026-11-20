@@ -123,21 +123,22 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
        `token` is a secret: never print it or put it in a message. It works once and
        expires within fifteen minutes, so prepare the file and digest first.
     4. Send the bytes in one of two ways.
-       - Install the CLI pinned to this package's release (`pip install exomem==0.184.0`) and run
+       - Install the CLI pinned to this package's release (`pip install exomem==0.191.0`) and run
          `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
          holds the file. It prints the reply.
        - When installing is not possible, or the installed release has no
-         `--handoff-file`, send the request that the CLI sends: one multipart `POST` to the
-         handoff's `upload_url`, with the header `Authorization: Bearer <token>` and
-         the form fields `file`, `hold=1` and `lane` (the handoff's `lane`), and no other
-         field such as `scope` or `category`; the service refuses them.
+         `--handoff-file`, run the `shell` line of the handoff's `next` send step. Replace
+         `<file>` with the file's path and `<token>` with `$TOKEN`, which the shell reads so
+         that the token stays out of the conversation:
 
          ```
          TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')
-         URL=$(python3 -c 'import json; print(json.load(open("handoff.json"))["upload_url"])')
-         LANE=$(python3 -c 'import json; print(json.load(open("handoff.json"))["lane"])')
-         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F "lane=$LANE" "$URL"
          ```
+
+         Add no other field, such as `scope` or `category`: the service refuses it, and a
+         refused send uses up the handoff. A handoff without `next` takes the same request
+         by hand: one multipart `POST` to its `upload_url`, with the header
+         `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane`.
     5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
        file's size. Pass its `file` object unchanged to
        `save_source(title="...", source_kind="...", files=[<file>], options={"expected_sha256": "<digest>"})`.
@@ -254,6 +255,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what do I have on X," "find my notes on Y," "have I covered Z" → **find**
 - "why was this note changed," "show the history of this page" → **get** (`read_page(part="history")`)
 - "what did I used to think about X," "show me the superseded version" → **find** (`prefer_active=false`)
+- "give me everything on X," "what do my notes conclude about X," "what is still open on X" → **get** (`read_page(part="brief")`)
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**

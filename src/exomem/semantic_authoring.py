@@ -17,7 +17,7 @@ from typing import Any
 
 from . import note_types, semantic_language_registry
 
-AUTHORING_CONTRACT_VERSION = 11
+AUTHORING_CONTRACT_VERSION = 12
 AUTHORING_CONTRACT_ID = "exomem.semantic-authoring"
 
 #: What the compact bootstrap core serves about page status. It leaves out the migration note for a
@@ -447,6 +447,27 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
         "destination_fitness": (
             "Choose homes by future use and accumulated content, not mentions or broad scope. "
             "Keep coherent long notes; reuse or create a home for independent material."
+        ),
+        # The ownership review asks these of a page that already sits in a home
+        # (`ownership_review`). They are guidance a better model may want worded
+        # differently, so they live here and the item detail and the write-time
+        # question read them from this contract rather than from a code constant.
+        "ownership_question": (
+            "Ownership check: does this material belong in its current home?"
+        ),
+        "ownership_test": (
+            "Ownership test. A page belongs to a project when it serves that project's own goal. Material "
+            "that has its own goal, institution, schedule or course of events, and would "
+            "still matter if the home project ended, is its own programme, even when it "
+            "informs the home project. Its home is a separate project (new_project when none "
+            "exists), linked to the related project by a relation rather than filed inside "
+            "it. Mentioning another project, or offering lessons for it, does not make "
+            "material part of it. Pages that already sit in a home are not evidence that "
+            "more such material belongs there."
+        ),
+        "ownership_deferral": (
+            "If the user already decided this page's home and nothing since bears on "
+            "ownership, answer abstain and say that the earlier decision stands."
         ),
         "new_compiled_note": "create_note",
         "replacement": "supersede_note",

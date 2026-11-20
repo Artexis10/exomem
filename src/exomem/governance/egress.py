@@ -2283,6 +2283,13 @@ def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
     from ..vault_store import read
 
     stored = read.owned_bytes(vault_root, rel_path)
+    if stored is None and not _is_markdown_path(rel_path):
+        from .. import media_store, reserved_paths
+
+        try:
+            return media_store.read_original_bytes(vault_root, rel_path).data
+        except reserved_paths.ReservedPathLeafError as error:
+            raise OSError("original bytes are unavailable") from error
     return (vault_root / rel_path).read_bytes() if stored is None else stored
 
 
@@ -3969,6 +3976,39 @@ def classify_units(
     return [_unit_verdict(unit, ctx)[1] for unit in units]
 
 
+def page_text_bounds(
+    vault_root: Path,
+    paths: Iterable[str],
+    *,
+    principal: RequestPrincipal | None = None,
+    purpose: str | None = None,
+) -> dict[str, int | None]:
+    """The most of each page's text the caller may be served (`page_text_bound`), by path.
+
+    Each page is decided on the terms `classify_units` decides a unit's page, and, as there, only a refusal is
+    receipted: a page is released only when the served packet names it.
+    """
+    root = Path(vault_root)
+    policy, _release_gate_active = gate_state(root)
+    who = principal if principal is not None else effective_principal()
+    wanted = sorted(set(paths))
+    if policy.blocked or (not policy.empty and not who.resolved):
+        return dict.fromkeys(wanted, page_text_bound(LEVEL_NONE))
+    if _file_policy_empty(root, policy):
+        return dict.fromkeys(wanted, page_text_bound(LEVEL_FULL))
+    ctx = _PacketRelease(
+        vault_root=root, policy=policy, who=who, record="withheld", policy_decides=True,
+        tombstoned=set(), withheld=set(), prose_resolved={},
+        declared_purpose=_declared_purpose(root, who, purpose), grants_hash=_grants_hash(policy),
+    )
+    for rel_path in wanted:
+        ctx.decide(rel_path)
+    return {
+        rel_path: page_text_bound(None if ctx.decisions[rel_path] is None else ctx.decisions[rel_path].level)
+        for rel_path in wanted
+    }
+
+
 def guard_working_set(
     vault_root: Path,
     packet: dict[str, Any],
@@ -4055,6 +4095,14 @@ def guard_working_set(
                 from .. import skills_context
 
                 guarded["skills"] = skills_context.guard_block(vault_root, caller, guarded["skills"])
+            if "domain_profiles" in guarded:
+                from .. import domain_profiles
+
+                guarded["domain_profiles"] = domain_profiles.guard_block(vault_root, caller, guarded["domain_profiles"])
+            if "positions" in guarded:
+                from .. import positions
+
+                guarded["positions"] = positions.guard_block(vault_root, caller, guarded["positions"])
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
@@ -5038,13 +5086,22 @@ def guard_view_response(
     vault_root = Path(vault_root)
     policy, release_gate_active = gate_state(vault_root)
     who = principal if principal is not None else effective_principal()
+    target = context_views.parse_view_ref(str(response.get("ref") or ""))
+    brief = target is not None and target.kind == context_views.VIEW_BRIEF
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
+        if brief:
+            from .. import topic_brief
+
+            return topic_brief.unavailable(response)
         return {**response, "items": [], "continuation": None}
     guarded = copy.deepcopy(dict(response))
     # The caller's view the compile built: the same principal argument, so the same binding.
     caller = context_views.CallerView.current(vault_root, purpose=purpose, principal=principal)
-    target = context_views.parse_view_ref(str(guarded.get("ref") or ""))
+    if brief:
+        from .. import topic_brief
+
+        return topic_brief.guard_response(vault_root, caller, guarded)
     if target is not None and target.profile:
         guarded["items"] = context_views.pinned_items(vault_root, guarded, caller)
         packet = {
@@ -5304,7 +5361,19 @@ def _iter_path_strings(value: Any) -> Iterable[str]:
             yield from _iter_path_strings(item)
 
 
-def _excerpt_of(body: str, limit: int = 600) -> str:
+#: Characters of page text an excerpt-level (L5) read returns; `read_page` cuts a longer body to them.
+PAGE_EXCERPT_MAX = 600
+
+
+def page_text_bound(level: int | None) -> int | None:
+    """The most of a page's text a reader at `level` is served: all of it (`None`) at full release, an excerpt of
+    `PAGE_EXCERPT_MAX` characters at the excerpt level, and none below it or when the level is undecided."""
+    if level == LEVEL_FULL:
+        return None
+    return PAGE_EXCERPT_MAX if level == LEVEL_EXCERPT else 0
+
+
+def _excerpt_of(body: str, limit: int = PAGE_EXCERPT_MAX) -> str:
     """The L5 rendering of a body: a bounded, whole-word excerpt."""
     text = " ".join(body.split())
     if len(text) <= limit:
@@ -5822,7 +5891,8 @@ def _annotate_page(
         return ref_decision is None or ref_decision.level < RELEASE_FLOOR
 
     withheld = frozenset(rel for rel in referenced if rel != rel_path and _below_floor(rel))
-    if level == LEVEL_EXCERPT:
+    bound = page_text_bound(level)
+    if bound is not None:
         body = parsed.body if snapshot_content is not None else str(page.get("body") or "")
         from .. import provenance
 
@@ -5835,7 +5905,7 @@ def _annotate_page(
             principal=who,
             purpose=declared_purpose,
         )
-        shown = _excerpt_of(body)
+        shown = _excerpt_of(body, bound)
         excerpt = {
             "path": rel_path,
             "body": shown,
@@ -6129,6 +6199,13 @@ def _postfilter(
     """
     if result is None:
         return None
+    inventory_projection = result if command_name == "inspect_captured_sources" and isinstance(result, dict) else None
+    capture_attempt = command_name in {"reserve_source_capture", "settle_source_capture", "erase_captured_source"} or (command_name == "capture_source" and (request_kwargs or {}).get("capture_reservation") is not None)
+    if inventory_projection is not None or capture_attempt or command_name == "inspect_capture_erasure_policy":
+        from ..source_capture import require_authority
+
+        # Reuse whole-namespace authority at release; revocation cannot become a partial identity leak.
+        require_authority(Path(vault_root))
     evidence_projection = (
         result if isinstance(result, dict) and "evidence_version" in result else None
     )
@@ -6232,12 +6309,19 @@ def _postfilter(
                 vault_root, cleaned, session=(request_kwargs or {}).get("session"),
                 purpose=(request_kwargs or {}).get("purpose"),
             )
+        if "positions" in cleaned:
+            # Every other field is in place, so the block can end the response: real-model replays used the
+            # positions when they were read last and mostly passed over them mid-packet.
+            cleaned["positions"] = cleaned.pop("positions")
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):
         from ..episode_recovery import EpisodeInputOwner
 
         cleaned = EpisodeInputOwner(vault_root).release_material(material_projection, cleaned)
+    if inventory_projection is not None and isinstance(cleaned, dict) and cleaned != inventory_projection:
+        cleaned = {**cleaned, "state": "partial", "complete": False, "next_cursor": None,
+                   "summary": "Captured Source inventory is incomplete after release filtering."}
     from .. import origin_bindings
 
     cleaned = origin_bindings.release_origin_response(vault_root, cleaned)
@@ -6438,6 +6522,13 @@ _METADATA_ONLY_COMMANDS: frozenset[str] = frozenset(
         "preserve",
         "remember",
         "capture_source",
+        # Attempt receipts require whole-namespace authority at lookup and release.
+        "reserve_source_capture",
+        "settle_source_capture",
+        # Host policy metadata contains no Source content; namespace authority still gates lookup and release.
+        "inspect_capture_erasure_policy",
+        # Erasure names its target reference and needs whole-namespace authority at lookup and release.
+        "erase_captured_source",
         "preserve_evidence",
         "preserve_artifacts",
         "compile_source",
@@ -6492,6 +6583,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "attention": "structure",
     "audit": "structure",
     "overview": "structure",
+    "inspect_captured_sources": "structure",
     "list_directory": "structure",
     "list_inbound_links": "structure",
     "evolution": "structure",
@@ -6541,6 +6633,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     },
     "record_memory": "structure",
     "plan_memory": "structure",
+    "inspect_captured_sources": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
     "served_context": "structure",
@@ -6632,6 +6725,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "fix": "dry-run-default",
         "reconcile": "dry-run-opt-in",
         "backfill-ids": "dry-run-default",
+        "convert-originals": "dry-run-default",
         "maintenance-job": "structure",
         "maintenance-job-cancel": "mutation",
         "held-resolve": "mutation",
@@ -6647,7 +6741,8 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        # A move with `validate_only` is its preview, which writes nothing.
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
@@ -7440,10 +7535,13 @@ class _ArtifactReferenceGate:
         self.purpose = _declared_purpose(self.vault_root, self.who, purpose)
         self.verdicts: dict[str, bool] = {}
         self.census = artifact_census.CensusView.empty()
+        self.filings = self.census.filings
         self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
         self._directly: dict[str, tuple[str, ...]] = {}
+        # Originals that the census lists no file for, each judged once on what its page binds; see `_filing`.
+        self._filed: dict[str, tuple[str, ...] | None] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
         with call_spans.span("egress.artifact_gate.tombstones"):
             self.tombstones = lifecycle.tombstoned_paths(self.vault_root)
@@ -7470,19 +7568,56 @@ class _ArtifactReferenceGate:
     def _index(self) -> None:
         self._index_entered = True
         self.census = artifact_census.request_census(self.vault_root)
+        self.filings = self.census.filings
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, managed_root_rel()
         )
 
-    def _paths_for(self, alias: str) -> tuple[str, ...]:
+    def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
-        return tuple(sorted({*self.census.paths(key), *self.tombstone_paths.get(key, ())}))
+        found = (*self.census.paths(key), *self.tombstone_paths.get(key, ()))
+        return self._with_filings(found, self.filings.paths(key))
 
     def _directly_named(self, token: str) -> tuple[str, ...]:
         found = self._directly.get(token)
         if found is None:
             found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
         return found
+
+    def _filing(self, logical: str) -> tuple[str, ...] | None:
+        """The path that a reference to the original at `logical`, a path the census lists no file at, is judged on.
+
+        The page `<logical>.md` proposed it. A pooled filing keeps no file at its path, and that path is decided as
+        an ordinary file's is, from the shared object's held metadata, as its download is. An original that the page
+        binds but whose bytes are elsewhere, such as an evicted one, is judged on the page. A page that binds no
+        original, such as a note with a dot in its name, gives no path, and an unreadable page gives `None`.
+        """
+        if logical not in self._filed:
+            companion = f"{logical}.md"
+            try:
+                bound = originals.bound_companion(self.vault_root, logical)
+                if bound is None or bound[0] != companion:
+                    self._filed[logical] = ()
+                else:
+                    pooled = originals.pooled(self.vault_root, logical) is not None
+                    self._filed[logical] = (logical if pooled else companion,)
+            except (OSError, ValueError, reserved_paths.ReservedPathLeafError):
+                self._filed[logical] = None  # An unreadable page cannot prove it binds nothing; withhold the mention.
+        return self._filed[logical]
+
+    def _with_filings(self, found: Iterable[str], proposed: tuple[str, ...]) -> tuple[str, ...] | None:
+        """`found`, and the originals among the census's `proposed` filings that their pages bind.
+
+        A proposed original that an ordinary file holds is in `found` already. `None` means one page was unreadable.
+        """
+        judged = set(found)
+        for logical in proposed:
+            if logical not in judged:
+                filed = self._filing(logical)
+                if filed is None:
+                    return None
+                judged.update(filed)
+        return tuple(sorted(judged))
 
     @staticmethod
     def _unwrap(value: str) -> tuple[str, bool]:
@@ -7524,23 +7659,23 @@ class _ArtifactReferenceGate:
         token = unquote(token).replace("\\", "/").strip().strip("/")
         if not token:
             return ()
-        direct = self._paths_for(token)
-        if direct:
+        # Each lookup also takes the originals that a pooled archive keeps no file for, so that a reference to one
+        # resolves to the same paths as a reference to an ordinary file would. `None` withholds the reference.
+        if (direct := self._paths_for(token)) != ():
             return direct
         sibling = None
         if directory is not None and "/" not in token:
             sibling = f"{directory.rstrip('/')}/{token}" if directory else token
-            direct = self._paths_for(sibling)
-            if direct:
+            if (direct := self._paths_for(sibling)) != ():
                 return direct
         if "/" not in token:
-            named = self.census.names(token.casefold())
-            if named:
-                return tuple(sorted(named))
+            key = token.casefold()
+            if (named := self._with_filings(self.census.names(key), self.filings.names(key))) != ():
+                return named
             if wikilink or "." not in token:
-                stemmed = self.census.stems(Path(token).stem.casefold())
-                if stemmed:
-                    return tuple(sorted(stemmed))
+                key = Path(token).stem.casefold()
+                if (stemmed := self._with_filings(self.census.stems(key), self.filings.stems(key))) != ():
+                    return stemmed
         if self.census.published:
             # A published census lists no directory, so a file created a moment
             # ago may be missing from it. A token with the shape of a vault path

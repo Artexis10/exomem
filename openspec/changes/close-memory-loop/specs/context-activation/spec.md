@@ -2,7 +2,7 @@
 
 ### Requirement: Read-only activation operation
 The product SHALL expose a read-only operation `activate_context` that accepts a raw
-original human turn (`turn`, non-empty text), an optional `max_chars` (default 4000, clamped
+original human turn (`turn`, non-empty text), an optional `max_chars` (default 6000, clamped
 to 500..8000), an optional declared `purpose`, an optional `include_timings`
 flag, and optional `client` and `session` attribution, and returns a working-memory
 packet. It SHALL accept an optional `trigger` with the closed protocol values

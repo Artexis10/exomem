@@ -19,8 +19,11 @@ from exomem import writer_lease  # noqa: E402
 from exomem.tui.app import ExomemTuiApp  # noqa: E402
 from exomem.tui.backend import ExomemBackend  # noqa: E402
 from exomem.tui.theme import GLYPHS_UNICODE  # noqa: E402
+from exomem.vault import parse_frontmatter  # noqa: E402
 
 pytestmark = pytest.mark.anyio
+
+WRITEBACK_TITLE = "Progressive disclosure reversal test"
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +36,15 @@ def _isolated_writer_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _app() -> ExomemTuiApp:
     return ExomemTuiApp(ExomemBackend(), glyphs=GLYPHS_UNICODE)
+
+
+def _notes_titled(vault: Path, title: str) -> list[Path]:
+    """The written notes whose stored title is `title`; the file name is not the test's concern."""
+    return [
+        page
+        for page in (vault / "Knowledge Base" / "Notes").rglob("*.md")
+        if parse_frontmatter(page.read_text(encoding="utf-8"))[0].get("title") == title
+    ]
 
 
 async def _settle(app, pilot):
@@ -118,7 +130,7 @@ async def test_ask_citation_contradiction_review(vault: Path):
         await pilot.press("w")
         await pilot.pause()
         assert app.screen.__class__.__name__ == "WriteBackModal"
-        app.screen.query_one("#writeback-title").value = "Progressive disclosure reversal test"
+        app.screen.query_one("#writeback-title").value = WRITEBACK_TITLE
         app.screen.query_one("#writeback-content").text = (
             "Contrary to the earlier conclusion, progressive disclosure did not "
             "reduce confusion in the sample scenario."
@@ -128,11 +140,11 @@ async def test_ask_citation_contradiction_review(vault: Path):
         assert app.screen.__class__.__name__ == "ConfirmModal", (
             "an unlinked note must trigger the explicit relation-review question"
         )
-        notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
+        notes = _notes_titled(vault, WRITEBACK_TITLE)
         assert not notes, "nothing may be written before the user confirms"
         await pilot.press("enter")  # 'Save unlinked — records your review'
         await _settle(app, pilot)
-        notes = list((vault / "Knowledge Base" / "Notes").rglob("*reversal-test*.md"))
+        notes = _notes_titled(vault, WRITEBACK_TITLE)
         assert notes, "confirmed write-back must land as a governed note"
 
         # Review the real attention queue and triage one item end-to-end.

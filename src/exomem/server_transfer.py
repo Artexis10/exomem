@@ -45,7 +45,7 @@ from . import (
 )
 from .governance import egress
 from .governance import principal as principal_module
-from .vault import VaultPathError, resolve_under_vault
+from .vault import VaultPathError
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 #: Loopback uploads never cross the Cloudflare edge, whose ~100 MB cap sets the public
@@ -447,19 +447,8 @@ def load_transfer_config() -> TransferConfig:
 
 
 def _download_target(vault_root: Path, path: str) -> tuple[Path, str]:
-    """Resolve a download path; an evicted original resolves by its binding (D1)."""
-    try:
-        return resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
-    except VaultPathError as missing:
-        if missing.code != "NOT_FOUND" or originals.binding_for(vault_root) is None:
-            raise
-        try:
-            abs_path, rel = resolve_under_vault(vault_root, path, must_be_file=True)
-            if originals.evicted(vault_root, rel):
-                return abs_path, rel
-        except (VaultPathError, reserved_paths.ReservedPathLeafError):
-            pass
-        raise missing
+    """Resolve a download by logical identity, including evicted and pooled originals."""
+    return originals.resolve_original_path(vault_root, path)
 
 
 def download_principal(
@@ -694,6 +683,15 @@ class _OriginalDownloadResponse(Response):
 
 async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> JSONResponse:
     """Receive one claimed ticket's file into a held upload; the ticket fixes lane and limit."""
+    status, body = await _hold_ticket_upload(vault_root, request, ticket)
+    if status != 201:
+        # The claim spent the ticket, so a refusal must say that a retry needs a new upload.
+        body = {**body, "reason": f"{body['reason']}. {upload_handoff.SPENT_REMEDY}"}
+    return JSONResponse(body, status_code=status)
+
+
+async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> tuple[int, dict]:
+    """The status and body of one claimed ticket's send: 201 with the held upload, or a refusal."""
     from . import held_uploads
 
     maximum = ticket["max_bytes"]
@@ -713,14 +711,14 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
     bounded = Request(request.scope, receive=bounded_receive)
     declared = _header_count(request.headers.get("content-length", ""))
     if declared is not None and declared > maximum + _FORM_OVERHEAD_BYTES:
-        return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}, status_code=413)
+        return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit"}
     # Content-Length less the framing allowance is the least the file can hold. With no name yet, only a
     # Source upload can be refused here; any other request reads its form and asks again below.
     if declared is not None and declared > _FORM_OVERHEAD_BYTES:
         refused = await _allowance_refused(
             vault_root, declared - _FORM_OVERHEAD_BYTES, None, ticket["lane"], most_bytes=declared)
         if refused is not None:
-            return JSONResponse(refused, status_code=413)
+            return 413, refused
     try:
         async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
@@ -728,15 +726,17 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     or _flag(str(form.get("hold") or "")) is not True
                     or set(form) - {"file", "lane", "hold", "filename"}
                     or any(len(form.getlist(key)) != 1 for key in form)):
-                return JSONResponse({"code": "INVALID_UPLOAD", "reason": "handoff fields cannot change its lane or hold mode"}, status_code=400)
+                return 400, {"code": "INVALID_UPLOAD",
+                             "reason": f"send only the form fields file, lane={ticket['lane']} and hold=1"}
             upload = form.get("file")
             if not hasattr(upload, "file"):
-                return JSONResponse({"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}, status_code=400)
+                return 400, {"code": "INVALID_UPLOAD", "reason": "multipart field `file` is required"}
             if not await upload_handoff._active(vault_root, ticket["principal"]):
-                return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+                # The cause alone: the refusal's remedy is the spent ticket's, which the caller adds.
+                return 401, {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}
             filename = str(form.get("filename") or upload.filename or "")
             if (refused := await _allowance_refused(vault_root, upload.size, filename, ticket["lane"])) is not None:
-                return JSONResponse(refused, status_code=413)
+                return 413, refused
             with principal_module.request_scope(ticket["principal"]):
                 held = await run_in_threadpool(
                     held_uploads.hold, vault_root, upload.file,
@@ -748,16 +748,15 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
                     secret=(upload_handoff.hold_secret(ticket["nonce"])
                             if ticket["lane"] == held_uploads.IMPORT_LANE else None),
                 )
-        return JSONResponse(held, status_code=201)
+        return 201, held
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
-        return JSONResponse({"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}, status_code=413)
+        return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
     except held_uploads.HeldUploadError as exc:
-        return JSONResponse({"code": exc.code, "reason": exc.reason},
-            status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400))
+        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400), {"code": exc.code, "reason": exc.reason}
 
 
 def _handoff_unavailable() -> JSONResponse:
-    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.UNAVAILABLE_REASON}, status_code=401)
+    return JSONResponse({"code": "UPLOAD_HANDOFF_UNAVAILABLE", "reason": upload_handoff.TICKET_UNUSABLE_REASON}, status_code=401)
 
 
 def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bearer: Any) -> None:
@@ -1323,7 +1322,8 @@ def register_transfer_routes(
                 )
                 # The destination decision comes before existence, which it never reveals.
                 preserve_module.admit_destination(vault_root, artifact)
-                if artifact.exists():
+                # A pooled filing has no file at its logical name, which stays taken.
+                if artifact.exists() or originals.pooled(vault_root, artifact) is not None:
                     return _tus_refusal(
                         "ARTIFACT_EXISTS",
                         f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "
@@ -1543,9 +1543,23 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 # The grant route's pin: hydrate only after the release gate, and
                 # keep eviction out until the bytes are read.
                 with media_store.local_originals(vault_root, (rel,), read=True):
-                    snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    try:
+                        # An ordinary file is served as it stands, and the release gate below judges its bytes.
+                        snapshot = reserved_paths.read_generic_bytes(vault_root, rel)
+                    except reserved_paths.ReservedPathLeafError as error:
+                        if error.code != "MISSING":
+                            raise
+                        # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
+                        snapshot = media_store.read_original_bytes(vault_root, rel)
             except reserved_paths.ReservedPathLeafError:
                 raise VaultPathError("NOT_FOUND", f"path does not exist: {rel}") from None
+            except originals.RetirementUnconfirmed as error:
+                # Named by the request's spelling, as NOT_FOUND is: the release gate passed only this path.
+                return JSONResponse(
+                    {"code": error.code, "reason": f"the Trash retirement of the original that {requested} names "
+                     "could not be confirmed; empty or restore that Trash entry first"},
+                    status_code=409,
+                )
             except media_store.MediaStoreError as error:
                 return _hydration_too_large(error) or JSONResponse(
                     {"code": "ORIGINAL_UNAVAILABLE", "reason": "the stored original is unavailable; retry later"},

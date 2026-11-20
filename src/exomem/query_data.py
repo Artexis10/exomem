@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import access, reserved_paths
+from . import access, media_store, originals, reserved_paths
 from .query_compat import (
     DATE_LIKE as _DATE_LIKE,
 )
@@ -208,11 +208,13 @@ def load_generic_rows(
     *,
     provenance: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict], list[str], list[str]]:
-    """Read a public dataset through the retained generic leaf before parsing."""
+    """Read an authorized logical dataset through its retained original before parsing."""
 
     try:
-        snapshot = reserved_paths.read_generic_bytes(vault_root, relative_path)
+        snapshot = media_store.read_original_bytes(vault_root, relative_path, max_bytes=MAX_FILE_BYTES)
     except reserved_paths.ReservedPathLeafError as error:
+        if error.code == "TOO_LARGE":
+            raise QueryDataError("TOO_LARGE", "dataset exceeds the byte limit") from None
         if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
@@ -424,7 +426,7 @@ def profile_data(
     stay queryable only via `query_data`.
     """
     try:
-        abs_path, rel = resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
+        abs_path, rel = originals.resolve_original_path(vault_root, path)
     except VaultPathError as e:
         raise QueryDataError(e.code, e.reason) from None
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
@@ -541,12 +543,10 @@ def query_data(
         raise absent
     # `excluded` paths (_access.yaml) refuse identically to a missing path, for the
     # same reason, and before the type and suffix checks that would tell them apart.
-    if not resolution.candidate.exists() or any(
-        access.refuse_if_excluded(vault_root, spelling) for spelling in spellings
-    ):
+    if any(access.refuse_if_excluded(vault_root, spelling) for spelling in spellings):
         raise absent
     try:
-        abs_path, rel = resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
+        abs_path, rel = originals.resolve_original_path(vault_root, path)
     except VaultPathError as e:
         raise QueryDataError(e.code, e.reason) from None
     if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:

@@ -67,6 +67,10 @@ class _RecordingMutationManager:
         with self.mutation_guard(vault, **metadata, holder_kind="background"):
             yield
 
+    def yield_to_waiting_writes(self, vault, **kwargs) -> float:
+        assert vault == self.vault
+        return 0.0
+
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
     """Preserve a media binary with no text → a `pending` stub sidecar."""
@@ -221,7 +225,7 @@ def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_r
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args, **_kwargs: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
@@ -394,7 +398,7 @@ def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
         lambda *_args, **kwargs: publication_intents.extend(kwargs["publication_intents"]) or True,
     )
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
     assert publication_intents
@@ -429,7 +433,7 @@ def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     body = sidecar.read_text(encoding="utf-8")
     assert "processing_state: pending" in body
@@ -466,7 +470,7 @@ def test_parent_requeues_changed_binary_after_failure_result(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -502,7 +506,7 @@ def test_parent_keeps_ocr_enqueued_during_deferred_result_completion(
         return True
 
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", complete_then_enqueue)
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "first transcript" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -544,8 +548,8 @@ def test_parent_retires_failed_result_after_foreign_sidecar_change(
     else:
         sidecar.write_bytes(foreign_bytes)
 
-    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_result(
-        store.pending_results()[0]
+    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_results(
+        store.pending_results()[:1]
     )
 
     assert store.pending_result_count() == 0
@@ -776,7 +780,7 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
     )
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert sidecar.read_text(encoding="utf-8") == target
     assert recovered == [True]
@@ -869,13 +873,10 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 
     assert manager.events.index("extract") < manager.events.index("guard-enter")
     assert manager.events.index("guard-enter") < manager.events.index("sidecar-commit")
+    # The graph epoch is published inside the commit's own hold; a second take could be refused.
     assert manager.guard_metadata == [
         {
             "operation": "background_media_extraction_commit",
-            "holder_kind": "background",
-        },
-        {
-            "operation": "background_media_graph_completion",
             "holder_kind": "background",
         },
     ]
@@ -886,7 +887,7 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failure-state media commits own the same guarded deferred-token postlude."""
+    """Failure-state media commits publish the graph epoch inside their own hold, then fan out after it."""
     result = _preserve_media_stub(vault, filename="guarded-failure.mp3")
     manager = _RecordingMutationManager(vault)
     fanout_depths: list[int] = []
@@ -921,7 +922,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
 
     def read_postlude_artifact(path, *args, **kwargs):  # noqa: ANN001
         if (
-            len(manager.guard_metadata) >= 2
+            token is not None
             and not checkpoint_published
             and Path(path) in {floor_path, checkpoint_path}
         ):
@@ -932,7 +933,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_published, checkpoint_replaced
         original_publish_hook(destination)
-        if destination == checkpoint_path and len(manager.guard_metadata) >= 2:
+        if destination == checkpoint_path and token is not None:
             assert manager.depth > 0
             checkpoint_replaced = True
             checkpoint_published = True
@@ -975,8 +976,8 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         "operation": "background_media_failure_commit",
         "holder_kind": "background",
     }
-    assert len(manager.guard_metadata) == 2
-    assert all(metadata["holder_kind"] == "background" for metadata in manager.guard_metadata)
+    # One hold: a second take for the epoch could be refused, which left the floor ahead of its checkpoint.
+    assert len(manager.guard_metadata) == 1
     assert token is not None
     assert postlude_reads == ["floor", "predecessor"]
     assert checkpoint_replaced
@@ -1034,10 +1035,10 @@ def test_media_canonical_commits_request_deferred_graph_completion(
     ]
 
 
-def test_media_deferred_postlude_reenters_the_mutation_coordinator(
+def test_media_deferred_epoch_is_published_inside_the_commit_hold(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The deferred token crosses the guard; its checkpoint work must re-enter it."""
+    """The deferred token's floor and checkpoint are written before the commit's hold is released."""
     result = _preserve_media_stub(vault, filename="postlude-guard.m4a")
     sidecar = vault / result.sidecar_path
     manager = _RecordingMutationManager(vault)
@@ -1045,10 +1046,19 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     checkpoint = graph_sync.checkpoint_path(vault)
     original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
+    original_batch = preserve.batch_atomic_write
+    committed = False
     postlude_reads: list[str] = []
     checkpoint_replaced = False
     fanout_depths: list[int] = []
 
+    def mark_committed(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal committed
+        result = original_batch(*args, **kwargs)
+        committed = committed or bool(kwargs.get("defer_graph_completion"))
+        return result
+
+    monkeypatch.setattr(preserve, "batch_atomic_write", mark_committed)
     monkeypatch.setattr(
         extract,
         "extract_text",
@@ -1059,7 +1069,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
 
     def read_artifact_inside_postlude(path, *args, **kwargs):  # noqa: ANN001
-        if len(manager.guard_metadata) >= 2 and Path(path) in {floor, checkpoint}:
+        if committed and Path(path) in {floor, checkpoint}:
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
         return original_read_artifact(path, *args, **kwargs)
@@ -1067,7 +1077,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_replaced
         original_publish_hook(destination)
-        if destination == checkpoint and len(manager.guard_metadata) >= 2:
+        if destination == checkpoint and committed:
             assert manager.depth > 0
             checkpoint_replaced = True
 
@@ -1098,8 +1108,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
         "operation": "background_media_extraction_commit",
         "holder_kind": "background",
     }
-    assert len(manager.guard_metadata) == 2
-    assert all(metadata["holder_kind"] == "background" for metadata in manager.guard_metadata)
+    assert len(manager.guard_metadata) == 1
     assert postlude_reads == ["floor", "predecessor"]
     assert checkpoint_replaced
     assert fanout_depths == [0]
@@ -2263,6 +2272,9 @@ def test_reembed_publishes_under_canonical_mutation_guard(
         def mutation_guard(self, _vault, **_metadata):
             guard_metadata.append(_metadata)
             yield
+
+        def yield_to_waiting_writes(self, _vault, **_kwargs) -> float:
+            return 0.0
 
     monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingManager())
     reembedded: list[Path] = []
@@ -4799,16 +4811,16 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
         return work
 
     monkeypatch.setattr(store, "has_parent_work", has_parent_work)
-    original_publish = parent._publish_parent_result
+    original_publish = parent._publish_batch
 
-    def publish(packet):
+    def publish(batch):
         published.append(now[0])
         if len(published) == 1:
             raise OSError("publication temporarily unavailable")
-        original_publish(packet)
+        original_publish(batch)
         parent._stop_event.set()
 
-    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+    monkeypatch.setattr(parent, "_publish_batch", publish)
 
     def wait(seconds):
         now[0] += seconds
@@ -4886,14 +4898,14 @@ def test_supervisor_retries_store_refusal_and_processes_later_enqueue(
         return _LivingChild()
 
     monkeypatch.setattr(worker, "_launch_child", launch)
-    original_publish = worker._publish_parent_result
+    original_publish = worker._publish_batch
 
-    def publish(packet):
-        original_publish(packet)
-        publications.append(packet.job.attempts)
+    def publish(batch):
+        original_publish(batch)
+        publications.extend(result.job.attempts for result in batch)
         worker._stop_event.set()
 
-    monkeypatch.setattr(worker, "_publish_parent_result", publish)
+    monkeypatch.setattr(worker, "_publish_batch", publish)
     worker._supervise()
 
     assert launches == [media_worker._FOLLOWER_RECHECK_SECONDS]
@@ -4978,14 +4990,14 @@ def test_living_child_parent_rechecks_external_blocked_sidecar_edits(
     published = []
     monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
     parent._child = _LivingChild()
-    original_publish = parent._publish_parent_result
+    original_publish = parent._publish_batch
 
-    def publish(packet):
-        original_publish(packet)
+    def publish(batch):
+        original_publish(batch)
         published.append(now[0])
         parent._stop_event.set()
 
-    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+    monkeypatch.setattr(parent, "_publish_batch", publish)
 
     def wait(seconds):
         now[0] += seconds

@@ -112,6 +112,8 @@ class PageHit(TypedDict):
     outside_kb: NotRequired[bool]
     status: NotRequired[str]
     superseded_by: NotRequired[list[str]]
+    # A Source with a correction: the page that stands for it now. Absent when the successor is withheld.
+    corrected_by: NotRequired[dict[str, str]]
     signals: NotRequired[dict[str, Any]]
     graph: NotRequired[dict[str, str | None]]
     media_type: NotRequired[str]

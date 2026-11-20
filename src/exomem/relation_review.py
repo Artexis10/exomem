@@ -172,6 +172,13 @@ class RelationReviewError(ValueError):
         return {"code": self.code, "reason": self.reason}
 
 
+class AuxiliaryGuardMoved(RelationReviewError):
+    """A server-planned auxiliary's guard moved between the write's plan and
+    its pre-commit recheck. It keeps the guard's own PATH_GUARD_* code and
+    message for direct callers; the writer lease converts only this — never a
+    guard on the write's own basis — into an absorbable, re-plannable busy."""
+
+
 # The three request parameters of a relation review, fixed by the tool schema
 # (a closed protocol set, not a vocabulary a vault or customer defines).
 # nosemgrep: ep-word-set -- the three tool-schema parameter names of a relation review; a closed API token set, not vocabulary.
@@ -1467,19 +1474,34 @@ def list_lifecycle_prepared_identities(vault_root: Path) -> tuple[str, ...]:
     return tuple(identities)
 
 
-def _safe_trash_original_path(value: object) -> bool:
+def _trash_original_parts(value: object) -> tuple[str, ...] | None:
+    """The parts of a well-formed relative POSIX ``original_path``, else ``None``."""
     if type(value) is not str:
-        return False
+        return None
     posix = PurePosixPath(value)
-    return bool(
+    if not (
         value
         and "\\" not in value
         and "\0" not in value
         and posix.as_posix() == value
         and not posix.is_absolute()
+        and posix.parts
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and managed_split_parts(posix.parts) is not None
-    )
+    ):
+        return None
+    return posix.parts
+
+
+def _safe_trash_original_path(value: object) -> bool:
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts) is not None
+
+
+def _trash_original_outside_managed_root(value: object) -> bool:
+    # The casefold comparison keeps a root spelled in other letter case failing closed: on a
+    # case-insensitive filesystem that spelling can still name a real managed page.
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts, key=str.casefold) is None
 
 
 def _read_bounded_lifecycle_sidecar_bytes(
@@ -1749,7 +1771,10 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             source = raw.decode("utf-8", errors="strict")
             metadata = parse_exact_json_object(source)
             original = metadata.get("original_path")
-            if not _safe_trash_original_path(original):
+            # Prepared paths are managed paths, so a sidecar outside the managed root can never
+            # prove one.
+            unrelated = _trash_original_outside_managed_root(original)
+            if not unrelated and not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
             guard = _capture_bounded_lifecycle_sidecar_guard(
                 root,
@@ -1767,6 +1792,8 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             ) from error
         aggregate_sidecar_bytes += len(raw)
         content_guards.append(guard)
+        if unrelated:
+            continue
         assert isinstance(original, str)
         trash_root = relative.removesuffix(".meta.json")
         target_kind: Literal["file", "directory", "missing"] = "missing"
@@ -3898,7 +3925,15 @@ def _detach_auxiliaries(
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
                 )
-            value.guard.recheck(root)
+            try:
+                value.guard.recheck(root)
+            except vault.PathGuardError as error:
+                # A writer ahead in line committed between this write's plan
+                # and its pre-boundary prepare: the auxiliary it moved is
+                # re-planned on the absorbed retry, as it already is when the
+                # in-boundary commit reports the same race. The subclass keeps
+                # the guard's own code for callers that plan no retry.
+                raise AuxiliaryGuardMoved(error.code, error.reason) from error
         else:
             try:
                 from .vault_store import read as store_read

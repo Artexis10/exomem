@@ -208,7 +208,9 @@ def permits(
                         or artifact_copy.sha256 != block["artifact_sha256"]):
                     return False
             else:
-                original = reserved_paths.read_generic_bytes(root, block["artifact_path"]).data
+                from .. import media_store
+
+                original = media_store.read_original_bytes(root, block["artifact_path"]).data
                 if hashlib.sha256(original).hexdigest() != block["artifact_sha256"]:
                     return False
             if snapshot is not None:

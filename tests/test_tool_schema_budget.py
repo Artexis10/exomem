@@ -26,27 +26,32 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
 # The surface is 24 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
-# wire measures 28,753 B, so the budget is 28,800 B; `recall_context`'s `native_skills`, which a hook fills so the
+# wire measures 29,115 B, so the budget is 29,150 B. `recall_context`'s `native_skills`, which a hook fills so the
 # skills catalogue omits what the client already loads, took 162 B. The door operations `imports.file`, `review.held` and
 # `maintenance.held_resolve` add 56 B to the two door enums. `cancel_uploads`, which frees a caller's own waiting
-# uploads, added the last 581 B. Raise a ceiling deliberately, in the diff that needs it.
-TOTAL_BUDGET = 28_800
+# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The wire measured 28,779 B
+# before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
+# `add_observation`; that string added 336 B, 112 B each. The door operation `maintenance.convert_originals`, the
+# owner's conversion into shared original storage, added the last 64 B to the two door enums.
+# `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). Raise a
+# ceiling deliberately, in the diff that needs it.
+TOTAL_BUDGET = 29_325
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "add_observation": 1500,
+    "add_observation": 1650,
     "add_plan_item": 500,
     "add_record": 850,
     "cancel_uploads": 600,
-    "create_note": 1700,
+    "create_note": 1850,
     "decide_review_item": 1000,
     "download_files": 550,
-    "edit_note": 2550,
+    "edit_note": 2700,
     "edit_plan_item": 750,
     "edit_record": 800,
-    "inspect_memory": 2150,
+    "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2450,
+    "manage_memory": 2500,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,
@@ -54,7 +59,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "recall_context": 2800,
     "save_episode": 1100,
     "save_evidence": 1200,
-    "save_source": 1300,
+    "save_source": 1400,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

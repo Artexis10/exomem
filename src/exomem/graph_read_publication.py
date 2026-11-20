@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from . import freshness, graph_sync, view_lag
 
@@ -236,6 +237,19 @@ def read_boundary(
     root = Path(root).resolve()
     with _lock:
         state = _states.get(root)
+    if (
+        state is not None
+        and state.pending is not None
+        and not state.coordinator.current_thread_holds_boundary()
+    ):
+        # A proof staged by a handed-off publication is consumed here by
+        # whichever read needs it first: one try only — a reader never waits
+        # out another holder for optional context. A reader that itself holds
+        # the boundary leaves it to the deferred after-release completion:
+        # its byte proofs must never run under a held guard.
+        _complete_observation(root, state, max_seconds=0.0)
+        with _lock:
+            state = _states.get(root)
     if state is None or state.pending is not None:
         yield False
         return
@@ -376,8 +390,33 @@ def begin_observation(
         return None
 
 
-def finish_observation(root: Path, observation: _Observation | None) -> None:
-    """Stage a contiguous association; prove bytes after the outer writer releases."""
+_OBSERVATION_UNSET: Final = object()
+#: A boundary holder whose publication runs on a worker binds the observation
+#: it began itself here, before copying its context for the worker: the
+#: publication adopts it instead of beginning one (the worker cannot take the
+#: begin's try-hold while the caller owns the boundary) and never finishes it —
+#: the binding side finishes it on whichever thread can still hold the guard.
+ADOPTED_OBSERVATION: contextvars.ContextVar = contextvars.ContextVar(
+    "graph_read_publication_adopted_observation", default=_OBSERVATION_UNSET
+)
+
+
+def finish_observation(
+    root: Path,
+    observation: _Observation | None,
+    *,
+    timeout_seconds: float | None = None,
+    complete_retry_seconds: float = 0.0,
+) -> None:
+    """Stage a contiguous association; prove bytes after the outer writer releases.
+
+    ``timeout_seconds`` lets a handoff worker that holds no boundary take the
+    guard for a bounded wait; the default try-hold keeps the inline caller's
+    never-wait behaviour. ``complete_retry_seconds`` bounds how long the
+    deferred proof retries a contended try-hold — it runs as after-release
+    work on whichever thread releases the boundary, so only a worker that
+    owns nothing else should set it nonzero.
+    """
     if observation is None:
         return
 
@@ -386,8 +425,19 @@ def finish_observation(root: Path, observation: _Observation | None) -> None:
         if root != observation.root:
             return
         prior = observation.state
-        with prior.coordinator.try_hold(operation="graph_observation_finish", holder_kind="graph") as held:
-            if not held:
+        hold = (
+            prior.coordinator.hold(
+                timeout_seconds=timeout_seconds,
+                operation="graph_observation_finish",
+                holder_kind="graph",
+            )
+            if timeout_seconds is not None
+            else prior.coordinator.try_hold(
+                operation="graph_observation_finish", holder_kind="graph"
+            )
+        )
+        with hold as held:
+            if held is False:  # try_hold misses; a bounded hold raises instead
                 return
             with _lock:
                 current = _states.get(root)
@@ -452,13 +502,16 @@ def finish_observation(root: Path, observation: _Observation | None) -> None:
                     )
                     _states[root] = pending
                     current.coordinator.defer_optional_after_release(
-                        (finish_observation, root), lambda: _complete_observation(root, pending),
+                        (finish_observation, root),
+                        lambda: _complete_observation(
+                            root, pending, max_seconds=complete_retry_seconds
+                        ),
                     )
     except Exception:  # noqa: BLE001 - optional association failure cannot fail publication
         return
 
 
-def _complete_observation(root: Path, pending: _State) -> None:
+def _complete_observation(root: Path, pending: _State, *, max_seconds: float = 0.0) -> None:
     """Hash the pending endpoint union without either mutation guard, then compare and swap."""
     from . import vault
 
@@ -480,23 +533,34 @@ def _complete_observation(root: Path, pending: _State) -> None:
                 # Keep the descriptor-bound identity; finalization reads no file contents.
                 guard = replace(content, leaf_policy="stable", expected_content_hash=None)
             guards.append((target, guard))
-        with pending.coordinator.try_hold(operation="graph_observation_complete", holder_kind="graph") as held:
-            if not held:
-                return
-            with _lock:
-                if _states.get(root) is not pending:
+        # Deferred completion runs after the owner's guard release; a
+        # contending holder can beat a single try, and a missed proof blocks
+        # every read of this association until the next publication. Retry
+        # briefly — optional work must still never wait out a real hold.
+        deadline = time.monotonic() + max_seconds
+        while True:
+            with pending.coordinator.try_hold(
+                operation="graph_observation_complete", holder_kind="graph"
+            ) as held:
+                if held:
+                    with _lock:
+                        if _states.get(root) is not pending:
+                            return
+                    if not _current(root, pending.bridge):
+                        raise ValueError("graph observation epoch changed")
+                    for target, guard in guards:
+                        guard.recheck(root)
+                        if target.signature is not None and (
+                            freshness.stat_signature(root / target.path) != target.signature
+                        ):
+                            raise ValueError("graph observation target changed")
+                    with _lock:
+                        if _states.get(root) is pending:
+                            _states[root] = replace(pending, pending=None)
                     return
-            if not _current(root, pending.bridge):
-                raise ValueError("graph observation epoch changed")
-            for target, guard in guards:
-                guard.recheck(root)
-                if target.signature is not None and (
-                    freshness.stat_signature(root / target.path) != target.signature
-                ):
-                    raise ValueError("graph observation target changed")
-            with _lock:
-                if _states.get(root) is pending:
-                    _states[root] = replace(pending, pending=None)
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.05)
     except Exception:  # noqa: BLE001 - unexplained bytes withdraw only the optional association
         with _lock:
             if _states.get(root) is pending:

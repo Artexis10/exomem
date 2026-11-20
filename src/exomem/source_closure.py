@@ -71,7 +71,8 @@ class SourceClosurePlan:
     skipped_backrefs: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False, slots=True)
 class SourceClosureViolation(Exception):
     code: str
     reason: str
@@ -220,6 +221,11 @@ def _resolve_one(
     frontmatter, _body, frontmatter_text = vault.parse_frontmatter(source)
     if frontmatter_text is None or not type_basis.selects(frontmatter.get("type"), note_types.raw):
         return None
+    reference = memory_refs.ref_from_markdown(source)
+    if reference is not None:
+        from . import source_custody
+
+        source_custody.require_publishable(root, reference)
     return ResolvedSource(
         supplied,
         relative,
@@ -228,6 +234,12 @@ def _resolve_one(
         "ingested_into" in frontmatter,
         tuple(retained for retained in current.guards if retained is not guard),
     )
+
+
+def custody_references(plan: SourceClosurePlan) -> tuple[str, ...]:
+    """Include resolved historical and skipped back-references, not only writable Sources."""
+    return tuple(dict.fromkeys(reference for item in (*plan.inspection.resolved, *plan.prior_inspection.resolved)
+                               if (reference := memory_refs.ref_from_markdown(item.source)) is not None))
 
 
 def inspect_source_closure(

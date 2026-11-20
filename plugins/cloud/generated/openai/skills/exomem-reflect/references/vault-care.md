@@ -169,7 +169,7 @@ Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontma
 
 ### Remote maintenance jobs
 
-A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
+A remote `fix`, `backfill-ids`, `reconcile` or `convert-originals` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
 
 1. Preview with `inspect_memory`, `dry_run=true`. The owner gets a `run_id` and `preview: true` at once: a preview of a large vault outlasts one request, so it runs as a read-only job. When it is `completed`, its receipt's `result` carries the `plan_id`. A caller other than the owner, and the local CLI, get the report in one call.
 2. Start with `manage_memory`: the same mode and flags, `dry_run=false`, that `plan_id` and a one-line `why`. It returns a `run_id` at once. Without both it returns `MAINTENANCE_PLAN_REQUIRED` and starts nothing.
@@ -178,6 +178,14 @@ A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview 
 5. Read the receipt. A finished job's status holds the totals: pages `committed`, `skipped_changed` (the page changed after the preview) and `outcome_unknown`. The page list is long, so read it page by page: pass the receipt's `next_cursor` as `cursor` to the same call, and repeat with each returned `next_cursor` until it is `null`. Each entry names a path, its kind and, for `backfill-ids`, the minted ID. A preview's entries are kind `planned`: the items its `plan_id` covers (paths, components or identities). A `fix` entry's value says what the plan does to the page. A `backfill-ids` preview also lists kind `identity_issue` and `skipped` entries, each with its detail as the value.
 
 If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE`, and its `retry` reads the running job by its `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes only in short holds, one per phase that writes, and other writes go through between them. A `MUTATION_BUSY` refusal during one of its holds names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
+
+### convert-originals
+
+An archive created before shared original storage keeps each original as an ordinary file at its own path. `convert-originals` stores the bytes of each original once in the shared store and then removes the ordinary file. The original keeps its path, and its page keeps every byte, with its references and grants. Only the owner can run it, and it dry-runs by default.
+
+The preview counts `would_convert`, `already_shared` and `store_bound`, which counts originals whose only copy is a stored version. It lists each `unreadable` original with a reason, and conversion leaves it unchanged. The write adds `converted`, `skipped_changed` (the original or its page changed after the inventory) and `kept_pinned` (a reader or a media job held the file).
+
+A run that stops leaves every original readable. Run the conversion again to finish an interrupted run or the skipped originals. `ORIGINAL_POOL_LIFECYCLE_REQUIRED` means that the service's launcher cannot serve shared storage yet: the operator must update the launcher first.
 
 ### structured-files
 

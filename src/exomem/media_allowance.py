@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from . import held_fs, originals, reserved_paths, runtime_resources, trash_metadata
 from .kbdir import managed_join, managed_root_rel
@@ -131,59 +131,6 @@ def admission(
     return decide(usage.used_bytes, projected, allowance_bytes, usage.observed_at)
 
 
-def _binding(
-    fields: dict[str, object], path: str, store: originals.StoreBinding,
-    metadata: dict[str, str], vault: Path, placements: dict[str, dict[str, object]],
-    placement_versions: dict[str, held_fs.FileVersion],
-) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
-    try:
-        return originals.referenced_binding(fields, sidecar_path=path, store=store)
-    except ValueError:  # A live page's `DisplacedReference` goes to `bound_references`, which confirms it.
-        if not PurePosixPath(path).is_relative_to(PurePosixPath(managed_join(trash_metadata.TRASH_SUBPATH))):
-            raise
-    # A Trash page that sat away from its companion path before its deletion goes to the same confirmation.
-    displaced: originals.DisplacedReference | None = None
-    from .relation_review import parse_exact_json_object
-
-    current = PurePosixPath(path)
-    # A canonical companion is adjacent to its binary; directory entries use their ancestor root.
-    candidates = (current, current.with_suffix(""), *current.parents)
-    for root in candidates:
-        key = root.as_posix()
-        metadata_path = metadata.get(key)
-        if metadata_path is None:
-            continue
-        if key not in placements:
-            with reserved_paths.open_generic_binary(vault, metadata_path) as source:
-                size = source.version.size
-                with runtime_resources.parser_preparation(size) as preparation:
-                    preparation.reserve_source(size)
-                    raw = source.stream.read(size + 1)
-                    if len(raw) != size:
-                        raise ValueError("Trash metadata changed during read")
-                    text = raw.decode("utf-8")
-                    preparation.reserve_parser(text, json_bytes=len(raw))
-                    parsed = parse_exact_json_object(text)
-                    # Only the fixed placement field survives the parser reservation.
-                    placement = {"original_path": parsed.get("original_path")}
-                    trash_metadata.original_path(placement, trash_root=key, current_path=path)
-                    source.require_current()
-                    placement_versions[metadata_path] = source.version
-                    placements[key] = placement
-                    del parsed, text, raw
-        try:
-            meta = placements[key]
-            historical = trash_metadata.original_path(meta, trash_root=root.as_posix(), current_path=path)
-            return originals.referenced_binding(fields, sidecar_path=historical, store=store)
-        except originals.DisplacedReference as error:
-            displaced = error
-        except (ValueError, UnicodeError):
-            continue
-    if displaced is not None:
-        raise displaced
-    raise ValueError("stored Trash reference has no trustworthy placement")
-
-
 def bound_references(
     vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
 ) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject, bool]]:
@@ -200,19 +147,13 @@ def bound_references(
     come after the walk, from one batched ledger read, with True last. Such a page holds no original
     beside it: its original stays at `binary.path`, and several pages may name the same one.
     """
-    metadata: dict[str, str] = {}
-    placements: dict[str, dict[str, object]] = {}
-    placement_versions: dict[str, held_fs.FileVersion] = {}
+    placements = trash_metadata.PlacementCensus(vault)
     displaced: list[tuple[str, originals.DisplacedReference]] = []
 
     def select(candidates: list[tuple[str, str]]):
         for relative, kind in candidates:
             if kind != "file":
                 continue
-            # Markdown and Trash metadata extensions belong to the fixed vault format.
-            if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
-                    and relative.endswith(trash_metadata.METADATA_SUFFIX)):
-                metadata[managed_join(relative[:-len(trash_metadata.METADATA_SUFFIX)])] = managed_join(relative)
             if relative.lower().endswith(".md"):
                 yield relative
 
@@ -230,10 +171,19 @@ def bound_references(
             try:
                 if entry.markdown is None:
                     raise ValueError("companion header was not read")
-                bound = _binding(
-                    parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
-                    path, store, metadata, vault, placements, placement_versions,
-                )
+                fields = parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0]
+                bound = None
+                if "stored_object" in fields:
+                    reference = originals.stored_reference(fields["stored_object"])
+                    if reference is None:
+                        raise ValueError("stored reference is malformed")
+                    if reference.store == store.store:
+                        # A live page's `DisplacedReference` comes here, and so does a Trash page that sat
+                        # away from its companion path before its deletion: the ledger confirms both below.
+                        binary = placements.resolve(path, fields)
+                        if binary is None:
+                            raise ValueError("stored reference has no valid binary binding")
+                        bound = binary, reference
             except originals.DisplacedReference as error:
                 displaced.append((path, error))
                 continue
@@ -260,11 +210,7 @@ def bound_references(
                 raise item
             else:
                 unreadable(path, item)
-    for metadata_path, version in placement_versions.items():
-        with reserved_paths.open_generic_binary(vault, metadata_path) as source:
-            if source.version != version:
-                raise ValueError("Trash placement changed during the census")
-            source.require_current()
+    placements.require_current()
 
 
 # What a failed read of the Knowledge Base tree can raise; the census that hit one is unknown.

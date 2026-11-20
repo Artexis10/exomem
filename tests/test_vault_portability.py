@@ -116,6 +116,10 @@ def _raw_zip(
     [
         ("Knowledge Base/Notes/Insights/note.md", "canonical"),
         ("Knowledge Base/Evidence/Case/receipt.pdf", "canonical"),
+        ("Knowledge Base/_Originals/format.json", "canonical"),
+        ("Knowledge Base/_Originals/sha256/aa/" + "a" * 64 + ".blob", "canonical"),
+        ("Knowledge Base/_Originals/sha256/bb/" + "a" * 64 + ".blob", "disposable-runtime"),
+        ("Knowledge Base/_Originals/sha256/aa/.exomem-held-publish-" + "a" * 32 + ".stage", "disposable-runtime"),
         ("Knowledge Base/log.md", "canonical"),
         ("Knowledge Base/_Schema/project-keys.yaml", "canonical"),
         ("Knowledge Base/_trash/2026-07-12/note.md", "canonical"),

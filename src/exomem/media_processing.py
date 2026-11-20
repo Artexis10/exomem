@@ -360,6 +360,7 @@ def reconcile_media(
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     defer_fanout_to_terminal: bool = False,
     request: ExtractionRequest | None = None,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -377,6 +378,10 @@ def reconcile_media(
 
     A `request` goes into the job row when this call creates or re-queues it, in the same
     store transaction, so the worker never claims the job without it.
+
+    `queue_guard` is the hold for a commit that only touches the machine-local job store, so it
+    does not advance the commit generation. It replaces `commit_guard` when the plan writes no
+    sidecar; a plan that writes one still takes `commit_guard`.
     """
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -451,7 +456,7 @@ def reconcile_media(
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
                                        commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
-                                       request=request)
+                                       request=request, queue_guard=queue_guard)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
@@ -474,14 +479,17 @@ def reconcile_media(
                 job.id if job else None,
                 attached=attached,
             )
-    try:
-        retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
-    except reserved_paths.ReservedPathLeafError as error:
-        if error.code not in {"MISSING", "RESERVED_PATH"}:
-            _confine_to_knowledge_base(vault, binary)
-        raise MediaProcessingError(
-            "MEDIA_NOT_FOUND", "media artifact does not exist"
-        ) from None
+    # A shared original has no file at its path; its pool object is immutable and read directly.
+    retained_identity = None
+    if stored is None or stored.local_path is None:
+        try:
+            retained_identity = reserved_paths.inspect_generic_file(vault, rel_binary)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code not in {"MISSING", "RESERVED_PATH"}:
+                _confine_to_knowledge_base(vault, binary)
+            raise MediaProcessingError(
+                "MEDIA_NOT_FOUND", "media artifact does not exist"
+            ) from None
     resolved_binary = _confine_to_knowledge_base(vault, binary)
     tier = access.access_tier(vault, rel_binary)
     if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
@@ -520,10 +528,13 @@ def reconcile_media(
             original=original,
         )
     )
+    writes_sidecar = repaired is not None or (pending is not None and original != pending)
+    queue_only = queue_guard is not None and commit_guard is not None and not writes_sidecar
 
     deferred_fanout: list[Path] = []
     deferred_created: list[Path] = []
     publication_intents: list[object] = []
+    rerun_with_commit_hold = False
 
     def _abort_publication_intents() -> None:
         if publication_intents:
@@ -536,6 +547,9 @@ def reconcile_media(
     def _write_sidecar(write: PlannedWrite) -> None:
         from .governance import catalog_publication
 
+        # A write needs the advancing hold. Queue-only mode plans no write and reruns with that hold
+        # when the runtime is unavailable, the one case that writes after the plan.
+        assert not queue_only, "a hold that leaves the commit generation alone never writes a sidecar"
         try:
             written = _preserve_module().commit_media_sidecar_writes(
                 vault,
@@ -612,6 +626,7 @@ def reconcile_media(
     def _commit_unit() -> tuple[bool, ReconcileResult | None]:
         """The guarded part: check that nothing changed since the plan, then commit. True with
         a result when reconcile_media returns it as it is."""
+        nonlocal rerun_with_commit_hold
         result: ReconcileResult | None = None
         commit_tier = access.access_tier(vault, rel_binary)
         if commit_tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
@@ -622,7 +637,7 @@ def reconcile_media(
                 f"media path is {commit_tier} under _access.yaml: {rel_binary}",
             )
         _confine_sidecar(vault, sidecar)
-        _verify_binary_identity(binary, resolved_binary, provenance)
+        _verify_binary_identity(vault, binary, resolved_binary, provenance)
         current = _read_sidecar_text(vault, sidecar)
         if current != original:
             if (
@@ -649,11 +664,17 @@ def reconcile_media(
                         expected_hash=content_hash(original),
                     )
                 )
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             _retire_completed_ocr(vault, binary, sidecar, media_type)
             result = ReconcileResult(media_type, "completed", sidecar, None)
         else:
             assert pending is not None
+            unavailable = _runtime_unavailable(vault)
+            if queue_only and unavailable is not None:
+                # The runtime went down after the plan, so this path must also write a blocked sidecar:
+                # change nothing here and run it again with the advancing hold.
+                rerun_with_commit_hold = True
+                return False, None
             if original != pending:
                 expected = (
                     content_hash(original)
@@ -668,7 +689,7 @@ def reconcile_media(
                     )
                 )
 
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
             attached = False
@@ -697,7 +718,6 @@ def reconcile_media(
                 durable_job = store.get(job_id)
             job_id = durable_job.id if durable_job is not None else None
             state = durable_job.state if durable_job is not None else media_jobs.PENDING
-            unavailable = _runtime_unavailable(vault)
             if unavailable is not None:
                 reason, next_action = unavailable
                 if durable_job is None or not store.mark(
@@ -735,7 +755,12 @@ def reconcile_media(
 
     with _commit_scope():
         early, result = _committing(
-            vault, commit_guard, "media_reconcile_commit", _commit_unit
+            vault, queue_guard if queue_only else commit_guard, "media_reconcile_commit", _commit_unit
+        )
+    if rerun_with_commit_hold:
+        return reconcile_media(
+            vault, binary, explicit=explicit, commit_guard=commit_guard,
+            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request,
         )
     if early:
         return result
@@ -856,14 +881,22 @@ def _iter_rotating_governed_media(
             break
 
 
+def unplaced_originals(vault: Path):
+    """Each bound original that holds no ordinary file: an evicted copy (`local_path` is None) or a shared pool object."""
+    from . import media_store, original_pool
+
+    if originals.binding_for(vault) is None and not original_pool.enabled(vault):
+        return
+    for stored in media_store.bound_originals(vault, unconfirmed=media_store.skip_unknown_original):
+        if stored.state == "evicted" or stored.local_path is not None:
+            yield stored
+
+
 def _iter_governed_media(vault: Path, kb_root: Path):
     """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
-    if originals.binding_for(vault) is not None:
-        from . import media_store
-
-        for stored in media_store.bound_originals(vault):
-            if stored.state == "evicted" and classify_media(stored.path):
-                yield stored.path
+    for stored in unplaced_originals(vault):
+        if classify_media(stored.path):
+            yield stored.path
     stack = [kb_root]
     while stack:
         directory = stack.pop()
@@ -1028,7 +1061,7 @@ def _is_completed_sidecar_shape(
     if not all(present):
         return False
     stored = originals.original_state(vault, binary)
-    if stored.state == "evicted":
+    if stored.state == "evicted" or stored.local_path is not None:
         current_size = stored.binary_size
     else:
         try:
@@ -1199,7 +1232,7 @@ def _retry_ambiguous_batch_failure(
             return _block_ambiguous_retry(store, durable, sidecar)
 
         try:
-            _verify_binary_identity(binary, resolved_binary, provenance)
+            _verify_binary_identity(vault, binary, resolved_binary, provenance)
             current, _guard = read_guarded_text(vault, sidecar)
         except (OSError, UnicodeError, MediaProcessingError, PathGuardError):
             return _block_ambiguous_retry(store, durable, sidecar)
@@ -1429,6 +1462,7 @@ def reprocess_media(
     language: str | None = None,
     multilingual: bool = False,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     """Queue one explicit second extraction of a media file, optionally with a language or mode.
 
@@ -1438,7 +1472,8 @@ def reprocess_media(
     is refused, so the caller asks again when that run ends.
     """
     return _queue_extraction(
-        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
+        queue_guard=queue_guard,
     )
 
 
@@ -1468,6 +1503,7 @@ def _queue_extraction(
     commit_guard: Callable[[], AbstractContextManager[object]] | None,
     *,
     reprocess: bool,
+    queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
     binary = Path(binary_path)
@@ -1489,7 +1525,9 @@ def _queue_extraction(
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
     request = ExtractionRequest(hint, mode, reprocess)
-    result = reconcile_media(vault, binary, commit_guard=commit_guard, request=request)
+    result = reconcile_media(
+        vault, binary, commit_guard=commit_guard, request=request, queue_guard=queue_guard
+    )
     if result is None:  # an explicit request is never skipped; this narrows the type
         raise MediaProcessingError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
     if not reprocess and result.state == "completed":
@@ -1501,7 +1539,8 @@ def _queue_extraction(
         return replace(result, requeued=1)
     # Only a completed transcript reaches here: reprocess replaces it, and reconcile queued nothing.
     store = media_jobs.MediaJobStore(vault)
-    boundary = commit_guard() if commit_guard is not None else nullcontext()
+    hold = queue_guard if queue_guard is not None else commit_guard
+    boundary = hold() if hold is not None else nullcontext()
     with boundary:
         job_id = store.request_extraction(
             media_jobs.MediaJob(
@@ -1535,10 +1574,16 @@ def _retire_completed_ocr(
     media_jobs.MediaJobStore(vault, create=False).retire_ocr(binary, media_type)
 
 
+def held_path(vault: Path, binary: Path) -> Path:
+    """Where the bytes of `binary` are: its own file, or the immutable pool object of a shared original."""
+    shared = originals.pooled(vault, binary)
+    return shared.local_path if shared is not None else binary
+
+
 def _confine_to_knowledge_base(vault: Path, binary: Path) -> Path:
     try:
         binary.relative_to(managed_root(vault))
-        resolved = binary.resolve(strict=True)
+        resolved = held_path(vault, binary).resolve(strict=True)
         resolved.relative_to(managed_root(vault).resolve(strict=True))
     except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
         raise MediaProcessingError(
@@ -1600,21 +1645,25 @@ def _read_provenance(
     resolved_binary: Path,
     expected_identity: held_fs.StableIdentity | None = None,
 ) -> _BinaryProvenance:
+    shared = None
     if expected_identity is None:
         try:
             relative = binary.relative_to(vault).as_posix()
             expected_identity = reserved_paths.inspect_generic_file(vault, relative)
         except (ValueError, reserved_paths.ReservedPathLeafError):
-            raise MediaProcessingError(
-                "MEDIA_NOT_FOUND", "media artifact does not exist"
-            ) from None
+            # A shared original has no file to inspect; its object is immutable and opened by `resolved_binary`.
+            shared = originals.pooled(vault, binary)
+            if shared is None:
+                raise MediaProcessingError(
+                    "MEDIA_NOT_FOUND", "media artifact does not exist"
+                ) from None
     digest = hashlib.sha256()
     try:
         with resolved_binary.open("rb") as stream:
             before = os.fstat(stream.fileno())
             if (
-                before.st_dev != expected_identity.device
-                or before.st_ino != expected_identity.inode
+                (expected_identity is not None
+                 and (before.st_dev != expected_identity.device or before.st_ino != expected_identity.inode))
                 or not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
             ):
@@ -1638,6 +1687,9 @@ def _read_provenance(
             "MEDIA_CHANGED_DURING_RECONCILIATION",
             f"media changed while provenance was being recorded: {binary}",
         )
+    if shared is not None and (digest.hexdigest(), before.st_size) != (shared.binary_sha256, shared.binary_size):
+        # A shared object is named by its digest, so other bytes are damage, never the filing's new content.
+        raise MediaProcessingError("MEDIA_ORIGINAL_UNVERIFIED", "the shared original differs from its binding")
     return _BinaryProvenance(
         relative_path=binary.relative_to(vault).as_posix(),
         original_filename=binary.name,
@@ -1666,10 +1718,14 @@ def read_timestamp_hints(binary: Path) -> tuple[int, int] | None:
 
 
 def _verify_binary_identity(
-    binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
+    vault: Path, binary: Path, resolved_binary: Path, provenance: _BinaryProvenance
 ) -> None:
     try:
-        if binary.resolve(strict=True) != resolved_binary:
+        try:
+            target = binary.resolve(strict=True)
+        except FileNotFoundError:
+            target = held_path(vault, binary).resolve(strict=True)  # a shared original's pool object
+        if target != resolved_binary:
             raise OSError("media path target changed")
         # Keep the identity source consistent with _read_provenance. On Windows,
         # stat(path) and fstat(open_handle) can report different st_ctime_ns

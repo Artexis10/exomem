@@ -52,13 +52,18 @@ COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID = "collections-sqlite-only-v1"
 #: A vault whose pages the collection store holds (OpenSpec make-vault-store-canonical). It is also the
 #: release capability's name (``collection_store.capability.VAULT_STORE_V1``), so one string serves both.
 VAULT_STORE_COMPATIBILITY_ID = "vault-store-v1"
-# This ID names the closed private-upload cancellation format.
+# These IDs name the closed original-storage and private-upload formats.
+SHARED_ORIGINALS_COMPATIBILITY_ID = "shared-originals-v1"
 HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID = "held-upload-cancellation-v1"
+# The manifest key a new vault's creator sets; the first service start with launcher support activates the
+# shared layout and removes it. Releases that predate it ignore the key, as they ignore any unknown key.
+_SHARED_ORIGINALS_INTENT = "shared_originals_intent"
 # With the store schema IDs, the closed catalog this release recognizes; an earlier release
 # reads any other ID as unknown.
 _OPTIONAL_COMPATIBILITY_IDS = _COLLECTION_STORE_COMPATIBILITY_IDS | frozenset({
     "raw-protection-v1", CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-    VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
+    VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
+    HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
 })
 
 
@@ -269,8 +274,8 @@ def supported_state_compatibility_ids() -> tuple[str, ...]:
     return (
         "raw-protection-v1", "collections-store-v1", COLLECTION_MARKER_COMPATIBILITY_ID,
         CONNECTOR_BOUNDARY_COMPATIBILITY_ID, COLLECTIONS_SQLITE_ONLY_COMPATIBILITY_ID,
-        VAULT_STORE_COMPATIBILITY_ID, HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID,
-        *store_schema.compatibility_ids(),
+        VAULT_STORE_COMPATIBILITY_ID, SHARED_ORIGINALS_COMPATIBILITY_ID,
+        HELD_UPLOAD_CANCELLATION_COMPATIBILITY_ID, *store_schema.compatibility_ids(),
     )
 
 
@@ -439,6 +444,54 @@ def record_vault_store_compatibility(
     ids = frozenset({VAULT_STORE_COMPATIBILITY_ID})
     _record_optional(vault_root, authority_check, add=ids if active else frozenset(),
                      drop=frozenset() if active else ids)
+
+
+def record_shared_originals_compatibility(
+    vault_root: Path, *, authority_check: Callable[[], bool], lock_timeout: float | None = None,
+) -> None:
+    """Enroll before pool publication; the caller proves lifecycle custody.
+
+    A serving caller passes `lock_timeout` and gets `TimeoutError` under contention.
+    """
+    _record_optional(vault_root, authority_check, add=frozenset({SHARED_ORIGINALS_COMPATIBILITY_ID}),
+                     lock_timeout=lock_timeout)
+
+
+def record_shared_originals_intent(vault_root: Path, *, authority: object) -> None:
+    """Record that a genuinely new vault starts in shared original storage.
+
+    Only a vault's creator calls this, under its offline authority. The intent is no format: the vault keeps
+    ordinary storage, which every release reads, until a service start that proves launcher support activates
+    the shared layout and clears the intent. A release that predates the intent ignores it.
+    """
+    _require_offline_authority(authority)
+    root = Path(vault_root)
+    state_dir = state_paths.vault_state_dir(root)
+    with _migration_lock(state_dir):
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("a new vault records its original storage once its state is complete")
+        if manifest.get(_SHARED_ORIGINALS_INTENT) is not True:
+            manifest[_SHARED_ORIGINALS_INTENT] = True
+            _write_manifest(state_dir, manifest)
+
+
+def shared_originals_intent(vault_root: Path) -> bool:
+    """Whether the vault's state records that it starts in shared original storage at its first capable start."""
+    manifest = _load_manifest(state_paths.vault_state_dir(vault_root), vault_root=vault_root)
+    return manifest is not None and manifest.get(_SHARED_ORIGINALS_INTENT) is True
+
+
+def clear_shared_originals_intent(
+    vault_root: Path, *, authority_check: Callable[[], bool], lock_timeout: float | None = None,
+) -> None:
+    """Retire the intent once the shared layout is active; the caller proves lifecycle custody."""
+    with _collection_store_manifest(
+        vault_root, authority_check, "intent retirement", lock_timeout=lock_timeout,
+    ) as (state_dir, manifest):
+        if _SHARED_ORIGINALS_INTENT in manifest:
+            del manifest[_SHARED_ORIGINALS_INTENT]
+            _write_manifest(state_dir, manifest)
 
 
 def record_held_upload_cancellation_compatibility(
@@ -874,6 +927,26 @@ def restore_connector_boundary_offline(vault_root: Path, *, authority: object, r
         requirement["selectors_sha256"], frozenset(requirement["protected_scopes"]), (),
         tuple(requirement["capture_paths"]),
     ))
+
+
+def restore_shared_originals_offline(vault_root: Path, *, authority: object) -> None:
+    """Re-enrol a restored archive whose canonical pool marker the caller has read, before anything serves it.
+
+    The archive carries the marker but not the state manifest, so without this an earlier release would open
+    the restored archive and find its pooled originals absent.
+    """
+    _require_offline_authority(authority)
+    root = Path(vault_root)
+    state_dir = state_paths.vault_state_dir(root)
+    with _migration_lock(state_dir):
+        manifest = _load_manifest(state_dir, vault_root=root)
+        if manifest is None or manifest["state"] != "complete":
+            raise StateMigrationOfflineRequired("restored shared originals require complete state")
+        if SHARED_ORIGINALS_COMPATIBILITY_ID not in manifest["descriptors"]:
+            manifest["descriptors"] = sorted([*manifest["descriptors"], SHARED_ORIGINALS_COMPATIBILITY_ID])
+            _write_manifest(state_dir, manifest)
+        with _RESOLUTION_LOCK:
+            _RESOLUTION_CACHE.pop(_cache_key(root, state_dir), None)
 
 
 def migrate_vault_state_offline(
@@ -1442,6 +1515,8 @@ def _validate_manifest(
         raise StateMigrationManifestError(path, "descriptor set is invalid")
     if payload.get("state") not in _MANIFEST_STATES:
         raise StateMigrationManifestError(path, "migration state is invalid")
+    if _SHARED_ORIGINALS_INTENT in payload and payload[_SHARED_ORIGINALS_INTENT] is not True:
+        raise StateMigrationManifestError(path, "shared-originals intent is invalid")
     families = payload.get("families")
     if not isinstance(families, dict):
         raise StateMigrationManifestError(path, "family states are invalid")

@@ -256,6 +256,7 @@ _PATTERN_SAMPLES = (
     ".embeddings.0123456789abcdef.sqlite-wal",
     "..review-state.json.abc123_4.tmp",
     "..due-state-candidates.json.abc123_4.tmp",
+    "..ownership-rotation.json.abc123_4.tmp",
     f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
     ".lexical-staged-0123456789abcdef.sqlite-wal",
     f".lexical.sqlite-shm.quarantine-{_HEX32}",
@@ -330,6 +331,7 @@ def test_a_descriptor_field_that_the_prefilter_has_no_condition_for_lets_every_p
 
 def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> None:
     from exomem import (
+        brief_watermarks,
         claims,
         compiled_history,
         deferred_index,
@@ -340,9 +342,11 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         lexstore,
         media_jobs,
         memory_refs,
+        ownership_rotation,
         procedure_approval,
         review_state,
         served_context,
+        source_custody,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -353,6 +357,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     expected = {
         "authorization-projections",
         "batch-workspace",
+        "brief-watermarks",
         "claims-store",
         "clip-store",
         "collection-archive",
@@ -369,6 +374,8 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "due-state",
         "embeddings-store",
         "freshness-store",
+        "generated-fragments",
+        "generated-fragments-index",
         "governance-store",
         "governance-tree",
         "graph-handoff",
@@ -387,12 +394,15 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "ownership-review",
         "procedure-approval-key",
         "procedure-approvals",
+        "original-pool",
         "references-store",
         "refs-store",
         "review-state",
         "source-corrections",
+        "source-custody",
         "served-context",
         "voice-profile-store",
     }
@@ -410,6 +420,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     token32 = "1" * 32
     claims_from_owners = [
         (root / compiled_history.history_root(), "compiled-history"),
+        (source_custody.manifest_root(root) / "6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b.json", "source-custody"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
@@ -440,6 +451,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         ),
         (review_state.state_path(root), "review-state"),
         (served_context.sidecar_path(root), "served-context"),
+        (brief_watermarks.sidecar_path(root), "brief-watermarks"),
         (
             review_state.state_path(root).with_name(
                 f".{review_state.STATE_FILENAME}.abc123_4.tmp"
@@ -466,6 +478,14 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
                 f".{due_state.EMISSION_FILENAME}.abc123_4.tmp"
             ),
             "due-state",
+        ),
+        (ownership_rotation.asked_path(root), "ownership-review"),
+        (ownership_rotation.rotation_path(root), "ownership-review"),
+        (
+            ownership_rotation.rotation_path(root).with_name(
+                f".{ownership_rotation.ROTATION_FILENAME}.abc123_4.tmp"
+            ),
+            "ownership-review",
         ),
         (
             lexical_live.with_name(f"{lexical_live.name}.rebuild-{token32}.tmp"),
@@ -4855,3 +4875,30 @@ def test_every_generic_command_path_role_routes_every_private_family() -> None:
                 assert hit is not None, (command.name, role.argument, descriptor_id)
                 assert hit.role == role
                 assert hit.classification.descriptor_id == descriptor_id
+
+
+def test_delayed_owner_cleanup_cannot_withdraw_a_replacement_publication(tmp_path: Path) -> None:
+    """Cleanup of a replaced temporary must not make its new private identity readable through an alias."""
+    pool = tmp_path / "Knowledge Base" / reserved_paths.ORIGINAL_POOL_DIRNAME
+    pool.mkdir(parents=True)
+    path = pool / "pending"
+    path.write_bytes(b"earlier stage")
+    previous = reserved_paths._lstat_identity(path)
+    name = path.relative_to(tmp_path).as_posix()
+    with reserved_paths._subsystem_authority_scope("original_pool"):
+        with reserved_paths._identity_coordination_scope(tmp_path, descriptor_ids=("original-pool",)):
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={name: previous}, remove={})
+        replacement = pool / "replacement"
+        replacement.write_bytes(b"new private stage")
+        replacement.replace(path)
+        current = reserved_paths._lstat_identity(path)
+        assert current != previous
+        with reserved_paths._identity_coordination_scope(tmp_path, descriptor_ids=("original-pool",)):
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={name: current}, remove={})
+            reserved_paths._publish_owner_identity_delta(tmp_path, "original-pool", put={}, remove={name: previous})
+    catalogue = reserved_paths._published_identity_catalogue(tmp_path)
+    assert catalogue.descriptor_for(current) == "original-pool"
+    assert catalogue.descriptor_for(previous) is None
+    with pytest.raises(reserved_paths.ReservedPathLeafError) as refused:
+        reserved_paths.read_generic_bytes(tmp_path, name)
+    assert refused.value.code == "RESERVED_PATH"
