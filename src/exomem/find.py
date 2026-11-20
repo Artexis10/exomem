@@ -2027,6 +2027,7 @@ def find(
         filter_plan, dimension_check = _managed_dimension_plan(
             filter_plan, dimension_lookups, result_level=result_level
         )
+    filter_plan = _withhold_positions(vault_root, filter_plan)
     if filter_plan.root is not None and managed_runtime:
         # A managed reader refuses a field no index can evaluate, and refuses it
         # HERE — before the freshness key, the hot cache, any catalogue query or
@@ -3170,6 +3171,25 @@ def _eligible_unit_records(
             ):
                 eligible[unit.unit_ref] = (page, unit, source_order)
     return eligible
+
+
+def _withhold_positions(
+    vault_root: Path, plan: structured_filters.FilterPlan
+) -> structured_filters.FilterPlan:
+    """`plan` made to read a recorded position only as this caller may see it.
+
+    Only a plan that reads a position pays for it, and only a caller who may not download every
+    original: the owner's plan is returned as it is. The same callers carry `caller_admission`, which
+    keeps the hot cache from serving their answers to anyone else.
+    """
+    from .governance import egress
+
+    if not structured_filters.reads_position(plan):
+        return plan
+    allowed = egress.original_download_filter(vault_root)
+    if allowed is None:
+        return plan
+    return plan.with_position_gate(lambda original: not allowed(original))
 
 
 def _origin_view(vault_root: Path) -> bool:

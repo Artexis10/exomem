@@ -410,6 +410,14 @@ _ELIGIBILITY_COLUMNS: tuple[str, ...] = (
     "speakers_json",
     "updated_day",
     "updated_json",
+    # When and where the original was captured, from a media sidecar: the day answers ordered and
+    # `$in` date filters like `updated_day`; the position is one REAL column per axis, NULL unless
+    # the page states a valid one. They hold every page's position, so a caller who may not see it is
+    # served a superset and the evaluator decides (`structured_filters.PositionGate`).
+    "capture_day",
+    "capture_date_json",
+    "capture_lat",
+    "capture_lon",
 )
 _EMPTY_ELIGIBILITY: tuple[None, ...] = (None,) * len(_ELIGIBILITY_COLUMNS)
 
@@ -426,6 +434,9 @@ _PAGE_AXIS_COLUMNS: dict[str, tuple[str | None, str]] = {
     "page.tags": (None, "tags_json"),
     "page.speakers": (None, "speakers_json"),
     "page.updated": ("updated_day", "updated_json"),
+    "page.capture_date": ("capture_day", "capture_date_json"),
+    "page.capture_lat": ("capture_lat", None),
+    "page.capture_lon": ("capture_lon", None),
 }
 #: The same, over `semantic_units`. The five governed scalar axes are
 #: single-valued by construction (the parser produces one string or None), so
@@ -519,7 +530,7 @@ def _day_members(value: object, *, present: bool) -> str | None:
     return "[]"
 
 
-def _eligibility_columns(page: object) -> tuple[str | None, ...]:
+def _eligibility_columns(page: object) -> tuple[str | float | None, ...]:
     """The eligibility row for one parsed page, in `_ELIGIBILITY_COLUMNS` order.
 
     Derived from `structured_filters.page_view` rather than from raw
@@ -532,7 +543,7 @@ def _eligibility_columns(page: object) -> tuple[str | None, ...]:
 
     view = structured_filters.page_view(page)
     recorded = view.get("updated")
-    row: list[str | None] = []
+    row: list[str | float | None] = []
     for axis, key in (
         ("page.type", "type"),
         ("page.status", "status"),
@@ -550,6 +561,12 @@ def _eligibility_columns(page: object) -> tuple[str | None, ...]:
         row.append(_canonical_members(axis, view.get(key), present=key in view, list_axis=True))
     row.append(_iso_day(recorded))
     row.append(_day_members(recorded, present="updated" in view))
+    captured = view.get("capture_date")
+    row.append(_iso_day(captured))
+    row.append(_day_members(captured, present="capture_date" in view))
+    # Already settled to a stated position by `page_view`; a page that states none stores NULL.
+    row.append(view.get("capture_lat"))
+    row.append(view.get("capture_lon"))
     return tuple(row)
 
 
@@ -6686,6 +6703,10 @@ class LexicalStore:
             # any finer granularity; `updated_json` answers presence and `$in`.
             " updated_day TEXT,"
             " updated_json TEXT,"
+            " capture_day TEXT,"
+            " capture_date_json TEXT,"
+            " capture_lat REAL,"
+            " capture_lon REAL,"
             " eligibility_view_json TEXT,"
             " content_hash TEXT, structure_json TEXT, ranking_json TEXT,"
             # The duplicate-handling index: derived from the page's bytes, never authority.
@@ -6825,6 +6846,20 @@ class LexicalStore:
         conn.execute("CREATE INDEX IF NOT EXISTS pages_status ON pages(status, in_kb, in_vault)")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS pages_updated_day ON pages(updated_day, in_kb, in_vault)"
+        )
+        # Only a media sidecar records a capture day or a position, so these partial indexes stay as
+        # small as the photos. A window then costs its matches, not the corpus.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_capture_day ON pages(capture_day, in_kb, in_vault) "
+            "WHERE capture_day IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_capture_lat ON pages(capture_lat, in_kb, in_vault) "
+            "WHERE capture_lat IS NOT NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_capture_lon ON pages(capture_lon, in_kb, in_vault) "
+            "WHERE capture_lon IS NOT NULL"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS semantic_units_verdict "

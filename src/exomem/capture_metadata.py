@@ -44,6 +44,7 @@ BASIS_UTC = "utc"
 
 TEXT_LIMIT = 128
 SIDE_LIMIT = 1_000_000
+_LAT_LIMIT, _LON_LIMIT = 90.0, 180.0
 
 # The EXIF and GPS tags that the EXIF specification fixes.
 _MAKE, _MODEL = 0x010F, 0x0110
@@ -112,6 +113,24 @@ class CaptureFacts:
 def without_position(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
     """`frontmatter` with the position fields removed, as a page without a position reads."""
     return {key: value for key, value in frontmatter.items() if key not in LOCATION_FIELDS}
+
+
+def carries_position(frontmatter: object) -> bool:
+    """Whether `frontmatter` holds a position field, valid or not: a withheld caller sees neither."""
+    return isinstance(frontmatter, Mapping) and not LOCATION_FIELDS.isdisjoint(frontmatter)
+
+
+def coordinate(field: str, value: object) -> float | None:
+    """`value` as the stored latitude or longitude it names, or None when the page states no such position.
+
+    The filter view and the catalogue columns both read a position through this, so the SQL narrowing
+    and the in-memory evaluation settle on the same set. A bool, a non-finite number or a value outside
+    the field's range is not a stated position.
+    """
+    limit = _LAT_LIMIT if field == CAPTURE_LAT else _LON_LIMIT
+    if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > limit:
+        return None
+    return float(value)
 
 
 def read(path: Path, media_type: str) -> CaptureFacts | None:

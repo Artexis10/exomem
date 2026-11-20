@@ -1963,6 +1963,11 @@ def set_capture_fields(content: str, capture: CaptureFacts) -> str:
     return content
 
 
+def without_position_fields(content: str) -> str:
+    """`content` as a page with no recorded position reads: the position fields removed, nothing else."""
+    return _remove_frontmatter_fields(content, lambda key: key in capture_metadata.LOCATION_FIELDS)
+
+
 def render_capture_block(before: str, capture: CaptureFacts) -> str:
     """The owner backfill's write: `before` with only its capture block replaced.
 
