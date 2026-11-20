@@ -354,10 +354,11 @@ class CorrectionPlan:
     def require_authority(self, root: Path) -> None:
         from .governance import connector_boundary, egress
 
-        if not _authorizer(root)(self.old_path):
+        # A withheld write target answers as if absent, as every write door does.
+        if not _authorizer(root)(self.old_path) or egress.write_target_withheld(root, self.old_path):
             raise SourceCorrectionUnavailable
         # The caller has read this Source, so saying it cannot be corrected from here reveals nothing new.
-        if access.writable_reason(root, self.old_path) is not None or egress.write_target_withheld(root, self.old_path):
+        if access.writable_reason(root, self.old_path) is not None:
             raise ValueError(_NOT_PERMITTED)
         connector_boundary.require_write(root, self.old_path, content=self.old_source.encode("utf-8"))
         if not can_record(root, self.old_ref):
