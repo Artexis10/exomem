@@ -63,7 +63,9 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   preferences, one-off activity, incidental associations, trivial metrics, and
   tentative events stay quiet. Durable interpretations may be preserved with
   explicit attribution and uncertainty; they are not established facts or
-  observed events. Eligibility never creates an Entity, collection, or
+  observed events. A question the work leaves open is saved as an open question,
+  and the values a task settled are saved as values, never as a pointer to a
+  working file. Eligibility never creates an Entity, collection, or
   schema: a new Entity or your own affiliation edge follows `proactive_capture`;
   accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
@@ -135,9 +137,10 @@ Updating a resolved entity follows the live capture disposition; the threshold f
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
-Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
-questions, or incidental names without durable reusable context. Capture at the
-landing, not during the flight.
+Not a stepping-stone: mid-thought exploration, brainstorm tangents, or incidental
+names without durable reusable context. A question the work leaves open at the
+landing is a stepping-stone, saved as an open question. Capture at the landing,
+not during the flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.

@@ -33,7 +33,9 @@ interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
 collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
+metrics, and tentative events stay quiet. Durable interpretations may be preserved with
+explicit attribution and uncertainty; they are not established facts or observed events.
+Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
 `proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires

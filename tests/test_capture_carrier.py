@@ -264,17 +264,31 @@ def test_stateless_http_sends_the_block_once_per_token_and_again_after_a_change(
 
 
 def test_the_worst_case_block_is_ascii_and_fits_the_rendered_ceiling(served) -> None:
-    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,440 bytes.
+    """Silent with a link shortcut carries the longest text. The hook renders it under its header; one block, 1,600 bytes.
 
     1,200 -> 1,320 on 2026-11-09: the block carries the correction of advice the user says failed.
     1,320 -> 1,440 on 2026-11-17: the block carries the document-identity rule.
+    1,440 -> 1,600 on 2026-11-20: the block carries held views, open questions and settled values.
+    1,600 is the hook's own cap: shorten a sentence before the next addition.
     """
     from test_retrieve_nudge_working_set import hook
 
     rendered = hook._capture_policy_text(prominence.capture_policy("silent", "confirm-shortcut"))
 
     assert rendered.isascii()
-    assert 0 < len(rendered.encode("ascii")) <= 1440
+    assert 0 < len(rendered.encode("ascii")) <= 1600
+
+
+def test_every_carrying_block_survives_the_hooks_cap_with_the_epistemic_sentence() -> None:
+    """Above its cap the hook keeps only the block's lead sentence, so a longer sentence would silence every capture rule."""
+    from test_retrieve_nudge_working_set import hook
+
+    carrying = [d for d in envelope.PROACTIVE_CAPTURE_MEANING if d != "off"]
+    for disposition in carrying:
+        for acceptance in envelope.LINK_ACCEPTANCE_MEANING:
+            rendered = hook._capture_policy_text(prominence.capture_policy(disposition, acceptance))
+
+            assert prominence._EPISTEMIC_CAPTURE in rendered, (disposition, acceptance)
 
 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))
