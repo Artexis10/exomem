@@ -30,6 +30,7 @@ from . import (
     vault,
 )
 from .capture_metadata import CaptureFacts
+from .vault_store import read
 
 MODE = "capture-metadata"
 _OPERATION = "capture_metadata_chunk"
@@ -95,10 +96,16 @@ def backfill(vault_root: Path, *, dry_run: bool = True, plan_id: str | None = No
 
 
 def _plan(root: Path) -> _Plan:
+    # One store snapshot answers the page census and each original's state, so the plan names one revision.
+    with read.request_snapshot(root):
+        return _read_plan(root)
+
+
+def _read_plan(root: Path) -> _Plan:
     plan = _Plan()
     archive = originals.ArchiveReads(root)
     # The canonical pages, which a store-mode vault keeps in its store and may not have projected to disk.
-    for rel, body in foreground_priority.yielding_in_bulk(media_bindings._pages(root)):  # noqa: SLF001 - the census's page source
+    for rel, body in foreground_priority.yielding_in_bulk(media_bindings._pages(root, join_request=True)):  # noqa: SLF001 - the census's page source
         data = bytes(body)
         try:
             fields, _body, marker = vault.parse_frontmatter(data.decode("utf-8"), custody=True)
