@@ -56,8 +56,8 @@ tests/test_hosted_secret_handoff.py
 tests/test_hosted_terraform_contract.py
 tests/test_incident_collection_checks.py
 tests/test_incident_regressions.py
+tests/test_incident_server_child.py
 tests/test_incident_source_checks.py
-tests/test_incident_warm_recall.py
 tests/test_incident_warmup.py
 tests/test_install_hook.py
 tests/test_learning_fresh_session_journey.py

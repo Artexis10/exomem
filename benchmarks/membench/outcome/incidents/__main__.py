@@ -334,6 +334,8 @@ def run_arm_side(
         [sys.executable, str(ARM_SIDE), *args],
         input=stdin,
         env=child_env(root, arm, arm_env),
+        # The unit root holds no `.env`; the caller's directory may, and product code loads it over `env`.
+        cwd=root,
         capture_output=True,
         text=True,
         timeout=ARM_SIDE_TIMEOUT_SECONDS,

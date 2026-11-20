@@ -144,6 +144,8 @@ def loopback_mcp(
                 str(port),
             ],
             env=env,
+            # The unit root holds no `.env`; the caller's directory may, and the server loads it over `env`.
+            cwd=root,
             stdout=sink,
             stderr=subprocess.STDOUT,
             start_new_session=True,

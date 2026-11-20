@@ -352,7 +352,9 @@ def tool_calls(stdout: str) -> list[dict[str, Any]]:
     calls: dict[str, dict[str, Any]] = {}
     ordered: list[dict[str, Any]] = []
     for payload in _lines(stdout):
-        blocks = (payload.get("message") or {}).get("content")
+        # A `system` event such as `permission_denied` carries its message as a plain string.
+        message = payload.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
         if not isinstance(blocks, list):
             continue
         for block in blocks:
