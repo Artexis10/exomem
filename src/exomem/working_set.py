@@ -1896,13 +1896,13 @@ def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
 
 def _connection_why(
     vault_root: Path, *, relation: str, direction: str, authoring_rel: str,
-    target_rel: str, authoring_body: str | None, lede_rel: str, lede_body: str | None,
+    target_rel: str, authoring_body: str | None, lede_body: str | None,
     resolver: Any, seen: Callable[[str], bool],
 ) -> str:
     """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary.
 
-    The lede that stands in is the connected page's, so `lede_rel` owns `lede_body` for egress;
-    on an inbound connection that page is the edge's author, not its target.
+    Both bodies arrive as the caller's prose, each egressed under the page it was read from,
+    so a line inside an origin carrier is never a quoted line and the lede holds no carrier.
     """
     from . import markdown_relations
     from .governance import egress
@@ -1935,9 +1935,7 @@ def _connection_why(
                     if "[[" in context:
                         context = ""
     if not context and lede_body:
-        context = working_set_index.lede(
-            egress.prose_for_caller(vault_root, lede_body, owner_path=lede_rel)
-        )
+        context = working_set_index.lede(lede_body)
         # A lede link is shown by its display name only when it names a page the caller sees;
         # otherwise the bare relation stands, so no path or withheld name reaches the reason.
         # The wikilink opener is a fixed syntax token: the display pass renders only the links the
@@ -2040,8 +2038,11 @@ def read_connections(
         return rel in seed_paths or (rel in by_path and (visible is None or visible(rel)))
 
     def _body(rel: str) -> str | None:
+        """The page's prose for this caller, egressed under the path it was read from."""
         page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
-        return None if page is None else str(page.body or "")
+        if page is None:
+            return None
+        return egress.prose_for_caller(Path(vault_root), str(page.body or ""), owner_path=rel)
 
     def _reason(seed: str, connection: Connection) -> str:
         bare = f"{connection.relation} ({connection.direction})"
@@ -2054,8 +2055,7 @@ def read_connections(
             return _connection_why(
                 Path(vault_root), relation=connection.relation, direction=connection.direction,
                 authoring_rel=authoring_rel, target_rel=target_rel,
-                authoring_body=_body(authoring_rel),
-                lede_rel=connection.target_path, lede_body=_body(connection.target_path),
+                authoring_body=_body(authoring_rel), lede_body=_body(connection.target_path),
                 resolver=resolver, seen=_seen,
             )
         except egress.ReaderViewUnavailable:

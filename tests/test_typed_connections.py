@@ -435,3 +435,24 @@ def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: P
     inbound = next(connection for connection in listed if connection.direction == "inbound")
     assert "The revised visit report" in inbound.why
     assert "exomem-origin" not in inbound.why
+
+
+def test_a_line_inside_an_origin_carrier_is_never_quoted_as_a_reason(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A carrier that spans lines can hold a line linking the seed; that line is withheld, not quoted."""
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    _page(vault, "visit-report", body=(
+        "The revised visit report.\n\n<!-- exomem-origin\n"
+        f"confidential interview transcript about [[{seed.removesuffix('.md')}]]\n-->\n\n"
+        f"- supersedes [[{seed.removesuffix('.md')}]]\n"
+    ))
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+    monkeypatch.setattr(egress, "projects_origin_for_caller", lambda *args, **kwargs: True)
+
+    served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+
+    listed, _omitted = served[seed]
+    reasons = " ".join(connection.why for connection in listed)
+    assert "confidential interview transcript" not in reasons
