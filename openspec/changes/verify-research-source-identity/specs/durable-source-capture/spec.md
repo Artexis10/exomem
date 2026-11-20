@@ -45,6 +45,7 @@ The predecessor page and its original SHALL remain byte-identical, and every exi
 
 A correction that supplies a new file, new `content` or new `passages` SHALL take its URL, kind, domain, projects, tags, document form, reason for capture and custody mark from the call when the call sets them, and from the predecessor when the call omits them, as a metadata-only correction does.
 It SHALL NOT require `source_kind` when the predecessor records one.
+Its successor SHALL keep owner-only raw protection when the predecessor has it, whatever the call sets.
 
 #### Scenario: A text Source's title is corrected
 

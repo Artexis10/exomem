@@ -9384,6 +9384,10 @@ def op_capture_source(
         projects = projects if projects is not None else carried.get("projects")
         document_form = document_form if document_form is not None else carried.get("document_form")
         custody_only = custody_only if custody_only is not None else carried.get("custody_only")
+        from .governance import raw_protection as raw_guard
+
+        # A successor is never less protected than its predecessor, as in the metadata-only route.
+        raw_protection = raw_protection or raw_guard.marked(plan.old_path)
     named_kind = bool((source_type or "").strip() or (source_kind or "").strip())
     # Resolved before any byte is fetched or written, for files and text alike. A correction that names no
     # kind keeps its predecessor's.

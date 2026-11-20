@@ -390,6 +390,22 @@ def test_a_text_correction_that_names_only_its_title_and_text_keeps_every_other_
     assert kept["custody_only"] is True
 
 
+def test_a_text_correction_of_an_owner_only_source_stays_owner_only(vault, source_schema, owner_scope) -> None:
+    from exomem.governance import raw_protection as raw_guard
+
+    old = commands.op_capture_source(
+        vault, source_schema, title="Ledger", source_kind="session", content="Private ledger lines.", raw_protection=True,
+    )["source"]
+    correction = {"supersedes": old["path"], "expected_hash": mutation_hash(vault / old["path"]), "reason": "Fix the title."}
+
+    corrected = commands.op_capture_source(
+        vault, source_schema, title="Household ledger", content="Private ledger lines.", correction=correction,
+    )["source"]
+
+    assert raw_guard.marked(old["path"])
+    assert raw_guard.marked(corrected["path"])
+
+
 # --- identity states a capture reports ----------------------------------------------------------------
 
 
