@@ -80,7 +80,7 @@ Capture date and position go into the metadata index that structured filters use
 - **The backfill rewrites stored sidecars.** Mitigation: it runs only when the owner starts it, touches only the capture block, and reports what it skipped.
 - **Video metadata can sit at the end of a file.** Mitigation: the probe reads the container's metadata atom where it is. Only an original with bytes on the volume is read.
 - **A UTC-only video can land one day off.** Mitigation: `capture_date_basis: utc` marks the date, and contextual retrieval can widen windows (see the camera-clock risk).
-- **Store mode and the capture columns.** The page store keeps its own copy of the page table, and this change does not alter that copy. No vault runs in store mode today. A release that enables store mode needs the store's owner-side upgrade for the capture columns before it serves a capture filter.
+- **A page store built before the capture columns.** The catalogue schema stamp is 18. `catalogue_schema_current` reads a store with an older stamp, or without the capture columns, as not current. `create_catalogue_schema` adds the columns and their indexes at the owner's next pass, so such a store heals without a manual step. Until then its reads answer "unchecked", never a wrong result.
 
 ## Migration Plan
 

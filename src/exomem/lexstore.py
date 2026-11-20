@@ -5286,8 +5286,26 @@ def create_catalogue_schema(conn: sqlite3.Connection) -> None:
     store's tables are the ones this module declares. It owns no transaction and stamps no schema version.
     """
     LexicalStore._create_catalog_tables(conn)
+    _add_later_page_columns(conn)
     LexicalStore._create_catalog_indexes(conn)
     LexicalStore._ensure_fts_schema(conn)
+
+
+def catalogue_schema_current(conn: sqlite3.Connection, *, raise_errors: bool = False) -> bool:
+    """Whether ``conn``'s catalogue carries this build's stamp and the page shape that goes with it.
+
+    The one rule that the lexical readers (`LexicalStore._schema_is_current`) and store mode's owner state
+    ask: a stamp over an older shape answers nothing, so it must not read as current. It emits no DDL.
+    """
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        if raise_errors:
+            raise
+        return False  # no catalogue tables yet
+    if not (row and row[0] == str(SCHEMA_VERSION)):
+        return False
+    return LexicalStore._pages_has_current_columns(conn, raise_errors=raise_errors)
 
 
 def stamp_catalogue_schema(conn: sqlite3.Connection) -> None:
@@ -5500,16 +5518,28 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
 #: The columns that schemas 17 and 18 added to `pages`; a store that the released code created before them
 #: lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
-_SCHEMA_18_PAGE_COLUMNS = ("capture_day", "capture_date_json", "capture_lat", "capture_lon")  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
-_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + _SCHEMA_18_PAGE_COLUMNS
+#: The type of each column that schema 18 added: the capture day and its typed value are text, the position is real.
+_SCHEMA_18_COLUMN_TYPES = {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
+_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + tuple(_SCHEMA_18_COLUMN_TYPES)
+
+
+def _add_later_page_columns(conn: sqlite3.Connection) -> None:
+    """Add the schema 17 and 18 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
+    for name in _SCHEMA_17_PAGE_COLUMNS:
+        if name not in present:
+            conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT")
+    for name, kind in _SCHEMA_18_COLUMN_TYPES.items():
+        if name not in present:
+            conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {kind}")
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
     """`columns` without the schema 17 and 18 columns that this connection's `pages` table does not have yet.
 
-    The duplicate index reads the sidecar, so a page written to an older store without these values
-    misleads no door. A store-mode read of the capture columns needs them added to that store, which
-    store mode's own DDL owns. Any other missing column still fails the insert: that store is wrong.
+    A page written to an older store without these values misleads no door, because `catalogue_schema_current`
+    reads that store as not current until `create_catalogue_schema` adds the columns (`_add_later_page_columns`).
+    Any other missing column still fails the insert: that store is wrong.
     """
     present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
     if all(name in present for name in _LATER_PAGE_COLUMNS):
@@ -6662,17 +6692,7 @@ class LexicalStore:
         ever creating, altering, or dropping anything. A missing `meta`/`pages`
         table or a legacy `pages` shape reads as not-current — the caller then
         defers to the atomic rebuild rather than mutating the old shape here."""
-        try:
-            row = conn.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()
-        except sqlite3.OperationalError:
-            if raise_errors:
-                raise
-            return False  # no `meta` table yet
-        if not (row and row[0] == str(SCHEMA_VERSION)):
-            return False
-        return self._pages_has_current_columns(conn, raise_errors=raise_errors)
+        return catalogue_schema_current(conn, raise_errors=raise_errors)
 
     @staticmethod
     def _create_catalog_tables(conn: sqlite3.Connection) -> None:

@@ -678,6 +678,155 @@ def test_frontmatter_size_is_independent_of_declaration_and_capture_text_is_exac
     assert frontmatters[0] == frontmatters[1]
 
 
+def test_spaced_passage_cuts_skip_the_per_character_script_scan(vault, passage_tools, monkeypatch):
+    """Classifying each character of each long spaced passage made every passage search re-pay seconds."""
+    from exomem import text_scripts
+    from exomem.passage_evidence import declared_chunks
+
+    over_cap = " ".join(f"lantern{number}" for number in range(embeddings.MAX_WORDS_PER_CHUNK + 1))
+    at_cap = " ".join(f"harbour{number}" for number in range(embeddings.MAX_WORDS_PER_CHUNK))
+    saved = commands.op_capture_source(
+        vault,
+        schema.load_source_schema(vault),
+        title="Spaced records",
+        source_kind="session",
+        passages=[dict(key="over", text=over_cap), dict(key="at", text=at_cap)],
+    )
+    assert "error" not in saved, saved
+    page = find_corpus.CACHE.get(vault / saved["source"]["path"], vault)
+    page.__dict__.pop("_declared_passage_chunks", None)
+    scanned = []
+    real = text_scripts.is_scriptio_continua
+    monkeypatch.setattr(
+        text_scripts, "is_scriptio_continua", lambda character: scanned.append(character) or real(character)
+    )
+
+    chunks = declared_chunks(page)
+
+    assert scanned == []
+    assert [(chunk.key, chunk.text.split()[0]) for chunk in chunks] == [
+        ("over", "lantern0"),
+        ("over", f"lantern{embeddings.MAX_WORDS_PER_CHUNK}"),
+        ("at", "harbour0"),
+    ]
+
+
+def _mixed_passages(prefix):
+    """One passage per cut rule: under the cap, over the word cap, and unspaced over the character cap."""
+    return [
+        {"key": f"{prefix}/short", "text": "The lantern keeper records oil deliveries."},
+        {"key": f"{prefix}/long", "text": " ".join(f"lantern{n}" for n in range(embeddings.MAX_WORDS_PER_CHUNK + 40))},
+        {"key": f"{prefix}/unspaced", "text": "灯台の油の記録。" * 90},
+    ]
+
+
+def test_passage_search_reads_the_published_cut_instead_of_cutting_the_source(vault, passage_tools, monkeypatch):
+    """Cutting every selected Source again on each search was a fixed cost that four callers queued behind."""
+    from exomem import file_watcher, passage_evidence
+
+    call, _encoder = passage_tools
+    passages = _mixed_passages("r")
+    saved = call("save_source", {"title": "Harbour survey", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "cut", "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._raw_witness.activate()  # This test drives the existing watcher synchronously.
+    assert watcher._flush_raw(census=True)
+    cuts = []
+    real_cut = passage_evidence.declared_chunks
+    monkeypatch.setattr(passage_evidence, "declared_chunks", lambda page: cuts.append(page.rel_path) or real_cut(page))
+
+    reply = call("search_memory", {"query": "lantern oil", "limit": 10, "options": {"result_level": "passage"}})
+
+    assert "error" not in reply, reply
+    assert cuts == []
+    assert {hit["passage_key"] for hit in reply["hits"]} == {passage["key"] for passage in passages}
+    path = memory_refs.resolve_identifier_read_only(vault, reply["hits"][0]["ref"])
+    body = vault_module.parse_frontmatter(vault_module.read_guarded_text(vault, vault / path)[0])[1]
+    for hit in reply["hits"]:
+        passage = passages[hit["passage_ordinal"] - 1]["text"]
+        assert hit["passage_hash"] == hashlib.sha256(passage.encode()).hexdigest()
+        assert body[hit["span"]["start"] : hit["span"]["start"] + hit["span"]["length"]] in passage
+
+
+def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_tools):
+    """A cut read for bytes it was not made from reports wrong spans, keys and passage hashes."""
+    from exomem import capture_inventory, page_names, passage_evidence
+
+    call, _encoder = passage_tools
+    pages = []
+    for revision, passages in (("one", _mixed_passages("a")), ("two", _mixed_passages("b")[::-1])):
+        saved = call("save_source", {"title": "Cut record", "source_kind": "session", "detail": "full",
+                                     "options": {"source_identity": {"system": "archive", "record_id": "bound", "revision": revision},
+                                                 "passages": passages}})
+        assert "error" not in saved, saved
+        path = (vault / page_names.resolve_page(vault, saved["source"]["id"])).relative_to(vault).as_posix()
+        data = (vault / path).read_bytes()
+        pages.append(find_corpus.parse_page(vault / path, 0, vault, content=data, resolved_relative=path))
+    first, second = pages
+    entry = capture_inventory.input_from_bytes(vault, first.rel_path, (vault / first.rel_path).read_bytes()).entry
+
+    assert list(passage_evidence.source_chunks(first, entry)) == list(passage_evidence.declared_chunks(first))
+    assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
+
+
+def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools):
+    """The capture's overlap check encoded title-prefixed paragraphs that the index could not
+    reuse, so every passage of a capture was encoded twice."""
+    from collections import Counter
+
+    from exomem import page_names, passage_evidence
+
+    call, encoder = passage_tools
+    earlier = call("save_source", {"title": "Earlier record", "source_kind": "session", "detail": "full",
+                                   "content": "The harbour keeps one lantern lit."})
+    assert "error" not in earlier, earlier
+    embeddings.index_incremental(vault)  # The overlap check scores against an index with vectors.
+    passages = [passage for passage in _mixed_passages("once") if not passage["key"].endswith("/long")]
+    saved = call("save_source", {"title": "Encoded once", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "once",
+                                                                 "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    assert embeddings.upsert_after_write_status(vault, [path], defer_during_warm=False).status == "completed"
+
+    page = find_corpus.parse_page(path, 0, vault, content=path.read_bytes(),
+                                  resolved_relative=path.relative_to(vault).as_posix())
+    cut = [chunk.text for chunk in passage_evidence.declared_chunks(page)]
+    assert len(cut) > len(passages)
+    encoded = Counter(encoder.texts)
+    assert {text: encoded[text] for text in cut} == dict.fromkeys(cut, 1)
+    assert not [text for text in encoder.texts if text.startswith("Encoded once")]
+
+
+def test_a_source_of_hundreds_of_declared_passages_is_indexed_within_the_preparation_budget(
+    vault, passage_tools, monkeypatch
+):
+    """Sources of 159 or more passages were refused before chunking and never indexed."""
+    from exomem import page_names
+
+    call, encoder = passage_tools
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+    passages = [{"key": f"g/{n:03d}", "text": " ".join(f"w{n}r{w}" for w in range(200))} for n in range(450)]
+    saved = call("save_source", {"title": "Large record", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "large",
+                                                                 "revision": "one"},
+                                             "passages": passages}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    before = len(encoder.texts)
+
+    result = embeddings.upsert_after_write_status(vault, [path], defer_during_warm=False)
+
+    assert result.status == "completed", result
+    assert {passage["text"] for passage in passages} <= set(encoder.texts[before:])
+
+
 def test_same_heading_in_an_ordinary_note_stays_searchable(vault):
     """A format-based global strip would erase authored text in an ordinary note."""
     from exomem.find_types import ParsedPage

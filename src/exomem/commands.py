@@ -6418,7 +6418,8 @@ def op_move_file(
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             POINTER_PREVIEW_REQUIRED; CURATED_PROTECTED;
             PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH (either end is a
-            store collection's view path).
+            store collection's view path); SHARED_ORIGINAL_NEEDS_EXTENSION
+            (a shared original renamed to a name without an extension).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:

@@ -407,6 +407,21 @@ def test_model_env_may_not_relocate_state_config_or_a_writable_directory() -> No
     render_statefulset(_spec(model_env={"EXOMEM_EMBED_BACKEND": "onnx", "EXOMEM_WHISPER_MODEL": "base"}))
 
 
+def test_a_cell_serves_passages_from_a_resident_matrix_by_default() -> None:
+    # Without the ceiling every passage search reads its vectors from disk, and
+    # four concurrent searches miss the cell's latency budget.
+    env = render_statefulset(_spec())["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == [str(512 * 1024 * 1024)]
+
+
+def test_a_cells_model_env_replaces_the_passage_matrix_default_instead_of_duplicating_it() -> None:
+    # Two entries with one name leave the value the pod gets to the order of the list.
+    env = render_statefulset(_spec(model_env={"EXOMEM_PASSAGE_MATRIX_BYTES": "0"}))["spec"]["template"]["spec"][
+        "containers"
+    ][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == ["0"]
+
+
 def test_model_env_may_not_move_media_extraction_into_the_serving_process() -> None:
     import pytest
 

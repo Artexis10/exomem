@@ -639,6 +639,7 @@ jobs:
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CLOUD }}-${{ matrix.arch }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}-{1}', env.IMAGE_CACHE_CLOUD, matrix.arch) || '' }}
@@ -656,6 +657,7 @@ jobs:
           outputs: type=image,name=ghcr.io/artexis10/exomem-cellctl,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CELLCTL }}-${{ matrix.arch }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}-{1}', env.IMAGE_CACHE_CELLCTL, matrix.arch) || '' }}
@@ -783,6 +785,8 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_LEAN) || '' }}
 
@@ -824,6 +828,8 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_ML) || '' }}
 
@@ -865,6 +871,8 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
           # Cache export added 27 minutes after the build and push took five minutes.
 

@@ -1007,7 +1007,8 @@ def upload_refusal(
         # An import archive is unpacked into a stage and released, so it is never an offloaded original. `evidence` is
         # the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
         stays = lane == held_uploads.IMPORT_LANE or (lane == "evidence" and (
-            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename)))
+            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))) or (
+            filename is not None and originals.resident_suffixless(vault, filename))
         largest = declared_bytes if most_bytes is None else most_bytes
         # A larger size never classifies back to offloadable, so the largest possible size decides for the range.
         if stays or (bounds is not None and bounds.classify(largest) != media_capacity.OFFLOADABLE):
@@ -1519,9 +1520,10 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     if current.state != "evicted":
         return  # Another completed hydration needs no second provider read.
     relative = ledger._relative(snapshot.path)
-    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path.
+    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path,
+    # and so does a suffix-less original, whose pool-only companion the egress census could not tell from a note.
     key = media_bindings.object_key(vault, relative, snapshot.binary_sha256)
-    if key != relative:
+    if key != relative and originals.may_share_bytes(relative):
         _hydrate_shared(vault, snapshot, ledger, token, key)
         return
     temporary = held_fs.publish_temporary_name()

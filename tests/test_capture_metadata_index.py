@@ -369,3 +369,28 @@ def test_a_capture_filter_scans_a_capture_index_not_the_whole_scope(filters, ind
         f"{lexstore._scope_term(eligibility, 'in_kb')} AND ({predicate})", params
     ).fetchall()
     assert index in " ".join(str(row[3]) for row in plan)
+
+
+def test_a_store_catalogue_built_before_the_capture_columns_reads_as_not_current_until_the_owner_pass_adds_them():
+    """Catches a store that stays "current" over a page table with no capture columns, so its capture filters fail or answer nothing."""
+    import sqlite3
+    from contextlib import closing
+
+    with closing(sqlite3.connect(":memory:")) as catalogue:
+        lexstore.create_catalogue_schema(catalogue)
+        lexstore.stamp_catalogue_schema(catalogue)
+        assert lexstore.catalogue_schema_current(catalogue)
+        for index in ("pages_capture_day", "pages_capture_lat", "pages_capture_lon"):
+            catalogue.execute(f"DROP INDEX {index}")
+        for column in ("capture_day", "capture_date_json", "capture_lat", "capture_lon"):
+            catalogue.execute(f"ALTER TABLE pages DROP COLUMN {column}")
+
+        assert not lexstore.catalogue_schema_current(catalogue)  # the stamp is current; the page shape is not
+
+        lexstore.create_catalogue_schema(catalogue)  # the owner pass
+
+        assert lexstore.catalogue_schema_current(catalogue)
+        kinds = {row[1]: row[2] for row in catalogue.execute("PRAGMA table_info(pages)") if row[1].startswith("capture_")}
+        assert kinds == {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}
+        indexes = {row[1] for row in catalogue.execute("PRAGMA index_list(pages)")}
+        assert {"pages_capture_day", "pages_capture_lat", "pages_capture_lon"} <= indexes
