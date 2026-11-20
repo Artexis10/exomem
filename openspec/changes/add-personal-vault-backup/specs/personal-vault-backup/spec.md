@@ -81,7 +81,7 @@ After a backup whose outcome is complete, the service SHALL run `restic forget -
 
 On the check interval, the service SHALL run `restic check --read-data-subset=n/N`. `n` SHALL advance after each successful check and wrap at `N`.
 
-On the sample interval, the service SHALL restore a sample of originals and notes from the latest snapshot into a temporary directory and delete it afterwards. It SHALL restore with restic's own verification, so each restored note is proved identical to the snapshot's recorded content. It SHALL hash each restored original and compare the digest with the `binary_sha256` of the sidecar restored from the same snapshot. A damaged restore, a missing file or a digest mismatch SHALL be a finding with the failing vault-relative path and a code.
+On the sample interval, the service SHALL restore a sample of originals and notes from the latest snapshot into a temporary directory and delete it afterwards. It SHALL restore with restic's own verification, so each restored note is proved identical to the snapshot's recorded content. It SHALL hash each restored original and compare the digest with the `binary_sha256` of the sidecar restored from the same snapshot. A damaged restore, a missing file or a digest mismatch SHALL be a finding with the failing vault-relative path and a code. A sample that draws no file SHALL read `empty`, never as a passed restore.
 
 #### Scenario: A healthy repository
 

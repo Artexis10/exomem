@@ -52,12 +52,12 @@ Each vault has one entry, keyed by its resolved path. The keys are:
 | `password_file` | required | Path to the repository password file. |
 | `environment_file` | none | Path to `NAME=value` lines for backend credentials. |
 | `interval_hours` | 24 | Time between backups. |
-| `keep_daily`, `keep_weekly`, `keep_monthly` | 7, 4, 12 | Keep rules. |
+| `keep_last`, `keep_daily`, `keep_weekly`, `keep_monthly` | 0, 7, 4, 12 | Keep rules. At least one must be above zero. |
 | `check_interval_days` | 7 | Time between repository checks. |
 | `check_subset_parts` | 12 | A check reads part `n` of this many, and `n` rotates. |
 | `sample_interval_days` | 7 | Time between sampled restores. |
 | `sample_size` | 20 | Originals, and notes, in each sample. |
-| `sample_max_mib` | 256 | Largest original that a sample restores. |
+| `sample_max_mib` | 64 | Largest original that a sample restores. |
 | `include_originals` | true | Whether original bytes join the snapshot. |
 
 The code does not parse the repository string beyond "a non-empty string", and never branches on its scheme. A repository that is a local path inside the vault is refused, because the snapshot would contain itself. That check compares two paths and reads no scheme.
@@ -68,7 +68,7 @@ Rejected alternative: add the keys to `EXOMEM_MEDIA_STORE_CONFIG`. `cellctl` wri
 
 ### D3: A service thread, one flight, every call bounded
 
-`vault_backup.start` runs one daemon thread, started and stopped like `original_fixity`. It starts only in the serving runtime, because a stdio session is too short to own a long backup. The thread starts when `EXOMEM_VAULT_BACKUP_CONFIG` is set and reads the file again at every cycle, so an edit needs no restart. With the variable unset, no thread starts.
+`vault_backup.start` runs one daemon thread, started and stopped like `original_fixity`. A stop ends a running restic process within seconds, and a step that a stop cut short is not recorded as a failure. It starts only in the serving runtime, because a stdio session is too short to own a long backup. The thread starts when `EXOMEM_VAULT_BACKUP_CONFIG` is set and reads the file again at every cycle, so an edit needs no restart. With the variable unset, no thread starts.
 
 A file lock under the vault's state directory makes a cycle single-flight, across the service thread and the CLI. A second runner reports "already running" and does nothing.
 
@@ -99,17 +99,17 @@ For each kept file:
 
 restic then backs up the vault root and the staging directory in one snapshot. The staging directory is removed after the call.
 
-A stage failure does not stop the backup of the vault. It makes the backup `partial` and a finding names the code. A partial backup never triggers retention, so a snapshot with a hole cannot push out an older complete one.
+A stage failure does not stop the backup of the vault. It makes the backup `partial` and a finding names the code. A partial backup never triggers retention, so a snapshot with a hole cannot push out an older complete one. The next backup waits the normal interval, because a file that stays unreadable would otherwise add a snapshot every hour and nothing would prune them.
 
 Rejected alternative: a filename glob list in the backup module. It goes stale on the day a family is added and cannot say why a file matters. Rejected alternative: copy live SQLite files raw. A torn copy restores as a corrupt database.
 
 ### D5: Verification reads the repository and proves a restore
 
-**Check.** On the check interval, `restic check --read-data-subset=n/N` runs, with `N` from `check_subset_parts`. `n` advances by one after each success and wraps, so the whole repository is read over `N` checks, about a quarter at the defaults. A failure is retried once, then recorded as a finding.
+**Check.** On the check interval, `restic check --read-data-subset=n/N` runs, with `N` from `check_subset_parts`. `n` advances by one after each success and wraps, so the whole repository is read over `N` checks, about a quarter at the defaults. A failed check is recorded as a finding, and the next check reads the same part again, so the finding stays until that part passes. Only a timeout or a held repository lock is retried within a call.
 
 **Sampled restore.** On its interval, the service restores a sample from the latest snapshot into a fresh temporary directory under the state root, then deletes it.
 
-1. It draws `sample_size` originals and `sample_size` notes with reservoir sampling over the live bindings and notes. Memory stays bounded at any vault size. It skips evicted originals, originals above `sample_max_mib`, and files whose mtime is newer than the snapshot start.
+1. It draws `sample_size` originals and `sample_size` notes with reservoir sampling over the live bindings and notes. Memory stays bounded at any vault size. It skips evicted originals, originals above `sample_max_mib`, and files whose inode change time is later than the snapshot's own start time, so a file edited or moved since the snapshot is never drawn.
 2. It restores each chosen file and its sidecar with `restic restore --verify`. restic checks every restored file against the snapshot's recorded content, so a note is proved byte-identical to the snapshot and not to the live file. If the batch restore fails, the service restores each path alone to name the failing one.
 3. It hashes each restored original and compares it with the `binary_sha256` of the restored sidecar, the binding as the snapshot recorded it. A change since the snapshot therefore causes no false alarm.
 4. A file the snapshot lacks, or a hash that differs, is a finding with the vault-relative path and a code.
@@ -120,7 +120,7 @@ Rejected alternative: compare restored files with the live files. A file edited 
 
 ### D6: Retention follows a complete backup
 
-After a complete backup, `restic forget --prune --keep-daily N --keep-weekly N --keep-monthly N` runs, restricted to snapshots that carry this change's tag. A snapshot of another vault or tool in the same repository is not touched, because restic groups by host and paths. A partial or failed backup never runs it.
+After a complete backup, `restic forget --prune` with the entry's `--keep-last`, `--keep-daily`, `--keep-weekly` and `--keep-monthly` counts runs, restricted to snapshots that carry this change's tag. A snapshot of another vault or tool in the same repository is not touched, because restic groups by host and paths. A partial or failed backup never runs it.
 
 ### D7: Owner operations are a CLI, and restore writes only to a separate directory
 
@@ -138,9 +138,9 @@ Rejected alternative: an MCP tool. It would need a public-surface entry, schemas
 
 ### D8: Status comes from a small JSON record that can be lost
 
-The service records the last attempt of each activity in one JSON file under the vault's state directory: backup, check, sampled restore and findings. It is written whole through a rename. A missing or unreadable record reads as `unknown`. An activity not yet run in a readable record reads as `never`. Neither is zero.
+The service records the last attempt of each activity in one JSON file under the vault's state directory: backup, retention, check, sampled restore and findings. It is written whole through a rename. A missing or unreadable record reads as `unknown`. An activity not yet run in a readable record reads as `never`. Neither is zero.
 
-`vault_backup.status(vault)` is cheap: it reads the config and the record and probes for restic. `resource_status.collect` adds it as `vault_backup`, and `exomem status` prints it. The block carries `state`, the repository fingerprint, `include_originals`, the last backup (time, snapshot ID, files, bytes, outcome), the last check, the last sampled restore (counts and failures), the next due time of each activity, and findings with paths and codes. The block is for the owner's local tools and may name vault paths.
+`vault_backup.status(vault)` is cheap: it reads the config and the record and probes for restic. `resource_status.collect` adds it as `vault_backup`, and `exomem status` prints it. The block carries `state`, the repository fingerprint, `include_originals`, the last backup (time, snapshot ID, files, bytes, outcome), the last retention, the last check, the last sampled restore (counts and failures), the next due time of each activity, and findings with paths and codes. The block is for the owner's local tools and may name vault paths.
 
 Rejected alternative: a SQLite table. The record is a few hundred bytes and rebuilds from the next cycle, so a database would add a schema for nothing.
 
@@ -150,7 +150,8 @@ Rejected alternative: a SQLite table. The record is a few hundred bytes and rebu
 - **Staging space.** Staging copies the non-rebuildable SQLite state once. A full disk makes the backup `partial` and shows a finding.
 - **First backup on a very large vault.** At 25 TB the first call can run for days. The 7-day timeout is a bound, and a killed call resumes by reusing uploaded data.
 - **Check cost.** At the defaults a weekly check reads about one twelfth of the repository. At 25 TB, a remote backend charges that egress. The owner tunes `check_subset_parts` and `check_interval_days`.
-- **Sample selection by mtime.** A file that arrived after the snapshot with an old mtime can read as missing from the snapshot. The next sample, after a newer backup, clears it.
+- **Sample selection by change time.** A file that changed after the snapshot is not drawn. A file that arrived after the snapshot with an older change time, for example a copy that keeps its timestamps, can read as missing from the snapshot. The next sample, after a newer backup, clears it.
+- **Derived rows in a canonical family.** The `collection-store` descriptor also names `collections-derived.sqlite`, which is rebuildable. Staging copies it with the store because the registry declares the family as one unit. Splitting the descriptor is old debt, and it would only save space.
 - **The repository shares a failure domain.** A repository on the same disk is no protection against disk loss. The status cannot know. The owner chooses.
 - **Prune cost.** `forget --prune` on a very large repository can run for hours, inside its timeout, after a backup and before the next due check.
 
