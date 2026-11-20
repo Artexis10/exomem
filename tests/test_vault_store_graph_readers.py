@@ -1250,21 +1250,6 @@ def cpu_pressure():
 OWNERSHIP_RULE = "classify_by_rule"
 
 
-@contextlib.contextmanager
-def counting_held_statements(root, counters):
-    """Count the statements of this request's snapshot that read stored pages for a batch of paths."""
-    with read.snapshot(root) as view:
-        def trace(sql):
-            if "store_pages" in sql and ("json_each" in sql or " IN (" in sql):
-                counters["held_statements"] += 1
-
-        view.connection.set_trace_callback(trace)
-        try:
-            yield
-        finally:
-            view.connection.set_trace_callback(None)
-
-
 def admission_sample(root, caller, operation, anchor=CLAIM):
     """One graph-reader sample, including the scalar work hidden by an elapsed time.
 
@@ -1285,8 +1270,7 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                 "admitted_publications": 0, "published_candidates": 0,
                 "layer_folder_reads": 0, "descriptor_matches": 0, "subject_decodes": 0,
                 "membership_evaluations": 0, "publication_decisions": 0, "coordinator_status_calls": 0,
-                "name_candidate_lookups": 0, "held_page_reads": 0, "content_floor_checks": 0,
-                "held_statements": 0, "held_paths": 0}
+                "name_candidate_lookups": 0, "held_page_reads": 0, "content_floor_checks": 0}
     classified, held = set(), set()
 
     def counted(name, real):
@@ -1349,8 +1333,7 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
         with library_scope(), request_scope(EXTERNAL) if caller != "owner" else contextlib.nullcontext():
             started, cpu_started = time.perf_counter(), time.process_time()
             # The pins that the tool dispatcher holds for a store read, and its ownership finish.
-            with (read.request_snapshot(root), collection_ownership.read_scope(root) as owned,
-                  counting_held_statements(root, counters)):
+            with read.request_snapshot(root), collection_ownership.read_scope(root) as owned:
                 if operation == "participants":
                     with state_paths.resolution_scope():
                         answer = epistemic_graph.EpistemicGraphIndex(root).relation_participants(
@@ -1360,7 +1343,6 @@ def admission_sample(root, caller, operation, anchor=CLAIM):
                     size = len(answer.paths)
                 else:
                     size = len(GRAPH_CALLS["find relation_of"](root))
-                counters["held_paths"] = len(read.request_memo(root).get((read.__name__, "held"), ()))
                 owned.finish()
             elapsed = (time.perf_counter() - started) * 1000
             cpu = (time.process_time() - cpu_started) * 1000
@@ -1720,8 +1702,15 @@ def test_store_hub_ranking_reads_yaml_only_for_selected_pages(stored, writer, ca
     assert larger["yaml_decodes"] <= sample["yaml_decodes"], (sample, larger)
 
 
-def build_drill_store(stored, writer):  # noqa: F811
-    """Commit the drill's corpus: `GENERATED` linked pages, the hub's `links`, and the degree sweep's anchors."""
+@pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
+@pytest.mark.timeout(1800)
+def test_restricted_admission_drill(stored, writer):  # noqa: F811
+    """Measure a realistic hub before and after commits and owner-pass revision bumps."""
+    import statistics
+    import subprocess
+
+    from exomem.governance import membership
+
     links = int(os.environ.get("EXOMEM_ADMISSION_DRILL_LINKS", str(GENERATED)))
     # The degree sweep reads smaller hubs of the same corpus: the first `degree` pages also link to their anchor.
     degrees = [int(value) for value in os.environ.get("EXOMEM_ADMISSION_DRILL_DEGREES", "").split(",") if value]
@@ -1742,19 +1731,6 @@ def build_drill_store(stored, writer):  # noqa: F811
             puts.append(write.PagePut(rel, body))
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "drill", puts=tuple(puts)))
     restrict_external(stored, 'tags: ["cohort-0"]')
-    return links, degrees, anchors
-
-
-@pytest.mark.skipif(not os.environ.get("EXOMEM_ADMISSION_DRILL_REPORT"), reason="Explicit load drill")
-@pytest.mark.timeout(1800)
-def test_restricted_admission_drill(stored, writer):  # noqa: F811
-    """Measure a realistic hub before and after commits and owner-pass revision bumps."""
-    import statistics
-    import subprocess
-
-    from exomem.governance import membership
-
-    links, degrees, anchors = build_drill_store(stored, writer)
     report = {"pages": GENERATED, "hub_links": links,
               "units_per_page": int(os.environ.get("EXOMEM_ADMISSION_DRILL_UNITS", "0")), "samples": {}}
     report_path = Path(os.environ["EXOMEM_ADMISSION_DRILL_REPORT"])
