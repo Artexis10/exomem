@@ -41,7 +41,7 @@ Reuse the existing SQLite publication and restart paths instead of adding a stor
 
 ### D2 — One quota slot with requests for steady progress and limits for the peak
 
-The build Job's limits match the serving-sized resource values, currently 2 CPU and 3 GiB, and cover the measured build peak. Its requests cover the build's non-reclaimable memory with headroom and the CPU it needs for steady progress. Task 3.1's rehearsal measured 12,000-note builds at a CPU peak of 1.0 to 1.5 cores, 117 MB of anonymous memory and a cgroup memory.peak of 1.9 GB, most of it reclaimable page cache. The chart therefore requests 1 CPU and 1 GiB. A build can use its limits when the node has room. Memory pressure evicts a pod that uses more than its request first, so a build that outgrows its memory request yields to serving cells and the upgrade proceeds cold. The namespace quota adds exactly one pod plus this profile's requests and limits, preserving ordinary Job headroom.
+The build Job's limits match the serving-sized resource values, currently 2 CPU and 3 GiB, and cover the measured build peak. Its requests cover the build's non-reclaimable memory with headroom and the CPU it needs for steady progress. Task 3.1's rehearsal measured 12,000-note builds at a CPU peak of 1.0 to 1.5 cores, 117 MB of anonymous memory and a cgroup memory.peak of 1.9 GB, most of it reclaimable page cache. The chart therefore requests 1 CPU and 1 GiB. A build can use its limits when the node has room. Under memory pressure the kubelet evicts pods above their memory requests before pods within them, and among those the pod furthest above its request first. A build that outgrows its memory request is therefore a likely eviction candidate, though a serving cell further above its own request goes first; an evicted build ends in a cold rebuild. The namespace quota adds exactly one pod plus this profile's requests and limits, preserving ordinary Job headroom.
 
 Platform `infra/helm/platform/templates/cellctl.yaml` quota admission rule 9 currently permits pod quotas 2 or 4, plus 5 with local storage. Update that rule to admit the extra slot: 5 without local storage and 6 with local storage.
 
@@ -100,7 +100,7 @@ Restic backs up `/data/vault` and `/data/host` (`infra/cellctl/src/cellctl/manif
 ## Risks / Trade-offs
 
 - [Catch-up grows between build and boot] → reuse restart reconcile; accept a cold rebuild when reconcile cannot prove the drift.
-- [Build memory could evict a neighbour] → request the build's non-reclaimable memory with headroom, so a build that outgrows its request is evicted first; cap builds per node; never bypass scheduling.
+- [Build memory could evict a neighbour] → request the build's non-reclaimable memory with headroom, so a build that outgrows its request becomes an eviction candidate; cap builds per node; never bypass scheduling.
 - [CPU contention slows serving reads] → use the upgrade window and bounded resources; measure contention in rehearsal.
 - [Image pull and startup consume the pre-attempt window] → build activity defers idle attempts only before the force minutes. The per-node attempt limit still bounds rollout throughput.
 - [Staged copies consume volume space] → retain only the current build Job's completed staged copy, then remove every unadopted staged copy at boot.

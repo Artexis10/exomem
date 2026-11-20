@@ -35,7 +35,7 @@ from re._casefix import _EXTRA_CASES as _SRE_EXTRA_CASES
 from types import MappingProxyType
 from urllib.parse import unquote
 
-from .. import held_fs, request_budget, vault
+from .. import held_fs, originals, request_budget, vault
 from ..kbdir import managed_join, managed_root_rel, managed_split, managed_splitter
 
 #: A literal alias starts and ends where the text does not continue a path.
@@ -312,7 +312,7 @@ class _Tables:
         # A page `<name>.md` whose `<name>` has a suffix of its own has the shape of the companion of an original at
         # `<name>`, which a pooled archive keeps no file for. Its aliases are listed with no file read; the gate keeps
         # that original only where the page binds it (`egress._ArtifactReferenceGate._filing`).
-        if suffix == ".md" and PurePosixPath(rel[:-3]).suffix:
+        if suffix == ".md" and originals.may_share_bytes(rel[:-3]):
             self._add(rel[:-3], *self.filings)
 
     def _add(

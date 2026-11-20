@@ -2791,6 +2791,12 @@ class FileWatcher:
             except Exception:  # noqa: BLE001 - private-record retention never stops watcher convergence
                 log.debug("served context retention unavailable")
 
+    @property
+    def seeds_recall_projections(self) -> bool:
+        """Whether the startup pass seeds the recall projections: a store-mode watcher's first pass is the
+        importer's whole-vault sweep, which seeds none, so nothing waits on it for recall."""
+        return self._importer is None
+
     def wait_until_seeded(self, timeout: float | None = None) -> bool:
         """Wait for the startup seed's terminal result.
 

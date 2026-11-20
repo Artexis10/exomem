@@ -31,6 +31,10 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     assert generated.returncode == 0
     name_key = tmp_path / "name-key"
     name_key.write_bytes(b"k" * 32)
+    from exomem import media_store
+
+    (tmp_path / "objects").mkdir()
+    media_store.write_store_marker(tmp_path / "objects", "test-store")
     values = {"store": "test-store", "adapter": "filesystem-test", "root": str(tmp_path / "objects"),
               "key_version": "1", "recipient": recipient, "identity_path": str(identity),
               "name_key_path": str(name_key), "enabled": True, "eviction_enabled": True,
@@ -471,7 +475,7 @@ def test_a_size_refusal_parks_until_the_configured_bound_allows_it(vault: Path, 
     assert originals.original_state(vault, path).state == "local"
     assert media_jobs.MediaJobStore(vault).get_by_binary(path, media_type=media_jobs.OFFLOAD_MEDIA_TYPE) is None
     assert media_store.enqueue_offloads(vault) == 0
-    assert not list((Path(values["root"])).rglob("*"))
+    assert [entry.name for entry in Path(values["root"]).rglob("*") if entry.name != media_store.STORE_MARKER] == []
     updated = values if new_bound is None else {**values, "max_object_bytes": new_bound}
     config.write_text(json.dumps({"vaults": {str(vault): updated}}))
     assert media_jobs.tool_status(vault)["offload_refusals"] == []
@@ -3099,7 +3103,7 @@ def test_a_corrupt_stored_object_fails_its_job_as_unverified(vault: Path, select
     path = _stored(vault, "recording", 300)
     assert media_store.evict(vault, path)
     for stored in Path(selected_store[0]["root"]).rglob("*"):
-        if stored.is_file():
+        if stored.is_file() and stored.name != media_store.STORE_MARKER:
             stored.write_bytes(b"x" * stored.stat().st_size)
     ledger = media_jobs.MediaJobStore(vault)
     job_id = ledger.enqueue(media_jobs.MediaJob(path, path.with_name(path.name + ".md"), "text"))
@@ -4789,3 +4793,37 @@ def test_a_download_pins_its_original_without_reading_the_companions_beside_it(v
 
     assert pinned == [(first.path,)]
     assert second.sidecar_path not in reads
+
+
+def test_a_suffixless_upload_of_a_pooled_archive_is_not_charged_to_the_allowance(
+        vault: Path, selected_store, monkeypatch):
+    """Defect: the upload check refuses a file that the pooled archive keeps on the volume, with a remedy that
+    cannot help, because it offers only the media allowance."""
+    from exomem import artifact_lifecycle, media_store, original_pool
+
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 1_000}}}))
+    assert media_store.upload_refusal(vault, 5_000, "LICENSE", "source") is not None  # a legacy archive charges it
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+
+    assert media_store.upload_refusal(vault, 5_000, "LICENSE", "source") is None
+    assert media_store.upload_refusal(vault, 5_000, "scan.pdf", "source") is not None
+
+
+def test_an_unreadable_pool_marker_admits_a_suffixless_upload_as_unknown(vault: Path, selected_store, monkeypatch):
+    """Defect: the pool marker read raises a held-filesystem error that the admission check did not catch, so an
+    unreadable marker failed the upload instead of admitting it as unknown."""
+    from exomem import held_fs, media_store, original_pool
+
+    used = _recorded_by_a_batch(vault)
+    values, config = selected_store
+    config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": used + 1_000}}}))
+
+    def unreadable(_vault):
+        raise held_fs.HeldFsError("IO_REFUSED", "the marker cannot be read")
+
+    monkeypatch.setattr(original_pool, "enabled", unreadable)
+
+    assert media_store.upload_refusal(vault, 5_000, "LICENSE", "source") is None

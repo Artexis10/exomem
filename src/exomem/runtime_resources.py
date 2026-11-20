@@ -545,6 +545,9 @@ class SemanticPreparation:
         # Title duplication is charged at UTF-8 width; strings can use four
         # bytes per codepoint. Eight vector copies cover retained encode parts,
         # concatenation/reuse assembly, both projections and publication blobs.
+        # Pass the width only before a chunker that encodes: otherwise
+        # check_projections charges the vectors of the actual cut before any
+        # encode, and this bound would refuse a page whose real vectors fit.
         lines = _source_line_bound(self.source)
         body = page.body or ""
         chunks = body.count("\n") + (len(body) + 249) // 250 + 1

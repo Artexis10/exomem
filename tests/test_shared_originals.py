@@ -399,6 +399,35 @@ def test_preserved_evidence_pools_its_binary_but_keeps_a_dataset_resident(vault,
     assert originals.pooled(vault, table.path) is None
 
 
+def test_a_suffixless_original_keeps_an_ordinary_file_in_a_pooled_archive(vault, tmp_path, monkeypatch) -> None:
+    """A pool-only filing exists solely as a companion the census tells from a note by its suffix;
+    `LICENSE` and `.blob` have none, so they file like datasets while a `.pdf` still pools."""
+    import datetime as dt
+
+    from exomem import add as add_module
+    from exomem import originals, preserve, schema
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    for name in ("LICENSE", ".blob"):
+        stage = tmp_path / f"stage-{name.strip('.')}"
+        stage.mkdir()
+        (stage / name).write_bytes(b"suffix-less original bytes")
+        added = add_module.add(
+            vault, schema.load_source_schema(vault), content="", title=f"Capture {name}",
+            source_type="session",
+            artifact=add_module.SourceArtifact(staged_path=stage / name, filename=name),
+            today=dt.date(2026, 11, 15),
+        )
+        assert (vault / added.artifact_path).is_file()
+        assert originals.pooled(vault, added.artifact_path) is None
+
+    filed = preserve.preserve_bytes(vault, scope="work", category="receipts", filename="receipt.pdf",
+                                    data=b"%PDF-1.7\na receipt", today=dt.date(2026, 11, 16))
+    assert not (vault / filed.path).exists()
+    assert originals.pooled(vault, filed.path) is not None
+
+
 def test_derived_state_cleanup_and_rebuilds_leave_pooled_originals_intact(vault, tmp_path, monkeypatch) -> None:
     """An owner who adopts external state and rebuilds derived rows must not lose canonical original bytes.
 

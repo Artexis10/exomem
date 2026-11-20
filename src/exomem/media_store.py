@@ -1,8 +1,8 @@
 """Encrypted, version-pinned originals; the volume is a verified local cache.
 
 A store is selected only by explicit configuration: the media edge for Cloud cells,
-and a filesystem adapter for tests. No store is selected by default. Jobs share the
-media ledger; protection records outlive those jobs.
+and a filesystem adapter for a local disk or a mounted NAS. No store is selected by default.
+Jobs share the media ledger; protection records outlive those jobs.
 """
 
 from __future__ import annotations
@@ -93,6 +93,7 @@ class ObjectTooLarge(MediaStoreError):
 
     def __init__(self, size: int, bound: int):
         super().__init__("MEDIA_OBJECT_TOO_LARGE", f"{size} bytes exceed the per-object bound of {bound}")
+        self.size = size
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,12 +144,84 @@ def _declared_chunks(stream: BinaryIO, size: int, sha256: str):
         raise MediaStoreError("MEDIA_UPLOAD_MISMATCH", "the uploaded bytes differ from the declared size or digest")
 
 
-class FilesystemStore:
-    """Versioned ciphertext store for isolated tests, with no deletion API."""
+#: The adapter name of a local disk or a mounted NAS, and its earlier name, which stays accepted.
+FILESYSTEM_ADAPTER = "filesystem"
+FILESYSTEM_ADAPTER_ALIAS = "filesystem-test"
+#: The file in a filesystem store's root that names the store that the root is. Only `declare_store` writes it.
+STORE_MARKER = ".exomem-store"
+_MARKER_SCHEMA = 1
+_MARKER_MAX_BYTES = 4096
 
-    def __init__(self, root: Path, *, max_object_bytes: int | None = None):
+
+def _read_marker(root: Path) -> dict[str, object] | None:
+    """The marker's content; None when the root, the marker or its content is absent, unreadable or not a marker."""
+    try:
+        descriptor = os.open(root / STORE_MARKER, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return None
+    with os.fdopen(descriptor, "rb") as marker:
+        if not stat.S_ISREG(os.fstat(marker.fileno()).st_mode):
+            return None
+        raw = marker.read(_MARKER_MAX_BYTES + 1)
+    try:
+        value = json.loads(raw) if len(raw) <= _MARKER_MAX_BYTES else None
+    except ValueError:
+        return None
+    if isinstance(value, dict) and value.get("schema") == _MARKER_SCHEMA and isinstance(value.get("store"), str):
+        return value
+    return None
+
+
+def read_store_marker(root: Path) -> str | None:
+    """The store name that `root`'s marker declares; None when the root, the marker or its content is absent or unreadable."""
+    found = _read_marker(root)
+    return None if found is None else str(found["store"])
+
+
+def read_store_id(root: Path) -> str | None:
+    """The random id that `root`'s marker carries; None when there is no marker, or an older one that has no id."""
+    found = _read_marker(root)
+    return found["id"] if found is not None and isinstance(found.get("id"), str) else None
+
+
+def write_store_marker(root: Path, name: str) -> str:
+    """Create the marker that names `root` as store `name`, with a new random id, and return the id; refuses to replace one.
+
+    `declare_store` is the owner's door to it.
+    """
+    store_id = uuid.uuid4().hex
+    descriptor = os.open(root / STORE_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                         | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as marker:
+        marker.write(json.dumps({"schema": _MARKER_SCHEMA, "store": name, "id": store_id},
+                                separators=(",", ":")).encode("utf-8"))
+        marker.flush()
+        os.fsync(marker.fileno())
+    held_fs.flush_directory_path(root).require()
+    return store_id
+
+
+class FilesystemStore:
+    """Versioned ciphertext store for a local disk or a mounted NAS, with no deletion API.
+
+    It never creates its root, and it serves only a root whose marker names this store. Without that, a NAS that is
+    not mounted would read as an empty store: `head` would answer absent, and the upload would land on the local disk.
+    When the owner's declaration recorded the marker's random id (`store_id`), a root whose marker carries another id
+    is another store of the same name, and is refused too.
+    """
+
+    def __init__(self, root: Path, *, name: str, max_object_bytes: int | None = None, store_id: str | None = None):
         self.root = root
+        self.name = name
         self.max_object_bytes = max_object_bytes
+        self.store_id = store_id
+
+    def require_identity(self) -> None:
+        found = _read_marker(self.root)
+        if found is None or found["store"] != self.name or (self.store_id is not None and found.get("id") != self.store_id):
+            # Unavailable is never proof that a version is gone: the caller keeps what it recorded.
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE",
+                                  "the store root is missing, or its marker does not name this store")
 
     def _path(self, name: str, version: str) -> str:
         if not originals.is_sha256(name) or not version or Path(version).name != version or version in {".", ".."}:
@@ -162,7 +235,7 @@ class FilesystemStore:
             raise ValueError("invalid upload declaration")
         if self.max_object_bytes is not None and size > self.max_object_bytes:
             raise ObjectTooLarge(size, self.max_object_bytes)
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             with filesystem.parent(name, create=True, access="mutate").require() as parent:
                 held_fs.publish_bytes(filesystem, parent, version,
@@ -173,6 +246,7 @@ class FilesystemStore:
     @contextmanager
     def open(self, name: str, version: str):
         relative = self._path(name, version)
+        self.require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             with filesystem.parent(name).require() as parent:
                 with filesystem.file(parent, Path(relative).name).require() as file:
@@ -181,7 +255,7 @@ class FilesystemStore:
 
     def head(self, name: str, version: str) -> ObjectHead | None:
         self._path(name, version)
-        # A missing store root is unavailable, not proof that a version is gone.
+        self.require_identity()
         with held_fs.acquire(self.root).require() as filesystem:
             parent_result = filesystem.parent(name)
             if parent_result.error is not None and parent_result.error.code == "MISSING":
@@ -202,16 +276,106 @@ def _settings(vault: Path) -> dict[str, object]:
     return value
 
 
-def store_for(vault: Path) -> Store:
-    config = _settings(vault)
-    if config.get("adapter") == "media-edge":
-        from .media_edge_store import EdgeStore
+def _adapter(connection: dict[str, object], name: str) -> Store:
+    """Build a store from its connection fields. The adapter names are the closed set of adapters this code implements."""
+    adapter = connection.get("adapter")
+    try:
+        if adapter == "media-edge":
+            from .media_edge_store import EdgeStore
 
-        return EdgeStore.from_configuration(config)
-    if config.get("adapter") != "filesystem-test":
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
-    bound = config.get("max_object_bytes")
-    return FilesystemStore(Path(str(config["root"])), max_object_bytes=None if bound is None else int(bound))
+            return EdgeStore.from_configuration(connection)
+        if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(connection.get("root"), str):
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
+        bound = connection.get("max_object_bytes")
+        return FilesystemStore(Path(str(connection["root"])), name=name,
+                               max_object_bytes=None if bound is None else int(bound))
+    except (TypeError, ValueError) as error:
+        # A connection field of the wrong type or form makes this one store unavailable, never the caller's whole pass.
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the store's connection fields are invalid: {error}") from error
+
+
+def store_for(vault: Path, name: str | None = None) -> Store:
+    """The store that serves eviction, or the declared store `name`; a declared store with an incomplete descriptor is unavailable."""
+    config = _settings(vault)
+    entry = originals.store_entry(config, name)
+    if entry is None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "no media store of that name is configured")
+    if not entry.serves_eviction and not entry.available:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store's descriptor is incomplete")
+    if (refusal := connection_refusal(entry)) is not None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
+    backend = _adapter(entry.connection, entry.name)
+    if isinstance(backend, FilesystemStore):
+        from . import media_replicas
+
+        backend.store_id = media_replicas.declared_store_id(vault, entry.name)
+    return backend
+
+
+def connection_refusal(entry: originals.StoreEntry) -> str | None:
+    """Why a store's entry cannot name a connection of its own, or None.
+
+    The media edge is one connection for the whole process (its address and credential come from the environment),
+    so a declared further store of that adapter would silently be the store that serves eviction again: a replica in
+    the same place, counted as a second failure domain.
+    """
+    if not entry.serves_eviction and entry.connection.get("adapter") == "media-edge":
+        return "a media-edge store has no connection of its own: only the store that serves eviction uses the edge"
+    return None
+
+
+def connection_unusable(entry: originals.StoreEntry) -> str | None:
+    """Why a store's connection cannot be built, or None. Building an adapter parses configuration and reads no store."""
+    if (refusal := connection_refusal(entry)) is not None:
+        return refusal
+    try:
+        _adapter(entry.connection, entry.name)
+    except MediaStoreError as error:
+        return str(error).removeprefix(f"{error.code}: ")
+    return None
+
+
+def declare_store(vault: Path, name: str) -> Path:
+    """The owner's declaration that the directory in store `name`'s `root` is that store; it writes the root's marker.
+
+    Only this writes a marker. It refuses a root on the vault's own device, because a NAS that is not mounted leaves
+    its mount point there, and a marker written into that empty directory would defeat the marker's purpose. It
+    never creates the root. It names the same store again without change and refuses a root that names another.
+    """
+    config = _settings(vault)
+    entry = originals.store_entry(config, name)
+    root = entry.connection.get("root") if entry is not None else None
+    if entry is None or entry.connection.get("adapter") not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS):
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "that store is not a configured filesystem store")
+    if not isinstance(root, str) or not Path(root).is_absolute() or not Path(root).is_dir():
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                              "the store's root must be an existing absolute directory: mount or create it first")
+    folder = Path(root)
+    if os.stat(folder).st_dev == os.stat(Path(vault)).st_dev:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                              "the store's root is on the vault's own device, so it would not survive that device's loss")
+    from . import media_replicas
+
+    declared = read_store_marker(folder)
+    if declared is not None and declared != name:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root already names another store")
+    recorded = media_replicas.declared_store_id(vault, name)
+    if declared == name:
+        # The same store again: its marker's id is recorded (also after a lost ledger), unless another id is on record.
+        found = read_store_id(folder)
+        if recorded is not None and found != recorded:
+            raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                                  "the store's root carries a marker other than the one recorded for this store; if this is "
+                                  "a new disk on purpose, remove its marker file and declare the store again")
+        if found is not None and found != recorded:
+            media_replicas.record_store_id(vault, name, found)
+        return folder
+    try:
+        store_id = write_store_marker(folder, name)
+    except FileExistsError:
+        raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store's root holds a marker that cannot be read") from None
+    media_replicas.record_store_id(vault, name, store_id)
+    return folder
 
 
 @contextmanager
@@ -986,10 +1150,11 @@ def upload_refusal(
     """Why `MEDIA_ALLOWANCE_EXCEEDED` refuses an upload of `declared_bytes`, or None when it is admitted (D10, task 4.5).
 
     Only an upload that offload would store charges the allowance. Preserve keeps an Evidence note or dataset
-    on the volume (design D1); the Source lane files every upload through `add` as an offloadable original,
-    whatever its name, so an Evidence upload whose name is not known yet (`filename` None) is admitted. A size
-    known only as a range, at least `declared_bytes` and at most `most_bytes`, is refused only when every size
-    in it is. An artifact too large to offload stays on the volume in either lane. The recorded
+    on the volume (design D1), as does a pooled archive for a suffix-less name (`originals.resident_suffixless`).
+    The Source lane files every other upload through `add` as an offloadable original, whatever its name, so
+    a Source upload whose name is not known yet is charged. An Evidence upload whose name is not known yet
+    (`filename` None) is admitted. A size known only as a range, at least `declared_bytes` and at most
+    `most_bytes`, is refused only when every size in it is. An artifact too large to offload stays on the volume in either lane. The recorded
     census decides first. Only a record that says the upload does not fit is confirmed by a census read now,
     and only the confirmed figure refuses. No record, an unknown figure, or a configuration, volume or ledger
     that cannot be read admits the upload: its original stays local with retryable offload demand, and offload
@@ -1007,7 +1172,8 @@ def upload_refusal(
         # An import archive is unpacked into a stage and released, so it is never an offloaded original. `evidence` is
         # the upload lane token (upload_tokens.UPLOAD_LANES) whose filing keeps notes and datasets.
         stays = lane == held_uploads.IMPORT_LANE or (lane == "evidence" and (
-            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename)))
+            filename is None or originals.is_note_path(filename) or source_inspection.is_dataset_name(filename))) or (
+            filename is not None and originals.resident_suffixless(vault, filename))
         largest = declared_bytes if most_bytes is None else most_bytes
         # A larger size never classifies back to offloadable, so the largest possible size decides for the range.
         if stays or (bounds is not None and bounds.classify(largest) != media_capacity.OFFLOADABLE):
@@ -1020,7 +1186,7 @@ def upload_refusal(
         decision = _upload_decision(recorded, declared_bytes, config.get("allowance_bytes"))
         if decision.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
             decision = _upload_decision(take_census(vault), declared_bytes, config.get("allowance_bytes"))
-    except (OSError, ValueError, TypeError, MediaStoreError) as error:  # An unreadable policy, volume or ledger.
+    except (OSError, ValueError, TypeError, MediaStoreError, held_fs.HeldFsError) as error:  # An unreadable policy, volume, ledger or pool marker.
         log.warning("the upload allowance check admits an upload as unknown: %s", type(error).__name__)
         return None
     if decision.code != media_allowance.MEDIA_ALLOWANCE_EXCEEDED:
@@ -1050,6 +1216,27 @@ class ReferencePublication:
 def prepare_reference(vault: Path, snapshot: OriginalSnapshot, reference: StoredObject | None,
                       *, retirement_meta: str | None = None) -> ReferencePublication:
     """Prepare the existing reference edit once, retaining its source guard and hash."""
+    def edit(fields: dict[str, object]) -> None:
+        if reference is None:
+            fields.pop("stored_object", None)
+        else:
+            fields["stored_object"] = reference.fields()
+        if retirement_meta is not None:
+            fields["original_retirement_meta"] = retirement_meta
+
+    return _prepare_edit(vault, snapshot, edit, retirement_meta)
+
+
+def prepare_replica(vault: Path, snapshot: OriginalSnapshot, replica: StoredObject) -> ReferencePublication:
+    """Prepare the edit that lists `replica` beside the sidecar's other replicas; `stored_object` stays as written."""
+    def edit(fields: dict[str, object]) -> None:
+        fields[originals.REPLICAS] = originals.with_replica(fields.get(originals.REPLICAS), replica)
+
+    return _prepare_edit(vault, snapshot, edit, None)
+
+
+def _prepare_edit(vault: Path, snapshot: OriginalSnapshot, edit: Callable[[dict[str, object]], None],
+                  retirement_meta: str | None) -> ReferencePublication:
     from .vault import (
         PlannedWrite,
         content_hash,
@@ -1062,12 +1249,7 @@ def prepare_reference(vault: Path, snapshot: OriginalSnapshot, reference: Stored
     if content_hash(text) != snapshot.sidecar_hash:
         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the sidecar binding changed")
     fields, body, _marker = parse_frontmatter(text, custody=True)
-    if reference is None:
-        fields.pop("stored_object", None)
-    else:
-        fields["stored_object"] = reference.fields()
-    if retirement_meta is not None:
-        fields["original_retirement_meta"] = retirement_meta
+    edit(fields)
     rendered = render_frontmatter_document(serialize_frontmatter(fields), body)
     return ReferencePublication(snapshot, PlannedWrite(
         snapshot.sidecar_path, rendered, guard=guard, expected_hash=content_hash(text),
@@ -1182,28 +1364,31 @@ def _release_name(store: MediaJobStore, name: str) -> None:
     _durable(store, "INSERT INTO media_releases(object) VALUES (?)", (name,))
 
 
-def _upload_name(store: MediaJobStore, snapshot: OriginalSnapshot) -> str:
+def _upload_name(store: MediaJobStore, snapshot: OriginalSnapshot, replica_store: str = "") -> str:
     """collect-released-media D1: the name minted for this original's open record, or a fresh random one.
 
     A retry after a lost reply reuses the record's name, which keeps the edge's nonce recovery and serial-write
-    hold. A name that a sidecar may carry is sealed (`_seal`) and never receives another upload.
+    hold. A name that a sidecar may carry is sealed (`_seal`) and never receives another upload. The record is per
+    store: `replica_store` is the replica store the name is for, and empty is the store that serves eviction.
     """
     conn = store._connect(readonly=True)
     try:
         row = conn.execute("SELECT object FROM media_protections WHERE binary_rel = ? AND uploadable = 1 "
-                           "ORDER BY created_at LIMIT 1", (store._relative(snapshot.path),)).fetchone()
+                           "AND store = ? ORDER BY created_at LIMIT 1",
+                           (store._relative(snapshot.path), replica_store)).fetchone()
     finally:
         conn.close()
     return str(row["object"]) if row is not None else secrets.token_hex(32)
 
 
-def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str, *, uploadable: bool) -> None:
+def _protect(store: MediaJobStore, snapshot: OriginalSnapshot, name: str, *, uploadable: bool,
+             replica_store: str = "") -> None:
     # One record per object covers every retried attempt for this original.
     relative = store._relative(snapshot.path)
-    _durable(store, "INSERT INTO media_protections(token, binary_rel, object, created_at, uploadable) "
-                    "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
+    _durable(store, "INSERT INTO media_protections(token, binary_rel, object, created_at, uploadable, store) "
+                    "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM media_protections "
                     "WHERE binary_rel = ? AND object = ?)",
-             (uuid.uuid4().hex, relative, name, time.time(), int(uploadable), relative, name))
+             (uuid.uuid4().hex, relative, name, time.time(), int(uploadable), replica_store, relative, name))
 
 
 def _seal(store: MediaJobStore, snapshot: OriginalSnapshot, name: str) -> None:
@@ -1350,6 +1535,38 @@ def _no_census() -> None:
     return None
 
 
+@contextmanager
+def _ciphertext_reserved(ledger: MediaJobStore, token: str, config: dict[str, object], ciphertext_size: int):
+    """Hold the temporary ciphertext's bytes against the hydration capacity, which it shares and takes no slot of (D12, choice 3).
+
+    A policy with no capacity reserves nothing, as before the capacity existed.
+    """
+    limits = media_capacity.hydration_limits(config)
+    if limits is not None:
+        _reserve(ledger, token, ciphertext_size, limits, hydration=False)
+    try:
+        yield
+    finally:
+        _release(ledger, token)
+
+
+def _upload_encrypted(ledger: MediaJobStore, token: str, config: dict[str, object], backend: Store, name: str,
+                      plaintext: BinaryIO, plaintext_size: int) -> tuple[ObjectHead, str]:
+    """Encrypt `plaintext` to the vault's recipient and upload it as `name`; return the ciphertext's head and version."""
+    with _ciphertext_reserved(ledger, token, config, media_capacity.age_ciphertext_size(plaintext_size)):
+        with tempfile.TemporaryFile() as ciphertext:
+            result = subprocess.run(["age", "--encrypt", "--recipient", str(config["recipient"])],
+                                    stdin=plaintext, stdout=ciphertext, stderr=subprocess.PIPE, check=False)
+            if result.returncode:
+                raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "age encryption failed")
+            ciphertext.seek(0)
+            head = _digest(ciphertext)
+            ciphertext.seek(0)
+            with _transport("upload"):
+                version = backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
+            return head, version
+
+
 def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
             job: MediaJob | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
@@ -1457,32 +1674,14 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                 reference = reuse.reference
                 assert reference is not None
             else:
-                # The ciphertext temporary file shares the hydration capacity and takes no slot (D12, choice 3).
-                # A policy with no capacity reserves nothing, as before the capacity existed.
-                limits = media_capacity.hydration_limits(config)
-                if limits is not None:
-                    _reserve(ledger, token, media_capacity.age_ciphertext_size(snapshot.binary_size), limits,
-                             hydration=False)
                 try:
-                    with tempfile.TemporaryFile() as ciphertext:
-                        result = subprocess.run(["age", "--encrypt", "--recipient", str(config["recipient"])],
-                                                stdin=source.stream, stdout=ciphertext, stderr=subprocess.PIPE,
-                                                check=False)
-                        if result.returncode:
-                            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "age encryption failed")
-                        ciphertext.seek(0)
-                        head = _digest(ciphertext)
-                        ciphertext.seek(0)
-                        try:
-                            with _transport("upload"):
-                                version = backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
-                        except ObjectTooLarge as refusal:
-                            _refuse(ledger, snapshot, refusal, head.size)
-                            return None
-                        reference = StoredObject(1, str(config["store"]), key_version, name, version, head.size,
-                                                 head.sha256)
-                finally:
-                    _release(ledger, token)
+                    head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream,
+                                                      snapshot.binary_size)
+                except ObjectTooLarge as refusal:
+                    _refuse(ledger, snapshot, refusal, refusal.size)
+                    return None
+                reference = StoredObject(1, str(config["store"]), key_version, name, version, head.size,
+                                         head.sha256)
             if not _confirmed(backend, reference):
                 # A condemned answer here means that a late attempt superseded this one; the retry uploads again.
                 raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
@@ -1499,10 +1698,177 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                     batch.charge(ledger, snapshot, reference)
                 _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
+                _note_replica(vault, path, reference, None if reuse is not None else time.time())
                 _finish_reference(ledger, original_state(vault, path), source)
 
             _publishing(vault, "media_store_publish", publish)
         return reference
+
+
+# A replica copy that these codes refuse meets the same refusal when it is tried again: its bytes or its target decide.
+# Any other failure is an outage or a change that a later attempt can pass. Closed codes that this module raises.
+# nosemgrep: ep-word-set -- the closed set of refusal codes that replicate raises; they are not words a person typed.
+REPLICA_REFUSAL_CODES = frozenset({
+    "MEDIA_OBJECT_TOO_LARGE", "MEDIA_ORIGINAL_UNVERIFIED", "MEDIA_REPLICA_STORE_UNKNOWN", "MEDIA_REPLICA_STORE_REFUSED",
+})
+
+
+def require_replica_store(vault: Path, name: str) -> originals.StoreEntry:
+    """The declared store `name`, when it can take a replica now; else `MediaStoreError` says why."""
+    config = _settings(vault)
+    if config.get("enabled") is not True:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store is disabled")
+    entry = originals.store_entry(config, name)
+    if entry is None:
+        raise MediaStoreError("MEDIA_REPLICA_STORE_UNKNOWN", "no store of that name is declared")
+    if entry.serves_eviction:
+        raise MediaStoreError("MEDIA_REPLICA_STORE_REFUSED",
+                              "offload fills the store that serves eviction; name another declared store")
+    if not entry.available:
+        fields = ", ".join((*entry.missing, *entry.invalid))
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the store's descriptor is incomplete: {fields}")
+    if (refusal := connection_refusal(entry)) is not None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
+    return entry
+
+
+def store_reachable(vault: Path, name: str) -> bool | None:
+    """Whether the store answers as itself now; None when its adapter has no cheap check (a remote store is not probed)."""
+    try:
+        backend = store_for(vault, name)
+    except (MediaStoreError, ValueError):
+        return False
+    if not isinstance(backend, FilesystemStore):
+        return None
+    try:
+        backend.require_identity()
+    except MediaStoreError:
+        return False
+    return True
+
+
+def replica_unusable(vault: Path, replica: StoredObject) -> str | None:
+    """Why automatic repair cannot read `replica` now, or None when it can.
+
+    It needs a store that is available and `immediate`, and the decryption identity of the replica's key version.
+    This install holds one identity, so a replica of another key version stays for the owner.
+    """
+    config = _settings(vault)
+    entry = originals.store_entry(config, replica.store)
+    if entry is None or not entry.available or connection_refusal(entry) is not None:
+        return "store_unavailable"
+    if entry.retrieval_class != originals.IMMEDIATE:
+        return "owner_restores"
+    identity = config.get("identity_path")
+    if replica.key_version != str(config.get("key_version")) or not isinstance(identity, str) \
+            or not os.access(identity, os.R_OK):
+        return "identity_unreadable"
+    return None
+
+
+def _note_replica(vault: Path, path: Path, replica: StoredObject, verified_at: float | None) -> None:
+    """Record a published replica in the derived table. A failure costs the row only: the next rebuild restores it."""
+    from . import media_replicas
+
+    try:
+        media_replicas.record(vault, MediaJobStore(vault)._relative(path), replica, verified_at=verified_at)
+    except (sqlite3.Error, OSError) as error:
+        log.warning("a published replica is not yet in the replica table: %s", type(error).__name__)
+
+
+def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object], vault: Path, backend: Store,
+                     name: str, source: StoredObject) -> tuple[ObjectHead, str]:
+    """Copy the eviction store's ciphertext of an evicted original into `backend` as `name`.
+
+    The bytes are hashed on the way and must match the pointer's recorded size and digest, which its own upload
+    confirmed. The key is not needed, and the plaintext never exists here.
+    """
+    with _ciphertext_reserved(ledger, token, config, source.ciphertext_size):
+        with tempfile.TemporaryFile() as ciphertext:
+            digest, size = hashlib.sha256(), 0
+            with closing(_stored_chunks(store_for(vault), source)) as chunks:
+                for chunk in chunks:
+                    digest.update(chunk)
+                    size += len(chunk)
+                    ciphertext.write(chunk)
+            head = ObjectHead(size, digest.hexdigest())
+            if head != ObjectHead(source.ciphertext_size, source.ciphertext_sha256):
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the stored ciphertext differs from its pinned digest")
+            ciphertext.seek(0)
+            with _transport("upload"):
+                return head, backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
+
+
+def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
+    """Make a verified replica of one bound original in the replica store `store_name`, and list it in its binding.
+
+    The replica is ciphertext. An original with bytes on the volume is hashed against its binding, then encrypted to
+    the vault's recipient. An evicted original is copied as the ciphertext that the eviction store holds, hashed on
+    the way against its pointer. Either way the target store confirms the ciphertext's size and digest before the
+    binding lists the replica. The sidecar write holds the vault boundary; hashing, encrypting and uploading do not.
+    An existing replica in this store that still verifies is kept and nothing is written.
+    """
+    vault = Path(vault).resolve()
+    config = _settings(vault)
+    require_replica_store(vault, store_name)
+    backend = store_for(vault, store_name)
+    if isinstance(backend, FilesystemStore):
+        # Before any read, hash, encryption or download: a store that does not answer as itself costs nothing.
+        backend.require_identity()
+    ledger = MediaJobStore(vault)
+    with _pin(vault, path) as (_ledger, token), ExitStack() as held:
+        snapshot = original_state(vault, path)
+        if snapshot.binary_sha256 is None or snapshot.binary_size is None:
+            raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
+        listed = next((replica for replica in snapshot.replicas if replica.store == store_name), None)
+        if listed is not None:
+            head = _verified_head(backend, listed)
+            if head is not None and not head.condemned:
+                _note_replica(vault, path, listed, None)
+                return listed
+            # Only a definitive absence replaces the entry; an unknown answer raised above and keeps it.
+        source = None
+        if snapshot.state == "evicted":
+            assert snapshot.reference is not None
+        elif snapshot.state in ("local", "cached"):
+            source = held.enter_context(_open_local_original(vault, path.relative_to(vault).as_posix(), snapshot))
+            _bind_pin(ledger, token, snapshot, source)
+            if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
+            source.stream.seek(0)
+        else:
+            raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original bytes are absent")
+        with _guard(vault, "media_store_replica_protect"):
+            if source is not None:
+                source.require_current()
+            if original_state(vault, path) != snapshot:
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+            name = _upload_name(ledger, snapshot, store_name)
+            _protect(ledger, snapshot, name, uploadable=True, replica_store=store_name)
+        if source is not None:
+            key_version = str(config["key_version"])
+            head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream, snapshot.binary_size)
+        else:
+            assert snapshot.reference is not None
+            key_version = snapshot.reference.key_version
+            head, version = _copy_ciphertext(ledger, token, config, vault, backend, name, snapshot.reference)
+        replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
+        if not _confirmed(backend, replica):
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
+
+        def publish() -> None:
+            if source is not None:
+                source.require_current()
+            if original_state(vault, path) != snapshot:
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+            _seal(ledger, snapshot, name)
+            _commit_reference(vault, prepare_replica(vault, snapshot, replica))
+            _note_replica(vault, path, replica, time.time())
+            _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?",
+                     (ledger._relative(path), name))
+
+        _publishing(vault, "media_store_replica_publish", publish)
+    return replica
 
 
 def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, token: str) -> None:
@@ -1519,9 +1885,10 @@ def _hydrate(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, tok
     if current.state != "evicted":
         return  # Another completed hydration needs no second provider read.
     relative = ledger._relative(snapshot.path)
-    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path.
+    # Only a filing hydrates into the pool; a Trash entry comes back as an ordinary file at its own Trash path,
+    # and so does a suffix-less original, whose pool-only companion the egress census could not tell from a note.
     key = media_bindings.object_key(vault, relative, snapshot.binary_sha256)
-    if key != relative:
+    if key != relative and originals.may_share_bytes(relative):
         _hydrate_shared(vault, snapshot, ledger, token, key)
         return
     temporary = held_fs.publish_temporary_name()
@@ -1744,13 +2111,16 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
     return ObjectHead(size, plaintext.hexdigest())
 
 
-def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO) -> ObjectHead:
+def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO, *, store: str | None = None) -> ObjectHead:
     """Decrypt one stored version into `sink` and return the plaintext's head; the export pack's read (D8).
+
+    `store` names the declared store that holds the version, as a replica's pointer does; None reads the store that
+    serves eviction.
 
     The pack reads a staging copy, not the live vault, so this takes no pin, reservation or ledger row. A
     transport failure raises `MEDIA_STORE_UNAVAILABLE`, after `sink` may have received a verified prefix.
     """
-    return _decrypt_into(store_for(vault), reference, str(_settings(vault)["identity_path"]), sink)
+    return _decrypt_into(store_for(vault, store), reference, str(_settings(vault)["identity_path"]), sink)
 
 
 def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bool) -> str:

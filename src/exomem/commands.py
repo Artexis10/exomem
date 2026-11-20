@@ -6422,7 +6422,8 @@ def op_move_file(
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             POINTER_PREVIEW_REQUIRED; CURATED_PROTECTED;
             PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH (either end is a
-            store collection's view path).
+            store collection's view path); SHARED_ORIGINAL_NEEDS_EXTENSION
+            (a shared original renamed to a name without an extension).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
@@ -10034,7 +10035,7 @@ def op_transfer_artifact(
     return handoff
 
 
-ProcessMediaOperation = Literal["process", "status", "retry", "reprocess"]
+ProcessMediaOperation = Literal["process", "status", "retry", "reprocess", "replicate"]
 
 
 def op_process_media(
@@ -10044,17 +10045,21 @@ def op_process_media(
     operation: ProcessMediaOperation = "process",
     language: str | None = None,
     multilingual: bool = False,
+    store: str | None = None,
 ) -> dict:
-    """Check governed media; retry after remediation; extract again.
+    """Check governed media; retry after remediation; extract again; replicate originals.
 
     Status reads; other operations change extraction state. Extraction normally runs
-    automatically. Reprocess keeps the old text on a prior page.
+    automatically. Reprocess keeps the old text on a prior page. Replicate (owner
+    only) queues an encrypted replica of every original in store `store` and returns
+    the queue counts; a repeat while it runs changes nothing.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
         multilingual: Detect language per window (slower).
+        store: Replicate only: the name of a store the vault declares.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10064,6 +10069,10 @@ def op_process_media(
     validate_process_media_operation(operation)
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    if operation == "replicate":
+        return _replicate_media(vault_root, path=path, paths=paths, store=store)
+    if store is not None:
+        raise OpError("STORE_NOT_APPLICABLE", "store applies to replicate only")
     if operation == "reprocess" and path is None and paths is None:
         raise OpError("MEDIA_PATH_REQUIRED", "reprocess needs the path or paths of the media to extract again")
     try:
@@ -10097,6 +10106,28 @@ def op_process_media(
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
     return _carrying_batch_advisories(vault_root, result)
+
+
+def _replicate_media(vault_root: Path, *, path: str | None, paths: list[str] | None, store: str | None) -> dict:
+    """Queue a replica of every original in the declared store `store`, for the owner; return the queue's progress.
+
+    The copy runs in the background worker, which holds the mutation guard only for each short commit, so this call
+    only records the request. A vault restricted audience is refused: a replica store holds every original.
+    """
+    from . import media_replicas, media_store
+    from .cli_ops import OpError
+
+    if path is not None or paths is not None:
+        raise OpError("MEDIA_REPLICATE_SCOPE", "replicate copies every original to the store; it takes no path")
+    if store is None:
+        raise OpError("MEDIA_STORE_REQUIRED", "replicate needs the name of a store the vault declares")
+    if egress_module.owner_only_aggregate(Path(vault_root)) is not None:
+        raise OpError("MEDIA_OWNER_ONLY", "replicate is for the vault owner")
+    try:
+        progress = media_replicas.request(Path(vault_root), store)
+    except media_store.MediaStoreError as error:
+        raise OpError(error.code, str(error)) from error
+    return {"operation": "replicate", **progress}
 
 
 def _process_media(
@@ -14842,7 +14873,7 @@ def validate_process_media_operation(operation: Any) -> None:
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, retry, or reprocess",
+            "process_media operation must be process, status, retry, reprocess, or replicate",
         )
 
 

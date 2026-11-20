@@ -64,6 +64,9 @@ class OriginalSnapshot:
     offloadable: bool = False
     #: Physical pool storage, when the ordinary logical binary path has been retired.
     local_path: Path | None = None
+    #: The replicas that the sidecar lists beside the eviction store's `reference`, earliest first. They never
+    #: change `state`: only the `reference` in the selected store decides local, cached or evicted.
+    replicas: tuple[StoredObject, ...] = ()
 
     @property
     def present(self) -> bool:
@@ -94,6 +97,21 @@ def stored_reference(value: object) -> StoredObject | None:
     if type(value["ciphertext_size"]) is not int or value["ciphertext_size"] <= 0:
         return None
     return StoredObject(**value)
+
+
+#: The sibling frontmatter key that lists the replicas beyond `stored_object`, the pointer of the store that serves
+#: eviction. An older release ignores it, so a downgrade reads the pointer alone.
+REPLICAS = "replicas"
+
+
+def replica_references(value: object) -> tuple[StoredObject, ...]:
+    """The well-formed entries of a sidecar's `replicas` list, in written order. Any other value lists none.
+
+    An entry that does not parse is unknown, never a replica: this read skips it, and a writer keeps it as written.
+    """
+    if not isinstance(value, list):
+        return ()
+    return tuple(found for entry in value if (found := stored_reference(entry)) is not None)
 
 
 def bound_path(fields: dict[str, object]) -> str | None:
@@ -219,6 +237,131 @@ def configuration(vault: Path) -> dict[str, object] | None:
     return selected
 
 
+# The retrieval classes of a store's capability descriptor: a protocol value that the descriptor schema fixes, never
+# a vocabulary that a vault defines. Only `immediate` lets repair read a replica without the owner.
+IMMEDIATE = "immediate"
+# nosemgrep: ep-word-set -- the descriptor schema's closed enum of retrieval classes.
+RETRIEVAL_CLASSES: tuple[str, ...] = (IMMEDIATE, "minutes", "hours")
+#: The configuration key that lists the declared stores beside the kept `store` key.
+STORES = "stores"
+#: The optional configuration key that states who holds the decryption identity, and its one value: a platform that
+#: wraps it. Without the key, the owner's confirmed export of the identity is the only evidence of custody.
+KEY_CUSTODY = "key_custody"
+PLATFORM_CUSTODY = "platform"
+
+
+@dataclass(frozen=True, slots=True)
+class StoreEntry:
+    """One configured store and its capability descriptor; a None field is unknown, never refused.
+
+    `connection` holds the fields that its adapter reads. An entry whose descriptor omits a field (`missing`)
+    or gives it a value that the schema refuses (`invalid`) is unavailable: no replica is made in it and repair
+    does not read it, and the status names those fields. Nothing branches on `name`.
+    """
+
+    name: str
+    connection: dict[str, object]
+    failure_domain: str | None = None
+    retrieval_class: str | None = None
+    head_recomputes: bool | None = None
+    missing: tuple[str, ...] = ()
+    invalid: tuple[str, ...] = ()
+    #: Whether this is the store that serves eviction: the one that the per-vault `store` key names.
+    serves_eviction: bool = False
+    #: Whether the entry came from the `stores` list (a declared store) and not from the legacy top-level fields.
+    declared: bool = False
+
+    @property
+    def available(self) -> bool:
+        return not self.missing and not self.invalid
+
+
+def _descriptor(entry: dict[str, object], *, require_adapter: bool) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
+    """The descriptor values that an entry gives, with the fields it omits and the fields it gives wrongly."""
+    given: dict[str, object] = {}
+    missing: list[str] = []
+    invalid: list[str] = []
+    checks = (
+        ("failure_domain", lambda v: isinstance(v, str) and bool(v.strip()) and len(v) <= 1024),
+        ("retrieval_class", lambda v: isinstance(v, str) and v in RETRIEVAL_CLASSES),
+        ("head_recomputes", lambda v: type(v) is bool),
+    )
+    for field, valid in checks:
+        if field not in entry:
+            missing.append(field)
+        elif valid(entry[field]):
+            given[field] = entry[field]
+        else:
+            invalid.append(field)
+    if require_adapter:
+        if "adapter" not in entry:
+            missing.append("adapter")
+        elif not isinstance(entry["adapter"], str) or not entry["adapter"]:
+            invalid.append("adapter")
+    return given, tuple(missing), tuple(invalid)
+
+
+def store_entries(config: dict[str, object]) -> dict[str, StoreEntry]:
+    """Every store that a vault's configuration declares, the one that serves eviction first.
+
+    The kept `store` key names the store that serves eviction, and the top-level fields of the entry (`adapter`,
+    `root` and the rest) are its connection, as they were before declared stores: an older release reads the file
+    the same way, so the two can never disagree. With no `stores` list, that is the only store, `immediate`, with
+    its other descriptor fields unknown. A declared entry of that name supplies only its descriptor. Any other
+    entry names a further store with its own connection. A malformed entry makes only itself unavailable.
+    """
+    primary = str(config["store"])
+    declared = config.get(STORES)
+    listed: list[tuple[str, dict[str, object]]] = []
+    if isinstance(declared, list):
+        for index, item in enumerate(declared):
+            name = item.get("name") if isinstance(item, dict) else None
+            listed.append((name if isinstance(name, str) and name else f"#{index}", item if isinstance(item, dict) else {}))
+    found: dict[str, StoreEntry] = {}
+    selected = next((entry for name, entry in listed if name == primary), None)
+    if selected is None:
+        found[primary] = StoreEntry(primary, config, retrieval_class=IMMEDIATE, serves_eviction=True)
+    else:
+        given, missing, invalid = _descriptor(selected, require_adapter=False)
+        found[primary] = StoreEntry(primary, config, given.get("failure_domain"), given.get("retrieval_class"),
+                                    given.get("head_recomputes"), missing, invalid, True, True)
+    seen: set[str] = set()
+    for name, item in listed:
+        if name in seen:
+            # A repeated name cannot be addressed, so it makes the later entry unavailable, not the first.
+            found[f"{name}#repeat"] = StoreEntry(f"{name}#repeat", item, invalid=("name",), declared=True)
+            continue
+        seen.add(name)
+        if name == primary:
+            continue
+        given, missing, invalid = _descriptor(item, require_adapter=True)
+        if "name" not in item:
+            missing = ("name", *missing)
+        found[name] = StoreEntry(name, item, given.get("failure_domain"), given.get("retrieval_class"),
+                                 given.get("head_recomputes"), missing, invalid, False, True)
+    return found
+
+
+def with_replica(value: object, replica: StoredObject) -> list[object]:
+    """A sidecar's `replicas` list with `replica` in place of the entry for its store, or after the last entry.
+
+    Every other entry stays as written and in its place, one that does not parse included, so a writer never drops
+    what it did not change and the earliest entry stays first.
+    """
+    entries = list(value) if isinstance(value, list) else []
+    for index, entry in enumerate(entries):
+        held = stored_reference(entry)
+        if held is not None and held.store == replica.store:
+            entries[index] = replica.fields()
+            return entries
+    return [*entries, replica.fields()]
+
+
+def store_entry(config: dict[str, object], name: str | None = None) -> StoreEntry | None:
+    """The entry for `name`, or for the store that serves eviction when `name` is None; None when none is declared."""
+    return store_entries(config).get(str(config["store"]) if name is None else name)
+
+
 def binding_for(vault: Path) -> StoreBinding | None:
     value = configuration(vault)
     return StoreBinding(str(value["store"])) if value is not None else None
@@ -288,6 +431,18 @@ def may_pool(bound: str) -> bool:
     from .trash_metadata import is_trash_path
 
     return not is_trash_path(bound)
+
+
+def may_share_bytes(relative: str) -> bool:
+    """Whether an original at `relative` may keep its bytes only in the shared pool.
+
+    A pool-only filing exists on disk solely as its companion page `<name>.md`, which the egress
+    artifact census tells from a note by `<name>` carrying a suffix of its own. A name without a
+    suffix (`LICENSE`, or a dotfile like `.blob`) gives a companion indistinguishable from a note,
+    so such an original keeps an ordinary file at its logical path instead, like a dataset.
+    """
+    # A trailing dot reads as a suffix of "." on newer Python and as none on older, so both count as none.
+    return PurePosixPath(relative).suffix not in ("", ".")
 
 
 def pooled(vault: Path, path: str | Path) -> OriginalSnapshot | None:
@@ -504,10 +659,23 @@ def original_state(
     return OriginalSnapshot(
         state, binary, sidecar, binary_binding_value.sha256, binary_binding_value.size,
         reference, hashlib.sha256(data).hexdigest(),
-        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field.
-        offloadable=not is_note_path(relative) and "data_file" not in fields,
+        # Datasets stay on the volume with notes (design D1); `data_file` is their closed pointer field. So does a
+        # suffix-less original of a pooled archive, whose evicted bytes could otherwise turn pool-only (`may_share_bytes`).
+        offloadable=not is_note_path(relative) and "data_file" not in fields
+        and not resident_suffixless(vault, relative, archive),
         local_path=local_path,
+        replicas=replica_references(fields.get(REPLICAS)),
     )
+
+
+def resident_suffixless(vault: Path, relative: str, archive: ArchiveReads | None = None) -> bool:
+    """Whether an original named `relative` stays on the volume, never offloaded, because a pooled archive
+    keeps a suffix-less one resident (`may_share_bytes`). The one rule that offload and upload admission share."""
+    if may_share_bytes(relative):
+        return False
+    from . import original_pool
+
+    return archive.pooled() if archive is not None else original_pool.enabled(vault)
 
 
 def evicted_visible_original(vault: Path, path: str) -> tuple[Path, str, OriginalSnapshot] | None:

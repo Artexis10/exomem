@@ -9,19 +9,40 @@ the graph's state asks here first. A file-mode vault keeps file mode's own answe
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..collection_store.connection import CollectionStoreError
 
+#: ``StoreGraph.reason`` of a graph that the build has switched off, and of a store whose read failed with no
+#: store code of its own.
+GRAPH_DISABLED = "graph_disabled"
+STORE_UNREADABLE = "store_unreadable"
+#: ``StoreGraph.state`` of a graph that the build has switched off. A failed read is ``unknown`` instead.
+UNAVAILABLE = "unavailable"
+
 
 @dataclass(frozen=True)
 class StoreGraph:
-    """What a store-mode graph reader serves: the revision it reads at, or why it serves nothing."""
+    """What a store-mode graph reader serves: the revision it reads at, or why it serves nothing.
+
+    ``current`` says the graph serves rows: it is enabled and the store opens. It does not say how fresh
+    the rows are: ``registry`` is `rederive`'s state of the snapshot (``current``, ``rebuilding`` or
+    ``unknown``), which stays behind while a schema or access-policy pass re-derives the pages. It is
+    ``unknown`` for any read that failed, with its code in ``reason``, and None only for a graph that
+    the build has switched off.
+    """
 
     current: bool
     revision: int | None
     reason: str | None = None
+    registry: str | None = None
+
+    @property
+    def state(self) -> str:
+        """The one word that doctor and the writer-lease status report for the graph."""
+        return UNAVAILABLE if self.registry is None else self.registry
 
 
 def read(vault_root: Path) -> StoreGraph | None:
@@ -29,20 +50,27 @@ def read(vault_root: Path) -> StoreGraph | None:
 
     The graph is current when it is enabled and the store opens: this is the readiness that
     `EpistemicGraphIndex._open_read_snapshot` applies before it lends the store's snapshot.
+    A read that fails reports an unknown state with its code, never a crash and never a healthy answer.
     """
+    from .. import state_migration
     from . import mode
     from . import read as store_read
 
-    if not mode.store_mode_for_reads(vault_root):
-        return None
-    from ..epistemic_graph import graph_enabled
-
-    if not graph_enabled():
-        return StoreGraph(False, None, "graph_disabled")
     try:
-        return StoreGraph(True, store_read.current_revision(vault_root))
+        if not mode.store_mode_for_reads(vault_root):
+            return None
+        from ..epistemic_graph import graph_enabled
+
+        if not graph_enabled():
+            return StoreGraph(False, None, GRAPH_DISABLED)
+        readiness = store_read.readiness(vault_root)
+        return StoreGraph(True, readiness.revision, registry=readiness.registry)
     except CollectionStoreError as error:
-        return StoreGraph(False, None, error.code)
+        return StoreGraph(False, None, error.code, mode.UNKNOWN)
+    except state_migration.StateMigrationManifestError as error:
+        return StoreGraph(False, None, error.code, mode.UNKNOWN)
+    except sqlite3.Error:
+        return StoreGraph(False, None, STORE_UNREADABLE, mode.UNKNOWN)
 
 
 def is_current(vault_root: Path) -> bool:

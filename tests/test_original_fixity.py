@@ -190,7 +190,7 @@ def test_an_evicted_original_is_never_downloaded(vault: Path, selected_store, mo
     opened: list[Path] = []
     real_store_for = media_store.store_for
     # Every read of the store, a download included, starts by opening it.
-    monkeypatch.setattr(media_store, "store_for", lambda vault: (opened.append(vault), real_store_for(vault))[1])
+    monkeypatch.setattr(media_store, "store_for", lambda vault, name=None: (opened.append(vault), real_store_for(vault, name))[1])
 
     assert original_fixity.run_pass(vault).outcomes == {"evicted": 1}
     assert original_fixity.run_pass(vault).outcomes == {"evicted": 1}

@@ -204,7 +204,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         assets = target / "assets"
         assets.mkdir()
         shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
-        shutil.copyfile(root / "LICENSE", target / "LICENSE")
+        shutil.copyfile(package_skills.APACHE_LICENSE, target / "LICENSE")
         readme = (
             f"# {definition['display_name']}\n\n"
             f"{definition['description']}\n\n"

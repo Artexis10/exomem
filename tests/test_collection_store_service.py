@@ -2213,7 +2213,6 @@ def test_accepted_store_unit_keeps_its_envelopes_inputs_past_the_unit_wait_deadl
     """A delayed accepted SQL unit cannot outlive the input lifetime held by its request worker."""
     from exomem.collection_store import preview
 
-    monkeypatch.setattr(service.manager, "_mutation_timeout_seconds", 1.0)
     server = runtime._server(service.root)
     entered, release, inputs_released = threading.Event(), threading.Event(), threading.Event()
     replies, failures = [], []
@@ -2237,14 +2236,18 @@ def test_accepted_store_unit_keeps_its_envelopes_inputs_past_the_unit_wait_deadl
             except BaseException as error:  # noqa: BLE001 - surface the accepted caller's failure on the test thread
                 failures.append(error)
 
-    caller = threading.Thread(target=invoke)
-    caller.start()
-    try:
-        assert entered.wait(5), "the store did not accept its unit"
-        assert not inputs_released.wait(1.2), "an accepted unit lost its inputs at the acknowledgement deadline"
-    finally:
-        release.set()
-        caller.join(10)
+    # The short wait is scoped to the request: the fixture's teardown flushes the replica under the same
+    # timeout, and a 1 s deadline is shorter than one publication on a loaded host.
+    with monkeypatch.context() as short:
+        short.setattr(service.manager, "_mutation_timeout_seconds", 1.0)
+        caller = threading.Thread(target=invoke)
+        caller.start()
+        try:
+            assert entered.wait(5), "the store did not accept its unit"
+            assert not inputs_released.wait(1.2), "an accepted unit lost its inputs at the acknowledgement deadline"
+        finally:
+            release.set()
+            caller.join(10)
     assert not caller.is_alive() and failures == []
     assert inputs_released.is_set() and replies == [1]
 
