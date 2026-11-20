@@ -14,12 +14,13 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from exomem import call_spans, embeddings, sidecar_store
+from exomem import call_spans, embedding_index, embeddings, foreground_priority, sidecar_store
 from exomem.vault_store.vectors import Withheld
 
 
@@ -89,6 +90,33 @@ def test_matrix_loads_once_and_is_reused(tmp_path, monkeypatch):
     assert count["n"] == 1  # loaded once, not per call
     assert matrix.shape[0] == 2
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
+
+
+def test_the_background_load_waits_for_a_request_and_a_reader_joining_it_does_not_wait_out_the_floor(
+    tmp_path, monkeypatch
+):
+    """The row copy shares the interpreter with requests, so it pauses for one in flight, and
+    the reader that joins the load for its matrix is not the request it pauses for."""
+    vault = _fresh_vault(tmp_path)
+    seed = embeddings.EmbeddingIndex(vault)
+    for name in ("a", "b", "c"):
+        seed.upsert_file(f"{name}.md", [f"{name} one", f"{name} two"], _mat([1, 0], [0, 1]), 1.0)
+    monkeypatch.setattr(embedding_index, "MATRIX_LOAD_YIELD_ROWS", 2)
+    idx = embeddings.get_embedding_index(vault)
+
+    with foreground_priority.foreground():
+        loading = idx.start_corpus_matrix_load()
+        time.sleep(0.3)
+        parked = loading.is_alive()
+        started = time.monotonic()
+        metadata, matrix = idx.all_vectors()
+        waited = time.monotonic() - started
+    loading.join(timeout=10)
+
+    assert parked
+    assert waited < foreground_priority.MAX_YIELD_SECONDS / 2, waited
+    assert matrix.shape[0] == 6
+    assert [m[0] for m in metadata] == ["a.md", "a.md", "b.md", "b.md", "c.md", "c.md"]
 
 
 def test_failed_matrix_load_retains_partial_counts_in_the_call_ledger(tmp_path, monkeypatch):

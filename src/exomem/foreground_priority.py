@@ -41,6 +41,8 @@ Scheduling only: process-local counters, no content, nothing persisted.
 
 from __future__ import annotations
 
+import math
+import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -54,12 +56,13 @@ _T = TypeVar("_T")
 #: caps what a stuck one can cost the bulk pass per unit of work.
 MAX_YIELD_SECONDS = 2.0
 
-#: Progress floor for a `bulk()` pass. Overlapping requests can keep
+#: Default progress floor for a `bulk()` pass. Overlapping requests can keep
 #: `_in_flight` above zero indefinitely, and every unit then waited the full cap:
-#: three units took 6 s. A pass may wait at most `MAX_WAIT_SHARE` of its elapsed
+#: three units took 6 s. A pass may wait at most `wait_share()` of its elapsed
 #: time, beyond one grace wait of `MAX_YIELD_SECONDS` so a request that arrives
-#: early still gets priority.
+#: early still gets priority. `EXOMEM_BULK_WAIT_SHARE` replaces it.
 MAX_WAIT_SHARE = 0.5
+WAIT_SHARE_ENV = "EXOMEM_BULK_WAIT_SHARE"
 
 #: Bound each progress turn by elapsed time, not an estimated number of units:
 #: cheap directory walks and expensive page parsing share the same pass.
@@ -163,7 +166,7 @@ def awaiting_bulk() -> Iterator[None]:
     For a short wait on work a bulk pass may own, by a thread that may hold a
     boundary: joining a single-flight build, or a lock a rebuild holds across
     its walk. Without it the owner parks for this very request and the wait
-    lasts the pass's progress floor (`MAX_WAIT_SHARE`) instead of the work.
+    lasts the pass's progress floor (`wait_share()`) instead of the work.
     Every pass is released rather than only the owner, because another
     foreground thread can hold the owner too: a writer queued on the boundary
     this thread holds. No request has priority meanwhile; a long join by a
@@ -258,7 +261,7 @@ def wait_for_retry(seconds: float) -> None:
 class PassBudget:
     """How long one `bulk()` pass has run, waited, and may still run unyielded.
 
-    ``wait_share``, in [0, 1), replaces `MAX_WAIT_SHARE` for this pass. A pass
+    ``wait_share``, in [0, 1), replaces `wait_share()` for this pass. A pass
     that may wait most of its time sets ``max_waited`` too: the total seconds it
     may wait, so it still finishes within that delay beyond its work.
     """
@@ -277,7 +280,7 @@ class PassBudget:
         work = max(0.0, now - self.started - self.waited)
         # Charge the initial grace once. Counting previous waits as elapsed
         # work would let those waits buy more waiting and double the grace.
-        share = MAX_WAIT_SHARE if self.wait_share is None else self.wait_share
+        share = wait_share() if self.wait_share is None else self.wait_share
         wait_per_work = share / (1.0 - share)
         allowed = MAX_YIELD_SECONDS + wait_per_work * work
         if self.max_waited is not None:
@@ -286,6 +289,23 @@ class PassBudget:
 
     def after_capped_wait(self, now: float, waited: float) -> None:
         self.work_until = now + min(waited, MAX_BULK_WORK_SECONDS)
+
+
+def wait_share() -> float:
+    """The share of its elapsed time a `bulk()` pass may wait, in [0, 1).
+
+    `EXOMEM_BULK_WAIT_SHARE`, read at each call so an operator changes it without a
+    restart of the pass; unset, malformed or out of range means `MAX_WAIT_SHARE`.
+    A share of 1 or more would make the progress floor unbounded.
+    """
+    raw = os.environ.get(WAIT_SHARE_ENV)
+    if raw is None:
+        return MAX_WAIT_SHARE
+    try:
+        share = float(raw)
+    except ValueError:
+        return MAX_WAIT_SHARE
+    return share if math.isfinite(share) and 0.0 <= share < 1.0 else MAX_WAIT_SHARE
 
 
 def pass_waited() -> float:
@@ -320,7 +340,7 @@ def yield_to_foreground(*, max_wait: float = MAX_YIELD_SECONDS) -> float:
     """Wait while a foreground request runs, at most `max_wait`; return the wait.
 
     Inside a `bulk()` pass the wait is also held to the pass's progress floor
-    (`MAX_WAIT_SHARE`, unless its `PassBudget` sets its own).
+    (`wait_share()`, unless its `PassBudget` sets its own).
     """
     check_cancelled()
     budget: PassBudget | None = getattr(_local, "budget", None)
@@ -423,6 +443,17 @@ def bulk(*, stop: threading.Event | None = None, budget: PassBudget | None = Non
             _local.bulk -= 1
             if outermost:
                 _local.budget = None
+
+
+def yield_in_bulk() -> float:
+    """`yield_to_foreground()` inside `bulk()` on this thread; no wait and no check elsewhere.
+
+    For one yield point between the units of a loop that `yielding_in_bulk` cannot wrap,
+    or that is too fine to ask at every unit. The caller holds no lock a request waits on.
+    """
+    if getattr(_local, "bulk", 0):
+        return yield_to_foreground()
+    return 0.0
 
 
 def yielding_in_bulk(items: Iterable[_T]) -> Iterable[_T]:

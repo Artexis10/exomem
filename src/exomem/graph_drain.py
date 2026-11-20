@@ -41,10 +41,12 @@ backstop for debt this process never observed.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from . import state_paths
@@ -712,6 +714,20 @@ def _run(vault_root: Path) -> None:
         log.info("graph drain cancelled; queued recovery remains pending")
 
 
+@contextlib.contextmanager
+def _bulk_pass() -> Iterator[None]:
+    """One drain pass as bulk work: it waits for a request in flight first, and its units yield to the next.
+
+    Each pass is its own scope, not one for the thread's life: an idle wait inside a long scope
+    would earn the pass wait allowance (`foreground_priority.PassBudget`) it never used.
+    """
+    from . import foreground_priority
+
+    with foreground_priority.bulk(stop=_stop):
+        foreground_priority.yield_to_foreground()
+        yield
+
+
 def _run_owned(vault_root: Path) -> None:
     global _wait_ends
     interval = IDLE_POLL_SECONDS
@@ -758,12 +774,14 @@ def _run_owned(vault_root: Path) -> None:
             # work behind a barrier is not held: it drains on every wake.
             if held_since is None:
                 held_since = _last_debt or time.monotonic()
-            drained = _per_path_work_once(vault_root)
+            with _bulk_pass():
+                drained = _per_path_work_once(vault_root)
             interval = min(hold, RETRY_SECONDS) if drained else hold
             continue
         # This attempt is no longer held; the next one gets its own ceiling.
         held_since = None
-        processed = _work_once(vault_root)
+        with _bulk_pass():
+            processed = _work_once(vault_root)
         if not _pending(vault_root):
             from . import epistemic_graph
 

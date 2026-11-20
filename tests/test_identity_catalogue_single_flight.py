@@ -14,11 +14,12 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from exomem import call_spans, request_budget, reserved_paths, writer_lease
+from exomem import call_spans, foreground_priority, request_budget, reserved_paths, writer_lease
 
 CALLERS = 8
 
@@ -580,6 +581,34 @@ def test_warm_scheduler_builds_off_the_calling_thread_and_returns_first(
     assert build_threads == ["exomem-identity-catalogue-warm"]
     assert caller not in build_threads
     assert builds == 1
+    assert reserved_paths.identity_catalogue_ready(vault_root) is True
+
+
+def test_the_warm_waits_for_a_request_and_a_request_joining_it_does_not_wait_out_the_floor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The walk is the 12 s stall the warm exists to take off requests, but it shares the
+    interpreter with them, so it pauses for one in flight. A request that needs its result
+    joins the build and must not count as the request the build waits for."""
+
+    vault_root = _vault(tmp_path)
+    _manager(tmp_path, monkeypatch)
+
+    with foreground_priority.foreground():
+        reserved_paths.schedule_identity_catalogue_warm(vault_root)
+        warm = _warm_thread()
+        assert warm is not None
+        time.sleep(0.3)
+        ready_beside_a_request = reserved_paths.identity_catalogue_ready(vault_root)
+        started = time.monotonic()
+        joined = reserved_paths._baseline_identity_catalogue(vault_root)
+        waited = time.monotonic() - started
+    warm.join(20)
+
+    assert ready_beside_a_request is False
+    assert waited < foreground_priority.MAX_YIELD_SECONDS / 2, waited
+    assert joined.generation is not None
     assert reserved_paths.identity_catalogue_ready(vault_root) is True
 
 

@@ -30,7 +30,7 @@ from typing import IO, TYPE_CHECKING
 
 from rpds import HashTrieMap, HashTrieSet
 
-from . import call_spans, held_fs, request_budget
+from . import call_spans, foreground_priority, held_fs, request_budget
 from .cli_ops import OpError
 from .kbdir import managed_join, managed_root_rel, managed_split_parts
 
@@ -3319,7 +3319,9 @@ class IdentityCatalogue:
                 raise RuntimeError(
                     "reserved identity catalogue could not enumerate the KB"
                 )
-            for record in children.require():
+            # A bulk pass waits for a request between entries. It holds no lock here: the single-flight
+            # build is waited on inside `awaiting_bulk`, and the locked fail-safe scan runs under a boundary.
+            for record in foreground_priority.yielding_in_bulk(children.require()):
                 relative = (
                     f"{prefix}/{record.relative_path}"
                     if prefix
@@ -3493,7 +3495,10 @@ def _await_baseline_flight(
     coordination boundary itself uses and reports the boundary unavailable.
     """
 
-    if not flight.done.wait(timeout):
+    # The leader may be the background warm, which yields to requests: this wait must not count as one.
+    with foreground_priority.awaiting_bulk():
+        finished = flight.done.wait(timeout)
+    if not finished:
         raise ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
     if flight.error is not None:
         raise flight.error
@@ -3654,7 +3659,8 @@ def schedule_identity_catalogue_warm(vault_root: Path) -> None:
 
     def _warm() -> None:
         try:
-            _baseline_identity_catalogue(vault_root)
+            with foreground_priority.bulk():
+                _baseline_identity_catalogue(vault_root)
         except BaseException as error:  # noqa: BLE001 - a background warm never raises
             # Class only: a failure message can name a private reserved path,
             # and this log is not inside the leaf boundary that hides them.

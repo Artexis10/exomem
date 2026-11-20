@@ -31,6 +31,7 @@ registry is opportunistic: a missed registration merely costs the old harmless e
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import functools
 import hashlib
@@ -50,6 +51,7 @@ from typing import TYPE_CHECKING, Any
 from . import (
     call_spans,
     capture_inventory,
+    foreground_priority,
     freshness,
     graph_read_publication,
     index_sync,
@@ -1281,6 +1283,16 @@ def _graph_repair_owned(vault_root: Path, *, batch_owned: bool) -> bool | None:
     return marker_stands or batch_owned
 
 
+def _give_way(budget: foreground_priority.PassBudget | None = None) -> None:
+    """Wait for a request in flight, once, as a bulk pass between two of its units.
+
+    The bulk scope holds only this wait, so a dispatch that follows it keeps its own
+    fan-out chain unbroken: a helper below it that yields in a bulk pass never does here.
+    """
+    with foreground_priority.bulk(budget=budget):
+        foreground_priority.yield_to_foreground()
+
+
 def _background_graph_caller(method: Callable[..., Any]) -> Callable[..., Any]:
     """Run a watcher step as a background graph caller.
 
@@ -1822,6 +1834,9 @@ class FileWatcher:
                     quiet = (time.monotonic() - self._last_change) >= debounce
                 if quiet:
                     break
+            if not self._stop.is_set():
+                # Events that arrive during the wait join this batch.
+                _give_way()
             self._wake.clear()
             self._flush()
         # Final drain so nothing pending is lost on shutdown.
@@ -1839,7 +1854,7 @@ class FileWatcher:
             paths = walk_vault_md(self._vault_root)
         else:
             paths = find_module._walk_md(self._kb_root) if self._kb_root.is_dir() else ()
-        for p in paths:
+        for p in foreground_priority.yielding_in_bulk(paths):
             try:
                 yield (str(p), freshness.stat_signature(p))
             except OSError:
@@ -1870,46 +1885,51 @@ class FileWatcher:
         drifted = False
         baselines_current = True
         pending_epoch = None if seed else freshness.external_pending_epoch(self._vault_root)
-        for scope in freshness.SCOPES:
-            if self._stop.is_set():
-                baselines_current = False
-                break
-            try:
-                if seed:
-                    # Bracket the walk itself, not the outer per-scope `try`,
-                    # so the pending mark clears on EVERY exit — including the
-                    # `except Exception` below catching a mid-walk failure —
-                    # and never covers `freshness.reconcile`'s own periodic
-                    # (non-seed) pass, which this seam is not about.
-                    freshness.announce_seed_pending(self._vault_root, scope)
-                    try:
-                        freshness.seed(self._vault_root, scope, self._walk_entries(scope))
-                    finally:
-                        freshness.clear_seed_pending(self._vault_root, scope)
-                else:
-                    delta = freshness.reconcile(
-                        self._vault_root,
-                        scope,
-                        self._walk_entries(scope),
-                        publication_guard=self._freshness_manager.consistency_guard(
+        # The periodic pass is bulk work: its walks wait for a request in flight, one budget across
+        # its scopes. Only the walk runs in the scope (the replacement lock it holds is waited on
+        # inside `awaiting_bulk`); the seed gates admission, so it never yields.
+        budget = None if seed else foreground_priority.PassBudget()
+        with contextlib.nullcontext() if seed else foreground_priority.bulk(budget=budget):
+            for scope in freshness.SCOPES:
+                if self._stop.is_set():
+                    baselines_current = False
+                    break
+                try:
+                    if seed:
+                        # Bracket the walk itself, not the outer per-scope `try`,
+                        # so the pending mark clears on EVERY exit — including the
+                        # `except Exception` below catching a mid-walk failure —
+                        # and never covers `freshness.reconcile`'s own periodic
+                        # (non-seed) pass, which this seam is not about.
+                        freshness.announce_seed_pending(self._vault_root, scope)
+                        try:
+                            freshness.seed(self._vault_root, scope, self._walk_entries(scope))
+                        finally:
+                            freshness.clear_seed_pending(self._vault_root, scope)
+                    else:
+                        delta = freshness.reconcile(
                             self._vault_root,
-                            operation="watcher_reconcile_freshness",
-                            holder_kind="background",
-                        ),
-                    )
-                    if not delta.published:
-                        baselines_current = False
-                    if delta.drifted:
-                        drifted = True
-                        # vault ⊇ kb, so a KB file lands in both deltas — dedupe
-                        # to dispatch it at most once per cycle.
-                        for sp in delta.changed:
-                            changed_union.setdefault(sp, None)
-                        for sp in delta.deleted:
-                            deleted_union.setdefault(sp, None)
-            except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
-                baselines_current = False
-                log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
+                            scope,
+                            self._walk_entries(scope),
+                            publication_guard=self._freshness_manager.consistency_guard(
+                                self._vault_root,
+                                operation="watcher_reconcile_freshness",
+                                holder_kind="background",
+                            ),
+                        )
+                        if not delta.published:
+                            baselines_current = False
+                        if delta.drifted:
+                            drifted = True
+                            # vault ⊇ kb, so a KB file lands in both deltas — dedupe
+                            # to dispatch it at most once per cycle.
+                            for sp in delta.changed:
+                                changed_union.setdefault(sp, None)
+                            for sp in delta.deleted:
+                                deleted_union.setdefault(sp, None)
+                except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
+                    baselines_current = False
+                    log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
         if not seed:
             try:
                 media_processing.reconcile_all_media(
@@ -1957,6 +1977,7 @@ class FileWatcher:
             else max(0, policy.max_reconcile_embed_files - drift_admission)
         )
         drain_limit = _background_deferred_limit(policy, remaining)
+        _give_way(budget)
         try:
             index_sync.drain_deferred_work(self._vault_root, limit=drain_limit)
         except Exception:  # noqa: BLE001 - queued work remains retryable
@@ -1972,6 +1993,7 @@ class FileWatcher:
         from . import bm25
 
         for scope in freshness.SCOPES:
+            _give_way(budget)
             try:
                 bm25.warm(self._vault_root, scope)
             except Exception:  # noqa: BLE001

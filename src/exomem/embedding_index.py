@@ -226,6 +226,9 @@ CATCHUP_MAX_ROUNDS = 8
 # that read; the wait starts short, so a transient failure (a busy lock) costs
 # seconds of dense recall, and doubles with each consecutive failure up to 64x.
 MATRIX_LOAD_RETRY_SECONDS = 5.0
+# Rows the background load copies between two yields to a request in flight: about
+# one progress turn (`foreground_priority.MAX_BULK_WORK_SECONDS`) of the per-row copy.
+MATRIX_LOAD_YIELD_ROWS = 512
 
 # --------------------------------------------------------------- generation meta
 #
@@ -2129,7 +2132,9 @@ class EmbeddingIndex:
             loading = self._matrix_loading()
             if loading is not None and may_wait:
                 # Wait off the lock for the load already running, never a second one.
-                loading.join()
+                # The load yields to requests, and this one must not count as one.
+                with foreground_priority.awaiting_bulk():
+                    loading.join()
             with self._lock:
                 served = self._serve_or_catch_up_locked(policy_identity)
                 if served is not None:
@@ -2490,7 +2495,9 @@ class EmbeddingIndex:
             if self._matrix_invalidation is not witness:
                 return
             before = self._cache
-            loaded = self._load_all_rows(admit_passage=True) if passage else self._load_all_rows()
+            # Off `self._lock`: the read yields to a request in flight, which waits on no lock this holds.
+            with foreground_priority.bulk():
+                loaded = self._load_all_rows(admit_passage=True) if passage else self._load_all_rows()
             with self._lock:
                 if self._matrix_invalidation is not witness:
                     return
@@ -2757,6 +2764,9 @@ class EmbeddingIndex:
                             reservation.retain(matrix)
                         metadata: list[tuple[str, int]] = []
                     fields = {"expected_rows": count, "width_sum": width}
+                    # Never while this thread holds `_lock`: a reader waits on it. The read snapshot is not
+                    # a lock, so a bulk pass may pause on it.
+                    may_yield = not self._lock._is_owned()
                     with call_spans.span("embeddings.matrix_load.rows", fields):
                         try:
                             cursor = conn.execute(
@@ -2770,6 +2780,8 @@ class EmbeddingIndex:
                                 matrix[len(metadata)] = np.frombuffer(blob, dtype=np.float32)
                                 del blob  # Release this vector before the next cursor fetch.
                                 metadata.append((sys.intern(fp), idx))
+                                if may_yield and not len(metadata) % MATRIX_LOAD_YIELD_ROWS:
+                                    foreground_priority.yield_in_bulk()
                             if len(metadata) != count:
                                 raise ValueError("embedding row count differs from snapshot")
                         finally:

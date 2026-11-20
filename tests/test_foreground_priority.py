@@ -714,3 +714,25 @@ def test_nested_bulk_stop_interrupts_without_traffic_and_restores_scope() -> Non
     assert completed == [0]
     with foreground_priority.bulk():
         assert list(foreground_priority.yielding_in_bulk(range(3))) == [0, 1, 2]
+
+
+def test_the_wait_share_is_a_setting_that_keeps_its_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass waits a share of its work after one grace wait. The operator moves the
+    share with an environment setting; unset, or a value that is not a share in
+    [0, 1), keeps the 0.5 that every pass used before it was a setting."""
+    budget = foreground_priority.PassBudget()
+    budget.started = 0.0
+
+    monkeypatch.delenv(foreground_priority.WAIT_SHARE_ENV, raising=False)
+    default = budget.allowance(100.0)
+    monkeypatch.setenv(foreground_priority.WAIT_SHARE_ENV, "0.9")
+    raised = budget.allowance(100.0)
+    monkeypatch.setenv(foreground_priority.WAIT_SHARE_ENV, "1.5")
+    refused = budget.allowance(100.0)
+
+    # 0.5 waits one second per second of work, 0.9 nine.
+    assert default == pytest.approx(foreground_priority.MAX_YIELD_SECONDS + 100.0)
+    assert raised == pytest.approx(foreground_priority.MAX_YIELD_SECONDS + 900.0)
+    assert refused == default

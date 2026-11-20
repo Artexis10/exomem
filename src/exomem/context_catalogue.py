@@ -934,7 +934,7 @@ class _Fold:
         for rel in ordered[len(to_fold):]:
             self.pending[rel] = PENDING_DEFERRED
             self.deferred += 1
-        for rel in to_fold:
+        for rel in foreground_priority.yielding_in_bulk(to_fold):
             foreground_priority.check_cancelled()
             self._fold_path(rel)
         self._mirror_other_anchors()

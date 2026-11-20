@@ -130,6 +130,13 @@
   - Measured 2026-11-14 on a copy of one vault with about 14,000 pages: the real server on one laptop, no network, the REST door. One read of each of the twelve queues took 67 to 69 s on unchanged code and 1.4 to 2.2 s from held passes. A decision by a listed id took 120 s and 1.6 to 1.8 s. The refusal of an unknown id took 67 s and 0.9 to 1.6 s. Each whole queue, read from held passes, held the same items in the same order as on unchanged code. The first round after a start ran before a pass was held: 187 s, against 170 s on unchanged code, while the worker ran its pass. One whole review audit pass took 71 s when a request ran it in an earlier draft, where the audit of the stale queue alone takes 5.5 s. That is why only the worker runs a pass. The server's resident memory did not change measurably.
   - Still open: a restricted caller and a bound collection writer keep the request path and its cost, so a decision on a vault whose pages a collection store owns is not faster.
   - Still open: the refusal of an unknown id still reads every queue. A lookup by id needs an index of item ids.
+- [ ] 3.20 Run the working-set warm, graph drain, vocabulary recovery, freshness reconcile, watcher flush, identity catalogue warm and matrix load in `foreground_priority.bulk()`, with a yield between natural units (design decision 10).
+  - Verify: one test per pass holds a request in flight and shows the pass makes no progress until it ends, then makes all of it; a request that joins a pass's single flight does not wait out the progress floor.
+  - Verify: no yield runs under a lock, boundary, single-flight build or connection that a request waits on; a site with no safe point stays unchanged and the design names why.
+- [ ] 3.21 End a derived-drain turn when a request is in flight, as for a waiting writer, and wait for it between turns outside the boundary.
+  - Verify: `tests/test_derived_drain_turns.py` ends a turn beside a request and keeps a loan to one unit.
+- [ ] 3.22 Make the bulk-pass wait share the setting `EXOMEM_BULK_WAIT_SHARE`, with 0.5 unchanged as the default.
+  - Verify: `tests/test_foreground_priority.py` reads the setting, and an unset or invalid value keeps the default allowance.
 
 ## 4. Verify installed behavior and deliver
 
