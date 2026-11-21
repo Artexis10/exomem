@@ -2167,6 +2167,7 @@ def _preflight_existing(
             details=closure_plan.inspection.public_details(),
         )
 
+    # Close the registry snapshot before the freshness checks and commit.
     with read.request_snapshot(root), mutation_timing_span(timings, "preflight.registries"):
         registry = relation_registry.load_registry(root)
         language = semantic_language_registry.load_registry(root)
@@ -2190,6 +2191,7 @@ def _preflight_existing(
     resolver_freshness = (
         resolver_freshness_before if resolver_freshness_before == resolver_freshness_after else None
     )
+    # Keep the before and after page states at one revision for preflight only.
     with read.request_snapshot(root), mutation_timing_span(timings, "preflight.page_states"):
         before = semantic_contract.build_page_state(
             root,
@@ -2261,6 +2263,7 @@ def _preflight_existing(
                 proposed_source=after_source,
                 primary_guard=primary_guard,
             )
+        # Close the relation-review snapshot before entering the commit boundary.
         with read.request_snapshot(root), mutation_timing_span(timings, "preflight.relation_review"):
             before_review = relation_review.load_relation_review(
                 root, before, corpus=before_corpus, admission=admission,

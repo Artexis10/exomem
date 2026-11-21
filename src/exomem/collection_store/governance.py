@@ -49,6 +49,9 @@ CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
 #: that a write accepts (`visible_snapshot`).
 UNLIMITED_WRITE_ROUTES = ("from the owner's CLI or a stdio connection, or from a client whose entry in the host's "
                           "connector boundary configuration denies it no scope")
+_PROJECTION_RELEASE_ERRORS = (
+    collections.CollectionError, membership.MembershipUnresolved, ValueError, TypeError, KeyError, sqlite3.Error,
+)
 
 
 def _json(value: Any) -> str:
@@ -1936,8 +1939,7 @@ class OperationAuthorization:
         """Which paths need the full projection release check, including unresolved paths."""
         try:
             return self.projection_subjects(path) is not None
-        except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
-                TypeError, KeyError, sqlite3.Error):
+        except _PROJECTION_RELEASE_ERRORS:
             return True
 
     def projection_decision(self, path: str, *, content: bytes | None = None,
@@ -2004,8 +2006,7 @@ class OperationAuthorization:
                         decide(extra, audience=self.who.audience_id, purpose=self.purpose,
                                policy=self.policy, active_grants=self.policy.grants)))
             return decision
-        except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
-                TypeError, KeyError, sqlite3.Error):
+        except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
 
     def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:
