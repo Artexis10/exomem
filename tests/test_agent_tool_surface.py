@@ -277,19 +277,35 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
 
 
 @pytest.mark.parametrize(
-    ("declaration", "invalid", "path", "choices", "corrected", "truncated"),
+    ("declaration", "invalid", "path", "choices", "corrected", "truncated", "fallback_yaml"),
     [
-        ("{type: enum, enum: [42, short, long]}", "medium", ["word_count"], [42, "short", "long"], 42, False),
+        ("{type: enum, enum: [42, short, long]}", "medium", ["word_count"], [42, "short", "long"], 42, False, False),
         (
             "{type: array, items: {type: enum, enum: [42, " + "x" * 17_000 + ", true, short]}}",
-            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], True,
+            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], True, False,
+        ),
+        (
+            r'{type: enum, enum: ["\uD800", 42]}',
+            "medium", ["word_count"], [42], 42, True, True,
         ),
     ],
-    ids=["field", "array-item-with-oversized-choice"],
+    ids=["field", "array-item-with-oversized-choice", "unencodable-choice-on-yaml-fallback"],
 )
 def test_an_agent_can_repair_a_record_with_a_declared_enum_value(
-    build, declaration, invalid, path, choices, corrected, truncated,
+    build, monkeypatch, declaration, invalid, path, choices, corrected, truncated, fallback_yaml,
 ) -> None:
+    if fallback_yaml:
+        import yaml
+        from exomem import vault as vault_module
+
+        class PythonSafeLoader(yaml.SafeLoader):
+            pass
+
+        PythonSafeLoader.add_constructor(
+            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, vault_module._construct_unique_mapping
+        )
+        monkeypatch.setattr(vault_module, "_UniqueKeySafeLoader", PythonSafeLoader)
+
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    word_count: {declaration}\n",

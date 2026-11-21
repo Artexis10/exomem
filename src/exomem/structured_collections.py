@@ -3551,6 +3551,8 @@ def enum_choices_for_wire(
         if isinstance(choice, str) and len(choice) > budget - size:
             continue
         try:
+            if isinstance(choice, str):
+                choice.encode("utf-8")
             width = len(json.dumps(choice, allow_nan=False)) + bool(selected)
         except ValueError:
             continue

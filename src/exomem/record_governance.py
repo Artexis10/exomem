@@ -2308,7 +2308,7 @@ def _declared_enum_fields(
     ) -> Iterator[tuple[list[str], tuple[Any, ...]]]:
         if spec.enum and (admits is None or admits(members)):
             yield path, spec.enum
-        if spec.items is not None:
+        if spec.type == "array" and spec.items is not None:
             yield from visit(spec.items, [*path, "items"], members)
         for name, child in spec.properties.items():
             yield from visit(child, [*path, "properties", name], (*members, name))

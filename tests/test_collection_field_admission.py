@@ -83,6 +83,9 @@ def release_document(basis, who=GUEST):
 
 def test_inspection_only_shows_enum_choices_for_released_members(store):
     front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    front["item_schema"]["fields"]["count"]["items"] = {
+        "type": "enum", "enum": ["unused"], "classification": "location",
+    }
     front["item_schema"]["fields"]["update"] = {
         "type": "object",
         "properties": {
