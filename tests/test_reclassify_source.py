@@ -160,6 +160,79 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
+@pytest.mark.parametrize("fault", ["release", "render", "cold-resolver", "removed-link", "changed-source"])
+def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
+    from _public_call import public_call
+    from fastmcp import Client
+    from fastmcp.tools import FunctionTool
+    from test_agent_tool_surface import _call
+
+    from exomem import file_watcher, find, freshness, move_file, request_budget, server
+    from exomem import vault as vault_module
+    from exomem.governance import egress
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    referrer = f"{KB}/Evidence/field-log.md" if fault == "cold-resolver" else f"{KB}/Notes/field-log.md"
+    (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
+    (vault / referrer).write_text(f"# Field log\n\n[[{source.removesuffix('.md')}]]\n", encoding="utf-8")
+    freshness.seed(vault, "vault", (
+        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+    ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    mcp = server.build_server(require_auth=False)
+    expired = threading.Event()
+
+    class Budget(request_budget.RequestBudget):
+        def remaining(self):
+            return 0.0 if expired.is_set() else super().remaining()
+
+    monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+    if fault in ("release", "render"):
+        target, name = (egress, "postfilter") if fault == "release" else (FunctionTool, "convert_result")
+        convert = getattr(target, name)
+
+        def expire(*args, **kwargs):
+            expired.set()
+            return convert(*args, **kwargs)
+
+        monkeypatch.setattr(target, name, expire)
+    elif fault in ("removed-link", "changed-source"):
+        plan = move_file.plan_inbound_rewrites
+
+        def edit_during_planning(*args, **kwargs):
+            # Hold watcher delivery back, so the planner sees the edit before the cache does.
+            changed = referrer if fault == "removed-link" else source
+            (vault / changed).write_text("# Edited while planning\n", encoding="utf-8")
+            return plan(*args, **kwargs)
+
+        monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            if fault == "cold-resolver":
+                find._RESOLVER_CACHE.pop(vault, None)
+            call = public_call("manage_memory_file", {
+                "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+            })
+            retry = await _call(client, *call)
+            assert retry.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
+            assert "references" not in retry and "preview_digest" not in retry
+            if fault == "cold-resolver":
+                assert await asyncio.to_thread(find.await_recall_resolver_warm)
+                preview = await _call(client, *call)
+                assert preview["referrers"]["pointer_repointed"] == [referrer]
+                assert preview["preview_digest"]
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        stop.set()
+
+
 @pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])
 def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
     from exomem import file_watcher, find, freshness

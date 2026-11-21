@@ -9291,11 +9291,18 @@ def invoke_command(
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted
 
+        preview_checkpoint = None
+        if command.name == "manage_memory_file":
+            from .reclassify_source import is_preview_call
+
+            if is_preview_call(command.name, kwargs):
+                preview_checkpoint = request_budget.current_checkpoint()
         budget = request_budget.current()
-        checkpoint = (
+        audit_checkpoint = (
             request_budget.ReadCheckpoint(budget)
             if budget is not None and invocation_is_audit(command, kwargs) else None
         )
+        checkpoint = audit_checkpoint or preview_checkpoint
 
         def finish_ownership(check: request_budget.ReadCheckpoint | None) -> None:
             with request_budget.checking(check), call_spans.span("command.ownership_finish"):
@@ -9317,7 +9324,7 @@ def invoke_command(
                 # The terminal filter asks the store live rather than replaying the body's verdict.
                 with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
                     result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
-                                        checkpoint=checkpoint)
+                                        checkpoint=checkpoint, reprove_aggregate=audit_checkpoint is not None)
                     result = store_preview.note_withheld_pages(command.name, result, injected[0])
                 finish_ownership(checkpoint)
             except BaseException as error:
@@ -9345,6 +9352,10 @@ def invoke_command(
                             raise
                         finish_ownership(error_checkpoint)
                 except request_budget.ReadBudgetExhausted:
+                    if preview_checkpoint is not None:
+                        from .reclassify_source import preview_warming
+
+                        raise preview_warming() from None
                     if budget is not None:
                         budget.note_truncated("audit.release")
                     raise _AuditBudgetExhausted() from None

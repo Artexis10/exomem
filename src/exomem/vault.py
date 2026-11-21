@@ -9195,12 +9195,15 @@ def cached_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    read_hashes: Mapping[str, str | None] | None = None,
 ) -> list[InboundLink] | None:
     """Borrow complete current evidence without a walk, build or cache wait.
 
     For a reader other than the owner (`visible` given), data that lags the
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
+
+    A file-mode planner can require the cache to have seen the same guarded bytes.
 
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
@@ -9320,6 +9323,9 @@ def cached_inbound_wikilinks(
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
             or not registry_current()
+            or (read_hashes is not None and any(
+                sha is None or cached[1].sources.get(path) != sha for path, sha in read_hashes.items()
+            ))
         ):
             return None
     finally:

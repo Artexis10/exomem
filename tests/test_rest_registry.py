@@ -117,14 +117,14 @@ def _auth() -> dict:
     return {"Authorization": "Bearer sekret"}
 
 
-@pytest.mark.parametrize("stage", ["admission", "planning", "response", "no-observer"])
+@pytest.mark.parametrize("stage", ["admission", "planning", "release", "response", "no-observer"])
 def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, monkeypatch, stage):
     import threading
     import time
     from types import SimpleNamespace
 
     from exomem import file_watcher, freshness, move_file, request_budget, server_rest
-    from exomem.governance import authorization_request
+    from exomem.governance import authorization_request, egress
 
     source = "Knowledge Base/Sources/Other/field-samples.md"
     page = vault / source
@@ -140,6 +140,7 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
         monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     elapsed = 0.0
+    release_completed = False
     clock = SimpleNamespace(monotonic=lambda: elapsed, time=time.time, perf_counter=time.perf_counter)
     monkeypatch.setattr(request_budget, "time", clock)
     monkeypatch.setattr(server_rest, "time", clock)
@@ -147,16 +148,19 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     target, operation = {
         "admission": (authorization_request, "verify_authorization_context"),
         "planning": (move_file, "plan_inbound_rewrites"),
+        "release": (egress, "postfilter"),
         "response": (server_rest.RestJSONResponse, "render"),
         "no-observer": (move_file, "plan_inbound_rewrites"),
     }[stage]
     original = getattr(target, operation)
 
     def expire_after(*args, **kwargs):
-        nonlocal elapsed
-        if stage in ("planning", "no-observer"):
-            elapsed = 2.0  # expire before the planner reaches the first referrer
+        nonlocal elapsed, release_completed
+        if stage in ("planning", "release", "no-observer"):
+            elapsed = 2.0
         result = original(*args, **kwargs)
+        if stage == "release":
+            release_completed = True
         elapsed = 2.0
         return result
 
@@ -165,6 +169,8 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
         "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
     })
 
+    if stage == "release":
+        assert not release_completed
     if stage == "no-observer":
         assert answer.status_code == 200, answer.json()
         assert answer.json()["data"]["referrers"]["rewritten"] == ["Knowledge Base/Notes/sampling-log.md"]

@@ -59,6 +59,7 @@ from .vault import (
     PathGuardError,
     PlannedWrite,
     VaultPathError,
+    WikilinkResolver,
     batch_atomic_write,
     content_hash,
     find_inbound_wikilinks,
@@ -545,6 +546,7 @@ def plan_inbound_rewrites(
     paired: tuple[str, str] | None = None,
     undo: bool = False,
     check: Callable[[], None] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
 ) -> list[InboundRewrite]:
     """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
@@ -567,7 +569,7 @@ def plan_inbound_rewrites(
     ) if pages else ()
     pointers = page_fields.pointer_fields(vault_root) if pages else frozenset()
     # One matcher holds one resolver for every append-only referrer of the move.
-    matcher = pointer_write.page_matcher(vault_root, {old_rel: new_rel})
+    matcher = pointer_write.page_matcher(vault_root, {old_rel: new_rel}, resolver_factory=resolver_factory)
     # Read on the first append-only page the undo changes, so pages it does not plan never
     # reach the records.
     restore: dict[str, str] | None = None

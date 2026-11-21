@@ -60,6 +60,7 @@ from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
     PathGuard,
+    PathGuardError,
     PlannedWrite,
     VaultPathError,
     admit_write_target,
@@ -615,20 +616,19 @@ def propose(
     # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
     owner = file_watcher.observing_inbound_recovery_stop(vault_root) if surface in ("mcp", "rest") else None
     check = request_budget.current_checkpoint()
-    if surface == "rest" and (owner is None) != (check is None):
-        # The REST handler selected its deadline before the leaf. Retry a handover.
+    served = surface == "rest" or (surface == "mcp" and request_budget.current() is not None)
+    if served and (owner is None) != (check is None):
+        # The transport selected whether to manage this preview before the leaf.
         raise preview_warming()
     if owner is None:
         return _propose(vault_root, path, source_kind=source_kind, domain=domain)
 
-    if check is None and (budget := request_budget.current()) is not None:
-        check = request_budget.ReadCheckpoint(budget)
     try:
         with (
-            request_budget.checking(check),
             foreground_priority.cancellable(owner),
             egress.proven_withheld_scope(reuse=True),
         ):
+            foreground_priority.check_cancelled()
             result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner)
             foreground_priority.check_cancelled()
             if file_watcher.observing_inbound_recovery_stop(vault_root) is not owner:
@@ -642,7 +642,7 @@ def _propose(
     vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
 ) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
-    text, _ = read_guarded_text(vault_root, absolute)
+    text, source_guard = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
 
@@ -715,14 +715,22 @@ def _propose(
         _visible_inbound(vault_root, rel) if owner is None
         else _managed_preview_inbound(vault_root, rel, owner)
     )
+    read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
     outcome = (
-        _referrer_outcome(
-            vault_root, rel, text, destination, inbound,
-            check=foreground_priority.check_cancelled if owner is not None else None,
-        )
+        _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes)
         if destination is not None
         else _ReferrerOutcome()
     )
+    if owner is not None and read_hashes is not None:
+        foreground_priority.check_cancelled()
+        try:
+            source_guard.recheck(vault_root)
+        except PathGuardError:
+            raise preview_warming() from None
+        if destination is not None and any(link.path not in read_hashes for link in inbound):
+            raise preview_warming()
+        if _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound:
+            raise preview_warming()
     return ReclassifyProposal(
         path=rel,
         current_kind=current_kind,
@@ -750,6 +758,11 @@ def _propose(
 #: The `manage_memory_file` call whose digest approves a correction's repoints of append-only
 #: referrers.
 _PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
+
+
+def is_preview_call(command: str, arguments: Mapping[str, object]) -> bool:
+    """Select the read-only preview operation from the command schema."""
+    return command == "manage_memory_file" and arguments.get("operation") == _PREVIEW_CALL["operation"]
 
 
 @dataclass(frozen=True)
@@ -787,11 +800,13 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     ]
 
 
-def _managed_preview_inbound(vault_root: Path, rel: str, owner: Event) -> list[InboundLink]:
+def _managed_preview_inbound(
+    vault_root: Path, rel: str, owner: Event, *, read_hashes: Mapping[str, str | None] | None = None,
+) -> list[InboundLink]:
     from . import find
 
     reader = egress.reader_view(vault_root)
-    inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader)
+    inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader, read_hashes=read_hashes)
     if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
             return inbound
@@ -825,7 +840,7 @@ def _referrer_outcome(
     inbound: list[InboundLink],
     *,
     undo: bool = False,
-    check: Callable[[], None] | None = None,
+    read_hashes: dict[str, str | None] | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -836,6 +851,14 @@ def _referrer_outcome(
     """
     from .governance import connector_boundary, egress
     from .vault_store import read as store_read
+
+    def borrow_resolver() -> vault.WikilinkResolver:
+        from .find import borrow_query_resolver
+
+        resolver = borrow_query_resolver(vault_root)
+        if resolver is None:
+            raise preview_warming()
+        return resolver
 
     relocating = destination != rel
     writable_page = connector_boundary.effect_admission(vault_root)
@@ -861,9 +884,12 @@ def _referrer_outcome(
     refusals: list[dict[str, str]] = []
     plans = move_file_module.plan_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
-        check=check,
+        check=foreground_priority.check_cancelled if read_hashes is not None else None,
+        resolver_factory=borrow_resolver if read_hashes is not None else None,
     )
     for item in plans:
+        if read_hashes is not None and item.path in forms:
+            read_hashes[item.path] = item.guard.expected_content_hash
         if not writable_page(item.path):
             continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0

@@ -134,7 +134,7 @@ def test_a_withheld_write_leaves_the_restricted_inbound_field_as_it_was(served: 
 def test_a_withheld_referrer_does_not_delay_reclassification_preview(
     served: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from exomem import file_watcher
+    from exomem import file_watcher, writer_lease
     from exomem.cli_ops import OpError
 
     stop = threading.Event()
@@ -150,8 +150,12 @@ def test_a_withheld_referrer_does_not_delay_reclassification_preview(
         commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
     assert cold.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
 
-    with request_scope(replace(_external(), administrative_ingress=True)):
-        preview = commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
+    command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "manage_memory_file")
+    checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=30))
+    with request_scope(replace(_external(), administrative_ingress=True)), request_budget.checking(checkpoint):
+        preview = writer_lease.invoke_command(
+            command, served, operation="propose-reclassification", path=source, source_kind="dataset-export",
+        )
     assert preview["references"] == 0
     assert preview["preview_digest"]
 

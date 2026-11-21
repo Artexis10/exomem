@@ -468,14 +468,16 @@ def register_rest_facade(
                         _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                     )
                     check = None
-                    if (
-                        _cmd.name == "manage_memory_file"
-                        and kwargs.get("operation") == "propose-reclassification"
-                        and file_watcher.observing_inbound_recovery_stop(vault_root) is not None
-                    ):
-                        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
-                            seconds=request_budget.budget_seconds(), entry=entered,
-                        ))
+                    if _cmd.name == "manage_memory_file":
+                        from .reclassify_source import is_preview_call
+
+                        if (
+                            is_preview_call(_cmd.name, kwargs)
+                            and file_watcher.observing_inbound_recovery_stop(vault_root) is not None
+                        ):
+                            check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
+                                seconds=request_budget.budget_seconds(), entry=entered,
+                            ))
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
