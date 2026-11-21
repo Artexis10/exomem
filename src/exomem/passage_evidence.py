@@ -83,7 +83,7 @@ def without_passage_keys(body: str, frontmatter: Mapping[str, Any], vault_root: 
     return body[: block.start] + body[block.end :] if block is not None else body
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PassageChunk:
     key: str
     ordinal: int
@@ -288,14 +288,31 @@ def declared_sources(vault_root: Path, publication) -> frozenset[str]:
         return paths
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _VerifiedSource:
-    """What a passage answer discloses from one Source page: its frontmatter and selected chunks."""
+    """What a passage hit takes from one Source page: its identity fields and selected chunks."""
 
-    frontmatter: Mapping[str, Any]
+    exomem_id: str | None
+    source_identity: str | None
     #: Chunk number to chunk, for the selected numbers the Source's cut holds. Never changed after
     #: creation, so readers may share it.
     chunks: Mapping[int, PassageChunk]
+
+
+def _weigh(key: tuple, source: _VerifiedSource) -> int:
+    """The bytes one memory entry keeps alive: its key's path and hash, its record and its Source.
+
+    The vault root, the scope and the proof are shared by many entries and are not counted. Every
+    `PassageChunk` field is weighed, so a field added there is counted here too.
+    """
+    weight = sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key[2:])
+    weight += sys.getsizeof((None, None))  # The entry's (proof, source) record.
+    weight += sys.getsizeof(source) + sys.getsizeof(source.exomem_id)
+    weight += sys.getsizeof(source.source_identity) + sys.getsizeof(source.chunks)
+    for number, chunk in source.chunks.items():
+        weight += sys.getsizeof(number) + sys.getsizeof(chunk)
+        weight += sum(sys.getsizeof(getattr(chunk, field.name)) for field in fields(chunk))
+    return weight
 
 
 class _VerifiedSources:
@@ -312,13 +329,17 @@ class _VerifiedSources:
     def __init__(self, *, max_entries: int, max_bytes: int) -> None:
         self.max_entries = max_entries
         self.max_bytes = max_bytes
-        self._entries: OrderedDict[tuple, tuple[tuple, _VerifiedSource, int]] = OrderedDict()
+        self._entries: OrderedDict[tuple, tuple[tuple, _VerifiedSource]] = OrderedDict()
         self._held = 0
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._entries)
+
+    def held_bytes(self) -> int:
+        """The bytes the bound applies to: every entry's weight and the ordered map that holds them."""
+        return self._held + sys.getsizeof(self._entries)
 
     def get(self, key: tuple, proof: tuple, numbers: set[int]) -> _VerifiedSource | None:
         """The entry for `key` when it was kept under `proof` and holds every chunk in `numbers`."""
@@ -339,16 +360,14 @@ class _VerifiedSources:
             for key, source in verified.items():
                 held = self._entries.get(key)
                 if held is not None and held[0] == proof:
-                    source = _VerifiedSource(source.frontmatter, {**held[1].chunks, **source.chunks})
+                    source = _VerifiedSource(
+                        source.exomem_id, source.source_identity, {**held[1].chunks, **source.chunks}
+                    )
                 self._drop(key)
-                weight = sys.getsizeof(source.frontmatter) + sum(
-                    sys.getsizeof(chunk.text) + sys.getsizeof(chunk.key) + sys.getsizeof(chunk.passage_hash)
-                    for chunk in source.chunks.values()
-                )
-                self._entries[key] = (proof, source, weight)
-                self._held += weight
+                self._entries[key] = (proof, source)
+                self._held += _weigh(key, source)
             while self._entries and (
-                len(self._entries) > self.max_entries or self._held > self.max_bytes
+                len(self._entries) > self.max_entries or self.held_bytes() > self.max_bytes
             ):
                 self._drop(next(iter(self._entries)))
 
@@ -365,11 +384,12 @@ class _VerifiedSources:
     def _drop(self, key: tuple) -> None:
         held = self._entries.pop(key, None)
         if held is not None:
-            self._held -= held[2]
+            self._held -= _weigh(key, held[1])
 
 
-# Sixteen MiB holds about 20,000 chunks of 500 characters; 4096 entries cover a vault of that many
-# Sources. `find.unload_ram_caches` releases it with the page cache.
+# An entry weighs about 850 bytes and each chunk of 500 characters about 900 more, so 16 MiB holds
+# 4096 Sources with about 14,000 chunks among them. `find.unload_ram_caches` releases it with the
+# page cache.
 _VERIFIED_SOURCES = _VerifiedSources(max_entries=4096, max_bytes=16 * 1024 * 1024)
 
 
@@ -410,7 +430,8 @@ def _verified_sources(
             continue
         chunks = source_chunks(page, entries.get(path))
         source = sources[path] = _VerifiedSource(
-            page.frontmatter,
+            page.frontmatter.get("exomem_id"),
+            page.frontmatter.get("source_identity"),
             {
                 number: chunks[number]
                 for number in numbers
@@ -594,12 +615,12 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         chunk = chunk_of(path, number)
         if chunk is None or (path, number) not in matches:
             continue
-        frontmatter = sources[path].frontmatter
+        source = sources[path]
         hits.append(
             {
-                "ref": memory_refs.memory_ref(frontmatter["exomem_id"]),
+                "ref": memory_refs.memory_ref(source.exomem_id),
                 "path": path,
-                "source_identity": frontmatter.get("source_identity"),
+                "source_identity": source.source_identity,
                 "passage_key": chunk.key,
                 "passage_ordinal": chunk.ordinal,
                 "passage_hash": chunk.passage_hash,

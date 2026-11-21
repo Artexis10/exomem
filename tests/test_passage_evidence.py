@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +39,9 @@ from exomem import (
     server_runtime,
 )
 from exomem import vault as vault_module
+
+# `install_encoder` replaces the encoder seam; a test of which model turn the query takes runs this one.
+REAL_EMBED_TEXTS = embeddings.embed_texts
 
 
 def publish_reference(vault):
@@ -1023,6 +1028,72 @@ def test_the_memory_of_verified_passages_stays_within_its_bound(
     assert len(passage_evidence._VERIFIED_SOURCES) == held
 
 
+def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
+    """Weighing an entry by its frontmatter dict and chunk strings alone counted under half the bytes
+    it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap."""
+    memory = passage_evidence._VerifiedSources(max_entries=1000, max_bytes=1 << 40)
+    root, scope, proof = Path("/vault").absolute(), "kb", ("checkpoint", "catalogue", 7)
+    for n in range(50):
+        chunks = {
+            number: passage_evidence.PassageChunk(
+                f"record/{n}/{number}", number + 1, hashlib.sha256(f"{n}/{number}".encode()).hexdigest(),
+                4000 + 1000 * number, 500, f"{n:03d} {number} " + "word " * 99,
+            )
+            for number in range(3)
+        }
+        path = f"Knowledge Base/Sources/Sessions/2026-11-21-source-{n:03d}.md"
+        source = passage_evidence._VerifiedSource(f"lh{n:03d}gx.6h5l", f"https://example.com/v/{n:011d}", chunks)
+        memory.keep({(root, scope, path, hashlib.sha256(path.encode()).hexdigest()): source}, proof)
+
+    # Every object the memory keeps alive, once each; the root, scope and proof belong to the caller.
+    seen, pending, kept = {id(root), id(scope), id(proof)}, [memory._entries], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen or isinstance(item, type):
+            continue
+        seen.add(id(item))
+        kept += sys.getsizeof(item)
+        pending.extend(gc.get_referents(item))
+
+    assert memory.held_bytes() >= kept
+
+
+def test_a_later_search_for_another_passage_of_a_remembered_source_still_finds_it(vault, passage_tools):
+    """The memory keeps only the chunks a search selected. Serving it to a search that selects another
+    chunk of that Source would withhold a passage that matches."""
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[
+            {"key": "lamp", "text": "The lantern burns oil."},
+            {"key": "bell", "text": "The harbour bell rings at dawn."},
+        ],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    lamp = call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
+    assert [hit["passage_key"] for hit in lamp["hits"]] == ["lamp"], lamp
+
+    bell = call("search_memory", {"query": "harbour bell", "limit": 1, "options": {"result_level": "passage"}})
+
+    assert [hit["passage_key"] for hit in bell["hits"]] == ["bell"], bell
+    assert bell["withheld_chunks"] == 0
+
+
+def test_releasing_the_page_cache_releases_the_memory_of_verified_passages(monkeypatch):
+    """The idle reclaimer hands page text back through the page cache; a memory it missed would keep
+    up to 16 MiB of that text resident in a pod without swap."""
+    memory = passage_evidence._VerifiedSources(max_entries=10, max_bytes=1 << 20)
+    monkeypatch.setattr(passage_evidence, "_VERIFIED_SOURCES", memory)
+    chunk = passage_evidence.PassageChunk("entry", 1, "0" * 64, 0, 22, "The lantern burns oil.")
+    memory.keep({("vault", "kb", "Source.md", "0" * 64): passage_evidence._VerifiedSource("id", None, {0: chunk})}, ())
+
+    find.unload_ram_caches(pages=True)
+
+    assert len(memory) == 0
+
+
 def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools, monkeypatch):
     """The capture's overlap check encoded title-prefixed paragraphs that the index could not
     reuse, so every passage of a capture was encoded twice."""
@@ -1311,10 +1382,16 @@ def test_a_capture_encode_does_not_hold_up_a_passage_query_on_a_concurrent_encod
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
     publish_reference(vault)
-    # The served ONNX encoder runs inferences side by side; the fixture's plain model does not.
-    concurrent = SimpleNamespace(texts_fit=lambda _texts: True, concurrent_encodes=True)
+    # The served ONNX encoder runs inferences side by side; the fixture's plain model does not. The
+    # query runs the real encode path, which picks the turn each inference takes.
+    concurrent = SimpleNamespace(
+        texts_fit=lambda _texts: True,
+        concurrent_encodes=True,
+        encode=lambda texts, **_options: encoder(texts),
+    )
     monkeypatch.setattr(embeddings, "_MODEL", concurrent)
     monkeypatch.setattr(embeddings, "get_model", lambda: concurrent)
+    monkeypatch.setattr(embeddings, "embed_texts", REAL_EMBED_TEXTS)
     monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
     shared = runtime_resources.ModelAdmissionGate(2)
     monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
