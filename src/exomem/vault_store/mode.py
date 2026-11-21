@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import state_migration, state_paths
 from ..collection_store import capability, connection, schema
+from . import resident_catalogue
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
 FILE_MODE = "file"
@@ -153,8 +154,12 @@ def store_mode_or_unreadable(vault_root: Path) -> tuple[bool, str | None]:
 
 
 def forget_read_mode(vault_root: Path) -> None:
-    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records.
+
+    The vault has left store mode, so the commit's resident catalogue resolver goes with the answer.
+    """
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
+    resident_catalogue.forget(vault_root)
     if _held_mode(vault_root) is not None:
         _REQUEST_MODE.set(None)
 

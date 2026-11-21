@@ -1247,6 +1247,10 @@ class SemanticCorpusContext:
     #: ones: a move's after corpus binds the claims its commit leaves (`PriorClaims.with_pages`).
     prior_claims: Any = field(default=None, repr=False, compare=False)
     capture_inventory: Any = field(default=None, repr=False, compare=False)
+    #: In store mode, the title that the writer's resolver indexes for each corpus path that holds no
+    #: page state here (a file that cannot be read as text, a stored page that the identity walk prunes,
+    #: such as one in the trash). None when that set is not known: the writer then builds from the disk.
+    unparsed_titles: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2070,10 +2074,11 @@ def reference_identity_snapshot_is_current(
 def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | None:
     """A detached resolver over the resident corpus of a store-mode vault, else None.
 
-    The corpus holds the resolver maps of every page that a disk build of the writer's resolver would
-    read (the store's pages and the files that it does not own), and the store-mode proof that the corpus
-    is current (``_store_resident_entry``) needs no walk of the stored pages. A miss reads and builds
-    nothing: the caller's own build from the store and the disk handles it.
+    The corpus holds the resolver maps of every page that it parses, and the titles of the other paths
+    that a build of the writer's resolver indexes (the store's pages and the files that it does not own),
+    and the store-mode proof that the corpus is current (``_store_resident_entry``) needs no walk of the
+    stored pages. A miss reads and builds nothing: the caller's own build from the store and the disk
+    handles it.
     """
     request_budget.checkpoint()
     root = Path(vault_root)
@@ -2088,7 +2093,9 @@ def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | 
     if entry is None:
         return None
     context = entry[1]
-    return vault.WikilinkResolver.from_maps(
+    if context.unparsed_titles is None:
+        return None
+    resolver = vault.WikilinkResolver.from_maps(
         root,
         full_paths=context.resolver_full_paths,
         kb_stripped=context.resolver_kb_stripped,
@@ -2096,6 +2103,8 @@ def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | 
         titles=context.resolver_titles,
         candidates_by_key=context.resolver_candidates_by_key,
     )
+    resolver.on_entries_changed(context.unparsed_titles.items(), ())
+    return resolver
 
 
 def current_writer_resolver_entries(
@@ -3300,6 +3309,7 @@ def _reconcile_markdown_delta(
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     owned = _store_census_owns(root)
     stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
+    unparsed = None if context.unparsed_titles is None else dict(context.unparsed_titles)
     stored_bodies: Mapping[str, bytes] = {}
     if stored:
         from .vault_store import read
@@ -3309,6 +3319,8 @@ def _reconcile_markdown_delta(
             stored_bodies = view.bodies(stored)
     for rel_path in changed_paths:
         request_budget.checkpoint()
+        if unparsed is not None:
+            unparsed.pop(rel_path, None)
         reference_only_path = _is_reference_only_path(rel_path)
         if reference_only_path:
             # Read as the reference scan reads it and as leniently: a deleted
@@ -3339,6 +3351,8 @@ def _reconcile_markdown_delta(
                 # The cold build's refusal, so that whether a page is accepted never depends on
                 # the cache. A parse that it accepts reads the identity that the state below holds.
                 _strict_page_identity(rel_path, source)
+            if unparsed is not None and rel_path in stored_bodies and not included:
+                unparsed[rel_path] = vault.display_title_from_bytes(stored_bodies[rel_path], rel_path)
         else:
             identity_member = in_kb and not reference_only_path
             included = not vault.in_excluded_scan_dir(rel_path) and (
@@ -3413,7 +3427,11 @@ def _reconcile_markdown_delta(
             with read.snapshot(root) as view:
                 identity = store_identity(view.connection)
                 inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
-    return replace(candidate, capture_inventory=inventory)
+    return replace(
+        candidate,
+        capture_inventory=inventory,
+        unparsed_titles=None if unparsed is None else MappingProxyType(unparsed),
+    )
 
 
 def on_corpus_files_changed(
@@ -3718,9 +3736,8 @@ def advance_corpus_for_store_commit(
     Any other state leaves the entry as it is, and the next reader's census walk reconciles or
     rebuilds it as before: a context at another revision, a changed registry, overlay or policy
     input, more than ``_PAGE_DELTA_LIMIT`` pages (a bulk change is cheaper derived once, by its
-    reader), a delta whose locality is not provable, or a store that moved again. The caption
-    survives only when the registry has seen no event since the context's own, so that a file event
-    still retires a context that it names.
+    reader), a delta whose locality is not provable, or a store that moved again. The advance drops
+    the event caption, so the next reader proves the files that the store does not own by a walk.
     """
     if not corpus_context_cache_enabled():
         return False
@@ -3732,7 +3749,6 @@ def advance_corpus_for_store_commit(
     with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
         with _CORPUS_CONTEXT_CACHE_LOCK:
             entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-            caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
             language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
         if entry is None or _store_census_revision(entry[0]) != before_revision:
             return False
@@ -3768,15 +3784,14 @@ def advance_corpus_for_store_commit(
                 root, entry[0], changed_paths=changed, deleted_paths=()
             )
         census = tuple(sorted((*(item for item in patched if _is_page_entry(item)), *config)))
-        current_checkpoint = freshness.consumer_checkpoint(root, "vault")
         with _CORPUS_CONTEXT_CACHE_LOCK:
             if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
                 return False
             _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
-            if caption is not None and caption == current_checkpoint:
-                _caption_corpus_context_locked(cache_key, current_checkpoint)
-            else:
-                _drop_corpus_caption_locked(cache_key)
+            # A store-mode vault's registry never sees a file event (the watcher seeds none), so a
+            # kept caption always matches and every build would be an event hit that never proves the
+            # files the store does not own. The next reader proves them (`_store_resident_entry`).
+            _drop_corpus_caption_locked(cache_key)
     return True
 
 
@@ -4610,11 +4625,8 @@ def _build_corpus_context_uncached(
     eligible: dict[str, Path] = {}
     paths = find_corpus.corpus_paths(root, "vault", lambda **walk: vault.walk_vault_md(root, **walk))
     # A stored page's path is the store's: resolving its file would stat a projection.
-    stored = (
-        {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages}
-        if isinstance(paths, find_corpus.StoreCorpus)
-        else {}
-    )
+    store_mode = isinstance(paths, find_corpus.StoreCorpus)
+    stored = {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages} if store_mode else {}
     for disk_path in sorted(paths, key=lambda item: item.as_posix()):
         request_budget.checkpoint()
         rel_path = stored.get(disk_path)
@@ -4668,9 +4680,43 @@ def _build_corpus_context_uncached(
         _copy_registry(relation_definitions),
         identity_census,
     )
+    return replace(
+        context,
+        capture_inventory=capture_inventory.collect(root, raw_inputs),
+        unparsed_titles=(
+            _unparsed_titles(
+                root,
+                {rel: path for rel, path in eligible.items() if rel not in states},
+                frozenset(stored.values()),
+            )
+            if store_mode
+            else None
+        ),
+    )
 
 
-    return replace(context, capture_inventory=capture_inventory.collect(root, raw_inputs))
+def _unparsed_titles(
+    root: Path, skipped: Mapping[str, Path], stored: frozenset[str]
+) -> Mapping[str, str | None]:
+    """The title that the writer's resolver build indexes for each ``skipped`` corpus path.
+
+    A stored page's title comes from the store's bytes, a file's from the disk, and a path that
+    cannot be read is indexed with no title, as ``WikilinkResolver`` builds it.
+    """
+    from .vault_store import read
+
+    bodies: Mapping[str, bytes] = {}
+    held = [rel for rel in skipped if rel in stored]
+    if held:
+        with read.snapshot(root) as view:
+            bodies = view.bodies(held)
+    titles: dict[str, str | None] = {}
+    for rel, disk_path in skipped.items():
+        if rel not in stored:
+            titles[rel] = vault.WikilinkResolver.read_title(disk_path)
+        elif rel in bodies:  # a stored page that the store no longer holds is not in a build either
+            titles[rel] = vault.display_title_from_bytes(bodies[rel], rel)
+    return MappingProxyType(titles)
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:

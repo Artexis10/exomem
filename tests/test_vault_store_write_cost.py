@@ -307,115 +307,24 @@ def test_a_writes_emitted_receipt_is_the_one_it_emitted_before_sets_took_the_cla
     )
 
 
-class DeriveCounts:
-    """How often a save enriches a page, derives a whole corpus and builds a link resolver.
-
-    ``resolver_builds`` counts the resolvers built from the disk or the store (``WikilinkResolver.__init__``);
-    ``large_resolvers`` counts those built from more than ``LARGE`` entries (``from_entries``), the
-    whole-corpus ones: a resolver over a page or two is as cheap as a dict.
-    """
-
-    LARGE = 64
-    NAMES = ("enrichments", "whole_derives", "resolver_builds", "large_resolvers")
-
-    def __init__(self, monkeypatch):
-        self.seen = Counter()
-        for name, owner, attribute in (
-            ("enrichments", semantic_contract, "enrich_page_state"),
-            ("whole_derives", semantic_contract, "_context_from_state_map"),
-            ("resolver_builds", vault_module.WikilinkResolver, "__init__"),
-        ):
-            function = getattr(owner, attribute)
-
-            def counting(*args, _name=name, _function=function, **kwargs):
-                self.seen[_name] += 1
-                return _function(*args, **kwargs)
-
-            monkeypatch.setattr(owner, attribute, counting)
-        from_entries = vault_module.WikilinkResolver.from_entries
-
-        def counted_from_entries(vault_root, entries):
-            entries = tuple(entries)
-            self.seen["large_resolvers"] += len(entries) > self.LARGE
-            return from_entries(vault_root, entries)
-
-        monkeypatch.setattr(vault_module.WikilinkResolver, "from_entries", counted_from_entries)
-
-    def take(self):
-        taken = {name: self.seen[name] for name in self.NAMES}
-        self.seen.clear()
-        return taken
-
-
-@pytest.mark.timeout(300)
-def test_a_store_writes_corpus_derivation_does_not_grow_with_the_pages(
-    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
-):
-    """Defect that this guards: a save that enriches every page of the vault, or derives the whole corpus
-    again for the page it adds, costs seconds at 20,000 pages. A create and an edit by the owner are
-    measured at N and 2N pages, each page also a file, with a read by a restricted caller before each
-    save, under a policy whose selector reads frontmatter so that the caller cannot admit the vault's
-    type overlay as the owner can. Enrichments stay with the pages the save changes, and no whole
-    corpus is derived, whatever the page count and whoever read in between. A restricted caller that
-    overwrote the owner's enrichment would make every save after its read enrich every page. The corpus
-    cache is on, as in a served vault: the suite defaults it off.
-
-    The restricted caller's own read and a restricted caller's save are not measured. The resolvers that a
-    save builds over the whole vault are held at zero by the test after this one.
-    """
-    grow(writer, 1, 70, on_disk=served)
-    restrict_external(served, "tags: [secret]")
-
-    def restricted_read():
-        with request_scope(EXTERNAL):
-            semantic_contract.build_corpus_context_with_census(served)
-
-    edit(served, create(served, "Warm-up"))
-    counts = DeriveCounts(monkeypatch)
-    measured = []
-    for title, more in (("First probe", 0), ("Second probe", 70)):
-        if more:
-            grow(writer, 1000, more, on_disk=served)
-            # The pages just committed are new to the corpus: the next save enriches them, and no more.
-            edit(served, create(served, "Catch-up"))
-        pages = page_count(served)
-        restricted_read()
-        counts.take()
-        path = create(served, title)
-        created = counts.take()
-        restricted_read()
-        counts.take()
-        edit(served, path)
-        edited = counts.take()
-        measured.append((pages, created, edited))
-    (pages_n, create_n, edit_n), (pages_2n, create_2n, edit_2n) = measured
-    grown = pages_2n - pages_n
-    report = json.dumps(measured)
-    assert pages_n > counts.LARGE and grown >= 70, report
-    for at_n, at_2n in ((create_n, create_2n), (edit_n, edit_2n)):
-        # The pages a save changes are enriched; a page of the vault is not.
-        assert at_2n["enrichments"] - at_n["enrichments"] <= 2, report
-        # The page that a save adds or changes joins the corpus by the page delta, never a whole derivation.
-        assert at_n["whole_derives"] == at_2n["whole_derives"] == 0, report
-        # No resolver is built over the corpus's entries for a judged page, nor by the store commit.
-        assert at_n["large_resolvers"] == at_2n["large_resolvers"] == 0, report
-
-
 class SaveCounts:
-    """The per-page work that a save may not do: a walk of the vault for the corpus census, a resolver built
-    over the whole vault, a frontmatter parse or a stored body read for a page that the save did not change."""
+    """The per-page work that a save may not do: enriching a page, deriving a whole corpus, walking the vault for
+    the corpus census, building a link resolver (``resolver_builds`` counts every one, ``large_resolvers`` those
+    built from more than ``LARGE`` entries, the whole-corpus ones: a resolver over a page or two is as cheap as a
+    dict), and parsing frontmatter or reading a stored body for a page that the save did not change."""
 
     LARGE = 64
     NAMES = (
-        "census_walks", "stored_page_censuses", "resolver_builds", "large_resolvers",
+        "enrichments", "whole_derives", "census_walks", "resolver_builds", "large_resolvers",
         "frontmatter_parses", "body_reads",
     )
 
     def __init__(self, monkeypatch):
         self.seen = Counter()
         for name, owner, attribute in (
+            ("enrichments", semantic_contract, "enrich_page_state"),
+            ("whole_derives", semantic_contract, "_context_from_state_map"),
             ("census_walks", semantic_contract, "_corpus_census"),
-            ("stored_page_censuses", semantic_contract, "_stored_page_census"),
             ("resolver_builds", vault_module.WikilinkResolver, "__init__"),
             ("frontmatter_parses", vault_module, "parse_frontmatter"),
         ):
@@ -463,14 +372,69 @@ class SaveCounts:
 
 
 @pytest.mark.timeout(300)
+def test_a_store_writes_corpus_derivation_does_not_grow_with_the_pages(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: a save that enriches every page of the vault, or derives the whole corpus
+    again for the page it adds, costs seconds at 20,000 pages. A create and an edit by the owner are
+    measured at N and 2N pages, each page also a file, with a read by a restricted caller before each
+    save, under a policy whose selector reads frontmatter so that the caller cannot admit the vault's
+    type overlay as the owner can. Enrichments stay with the pages the save changes, and no whole
+    corpus is derived, whatever the page count and whoever read in between. A restricted caller that
+    overwrote the owner's enrichment would make every save after its read enrich every page. The corpus
+    cache is on, as in a served vault: the suite defaults it off.
+
+    The restricted caller's own read and a restricted caller's save are not measured. The resolvers that a
+    save builds over the whole vault are held at zero by the test after this one.
+    """
+    grow(writer, 1, 70, on_disk=served)
+    restrict_external(served, "tags: [secret]")
+
+    def restricted_read():
+        with request_scope(EXTERNAL):
+            semantic_contract.build_corpus_context_with_census(served)
+
+    edit(served, create(served, "Warm-up"))
+    counts = SaveCounts(monkeypatch)
+    measured = []
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            # The pages just committed are new to the corpus: the next save enriches them, and no more.
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        restricted_read()
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        restricted_read()
+        counts.take()
+        edit(served, path)
+        edited = counts.take()
+        measured.append((pages, created, edited))
+    (pages_n, create_n, edit_n), (pages_2n, create_2n, edit_2n) = measured
+    grown = pages_2n - pages_n
+    report = json.dumps(measured)
+    assert pages_n > counts.LARGE and grown >= 70, report
+    for at_n, at_2n in ((create_n, create_2n), (edit_n, edit_2n)):
+        # The pages a save changes are enriched; a page of the vault is not.
+        assert at_2n["enrichments"] - at_n["enrichments"] <= 2, report
+        # The page that a save adds or changes joins the corpus by the page delta, never a whole derivation.
+        assert at_n["whole_derives"] == at_2n["whole_derives"] == 0, report
+        # No resolver is built over the corpus's entries for a judged page, nor by the store commit.
+        assert at_n["large_resolvers"] == at_2n["large_resolvers"] == 0, report
+
+
+@pytest.mark.timeout(300)
 def test_a_store_save_after_a_save_walks_no_page_and_builds_no_resolver_over_the_vault(
     served, writer, corpus_cache_on, monkeypatch  # noqa: F811
 ):
     """Defect that this guards: each store commit evicts the structural corpus, so the next save walks and
     reconciles every page again and builds a resolver over every page, twice. A create and an edit by the
-    owner, after a save that warmed the corpus, are measured at N and 2N pages: the next save is an event
-    hit that walks no vault and builds no resolver, and the pages that it parses or reads from the store are
-    the ones that it changes, whatever the page count."""
+    owner, after a save that warmed the corpus, are measured at N and 2N pages: the next save finds the corpus
+    resident (the store's revision and a listing of the files that the store does not own prove it), runs no
+    census of the vault's pages and builds no resolver over them, and the pages that it parses or reads from
+    the store are the ones that it changes, whatever the page count."""
     grow(writer, 1, 70, on_disk=served)
     edit(served, create(served, "Warm-up"))
     counts = SaveCounts(monkeypatch)
@@ -491,7 +455,7 @@ def test_a_store_save_after_a_save_walks_no_page_and_builds_no_resolver_over_the
     assert pages_n > SaveCounts.LARGE and pages_2n - pages_n >= 70, json.dumps(measured)
     broken = []
     for write_name, at_n, at_2n in (("create", create_n, create_2n), ("edit", edit_n, edit_2n)):
-        for name in ("census_walks", "stored_page_censuses", "resolver_builds", "large_resolvers"):
+        for name in ("census_walks", "resolver_builds", "large_resolvers"):
             if at_n[name] or at_2n[name]:
                 broken.append((write_name, name, at_n[name], at_2n[name]))
         # The pages that a save changes are parsed and read; a page of the vault is not.

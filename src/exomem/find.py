@@ -9618,6 +9618,10 @@ def unload_ram_caches(
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
+        from .vault_store import resident_catalogue
+
+        resident_catalogue.forget()
     if not keep_recall_resolver:
         from . import epistemic_graph, graph_read_publication
 

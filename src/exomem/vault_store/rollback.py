@@ -21,7 +21,18 @@ from pathlib import Path
 from .. import epistemic_graph, held_fs, lexstore, memory_refs, state_migration, vault
 from ..cli_ops import OpError
 from ..collection_store import admission, connection, custody, schema
-from . import marker, migrate, mode, ownership, projection, projector, read, rederive, write
+from . import (
+    marker,
+    migrate,
+    mode,
+    ownership,
+    projection,
+    projector,
+    read,
+    rederive,
+    resident_catalogue,
+    write,
+)
 from .write import Origin
 
 #: The store-mode tables a rollback keeps: the mode row that it sets back to file, and the audit trail, which is append-only history.
@@ -288,6 +299,7 @@ def _rollback(
     started = time.perf_counter()
     with writer.handle.transaction() as tx:
         _drop_store_mode(tx, root, revision=row[1] + 1, why=why)
+    resident_catalogue.forget(root)
     timings["drop_s"] = time.perf_counter() - started
     result = _finish(root, conn, authority_check, timings)
     return {"status": "rolled-back", "revision": row[1] + 1, "export": exported, **result}

@@ -19,7 +19,6 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -38,7 +37,7 @@ from .. import (
 from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
-from . import read
+from . import read, resident_catalogue
 
 if TYPE_CHECKING:
     from .write import StoreChange
@@ -65,36 +64,10 @@ class ResolverDelta:
     entries: tuple[tuple[str, str | None], ...]
     deleted: tuple[str, ...]
     #: The catalogue's ``(path, title)`` rows and the resolver over them as the commit leaves them, for
-    #: ``remember_catalogue``. Set when the derivation was given the vault triple that it started from.
+    #: ``resident_catalogue.remember``. Set when the derivation was given the vault triple that it started from.
     catalogue: tuple[dict[str, str | None], vault.WikilinkResolver] | None = field(
         default=None, compare=False, repr=False
     )
-
-
-#: The resolver over the catalogue's vault pages that the last commit left, with the rows that it holds,
-#: keyed by the vault triple at which it stands. The next commit derives from it instead of building
-#: the resolver over every row again. A commit that starts at another triple (a write that bypassed the
-#: commit, a lexical sync, another process) finds none and builds from the rows.
-_CATALOGUE_LOCK = threading.Lock()
-_CATALOGUE: dict[Path, tuple[tuple, dict[str, str | None], vault.WikilinkResolver]] = {}
-
-
-def remember_catalogue(root: Path, after: tuple, delta: ResolverDelta) -> None:
-    """Keep the catalogue resolver that ``delta`` carries, at the vault triple ``after`` of its commit."""
-    with _CATALOGUE_LOCK:
-        if delta.catalogue is None:
-            _CATALOGUE.pop(Path(root), None)
-        else:
-            _CATALOGUE[Path(root)] = (after, *delta.catalogue)
-
-
-def _held_catalogue(root: Path, triple: tuple | None):
-    """The resident catalogue resolver when it stands at ``triple``, else None."""
-    if triple is None:
-        return None
-    with _CATALOGUE_LOCK:
-        held = _CATALOGUE.get(Path(root))
-    return held[1:] if held is not None and held[0] == triple else None
 
 
 def apply(
@@ -110,7 +83,7 @@ def apply(
     ``existing`` is the set of the change's page paths that the store held before the commit, which
     tells a new page from an edited one. ``before`` is the vault triple that the commit starts at; a
     caller that gives it lets the commit derive from the catalogue resolver that the last commit left
-    and carry the new one out (``remember_catalogue``).
+    and carry the new one out (``resident_catalogue.remember``).
     """
     return _Derivation(
         tx,
@@ -214,7 +187,7 @@ class _Derivation:
     # ------------------------------------------------------------------ run
 
     def run(self) -> ResolverDelta:
-        held = _held_catalogue(self.root, self.before_triple)
+        held = resident_catalogue.held(self.root, self.before_triple)
         # The rows and resolver that the catalogue held before this commit: kept ones are read here, never edited.
         before, before_resolver = held if held is not None else (self._resolver_entries(), None)
         derived = self._write_lexical_and_identity()
