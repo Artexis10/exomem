@@ -14,3 +14,5 @@ The normal search index already has chunks for long Sources. Paragraph splitting
 ## Risks and Trade-offs
 
 A ranking lift can crowd out a summary. Compare the same cases with and without the change, including ordinary summary queries. An old or withheld chunk can disclose words and position. Verify the winning chunk against the caller's released Source before it influences the order. A lost write reply can otherwise create another Source. Resolve it through the durable receipt.
+
+A later missing part leaves earlier citations readable. The Source read reports an unknown total and keeps the gap visible at the next offset. Search adds no reads to prove later parts.

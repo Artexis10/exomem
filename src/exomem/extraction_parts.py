@@ -34,6 +34,7 @@ from .governance import raw_protection
 from .kbdir import managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
+    PathGuardError,
     PlannedWrite,
     content_hash,
     markdown_lf,
@@ -497,7 +498,10 @@ def _by_stat(memo: dict[Path, tuple[tuple[int, int, int], int]], path: Path, mea
 
 
 def _part_text(vault_root: Path, page: Path, number: int) -> str:
-    raw, _guard = read_guarded_text(vault_root, part_path(page, number))
+    try:
+        raw, _guard = read_guarded_text(vault_root, part_path(page, number))
+    except (PathGuardError, UnicodeError) as error:
+        raise OSError("a declared extraction part is unreadable") from error
     part = part_document(raw)
     if part is None:
         raise FileNotFoundError("a declared extraction part has no Source binding")
@@ -536,9 +540,18 @@ def bounds_of(first_length: int, lengths: Iterable[int]) -> list[int]:
     return bounds
 
 
-def _bounds(vault_root: Path, page: Path, first: str, count: int) -> list[int]:
+def _bounds(vault_root: Path, page: Path, first: str, count: int, *, prefix: bool = False) -> list[int]:
     """Where each part starts in the whole text as it is now, then where the text ends."""
-    return bounds_of(len(first), (_part_length(vault_root, page, number) for number in range(2, count + 1)))
+    def lengths() -> Iterator[int]:
+        for number in range(2, count + 1):
+            try:
+                yield _part_length(vault_root, page, number)
+            except OSError:
+                if not prefix:
+                    raise
+                return
+
+    return bounds_of(len(first), lengths())
 
 
 def stored_parts(
@@ -598,9 +611,9 @@ class Window:
 
     text: str
     offset: int
-    #: Where the next window starts; None when this one reaches the end of the text.
+    #: Where the next window starts. None only at a verified end of the text.
     next_offset: int | None
-    total_chars: int
+    total_chars: int | None
     part: int
     parts: int
 
@@ -645,17 +658,20 @@ def read_window(
     `next_offset` is always past `offset`, and walking it from 0 to None returns the text of
     every part, in order, exactly. `withhold` gives the spans of a part's text that the caller
     is not shown; they leave the window's text, never its positions. Raises `ValueError` for
-    an `offset` outside the text and `OSError` for a part page that is missing or that changes
-    during the read.
+    an `offset` outside the text and `OSError` for a part needed to reach it that is missing or
+    changes during the read. A missing later part leaves the total unknown.
     """
     count = count_of(frontmatter)
     for _attempt in range(2):
-        bounds = _bounds(vault_root, page, first, count)
+        bounds = _bounds(vault_root, page, first, count, prefix=True)
         total = bounds[-1]
+        incomplete = len(bounds) != count + 1
+        if incomplete and offset >= total:
+            raise FileNotFoundError("an extraction part needed for this offset is missing")
         if not 0 <= offset < max(total, 1):
             raise ValueError(f"offset {offset} is outside the extracted text of {total} characters")
         # The first part that ends past `offset`; an empty part holds no position.
-        number = next((n for n in range(1, count + 1) if offset < bounds[n]), 1)
+        number = next((n for n in range(1, len(bounds)) if offset < bounds[n]), 1)
         text = first if number == 1 else _part_text(vault_root, page, number)
         if len(text) == bounds[number] - bounds[number - 1]:
             break
@@ -665,7 +681,8 @@ def read_window(
     end = _window_end(text, local)
     reached = bounds[number - 1] + end
     shown = without_spans(text, local, end, withhold(text))
-    return Window(shown, offset, reached if reached < total else None, total, number, count)
+    next_offset = reached if incomplete or reached < total else None
+    return Window(shown, offset, next_offset, None if incomplete else total, number, count)
 
 
 @dataclass

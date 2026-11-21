@@ -476,20 +476,35 @@ def test_a_part_two_search_offset_ignores_preserved_notes_after_a_carriage_retur
     assert hit.passage["text"] == opened["body"] == quote
 
 
-def test_a_multipart_read_cannot_release_an_unrelated_page_at_a_part_path(vault) -> None:
+def test_a_multipart_read_opens_a_verified_prefix_without_releasing_an_unrelated_part(vault) -> None:
     path = "Knowledge Base/Sources/workshop.md"
     source = vault / path
-    part = extraction_parts.part_path(source, 2)
-    part.parent.mkdir(parents=True, exist_ok=True)
+    second = extraction_parts.part_path(source, 2)
+    unrelated = extraction_parts.part_path(source, 3)
+    second.parent.mkdir(parents=True, exist_ok=True)
     first = "[0:03] We inspected the gate."
+    quote = "The cerulean forklift needs a wider turn."
     source.write_text(
-        f"---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n## Extracted text\n\n{first}\n",
+        f"---\ntitle: Workshop\ntype: source\nextraction_parts: 3\n---\n\n## Extracted text\n\n{first}\n",
         encoding="utf-8",
     )
-    part.write_bytes(b"---\ntype: insight\n---\n\r## Extracted text\r\rAn unrelated note.\r")
+    second.write_text(
+        f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{quote}\n",
+        encoding="utf-8",
+    )
+    unrelated.write_bytes(b"---\ntype: insight\n---\n\r## Extracted text\r\rAn unrelated note.\r")
+
+    hit = next(hit for hit in find_module.find(vault, query=quote, mode="keyword") if hit.path == path)
+    opened = commands.op_read_memory(vault, path=path, offset=hit.passage["offset"])
+
+    assert hit.matched_part == opened["window"]["part"] == 2
+    assert opened["body"] == hit.passage["text"] == quote
+    assert opened["window"]["incomplete"] is True and opened["window"]["total_chars"] is None
+    next_offset = opened["window"]["next_offset"]
+    assert next_offset == len(first) + len(quote)
 
     with pytest.raises(ValueError, match="PART_MISSING"):
-        commands.op_read_memory(vault, path=path, offset=len(first))
+        commands.op_read_memory(vault, path=path, offset=next_offset)
 
 
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:

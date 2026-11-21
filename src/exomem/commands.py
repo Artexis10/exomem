@@ -8477,6 +8477,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
             "total_chars": window.total_chars,
             "part": window.part,
             "parts": window.parts,
+            **({"incomplete": True} if window.total_chars is None else {}),
         },
     }
 
