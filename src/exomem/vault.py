@@ -8032,7 +8032,7 @@ def yaml_flow_list(values: Iterable[Any]) -> str:
     return "[" + ", ".join(yaml_scalar(value) for value in values) + "]"
 
 
-def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
+def _walk_vault_md_entry(vault_root: Path, child: Path, *, strict: bool = False) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:
         relative = relative_posix(child, vault_root)
@@ -8043,6 +8043,8 @@ def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     try:
         info = child.lstat()
     except OSError:
+        if strict:
+            raise
         return None
     if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
         return None
@@ -8082,7 +8084,9 @@ def relative_posix(path: Path, anchor: Path) -> str:
     return path.relative_to(anchor).as_posix()
 
 
-def walk_vault_md(vault_root: Path, *, skip: Callable[[Path], bool] | None = None):
+def walk_vault_md(
+    vault_root: Path, *, skip: Callable[[Path], bool] | None = None, strict: bool = False,
+):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
     Walks the FULL vault, not just Knowledge Base/. Used by Tier 2 inbound-
@@ -8098,12 +8102,14 @@ def walk_vault_md(vault_root: Path, *, skip: Callable[[Path], bool] | None = Non
         try:
             children = list(d.iterdir())
         except OSError:
+            if strict:
+                raise
             return
         for child in children:
             foreground_priority.check_cancelled()
             if skip is not None and child.suffix.lower() == ".md" and skip(child):
                 continue
-            kind = _walk_vault_md_entry(vault_root, child)
+            kind = _walk_vault_md_entry(vault_root, child, strict=strict)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":
@@ -8382,7 +8388,7 @@ def _plan_inbound_edit(
 class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
-    owner_stop: threading.Event | None = None
+    owner: tuple[threading.Event, Callable[[], bool] | None] | None = None
     # Reconcile, request-triggered recovery and exact preview fallback share this slot.
     building: threading.Lock = field(default_factory=threading.Lock)
 
@@ -8393,22 +8399,41 @@ _INBOUND_INDEX_LOCK = threading.Lock()
 _INBOUND_PATCH_LOCK = threading.Lock()
 
 
-def register_inbound_index(vault_root: Path, stop: threading.Event | None = None) -> None:
+def register_inbound_index(
+    vault_root: Path, stop: threading.Event | None = None, *,
+    observer_alive: Callable[[], bool] | None = None,
+) -> None:
     """Prepare the stable demand signal and, once running, bind the owner's shutdown signal."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-        if stop is not None:
-            state.owner_stop = stop
+        if stop is not None and not stop.is_set():
+            state.owner = (stop, observer_alive)
 
 
-def inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
-    """The active file-mode recovery owner's shutdown signal."""
+def unregister_inbound_index(vault_root: Path, stop: threading.Event) -> None:
+    """Withdraw the stopped owner and keep the demand signal and resident evidence."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.get(root)
+        if state is not None and state.owner is not None and state.owner[0] is stop:
+            state.owner = None
+
+
+def inbound_recovery_stop(
+    vault_root: Path, *, observing: bool = False,
+) -> threading.Event | None:
+    """The recovery owner's stop signal, with live observation when requested."""
     if not freshness.event_indexes_enabled() or _store_inbound_mode(vault_root):
         return None
     state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
-    stop = state.owner_stop if state is not None else None
-    return stop if stop is not None and not stop.is_set() else None
+    owner = state.owner if state is not None else None
+    if owner is None:
+        return None
+    stop, observer_alive = owner
+    if stop.is_set() or (observing and (observer_alive is None or not observer_alive())):
+        return None
+    return stop
 
 
 def inbound_recovery_available(vault_root: Path) -> bool:
@@ -8467,7 +8492,7 @@ def inbound_rows(rel: str, text: str) -> tuple[str, list[tuple[int, str, str, st
     ]
 
 
-def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
+def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = None) -> _InboundIndexData:
     from . import foreground_priority
 
     buckets: dict[str, list[_InboundEntry]] = {}
@@ -8475,7 +8500,7 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     sources: dict[str, str] = {}
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
-    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
+    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root) if paths is None else paths):
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -8508,12 +8533,50 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     )
 
 
-def _vault_freshness_key(vault_root: Path, *, disk_freshness: bool = False):
+def checked_disk_inbound_wikilinks(
+    vault_root: Path, target_rel_path: str, *, visible: Callable[[str], bool] | None,
+) -> list[InboundLink] | None:
+    """Read literal links from a stable disk scan without publishing the result to the cache."""
+    from . import foreground_priority
+
+    def inventory() -> dict[Path, freshness.FileSignature]:
+        return {path: freshness.stat_signature(path) for path in walk_vault_md(vault_root, strict=True)}
+
+    def epoch() -> tuple[str, int | None, int | None]:
+        return (
+            freshness.consumer_checkpoint_instance(), freshness.generation(vault_root, "vault"),
+            freshness.external_pending_epoch(vault_root),
+        )
+
+    with inbound_build_slot(vault_root) as acquired:
+        if not acquired:
+            return None
+        budget = request_budget.current()
+        check = request_budget.current_checkpoint() or (request_budget.ReadCheckpoint(budget) if budget else None)
+        try:
+            with request_budget.checking(check):
+                start = epoch()
+                before = inventory()
+                data = _build_inbound_index(vault_root, paths=before)
+                if len(data.sources) != len(before):
+                    return None
+                snapshot = _snapshot_inbound(data, target_rel_path)
+                result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
+                after = inventory()
+                request_budget.checkpoint()
+                if before == after and start == epoch():
+                    return result
+        except (OSError, request_budget.ReadBudgetExhausted, foreground_priority.BulkCancelled):
+            return None
+    return None
+
+
+def _vault_freshness_key(vault_root: Path):
     """The vault-scope freshness triple — from the event-maintained registry
     when it is live (syscall-free), else a fresh stat-walk. Byte-identical
     either way, so the inbound index's staleness check no longer walks the
     vault per call once the registry is live (P3)."""
-    live = None if disk_freshness else freshness.triple(vault_root, "vault")
+    live = freshness.triple(vault_root, "vault")
     if live is not None:
         return live
     from . import find as find_module
@@ -8521,11 +8584,9 @@ def _vault_freshness_key(vault_root: Path, *, disk_freshness: bool = False):
     return find_module._walk_freshness_key(walk_vault_md(vault_root))
 
 
-def _inbound_index(
-    vault_root: Path, *, require_current: bool = False, disk_freshness: bool = False,
-) -> _InboundIndexData:
+def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
-    key = _vault_freshness_key(vault_root, disk_freshness=disk_freshness)
+    key = _vault_freshness_key(vault_root)
     start = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
@@ -8620,15 +8681,14 @@ def _catch_up_inbound(
 def inbound_rebuild_needed(vault_root: Path) -> bool:
     """Whether only an owner build can restore this vault's index.
 
-    True when nothing is resident, or the resident data has no proven checkpoint.
-    Data that is resident under a checkpoint merely behind the registry is
-    completed by the patch the watcher is about to run, so a rebuild would repeat
-    work the patch does for the cost of the change.
+    A resident checkpoint can wait for an incremental patch while retained
+    history reaches it. A reseed or an expired history needs a new build.
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
     cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
-    return cached is None or cached[1].checkpoint is None
+    checkpoint = cached[1].checkpoint if cached is not None else None
+    return checkpoint is None or not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
 
 
 def prime_inbound_index(
@@ -9111,7 +9171,6 @@ def find_inbound_wikilinks(
     visible: Callable[[str], bool] | None = None,
     target_has_no_file: bool = False,
     lineage: bool = True,
-    disk_freshness: bool = False,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -9144,8 +9203,6 @@ def find_inbound_wikilinks(
     With `lineage`, links to the target's prior paths count too (`lineage_link_targets`), because
     they resolve to it. A move or reclassification that plans rewrites of links to the old path
     passes `lineage=False`: the page keeps its lineage, so its prior paths keep resolving.
-
-    `disk_freshness` checks the disk for changes when no running watcher vouches for the registry.
     """
     priors = lineage_link_targets(vault_root, target_rel_path) if lineage else ()
     stored = _store_inbound(vault_root, (target_rel_path, *priors), visible)
@@ -9153,7 +9210,7 @@ def find_inbound_wikilinks(
         if not priors:
             return stored[target_rel_path]
         return _merge_inbound(stored[target] for target in (target_rel_path, *priors))
-    data = _inbound_index(vault_root, disk_freshness=disk_freshness)
+    data = _inbound_index(vault_root)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
         prior_snapshots = [(prior, _snapshot_inbound(data, prior)) for prior in priors]

@@ -86,7 +86,7 @@ def served(vault: Path) -> Path:
     vault_module.clear_inbound_index()
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
-    vault_module.register_inbound_index(vault, threading.Event())
+    vault_module.register_inbound_index(vault, threading.Event(), observer_alive=lambda: True)
     assert vault_module.prime_inbound_index(vault, eager=True)
     find_module._get_query_resolver(vault)
     return vault

@@ -1810,7 +1810,7 @@ class FileWatcher:
                     self._seed_succeeded = False
                     log.exception("file watcher: startup event catch-up failed")
                 finally:
-                    self._seed_complete.set()
+                    self._complete_seed()
         while not self._stop.is_set():
             self._wake.wait(timeout=self._held_publication_intent_timeout())
             if self._stop.is_set():
@@ -2011,8 +2011,30 @@ class FileWatcher:
         from . import vault
 
         self._optional_recovery_armed = True
-        if self._importer is None and self._reconcile_thread is not None and self._reconcile_thread.is_alive():
-            vault.register_inbound_index(self._vault_root, self._stop)
+        if (
+            self._importer is None
+            and self._seed_succeeded
+            and self._seed_complete.is_set()
+            and self._reconcile_thread is not None
+            and self._reconcile_thread.is_alive()
+        ):
+            observer_alive = getattr(self._observer, "is_alive", None)
+            dispatch = self._thread
+
+            def observing() -> bool:
+                return (
+                    observer_alive is not None and observer_alive()
+                    and dispatch is not None and dispatch.is_alive()
+                )
+
+            vault.register_inbound_index(
+                self._vault_root, self._stop, observer_alive=observing,
+            )
+
+    def _complete_seed(self) -> None:
+        self._seed_complete.set()
+        if self._optional_recovery_armed and not self._stop.is_set():
+            self.arm_optional_recovery()
 
     def _prime_inbound_if_needed(self) -> None:
         from . import foreground_priority, readiness, vault
@@ -2796,7 +2818,7 @@ class FileWatcher:
             self._seed_succeeded = succeeded
             self._seed_published.set()
             if not self._dispatch_waits_for_seed:
-                self._seed_complete.set()
+                self._complete_seed()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
             try:
@@ -2830,21 +2852,23 @@ class FileWatcher:
         return self._importer is not None or freshness.event_indexes_enabled()
 
     def _start_reconcile_thread(self) -> None:
-        if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
-            return
         self._reconcile_thread = threading.Thread(
             target=self._run_reconcile,
             name="kb-freshness-reconcile",
             daemon=True,
         )
         self._reconcile_thread.start()
-        if self._optional_recovery_armed:
-            self.arm_optional_recovery()
 
     # ---- lifecycle ----
 
     def start(self) -> bool:
         """Start observation, or reconcile-only polling when watchdog is absent."""
+        observer_alive = getattr(self._observer, "is_alive", None)
+        if (observer_alive is not None and observer_alive()) or any(
+            worker is not None and worker.is_alive() for worker in (self._thread, self._reconcile_thread)
+        ):
+            log.warning("file watcher: a previous worker is still running; restart deferred")
+            return False
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
@@ -2863,6 +2887,7 @@ class FileWatcher:
         self._seed_succeeded = False
         self._startup_recovery_started = False
         self._dispatch_waits_for_seed = False
+        self._observer = None
 
         try:
             Observer, FileSystemEventHandler = _import_watchdog()
@@ -2950,10 +2975,13 @@ class FileWatcher:
             self._stop.set()
             self._wake.set()
             self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                return False
             self._thread = None
             if self._runs_reconcile():
+                self._observer = None
                 self._dispatch_waits_for_seed = False
-                self._stop.clear()
+                self._stop = foreground_priority.StopEvent()
                 self._wake.clear()
                 self._start_reconcile_thread()
                 return True
@@ -2970,8 +2998,10 @@ class FileWatcher:
         self._seed_published.set()
         self._seed_complete.set()
         # No owner keeps the published census current once the watcher stops.
+        from . import vault
         from .governance import artifact_census
 
+        vault.unregister_inbound_index(self._vault_root, self._stop)
         artifact_census.withdraw(self._vault_root)
         if self._observer is not None:
             try:

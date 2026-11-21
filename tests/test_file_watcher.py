@@ -1306,6 +1306,28 @@ def test_file_watcher_dispatch_thread_restarts_after_stop(
         watcher.stop()
 
 
+def test_restart_waits_for_the_previous_run_to_exit(vault):
+    watcher = file_watcher.FileWatcher(vault)
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, daemon=True)
+    watcher._reconcile_thread = worker
+    worker.start()
+    watcher.stop()
+    try:
+        assert not watcher.start()
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert watcher.start()
+    try:
+        assert watcher.wait_until_seeded(10)
+        watcher.arm_optional_recovery()
+        assert vault_module.inbound_recovery_stop(vault, observing=True) is not None
+    finally:
+        watcher.stop()
+
+
 # ---- Self-write suppression (OpenSpec: improve-find-latency-token-cost) ----
 
 

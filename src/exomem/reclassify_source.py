@@ -733,24 +733,20 @@ class _Written:
     pointer_repointed: tuple[Mapping[str, str], ...] = ()
 
 
-def _visible_inbound(
-    vault_root: Path, rel: str, *, disk_freshness: bool = False,
-) -> list[InboundLink]:
+def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     """Inbound links over the caller's view, as in a vault without the pages
     withheld from it: a writer other than the owner never learns of a link
     from a page it may not see."""
     visible = egress.visible_page_filter(vault_root)
     return [
         hit
-        for hit in find_inbound_wikilinks(
-            vault_root, rel, visible=visible, lineage=False, disk_freshness=disk_freshness,
-        )
+        for hit in find_inbound_wikilinks(vault_root, rel, visible=visible, lineage=False)
         if visible is None or visible(hit.path)
     ]
 
 
 def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
-    from . import find
+    from . import find, freshness
     from .cli_ops import OpError
     from .governance.principal import effective_principal
     from .vault_store.mode import store_mode_for_reads
@@ -759,14 +755,20 @@ def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     if effective_principal().surface not in ("mcp", "rest") or store_mode_for_reads(vault_root):
         return _visible_inbound(vault_root, rel)
 
-    if vault.inbound_recovery_available(vault_root):
-        inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=egress.reader_view(vault_root))
+    reader = egress.reader_view(vault_root)
+    owner = vault.inbound_recovery_stop(vault_root, observing=True)
+    recovering = False
+    if owner is not None:
+        inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader)
+        if vault.inbound_recovery_stop(vault_root, observing=True) is owner:
+            if inbound is not None:
+                return inbound
+            # A live observer settles its debounce batch without a request-owned walk.
+            recovering = freshness.external_pending(vault_root) or find.schedule_inbound_rebuild(vault_root)
+    if not recovering:
+        inbound = vault.checked_disk_inbound_wikilinks(vault_root, rel, visible=reader)
         if inbound is not None:
             return inbound
-    if not find.schedule_inbound_rebuild(vault_root):
-        with vault.inbound_build_slot(vault_root) as acquired:
-            if acquired:
-                return _visible_inbound(vault_root, rel, disk_freshness=True)
     raise OpError(
         "RECLASSIFICATION_PREVIEW_WARMING",
         "The source's references are still being checked. Retry the same preview shortly.",
