@@ -599,14 +599,20 @@ def withdraw(vault_root: Path) -> None:
             _withdraw_locked(feed)
 
 
-def published_view(vault_root: Path) -> CensusView | None:
+def published_view(vault_root: Path, *, observe_only: bool = False) -> CensusView | None:
     """The published base and overlay, or `None` while the vault has none.
 
     Asking marks the vault as wanted: the background owner publishes only for
-    a vault that a request needed, so an idle vault costs nothing.
+    a vault that a request needed, so an idle vault costs nothing. An observer
+    uses only a ready view and neither signals demand nor assembles an overlay.
     """
     key = _vault_key(vault_root)
     with _CENSUS_LOCK:
+        if observe_only:
+            feed = _FEEDS.get(key)
+            if feed is None or feed.base is None or (feed.added and feed.overlay is None):
+                return None
+            return CensusView(feed.base, feed.overlay, published=True)
         feed = _feed_locked(key)
         feed.demanded = True
         base = feed.base

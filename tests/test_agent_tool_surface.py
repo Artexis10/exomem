@@ -10,6 +10,7 @@ import asyncio
 import json
 from pathlib import Path
 from shutil import copytree
+from types import SimpleNamespace
 
 import pytest
 import record_fixtures
@@ -20,7 +21,7 @@ from test_collection_store_service import service  # noqa: F401 - the SQLite wor
 from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
 from test_governance_postfilter import AWS_KEY, HIGH_ENTROPY
 
-from exomem import call_ledger, memory_refs, semantic_contract, state_migration, writer_lease
+from exomem import call_ledger, memory_refs, page_ids, semantic_contract, state_migration, writer_lease
 from exomem import server as server_module
 from exomem.governance import artifact_census
 
@@ -359,12 +360,14 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     config.write_text(json.dumps(host), encoding="utf-8")
     protected_field = f"Follow [[{Path(PRIVATE).stem}]]"
     unproved_identity = memory_refs.memory_ref("f338e51e-a1cf-4512-96be-e5cb56286d08")
-    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, unproved_identity, True])
+    short_id = page_ids.page_id(memory_refs.parse_memory_ref(unproved_identity), PRIVATE, "0" * 64)
+    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, f"See {unproved_identity}", True])
     manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    release_hash: {{type: enum, enum: {declared}}}\n"
         f"    resource_group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n"
         f"    {json.dumps(protected_field)}: {{type: enum, enum: [42]}}\n"
+        f"    {json.dumps(f'See ({short_id})')}: {{type: enum, enum: [17]}}\n"
         f"    {AWS_KEY}: {{type: enum, enum: [false]}}\n",
     ), encoding="utf-8")
     authority = state_migration.assert_offline_migration_authority(source="restricted enum fixture")
@@ -374,18 +377,25 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     async def scenario(client):
         target = {"collection": record_fixtures.LEDGER_COLLECTION_PATH}
         operation = {"operation": "records.inspect", "arguments": target}
-        with monkeypatch.context() as cold:
-            cold.setattr(artifact_census, "published_view", lambda root: None)
-            cold.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum scan walked the vault"))
-            cold_inspected = await _call(client, "inspect_memory", operation)
-        assert cold_inspected["contract"]["declared_enums"] == {"values": {}, "truncated": True}
-        assert cold_inspected["lifecycle_guards"]["expected_container_hash"]
-        assert artifact_census.rebuild_published(vault, eager=True)
         item = record_fixtures.ledger_item(release_hash="invalid")
         del item["word_count"]
-        with monkeypatch.context() as cold_identity:
-            cold_identity.setattr(semantic_contract, "borrow_link_snapshot", lambda root: None)
-            cold_identity.setattr(
+        with monkeypatch.context() as cold:
+            cold.setattr(artifact_census, "published_view", lambda root, **kwargs: None)
+            with monkeypatch.context() as read_only:
+                read_only.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum scan walked the vault"))
+                cold_inspected = await _call(client, "inspect_memory", operation)
+            cold_refused = await _call(client, "add_record", {
+                **target, "why": "Log a cold entry", "item": {**item, "slug": "cold-entry"}})
+        assert cold_inspected["contract"]["declared_enums"] == {"values": {}, "truncated": True}
+        assert cold_inspected["lifecycle_guards"]["expected_container_hash"]
+        assert cold_refused.get("error", {}).get("code") == "SCHEMA_ENUM", cold_refused
+        assert "candidates" not in cold_refused["error"] and cold_refused["error"]["retry"]["arguments"]["held"]
+        assert artifact_census.rebuild_published(vault, eager=True)
+        with monkeypatch.context() as stale_identity:
+            stale_identity.setattr(
+                semantic_contract, "borrow_link_snapshot", lambda root: SimpleNamespace(reference_owners={}),
+            )
+            stale_identity.setattr(
                 memory_refs, "paths_for_optional_references_read_only",
                 lambda *args, **kwargs: pytest.fail("enum entered the identity lookup that can walk the vault"),
             )
@@ -411,7 +421,8 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
         return inspected, refused, blocked, rows
 
     inspected, refused, blocked, rows = _session(build(), scenario)
-    assert all(target not in json.dumps([inspected, refused, blocked]) for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY))
+    assert all(target not in json.dumps([inspected, refused, blocked])
+               for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY, unproved_identity, short_id))
     assert [row["release_hash"] for row in rows["rows"]] == [True]
 
 

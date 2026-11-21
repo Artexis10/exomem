@@ -220,6 +220,23 @@ def test_an_unpublished_census_takes_the_walk_and_is_never_empty(
     assert artifact_census.published_view(vault) is None
 
 
+def test_observing_the_census_neither_requests_publication_nor_builds_an_overlay(vault, monkeypatch):
+    assert artifact_census.published_view(vault, observe_only=True) is None
+    assert not artifact_census.rebuild_published(vault)
+    assert artifact_census.rebuild_published(vault, eager=True)
+    relative = f"{WITHHELD_DIR}/new-memo.txt"
+    _write(vault, relative)
+    artifact_census.note_created(vault, (relative,))
+
+    with monkeypatch.context() as observer:
+        observer.setattr(artifact_census, "_census_from_rels", lambda rels: pytest.fail("observer built an overlay"))
+        assert artifact_census.published_view(vault, observe_only=True) is None
+
+    published = artifact_census.published_view(vault)
+    assert published is not None and published.paths(relative.casefold()) == (relative,)
+    assert artifact_census.published_view(vault, observe_only=True) == published
+
+
 def test_a_burst_of_new_files_withdraws_the_census_to_the_walk(
     vault: Path, walks: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

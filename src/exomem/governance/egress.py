@@ -56,6 +56,7 @@ from .. import (
     find_corpus,
     memory_refs,
     originals,
+    page_ids,
     request_budget,
     reserved_paths,
     state_paths,
@@ -7727,32 +7728,30 @@ class _ArtifactReferenceGate:
     def _can_scan_optional_text(self) -> bool:
         if self.fail_closed:
             return False
-        if self._indexed or (self._policy_empty() and not self.tombstones):
+        if self.census.published or (self._policy_empty() and not self.tombstones):
             return True
-        census = artifact_census.published_view(self.vault_root)
+        census = artifact_census.published_view(self.vault_root, observe_only=True)
         if census is None:
             return False
         self._index(census)
         self._indexed = True
         return True
 
-    def _admit_pending_identity_paths(self, paths: Iterable[str]) -> Iterable[str]:
-        return pending_identity_candidates(self.vault_root, paths, principal=self.who, purpose=self.purpose)
-
-    @functools.cached_property
-    def _borrowed_identity_lookup(self) -> Callable[[str], tuple[str, ...] | None]:
-        from .. import semantic_contract
-
-        snapshot = semantic_contract.borrow_link_snapshot(self.vault_root)
-        if snapshot is None:
-            return lambda identifier: None
-        return memory_refs.reference_owner_lookup(
-            self.vault_root, snapshot.reference_owners, admit_pending_paths=self._admit_pending_identity_paths,
-        )
-
     def scan_optional_text(self, values: list[Any]) -> list[Any]:
-        return [self.gate_text(value, _borrow_identity=True) if isinstance(value, str) else value
-                for value in values]
+        def scan(value: Any) -> Any:
+            if not isinstance(value, str):
+                return value
+            # Check URI tokens even inside a wikilink label or an open vault's text.
+            text = value.replace("[", " ").replace("]", " ").replace("|", " ")
+            if any(memory_refs.parse_memory_ref(self._unwrap(match[0])[0])
+                   for match in _WRAPPED_ARTIFACT_REFERENCE.finditer(text)):
+                return WITHHELD_REFERENCE
+            # The split supplies prose token boundaries. page_ids owns the short-ID format.
+            if any(page_ids.is_page_id(token.strip(".")) for token in re.split(r"[^\w.]+", value)):
+                return WITHHELD_REFERENCE
+            return self.gate_text(value, _omit_identities=True)
+
+        return [scan(value) for value in values]
 
     def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
@@ -7810,7 +7809,7 @@ class _ArtifactReferenceGate:
         return token, wikilink
 
     def resolve(
-        self, value: str, *, directory: str | None = None, _borrow_identity: bool = False,
+        self, value: str, *, directory: str | None = None, _omit_identities: bool = False,
     ) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
@@ -7821,14 +7820,16 @@ class _ArtifactReferenceGate:
             memory_id = memory_refs.parse_memory_ref(token)
             if memory_id is None:
                 return ()
+            if _omit_identities:
+                return None
             # Redaction keeps raw hidden-owner evidence after pending withdrawal.
             # Potentially visible uncertainty omits the token, not admitted material.
-            if _borrow_identity:
-                paths = self._borrowed_identity_lookup(memory_id)
-            else:
-                paths = memory_refs.paths_for_optional_references_read_only(
-                    self.vault_root, (memory_id,), admit_pending_paths=self._admit_pending_identity_paths,
-                ).get(memory_id, ())
+            paths = memory_refs.paths_for_optional_references_read_only(
+                self.vault_root, (memory_id,),
+                admit_pending_paths=lambda paths: pending_identity_candidates(
+                    self.vault_root, paths, principal=self.who, purpose=self.purpose,
+                ),
+            ).get(memory_id, ())
             if paths is None:
                 return None
             if len(paths) != 1:
@@ -7907,7 +7908,7 @@ class _ArtifactReferenceGate:
         self.verdicts[rel_path] = allowed
         return allowed
 
-    def gate_text(self, text: str, *, _borrow_identity: bool = False) -> str:
+    def gate_text(self, text: str, *, _omit_identities: bool = False) -> str:
         request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
@@ -7933,7 +7934,7 @@ class _ArtifactReferenceGate:
                     # The caller sent this. Echoing it back tells them nothing;
                     # replacing it tells them the item exists.
                     return token
-            candidates = self.resolve(token, _borrow_identity=_borrow_identity)
+            candidates = self.resolve(token, _omit_identities=_omit_identities)
             if candidates is None or (
                 candidates and not all(self._permits(rel) for rel in candidates)
             ):
