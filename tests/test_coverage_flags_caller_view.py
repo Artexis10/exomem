@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from contextvars import copy_context
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -84,7 +86,7 @@ def served(vault: Path) -> Path:
     vault_module.clear_inbound_index()
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
-    vault_module.register_inbound_index(vault)
+    vault_module.register_inbound_index(vault, threading.Event())
     assert vault_module.prime_inbound_index(vault, eager=True)
     find_module._get_query_resolver(vault)
     return vault
@@ -127,6 +129,28 @@ def test_a_withheld_write_leaves_the_restricted_inbound_field_as_it_was(served: 
     _write_as_the_service_does(served, HIDDEN, "# Hidden\n\nRewritten. See [[coverage-anchor]].\n")
 
     assert _links(served, restricted=True) == before
+
+
+def test_a_withheld_referrer_does_not_delay_reclassification_preview(
+    served: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.cli_ops import OpError
+
+    source = "Knowledge Base/Sources/Other/coverage-source.md"
+    _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
+    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
+    assert vault_module.prime_inbound_index(served, eager=True)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n\nNew context.\n")
+
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(OpError) as cold:
+        commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
+    assert cold.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+
+    with request_scope(replace(_external(), administrative_ingress=True)):
+        preview = commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
+    assert preview["references"] == 0
+    assert preview["preview_digest"]
 
 
 def test_a_withheld_write_leaves_the_restricted_pack_complete(served: Path) -> None:

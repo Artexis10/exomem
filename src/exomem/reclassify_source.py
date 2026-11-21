@@ -47,8 +47,10 @@ from . import (
     semantic_writes,
     source_pointers,
     source_taxonomy,
+    vault,
     vocabulary_resolution,
 )
+from .governance import egress
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
@@ -575,6 +577,7 @@ def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...
     )
 
 
+@egress.proven_withheld_scope(reuse=True)
 def propose(
     vault_root: Path,
     path: str,
@@ -672,7 +675,7 @@ def propose(
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
-    inbound = _visible_inbound(vault_root, rel)
+    inbound = _preview_inbound(vault_root, rel)
     outcome = (
         _referrer_outcome(vault_root, rel, text, destination, inbound)
         if destination is not None
@@ -730,18 +733,45 @@ class _Written:
     pointer_repointed: tuple[Mapping[str, str], ...] = ()
 
 
-def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
+def _visible_inbound(
+    vault_root: Path, rel: str, *, disk_freshness: bool = False,
+) -> list[InboundLink]:
     """Inbound links over the caller's view, as in a vault without the pages
     withheld from it: a writer other than the owner never learns of a link
     from a page it may not see."""
-    from .governance import egress
-
     visible = egress.visible_page_filter(vault_root)
     return [
         hit
-        for hit in find_inbound_wikilinks(vault_root, rel, visible=visible, lineage=False)
+        for hit in find_inbound_wikilinks(
+            vault_root, rel, visible=visible, lineage=False, disk_freshness=disk_freshness,
+        )
         if visible is None or visible(hit.path)
     ]
+
+
+def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
+    from . import find
+    from .cli_ops import OpError
+    from .governance.principal import effective_principal
+    from .vault_store.mode import store_mode_for_reads
+
+    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
+    if effective_principal().surface not in ("mcp", "rest") or store_mode_for_reads(vault_root):
+        return _visible_inbound(vault_root, rel)
+
+    if vault.inbound_recovery_available(vault_root):
+        inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=egress.reader_view(vault_root))
+        if inbound is not None:
+            return inbound
+    if not find.schedule_inbound_rebuild(vault_root):
+        with vault.inbound_build_slot(vault_root) as acquired:
+            if acquired:
+                return _visible_inbound(vault_root, rel, disk_freshness=True)
+    raise OpError(
+        "RECLASSIFICATION_PREVIEW_WARMING",
+        "The source's references are still being checked. Retry the same preview shortly.",
+        details={"retry_after_ms": 1000},
+    )
 
 
 def _link_form(raw_target: str) -> str:

@@ -51,6 +51,8 @@ The operation SHALL offer a read-only mode that reports the corrected classifica
 
 The read-only mode SHALL accept a caller-supplied kind and domain and preview that correction, so a caller that has read the source and decided can show the destination and affected references before anything is written. Supplied values SHALL be resolved through the same rules the correction applies, so a value the correction would refuse is refused during the preview rather than after approval.
 
+A served file-mode preview SHALL return `RECLASSIFICATION_PREVIEW_WARMING` with a retry delay when the background owner can restore missing inbound evidence or another fallback preview is building it. The response SHALL omit reference counts and the preview digest. Complete evidence, including evidence of zero references, SHALL produce the normal preview. If no background owner can restore the evidence, one served preview MAY build it synchronously while concurrent previews receive the same retry response.
+
 When no values are supplied, evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
 
 #### Scenario: A preview writes nothing
@@ -65,6 +67,13 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 - **WHEN** a preview is requested for a source whose destination a page that the caller can see already occupies
 - **THEN** the report states that the move would be refused and why
 - **AND** it names that page
+
+#### Scenario: Cold inbound evidence leaves the preview pending
+
+- **WHEN** a served file-mode preview cannot prove the caller's inbound references and the background owner can recover them
+- **THEN** the response asks the caller to retry the same preview after the reported delay
+- **AND** the response omits the reference count and approval digest
+- **AND** a retry with complete evidence returns the normal preview
 
 #### Scenario: Evidence accompanies a proposed value
 

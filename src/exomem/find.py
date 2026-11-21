@@ -8657,21 +8657,28 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     )
 
 
-def schedule_inbound_rebuild(vault_root: Path) -> None:
-    """Start at most one background inbound-index build per vault.
-
-    The immediate owner for a server's context pack that borrowed the index and
-    found none: the pack must not build it, and the watcher's reconcile pass
-    (minutes away) stays the backstop. `prime_inbound_index` is single-flight per
-    vault, so this thread and that pass never build concurrently.
-    """
+def schedule_inbound_rebuild(vault_root: Path) -> bool:
+    """Accept a miss when the watcher can patch or immediately rebuild the index."""
+    from . import readiness
     from . import vault as vault_module
 
-    _schedule_resolver_warm(
+    stop = vault_module.inbound_recovery_stop(vault_root)
+    if (
+        stop is None
+        or os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM")
+        or readiness.is_warming()
+        or freshness.generation(vault_root, "vault") is None
+        or freshness.external_pending(vault_root)
+    ):
+        return False
+    if not vault_module.inbound_rebuild_needed(vault_root):
+        return True  # an incremental publication can finish a resident checkpoint
+    return _schedule_resolver_warm(
         vault_root,
         _INBOUND_INDEX_REBUILDS,
-        vault_module.prime_inbound_index,
+        lambda root: vault_module.prime_inbound_index(root, defer_to_patch=True),
         "exomem-inbound-index-warm",
+        stop=stop,
     )
 
 
@@ -8680,20 +8687,24 @@ def _schedule_resolver_warm(
     inflight: set[Path],
     build: Callable[[Path], object],
     thread_name: str,
-) -> None:
+    *,
+    stop: threading.Event | None = None,
+) -> bool:
     """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
-        return
+        return False
     key = Path(root)
     with _RECALL_REBUILD_LOCK:
         if key in inflight:
-            return
+            return True
         inflight.add(key)
 
     def _run() -> None:
         try:
-            with foreground_priority.bulk():
+            with foreground_priority.bulk(stop=stop):
                 build(key)
+        except foreground_priority.BulkCancelled:
+            return
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
             log.warning("background rebuild skipped (%s)", error)
         finally:
@@ -8710,6 +8721,8 @@ def _schedule_resolver_warm(
     except RuntimeError:
         with _RECALL_REBUILD_LOCK:
             inflight.discard(key)
+        return False
+    return True
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:

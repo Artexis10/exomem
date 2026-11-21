@@ -208,6 +208,7 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         # prove completeness — retryable with bounded `retry_after_ms`, never a
         # client-fault 400.
         "RETRIEVAL_INDEX_WARMING",
+        "RECLASSIFICATION_PREVIEW_WARMING",
         # A name-linked retained input the lookup could not yet check; the refusal
         # schedules the build that settles it, so the same write succeeds on retry.
         "ORIGIN_INPUT_LOOKUP_STALE",

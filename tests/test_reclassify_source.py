@@ -16,7 +16,10 @@ Every fixture here is synthetic.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import ANY
 
@@ -54,6 +57,137 @@ def _body(vault: Path, rel: str) -> str:
 
     _, body, _ = parse_frontmatter((vault / rel).read_text(encoding="utf-8"))
     return body
+
+
+def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+    from test_collection_store_s1_gate import _until
+
+    from exomem import file_watcher, find, freshness, readiness, server
+    from exomem import vault as vault_module
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    captured = _capture(vault, source_schema, title="Harbor measurements")
+    note = f"{KB}/Notes/move-me.md"
+    destination = f"{KB}/Notes/moved.md"
+    (vault / note).write_text(f"# Measurements\n\n[[{captured.path}]]\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+    mcp = server.build_server(require_auth=False)
+    mcp._exomem_local_runtime_activation.fallback_seconds = 60
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.02)
+    assert watcher.start()
+    started, release = threading.Event(), threading.Event()
+    builders: list[str] = []
+    original_build = vault_module._build_inbound_index
+
+    def paused_build(root: Path):
+        builders.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(15)
+        return original_build(root)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            async def call(tool: str, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            moved = await call(
+                "manage_memory_file", operation="move", old_path=note, new_path=destination,
+            )
+            assert moved.get("paths") == [note, destination], moved
+            assert vault_module.inbound_recovery_available(vault)
+            assert not readiness.is_warming()
+            assert freshness.generation(vault, "vault") is not None
+            await asyncio.to_thread(_until, lambda: not freshness.external_pending(vault))
+            # Withdraw the cache after the move, as an idle quiet-mode service may.
+            vault_module.evict_inbound_index(vault)
+            monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+            preview = {
+                "operation": "propose-reclassification", "path": captured.path,
+                "source_kind": "dataset-export",
+            }
+            try:
+                cold = await call("manage_memory_file", **preview)
+                assert cold["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert cold["error"]["retry"]["after_s"] > 0
+                assert "references" not in cold and "preview_digest" not in cold
+                assert await asyncio.to_thread(started.wait, 5)
+                overlap, records = await asyncio.gather(
+                    call("manage_memory_file", **preview),
+                    call("query_records", collection="Meter readings", limit=1),
+                )
+                assert overlap["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert records.get("rows"), records
+            finally:
+                release.set()
+            assert await asyncio.to_thread(find.await_recall_resolver_warm)
+            warm = await call("manage_memory_file", **preview)
+            assert warm.get("references") == 2, warm
+            assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
+            assert warm["preview_digest"]
+
+    try:
+        assert watcher.wait_until_seeded(10)
+        watcher.arm_optional_recovery()
+        asyncio.run(exercise())
+        assert builders == ["exomem-inbound-index-warm"]
+    finally:
+        release.set()
+        watcher.stop()
+
+
+def test_a_stopped_watchers_preview_fallback_builds_once_from_disk(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import freshness
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import owner_principal, request_scope
+
+    captured = _capture(vault, source_schema, title="River measurements")
+    entries = [
+        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+    ]
+    freshness.seed(vault, "vault", entries)
+    stop = threading.Event()
+    vault_module.register_inbound_index(vault, stop)
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    stop.set()
+    # A referrer arrives after the watcher stops. Its registry cannot vouch for the old cache.
+    referrer = f"{KB}/Notes/updated.md"
+    (vault / referrer).write_text(f"# Updated\n\n[[{captured.path}]]\n", encoding="utf-8")
+    started, release = threading.Event(), threading.Event()
+    original_build = vault_module._build_inbound_index
+
+    def paused_build(root: Path):
+        started.set()
+        assert release.wait(5)
+        return original_build(root)
+
+    def preview():
+        with request_scope(owner_principal(surface="mcp")):
+            return rc.propose(vault, captured.path, source_kind="dataset-export")
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(preview)
+        try:
+            assert started.wait(5)
+            with pytest.raises(OpError) as busy:
+                pool.submit(preview).result(timeout=2)
+            assert busy.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+            assert busy.value.details["retry_after_ms"] > 0
+        finally:
+            release.set()
+        assert referrer in first.result(timeout=5).rewritten
 
 
 # ---------------------------------------------------------------------------

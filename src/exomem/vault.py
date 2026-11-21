@@ -8382,9 +8382,8 @@ def _plan_inbound_edit(
 class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
-    owned: bool = False  # a watcher owner is registered to recover this vault's index
-    # Held by the one owner pass building this vault's index: the reconcile pass and a
-    # pack-demanded background build both call `prime_inbound_index` and must not overlap.
+    owner_stop: threading.Event | None = None
+    # Reconcile, request-triggered recovery and exact preview fallback share this slot.
     building: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -8394,11 +8393,22 @@ _INBOUND_INDEX_LOCK = threading.Lock()
 _INBOUND_PATCH_LOCK = threading.Lock()
 
 
-def register_inbound_index(vault_root: Path) -> None:
-    """Prepare a stable demand signal before the existing watcher serves a vault."""
+def register_inbound_index(vault_root: Path, stop: threading.Event | None = None) -> None:
+    """Prepare the stable demand signal and, once running, bind the owner's shutdown signal."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
-        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration()).owned = True
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+        if stop is not None:
+            state.owner_stop = stop
+
+
+def inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
+    """The active file-mode recovery owner's shutdown signal."""
+    if not freshness.event_indexes_enabled() or _store_inbound_mode(vault_root):
+        return None
+    state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
+    stop = state.owner_stop if state is not None else None
+    return stop if stop is not None and not stop.is_set() else None
 
 
 def inbound_recovery_available(vault_root: Path) -> bool:
@@ -8409,10 +8419,21 @@ def inbound_recovery_available(vault_root: Path) -> bool:
     process, or event-maintained indexes disabled) nothing would ever recover
     the index, so such a caller keeps the synchronous lookup.
     """
-    if _store_inbound_mode(vault_root):
-        return False  # the store's rows need no recovery: a read is complete at its snapshot
-    state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
-    return state is not None and state.owned and freshness.event_indexes_enabled()
+    return inbound_recovery_stop(vault_root) is not None
+
+
+@contextmanager
+def inbound_build_slot(vault_root: Path) -> Iterator[bool]:
+    """Share the owner's build lock without queuing a served preview behind a walk."""
+    root = str(vault_root.resolve())
+    with _INBOUND_INDEX_LOCK:
+        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
+    acquired = state.building.acquire(blocking=False)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            state.building.release()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -8487,12 +8508,12 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     )
 
 
-def _vault_freshness_key(vault_root: Path):
+def _vault_freshness_key(vault_root: Path, *, disk_freshness: bool = False):
     """The vault-scope freshness triple — from the event-maintained registry
     when it is live (syscall-free), else a fresh stat-walk. Byte-identical
     either way, so the inbound index's staleness check no longer walks the
     vault per call once the registry is live (P3)."""
-    live = freshness.triple(vault_root, "vault")
+    live = None if disk_freshness else freshness.triple(vault_root, "vault")
     if live is not None:
         return live
     from . import find as find_module
@@ -8500,9 +8521,11 @@ def _vault_freshness_key(vault_root: Path):
     return find_module._walk_freshness_key(walk_vault_md(vault_root))
 
 
-def _inbound_index(vault_root: Path, *, require_current: bool = False) -> _InboundIndexData:
+def _inbound_index(
+    vault_root: Path, *, require_current: bool = False, disk_freshness: bool = False,
+) -> _InboundIndexData:
     """The cached index, rebuilt when the vault's freshness key moves."""
-    key = _vault_freshness_key(vault_root)
+    key = _vault_freshness_key(vault_root, disk_freshness=disk_freshness)
     start = freshness.consumer_checkpoint(vault_root, "vault")
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
@@ -8604,12 +8627,13 @@ def inbound_rebuild_needed(vault_root: Path) -> bool:
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
-    with _INBOUND_INDEX_LOCK:
-        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
+    cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
     return cached is None or cached[1].checkpoint is None
 
 
-def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+def prime_inbound_index(
+    vault_root: Path, *, eager: bool = False, defer_to_patch: bool = False,
+) -> bool:
     """Rebuild requested link metadata on the existing background owner.
 
     At most one pass builds a vault's index at a time: a caller that finds
@@ -8629,6 +8653,8 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
     if not state.building.acquire(blocking=False):
         return False
     try:
+        if defer_to_patch and not inbound_rebuild_needed(vault_root):
+            return False
         data = _inbound_index(vault_root, require_current=True)
     finally:
         state.building.release()
@@ -9085,6 +9111,7 @@ def find_inbound_wikilinks(
     visible: Callable[[str], bool] | None = None,
     target_has_no_file: bool = False,
     lineage: bool = True,
+    disk_freshness: bool = False,
 ) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
@@ -9117,6 +9144,8 @@ def find_inbound_wikilinks(
     With `lineage`, links to the target's prior paths count too (`lineage_link_targets`), because
     they resolve to it. A move or reclassification that plans rewrites of links to the old path
     passes `lineage=False`: the page keeps its lineage, so its prior paths keep resolving.
+
+    `disk_freshness` checks the disk for changes when no running watcher vouches for the registry.
     """
     priors = lineage_link_targets(vault_root, target_rel_path) if lineage else ()
     stored = _store_inbound(vault_root, (target_rel_path, *priors), visible)
@@ -9124,7 +9153,7 @@ def find_inbound_wikilinks(
         if not priors:
             return stored[target_rel_path]
         return _merge_inbound(stored[target] for target in (target_rel_path, *priors))
-    data = _inbound_index(vault_root)
+    data = _inbound_index(vault_root, disk_freshness=disk_freshness)
     with _INBOUND_INDEX_LOCK:
         snapshot = _snapshot_inbound(data, target_rel_path)
         prior_snapshots = [(prior, _snapshot_inbound(data, prior)) for prior in priors]

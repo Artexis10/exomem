@@ -2008,7 +2008,11 @@ class FileWatcher:
 
     def arm_optional_recovery(self) -> None:
         """Permit optional metadata work only after runtime workers have started."""
+        from . import vault
+
         self._optional_recovery_armed = True
+        if self._importer is None and self._reconcile_thread is not None and self._reconcile_thread.is_alive():
+            vault.register_inbound_index(self._vault_root, self._stop)
 
     def _prime_inbound_if_needed(self) -> None:
         from . import foreground_priority, readiness, vault
@@ -2834,6 +2838,8 @@ class FileWatcher:
             daemon=True,
         )
         self._reconcile_thread.start()
+        if self._optional_recovery_armed:
+            self.arm_optional_recovery()
 
     # ---- lifecycle ----
 
@@ -2847,11 +2853,10 @@ class FileWatcher:
             log.info("file watcher: %s not found; not watching", kb_root)
             return False
 
-        # Hosted quiesce/resume deliberately reuses the watcher instance. A
-        # stopped threading.Event is sticky, so reset both loop controls before
-        # recreating the dispatch/observer threads.
+        # A restarted watcher gets a new stop signal. A rebuild from the
+        # previous run must still see its own run's shutdown.
         self._raw_witness = capture_inventory.new_raw_witness(self._vault_root)
-        self._stop.clear()
+        self._stop = foreground_priority.StopEvent()
         self._wake.clear()
         self._seed_published.clear()
         self._seed_complete.clear()
@@ -2959,8 +2964,8 @@ class FileWatcher:
         return True
 
     def stop(self) -> None:
-        self._raw_witness.withdraw(stopped=True)
         self._stop.set()
+        self._raw_witness.withdraw(stopped=True)
         self._wake.set()
         self._seed_published.set()
         self._seed_complete.set()

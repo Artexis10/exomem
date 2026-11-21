@@ -316,9 +316,22 @@ def test_a_reclassification_repoints_an_evidence_link_and_its_revert_restores_th
     proposal = writer_lease.invoke_command(
         MANAGE, vault, operation="propose-reclassification", path=SOURCE, **correction
     )
+    original += "\nA later measurement.\n"
+    evidence.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match="POINTER_PREVIEW_REQUIRED"):
+        writer_lease.invoke_command(
+            MANAGE, vault, operation="reclassify", path=SOURCE, reason="a survey, not an article",
+            preview_digest=proposal["preview_digest"], **correction,
+        )
+    assert evidence.read_text(encoding="utf-8") == original
+    assert (vault / SOURCE).is_file()
+    refreshed = writer_lease.invoke_command(
+        MANAGE, vault, operation="propose-reclassification", path=SOURCE, **correction
+    )
+    assert refreshed["preview_digest"] != proposal["preview_digest"]
     moved = writer_lease.invoke_command(
         MANAGE, vault, operation="reclassify", path=SOURCE, reason="a survey, not an article",
-        preview_digest=proposal["preview_digest"], **correction,
+        preview_digest=refreshed["preview_digest"], **correction,
     )
     repointed = evidence.read_text(encoding="utf-8")
     writer_lease.invoke_command(
