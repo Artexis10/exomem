@@ -887,18 +887,6 @@ def test_uncertain_publication_keeps_protection_until_confirmed(vault: Path, sel
         assert captured.execute("SELECT count(*) FROM media_protections").fetchone()[0] == 0
 
 
-def test_destroyed_version_cannot_authorize_eviction(vault: Path, selected_store):
-    from exomem import media_store
-
-    path = _preserved(vault)
-    old = _offload(vault, path)
-    (Path(selected_store[0]["root"]) / old.object / old.version).unlink()
-    assert not media_store.evict(vault, path)
-    assert path.exists() and originals.original_state(vault, path).state == "local"
-    replacement = _offload(vault, path)
-    assert replacement.version != old.version
-
-
 def test_unknown_store_result_preserves_the_reference_and_local_bytes(vault: Path, selected_store, monkeypatch):
     from exomem import media_store
 
@@ -4111,16 +4099,16 @@ def test_an_eviction_that_read_a_served_policy_still_honours_a_latch_set_before_
     from exomem import media_store
 
     path = _stored(vault, "cached", 300)
-    real = media_store._confirmed
+    head = media_store.FilesystemStore.head
 
-    def turn_off_and_count(*arguments):
+    def turn_off_and_count(store, name, version):
         _retained(selected_store, vault)  # The owner turns the store off while the eviction waits on the store.
         assert media_store.drain_census(vault) == (0, 0)
-        return real(*arguments)
+        return head(store, name, version)
 
-    monkeypatch.setattr(media_store, "_confirmed", turn_off_and_count)
+    monkeypatch.setattr(media_store.FilesystemStore, "head", turn_off_and_count)
 
-    assert media_store._evict_one(vault, path) == media_store.KEPT
+    assert not media_store.evict(vault, path)
 
     assert originals.original_state(vault, path).state == "cached"
 

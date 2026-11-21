@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from exomem import media_store, originals
+from exomem import media_replicas, media_store, originals
 from exomem.media_edge_protocol import (
     COLLECTOR_AUDIENCE,
     OBJECTS_PATH,
@@ -127,9 +127,10 @@ def test_a_condemned_version_is_never_evicted_on_or_reused_and_its_bytes_go_up_a
 
         assert not media_store.evict(vault, path)
         assert path.read_bytes() == source
-        assert originals.original_state(vault, path).reference is None
-        again = _offload(vault, path)
-        assert again.object != condemned.object
+        assert originals.original_state(vault, path).reference == condemned
+        assert media_replicas.drain(vault) == 1
+        again = originals.original_state(vault, path).reference
+        assert again is not None and again.object != condemned.object
 
         assert condemned.version in harness.fake.lifecycle_tick(harness.fake.hiding_days)
         for original in (path, duplicate):

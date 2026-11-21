@@ -3082,28 +3082,12 @@ def _evict_one(vault: Path, path: Path) -> str:
     if media_replicas.has_quarantined(vault, (snapshot.reference,)):
         return KEPT  # A pointer that a check or an earlier pass found damaged authorizes nothing; its new copy replaces it.
     try:
-        confirmed = _confirmed(store_for(vault), snapshot.reference)
-    except ReplicaMismatch as mismatch:
-        _quarantine_found(vault, [ledger._relative(path)], snapshot.reference, mismatch.failure)
-        return KEPT
+        failure = _head_failure(store_for(vault), snapshot.reference)
     except MediaStoreError as error:
         # An unavailable or unverified version cannot authorize removal; an outage also ends the pass.
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
-    if not confirmed:
-        # An absent or condemned version authorizes no removal: the bytes go up again under a new name.
-        def release() -> None:
-            if original_state(vault, path) == snapshot:
-                assert snapshot.reference is not None
-                _release_name(ledger, snapshot.reference.object)
-                _publish_reference(vault, snapshot, None)
-                enqueue_offload(vault, path)
-
-        try:
-            _publishing(vault, "media_store_absent_version", release)
-        except MediaStoreError as error:
-            if error.code != STORE_BUSY_CODE:
-                raise
-            return BUSY
+    if failure is not None:
+        _quarantine_found(vault, [ledger._relative(path)], snapshot.reference, failure)
         return KEPT
     with _guard(vault, "media_store_evict"):
         conn = ledger._connect()

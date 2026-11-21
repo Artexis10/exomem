@@ -1784,6 +1784,35 @@ def test_a_copy_again_of_a_version_that_two_filings_share_uploads_it_once_and_ke
     assert len(_objects(Path(selected_store[0]["root"]))) == 2  # the damaged version and its one replacement
 
 
+def test_eviction_recovers_an_absent_shared_version_at_the_existing_allowance(vault: Path, selected_store) -> None:
+    """Eviction must leave the resident filing's pointer available to repair its evicted sibling."""
+    resident = _preserved(vault, category="resident")
+    source = resident.read_bytes()
+    lost = _offload(vault, resident)
+    sibling = _preserved(vault, category="sibling")
+    assert _offload(vault, sibling) == lost
+    assert media_store.evict(vault, sibling)
+    _configure(selected_store, vault, allowance_bytes=len(source))
+    (Path(selected_store[0]["root"]) / lost.object / lost.version).unlink()
+
+    assert not media_store.evict(vault, resident)
+    assert resident.read_bytes() == source
+    assert originals.original_state(vault, resident).reference == lost
+    for filing in (resident, sibling):
+        [replica] = media_replicas.original_view(vault, filing.relative_to(vault).as_posix())["replicas"]
+        assert replica["state"] == media_replicas.QUARANTINED
+        assert replica["finding"]["failure"] == "absent"
+
+    _recopy_all(vault)
+
+    replacement = _entry(vault, resident, lost.store)
+    assert replacement != lost
+    assert _entry(vault, sibling, lost.store) == replacement
+    assert media_allowance.reference_usage(vault).used_bytes == len(source)
+    with media_store.open_original(vault, sibling) as original:
+        assert original.stream.read() == source
+
+
 def test_a_copy_again_after_a_key_rotation_is_still_shared_by_the_filings_of_one_version(
         vault: Path, selected_store, mirrored: Path) -> None:
     """A copy of ciphertext keeps its source's key version: a rotated key must not make each filing upload its own."""
