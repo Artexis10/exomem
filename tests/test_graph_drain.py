@@ -1286,7 +1286,7 @@ def test_a_new_observation_during_the_contention_query_invalidates_coverage(
         return True
 
     monkeypatch.setattr(deferred_index, "graph_receipts_cover", observe_after_query)
-    assert graph_drain.note_covered_contention(tmp_path) is False
+    assert graph_drain.note_covered_contention(tmp_path) is None
     assert graph_drain.per_path_repair_blocked(tmp_path)
 
 

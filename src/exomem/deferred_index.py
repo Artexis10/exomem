@@ -1515,7 +1515,7 @@ def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:
 
 class GraphFullRebuildDetails(NamedTuple):
     token: tuple[int, int]
-    fatal_family: str | None
+    fatal_family: str | None  # Stable main-file identity, independent of content and times.
 
 
 class GraphFullRebuildStateUnavailable(RuntimeError):

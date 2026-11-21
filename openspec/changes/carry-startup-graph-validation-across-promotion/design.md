@@ -54,13 +54,16 @@ Shutdown cancels the wait; a lifecycle deadline leaves repair pending.
 Stable structural metadata loss uses the existing durable full-rebuild marker and graph repair owner.
 That owner rebuilds only after validating the canonical floor and checkpoint, without changing those canonical bytes.
 Fatal SQLite corruption ends startup validation as a fenced failure with the full marker retained.
-When the cold row proof reports a fatal SQLite read, startup records the exact data family with that marker after rechecking it under the boundary.
-The repair owner refuses rebuild while that family matches, including after later canonical commits or repeated marker raises.
+When the cold row proof reports a fatal SQLite read, startup rechecks the exact data-family witness under the boundary.
+Startup records the main file's stable device and inode identity with that marker.
+The repair owner refuses rebuild while that identity matches.
+Touches, in-place writes, companion changes, canonical commits and repeated marker raises do not release that fence.
 The marker owns recovery when a read barrier also stands, and the full builder checks the attestation before building and before replacement.
 Read-fence writes leave the matched data family unchanged.
 An unreadable or malformed marker defers graph recovery and read-fence writes.
-A changed family enters normal epoch validation.
-Explicit offline replacement retains its existing quiescence requirement.
+A missing or unknown main identity remains pending.
+A safely observed distinct main identity enters normal epoch validation; identity alone proves neither healthy contents nor offline quiescence.
+Explicit offline replacement retains its existing quiescence requirement and replaces the main file with its compatible companions.
 Watcher-enabled and watcherless startup use the same recovery owner.
 A passive server constructor does not start this lifecycle.
 

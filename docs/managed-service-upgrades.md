@@ -585,6 +585,8 @@ Any canonical writes that reach graph dispatch in the meantime queue their graph
 When the canonical floor and checkpoint agree, a full graph rebuild can replace a damaged metadata table.
 If startup encounters fatal SQLite corruption while reading the graph, graph reads stay fenced and rebuild debt remains.
 The startup log reports `graph_sidecar_requires_replacement`.
+Touching or rewriting the same file, or changing its companions, does not release this fence.
+Offline replacement requires closed readers and writers, a distinct main file, and compatible WAL or journal state.
 Restore or replace the damaged graph family offline before downgrading from a worker that recorded this fault.
 Older releases ignore the recorded data-family attestation.
 A quarantine can settle an exact checkpoint after the drain proves the held page's

@@ -189,18 +189,24 @@ def note_covered_contention(vault_root: Path) -> bool | None:
     from . import deferred_index, freshness
 
     stamp = freshness.external_pending_epoch(vault_root)
-    if freshness.external_pending_unscoped(vault_root):
-        return False
+    unscoped = freshness.external_pending_unscoped(vault_root)
     observed = freshness.bounded_external_pending_paths(vault_root, limit=DRAIN_LIMIT)
     paths: list[str] = []
+    invalid_path = False
     for path in observed or ():
         rel = freshness.registry_rel(vault_root, path)
         if rel is None:
-            return False
+            invalid_path = True
+            break
         paths.append(rel)
-    if not deferred_index.graph_receipts_cover(vault_root, paths):
-        return False
-    if freshness.external_pending_unscoped(vault_root) or freshness.external_pending_epoch(vault_root) != stamp:
+    covered = (
+        not unscoped and not invalid_path
+        and deferred_index.graph_receipts_cover(vault_root, paths)
+    )
+    unscoped_after = freshness.external_pending_unscoped(vault_root)
+    if freshness.external_pending_epoch(vault_root) != stamp:
+        return None  # A moving observation does not disprove scoped ownership.
+    if unscoped or unscoped_after or invalid_path or not covered:
         return False
     if observed is None:
         return None

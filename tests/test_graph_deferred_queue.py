@@ -66,6 +66,7 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 from exomem.epistemic_graph import EpistemicGraphIndex
 
 PAGE_A = "Knowledge Base/Notes/Insights/queue-a.md"
@@ -3068,6 +3069,11 @@ def test_fatal_graph_rows_hold_recovery_until_the_sidecar_changes(vault, monkeyp
     original = deferred_index.graph_full_rebuild_details(vault)
     assert original is not None and original.fatal_family is not None
     assert original.token[0] == generation
+    # Timestamp drift cannot prove that an attested damaged file was replaced.
+    before = graph.path.stat()
+    os.utime(graph.path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    assert graph.path.stat().st_ino == before.st_ino
+    assert graph.path.read_bytes() == damaged
     assert not graph.recover_startup_graph(verdict)
     assert [path.read_bytes() for path in canonical_paths] == canonical
     assert graph.path.read_bytes() == damaged
@@ -3136,6 +3142,17 @@ def test_fatal_graph_rows_hold_recovery_until_the_sidecar_changes(vault, monkeyp
     assert graph.path.read_bytes() == damaged
     assert [path.read_bytes() for path in canonical_paths] == canonical
 
+    missing = graph.path.with_name("damaged.saved")
+    graph.path.replace(missing)
+    try:
+        assert graph.validate_startup_snapshot() is None
+        result = epistemic_graph.converge_full_graph_marker(vault)
+        assert result.outcome == "deferred" and not result.whole_vault_attempted
+        assert deferred_index.graph_full_rebuild_details(vault) == advanced
+        assert epistemic_graph.startup_source_proof_pending(vault)
+    finally:
+        missing.replace(graph.path)
+
     # Model an offline restore after closing the corrupt family's readers.
     restored = graph.path.with_name("restored.sqlite")
     restored.write_bytes(healthy)
@@ -3148,3 +3165,90 @@ def test_fatal_graph_rows_hold_recovery_until_the_sidecar_changes(vault, monkeyp
     deferred_index.mark_graph_full_rebuild(vault, generation=newer)
     ordinary = deferred_index.graph_full_rebuild_details(vault)
     assert ordinary is not None and ordinary.fatal_family is None
+
+
+def test_partial_pass_does_not_retire_a_source_that_moved_before_commit(vault, monkeypatch):
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    path = vault / PAGE_A
+    path.write_text(_page("A", "First external edit."), encoding="utf-8")
+    freshness.mark_external_pending(vault, paths=[path])
+    deferred_index.add_graph_receipts(vault, [PAGE_A, PAGE_B])
+    original = type(graph)._refresh_paths_pass
+    edits = []
+
+    def edit_after_partial_publication_checks(self, paths, **kwargs):
+        callback = kwargs.get("before_commit")
+        if callback is not None:
+            def publish(conn):
+                callback(conn)
+                if not edits:
+                    assert conn.execute(
+                        "SELECT value FROM graph_meta WHERE key='read_barrier'"
+                    ).fetchone() == ("unavailable",)
+                    path.write_text(_page("A", "Second external edit."), encoding="utf-8")
+                    edits.append(True)
+
+            kwargs["before_commit"] = publish
+        return original(self, paths, **kwargs)
+
+    with monkeypatch.context() as cut:
+        cut.setattr(type(graph), "_refresh_paths_pass", edit_after_partial_publication_checks)
+        index_sync.drain_graph_work(vault, paths=[PAGE_A], limit=1)
+    assert edits
+    pending_after_first = freshness.external_pending_for(vault, [path])
+    queued_after_first = deferred_index.list_graph_paths(vault)
+    index_sync.drain_graph_work(vault, paths=[PAGE_B], limit=1)
+    with closing(sqlite3.connect(graph.path)) as conn:
+        stored = conn.execute(
+            "SELECT source_hash FROM graph_nodes WHERE kind='file' AND path=?", (PAGE_A,)
+        ).fetchone()[0]
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert pending_after_first and PAGE_A in queued_after_first, (
+        pending_after_first, queued_after_first, graph.available(), stored == actual,
+    )
+
+
+def test_moved_but_still_covered_observations_stay_pending_after_contention(vault, monkeypatch):
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    deferred_index.add_graph_receipts(vault, [PAGE_A, PAGE_B])
+    freshness.mark_external_pending(vault, paths=[PAGE_A])
+    graph.suspend_reads()
+    graph_drain.note_per_path_repair(vault, admissible=False)
+    original_cover = deferred_index.graph_receipts_cover
+    checked = []
+
+    def cover_then_receive_another_covered_event(root, paths):
+        verdict = original_cover(root, paths)
+        if not checked:
+            assert verdict
+            freshness.mark_external_pending(root, paths=[PAGE_B])
+            checked.append(True)
+        return verdict
+
+    def busy(self, paths):
+        raise OpError("MUTATION_BUSY", "A writer holds the vault.", details={"status": "retryable"})
+
+    monkeypatch.setattr(type(graph), "drain_paths", busy)
+    monkeypatch.setattr(deferred_index, "graph_receipts_cover", cover_then_receive_another_covered_event)
+    graph_drain._work_once(vault)
+    assert checked
+    assert set(deferred_index.list_graph_paths(vault)) == {PAGE_A, PAGE_B}
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+
+
+def test_unreadable_marker_keeps_one_pending_batch(vault, monkeypatch):
+    _write_without_graph_repair(vault, monkeypatch, {
+        PAGE_A: _page("A", "Updated A."), PAGE_B: _page("B", "Updated B."),
+    })
+    before = deferred_index.snapshot_graph(vault)
+    calls = []
+
+    def unavailable(self, paths):
+        calls.append(tuple(paths))
+        raise deferred_index.GraphFullRebuildStateUnavailable("marker state unavailable")
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "drain_paths", unavailable)
+    index_sync.drain_graph_work(vault)
+    assert len(calls) == 1, "a shared metadata refusal retried every receipt"
+    assert deferred_index.snapshot_graph(vault) == before
+    assert deferred_index.graph_failure_paths(vault) == []

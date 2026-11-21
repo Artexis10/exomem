@@ -1121,7 +1121,7 @@ def _readiness_refusal(error: BaseException) -> str | None:
     another writer holds, and a SQLite store another connection holds. The
     label is a code or class name, so it carries no content.
     """
-    from . import graph_sync, reserved_paths
+    from . import deferred_index, graph_sync, reserved_paths
     from .cli_ops import OpError
     from .vault import VaultLockTimeout
 
@@ -1131,6 +1131,8 @@ def _readiness_refusal(error: BaseException) -> str | None:
         return error.code if error.details.get("status") == "retryable" else None
     if isinstance(error, (VaultLockTimeout, graph_sync.GraphEpochUnreadable)):
         return error.code
+    if isinstance(error, deferred_index.GraphFullRebuildStateUnavailable):
+        return type(error).__name__
     if isinstance(error, sqlite3.OperationalError):
         code = getattr(error, "sqlite_errorcode", None)
         # An extended result code keeps its primary code in its low 8 bits.
@@ -1285,12 +1287,12 @@ def _drain_graph_receipts(
         graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0, False
     if report.get("commit_race"):
-        # A live commit beat the batch to the lock: no page's fault, so there is
-        # nothing to isolate. A replay per receipt would hold the boundary once
+        # A source or commit moved during the batch: no page's fault, so there
+        # is nothing to isolate. A replay per receipt would hold the boundary once
         # per page and, with its siblings still queued, withhold its publication
         # after rewriting the catalogue rows -- minutes of lock for nothing. The
         # receipts stay queued and the next tick runs one batch again.
-        log.info("deferred graph batch lost to a commit; work remains queued")
+        log.info("deferred graph batch proof moved; work remains queued")
         return 0, graph_drain.note_covered_contention(vault_root)
     if report:
         # The pass ran per path. A failed batch, isolated below, says nothing
