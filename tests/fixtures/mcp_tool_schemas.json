@@ -657,6 +657,7 @@
             "imports.work_item",
             "media.video",
             "media.image",
+            "media.preview",
             "media.status",
             "review.item_context",
             "review.item",
