@@ -23,7 +23,7 @@ On the shipped code a 600-line timed sidecar held the boundary for 30.65 s, and 
 
 ## Impact
 
-- Code: `index_sync.py` (one function extracted, `refresh_embeddings`), `media_worker.py`, `scene_frames.py`.
+- Code: `index_sync.py` (one function extracted, `refresh_embeddings`), `media_worker.py`, `scene_frames.py`, and `vault.py`, where a batch now admits each write before staging, before its first flip and before its own flip, instead of admitting every remaining write at every flip.
 - Behaviour: a note save during a re-embed or a scene-frame job no longer waits for the job's model work. A re-embed no longer re-runs the exact-path custody, memory-reference, lexical and graph steps of a full upsert, because it changes no canonical byte; it refreshes embeddings only.
 - Known limit: the frame-page batch commit still runs inside one hold, and its cost grows with the frame count. See the design.
 - Undo: revert the change. No stored file format changes.

@@ -6668,8 +6668,12 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
+                # Before the first flip the whole batch is admitted, so a refusal installs nothing;
+                # each later flip readmits the write it installs, against the live access state.
+                # Revalidating every pending write at every flip made a batch's hold quadratic.
                 _validate_batch_write_access(
-                    root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                    root, writes if index == 0 else writes[index:index + 1], proposed=writes,
+                    auxiliary_manifest=_vocabulary_auxiliaries,
                     granted_paths=(
                         additive_guard.effect_paths() if additive_guard is not None else frozenset()
                     ),
@@ -7052,6 +7056,40 @@ def _batch_state_target(vault_root: Path, target: Path) -> bool:
     )
 
 
+class _PlanByPath(Mapping[str, PlannedWrite]):
+    """A plan's writes by resolved vault-relative path, resolved on the first lookup.
+
+    Only a confined writer or a capture-namespace target reads it (`connector_boundary.require_write`
+    returns first for every other write), and building it eagerly resolved the whole plan once per
+    admitted write.
+    """
+
+    def __init__(self, vault_resolved: Path, plan: tuple[PlannedWrite, ...]) -> None:
+        self._vault_resolved = vault_resolved
+        self._plan = plan
+        self._by_path: dict[str, PlannedWrite] | None = None
+
+    def _resolved(self) -> dict[str, PlannedWrite]:
+        if self._by_path is None:
+            by_path = {}
+            for write in self._plan:
+                try:
+                    by_path[write.path.resolve().relative_to(self._vault_resolved).as_posix()] = write
+                except (ValueError, OSError):
+                    continue  # The ordinary target check owns external-state and invalid paths.
+            self._by_path = by_path
+        return self._by_path
+
+    def __getitem__(self, key: str) -> PlannedWrite:
+        return self._resolved()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolved())
+
+    def __len__(self) -> int:
+        return len(self._resolved())
+
+
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
@@ -7103,12 +7141,7 @@ def _validate_batch_write_access(
         if registry_primary is not None and "registry-history" in roles.values()
         else set()
     )
-    proposed_by_path = {}
-    for write in full_plan:
-        try:
-            proposed_by_path[write.path.resolve().relative_to(vault_resolved).as_posix()] = write
-        except (ValueError, OSError):
-            continue  # The ordinary target check below owns external-state and invalid paths.
+    proposed_by_path = _PlanByPath(vault_resolved, full_plan)
     for write in writes:
         for target in (write.path, *write.ensure_directories):
             if _batch_state_target(vault_root, target):

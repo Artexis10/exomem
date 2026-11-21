@@ -45,11 +45,37 @@ A reprocess replaces an earlier frame set. `clear_scene_frames` removes the old 
 
 ### Honest limit: the frame commit still grows with the frame count
 
-The commit hold is the batch write of the frame files, and it is not constant. Measured after this change with zero encoder delay, `background_media_scene_frame_commit` holds 0.87 s for 4 frames, 12.4 s for 40 frames and 23.0 s for 80 frames, which is about 0.3 s per frame (one image file and one page per frame). An earlier run on the same instrument measured 7.4 s for the 40-frame case, so the commit's cost also moves with disk and CPU load. The cost is the batch writer: it calls `_validate_batch_write_access` once per write over the writes that remain, and it fsyncs each write. A profile of a 40-frame commit on the shipped code shows 83 calls to `_validate_batch_write_access` at 9.4 s cumulative under the profiler.
+The commit hold is the batch write of the frame files, and it is not constant. Measured after the derivation moved out, with zero encoder delay, `background_media_scene_frame_commit` held 0.87 s for 4 frames, 12.4 s for 40 frames and 23.0 s for 80 frames. An earlier run on the same instrument measured 7.4 s for the 40-frame case, so the commit's cost also moves with disk and CPU load. The measured saving of moving the derivation out is the work that real encoders add (frame image encoding, text-embedding encodes of every frame page, index fan-out), which the stub delay models and the zero-delay runs do not.
 
-This change does not alter `batch_atomic_write`. A change to its per-write revalidation touches the checks that protect every batch write, so it needs its own design and proof. This change therefore states the guarantee it delivers (no model work, no image encoding and no index fan-out inside the hold) and does not claim that the hold is independent of the frame count. The measured saving of this change for scene frames is the work that real encoders add (frame image encoding, text-embedding encodes of every frame page, index fan-out), which the stub delay models and the zero-delay runs do not. At zero delay the hold of the shipped code and the new commit hold are close, because the batch commit dominates both.
+A profile traced most of the remaining hold to the batch writer's access admission. Before each flip it admitted every write that remained (`_validate_batch_write_access` over `writes[index:]`), so a batch of N writes ran about N²/2 write admissions. A 40-frame commit made 85 calls at 9.6 s cumulative under the profiler.
 
-Follow-up, as a separate change: validate the remaining writes of a batch once instead of once per write, and measure the fsync share. Committing the frames in several bounded batches would also bound the hold, but it gives up the one rollback set that binds an exact-v4 vault's catalog successor to the frame set, so it needs its own design.
+#### A batch admits each write once per stage
+
+The batch writer now admits each write three times: with the whole batch before staging, with the whole batch before the first flip, and alone immediately before its own flip. Every check still runs for every write, inside the boundary and against the live access state:
+
+- A refusal before the first flip still installs nothing, and a later refusal still rolls back the whole batch.
+- Each check of a write reads the write itself, the policy and host state, or the write's own pre-image. A batch writes each path once, so each such input has one value before its flip and one after it.
+- A check that reads one such input sees, at any flip between the first and the write's own, the value that one of those two admissions sees. The dropped admission therefore refuses only where one of them refuses, with the same error code.
+- A check that reads two inputs that the same batch changes at different flips could see a mix that neither admission sees. Only an owner batch that also rewrites a policy file can do that, because no confined writer may write policy. The own-flip admission still checks the write against the state it is installed into.
+- A foreign change that lands and reverts between two flips no longer refuses a write whose own flip comes later.
+
+The map of planned writes by path, which only a confined writer's or capture-namespace admission reads, is now built on its first lookup. An unconfined writer no longer resolves the whole plan once per admitted write.
+
+Hold seconds at zero delay, with the holding thread's CPU seconds in brackets. The figures come from two interleaved runs per arm on the same instrument, on a machine under load from other work (load average 22 to 24 on 16 cores):
+
+| Frames | Before, run 1 | Before, run 2 | After, run 1 | After, run 2 |
+|---|---|---|---|---|
+| 4 | 1.54 [0.62] | 1.19 [0.64] | 1.55 [0.51] | 1.06 [0.58] |
+| 40 | 8.30 [5.39] | 10.83 [6.60] | 7.19 [2.39] | 4.83 [3.13] |
+| 80 | 25.53 [20.10] | 27.26 [22.42] | 15.70 [6.37] | 14.06 [8.59] |
+
+An earlier run of the new code under lighter load held 0.97 s, 3.81 s and 10.6 s.
+
+#### What still grows with the frame count
+
+The hold still grows faster than the frame count, and it is well above 2 s for 40 frames. The remaining cost is the guard rechecks. At every flip the writer re-verifies the workspace census and every installed and pending artifact, so their work also grows with N². At 80 frames, timing wrappers without the profiler measured 3.2 s in the workspace census of an 8.6 s hold, against 0.47 s for 172 admissions. Each staged file is also fsynced once (163 calls and 1.4 s at 80 frames under the profiler), which grows linearly.
+
+Follow-up, as a separate change: a recheck schedule that stays linear in the batch size. It changes how soon the writer detects a foreign change to a file that it installed or staged, so it needs its own design and proof. Committing the frames in several bounded batches would also bound the hold, but it gives up the one rollback set that binds an exact-v4 vault's catalog successor to the frame set, so it needs its own design.
 
 The spec requirement carries the same limit: it bounds the hold by the sidecar's length and keeps derived computation out of it, and it makes no claim about the frame count.
 
