@@ -260,8 +260,11 @@ def test_a_maps_packet_reports_what_became_of_its_token(vault: Path, monkeypatch
     _world(vault, with_w=False)
     _built(vault).close()
     options = {"turn": "", "max_chars": 8000}
-    first = _activate(vault, **options)
-    assert first["generation"]["continuity"] == "absent"
+    opening = _activate(vault, **options)
+    assert opening["generation"]["continuity"] == "absent"
+    # The opening request carried the capture policy block out of the map's room, so a map that does not fit beside the
+    # block differs from the one the next request serves: the control starts from that next request.
+    first = _activate(vault, continuity=opening["continuity"], **options)
     assert _activate(vault, continuity=first["continuity"], **options)["map"]["unchanged"] is True  # the control: nothing moved yet
 
     _page(vault, "dock-roster", "topics: [fleet]\nupdated: 2026-09-20\nsummary: Who works which dock.\n")
@@ -313,7 +316,8 @@ def test_a_pathless_map_anchor_opens_its_profile(
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     caller = _external() if restricted else OWNER
-    packet = _activate(vault, caller, max_chars=8000)
+    opening = _activate(vault, caller, max_chars=8000)  # carries the capture policy block, so its map has less room
+    packet = _activate(vault, caller, continuity=opening["continuity"], max_chars=8000)
     anchor = next(item for item in packet["map"]["items"] if item["ref"] == "project:harbour-ops")
     assert not anchor.get("path")
     assert anchor["profile"] == context_views.anchor_profile_ref(anchor["ref"])
