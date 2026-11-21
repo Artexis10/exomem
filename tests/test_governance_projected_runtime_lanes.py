@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from governance_projection_support import verified_namespace
 
-from exomem import embeddings, lifecycle_statuses, readiness
+from exomem import embeddings, extraction_parts, lifecycle_statuses, readiness
 from exomem.governance import (
     catalog_publication,
     principal,
@@ -810,26 +811,46 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "catalog-capacity"])
+@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "multipart", "catalog-capacity"])
 def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, layout):
     background = "We went over the morning schedule. " * 130 if layout == "long-turn" else ""
     quote = "Leave it open until the truck arrives."
     text = f"[00:03] We inspected the gate.\n[00:19] {background}{quote}"
-    source = _variant(
-        "Knowledge Base/Sources/gate.md", "1" * 64, text,
-        fields={"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: "true"},
+    path = "Knowledge Base/Sources/gate.md"
+    multipart = layout in {"multipart", "catalog-capacity"}
+    declaration = "extraction_parts: 2\n" if multipart else ""
+    policy = Policy(fingerprint="f" * 64)
+    source_item = catalog_publication.catalog_item(
+        vault_root=tmp_path, path=path,
+        source=f"---\ntitle: Gate log\ntype: source\n{declaration}---\n\n## Extracted text\n\n{text}\n",
+        policy=policy,
+        target_key=projections.ProjectionNamespaceKey(policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1),
+        pending={
+            extraction_parts.part_path(Path(path), 2).as_posix():
+                "---\npart_of: gate.md\n---\n\n## Extracted text\n\n[00:50] The meeting closed.\n",
+        } if multipart else {},
     )
+    (source,) = source_item.variants
     summary = _variant(
         "Knowledge Base/Notes/gate.md", "2" * 64, "The truck can enter through the open gate.",
         fields={"type": "insight", "sources": "Sources/gate"},
     )
-    clipped = layout == "catalog-capacity"
-    parts = ((2, "[00:50] The meeting closed.", len(text)),) if clipped else ()
-    (source,) = projections.with_parts((source,), parts, head=text)
-    if clipped:
-        monkeypatch.setattr(projections, "MAX_GOVERNED_CATALOG_ITEMS", 2)
-        fitted, _ = catalog_publication.fit_parts((_item(source), _item(summary)))
+    if layout == "catalog-capacity":
+        monkeypatch.setattr(projections, "MAX_GOVERNED_CATALOG_ITEMS", 3)
+        monkeypatch.setattr(
+            projections, "MAX_GOVERNED_SEARCH_BYTES_PER_ITEM",
+            sum(len(value.encode("utf-8")) for value in source.search_fields.values()),
+        )
+        unclipped_source, _ = catalog_publication.fit_parts((source_item, _item(summary)))
+        assert unclipped_source.variants[0].parts
+        withheld = projection_store.ProjectionItemVariants("Knowledge Base/Notes/withheld.md", "3" * 64, ())
+        fitted, *_ = catalog_publication.fit_parts((source_item, _item(summary), withheld))
         (source,) = fitted.variants
+        assert not source.parts
+        assert source.search_fields == unclipped_source.variants[0].search_fields
+        assert projected_retrieval.transcript_samples(source) == projected_retrieval.transcript_samples(
+            unclipped_source.variants[0],
+        )
     offset = text.index("[00:19]")
     baseline = _runtime((_item(source), _item(summary)))
     samples = projected_retrieval.transcript_samples(source)
@@ -838,6 +859,8 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
         tmp_path, baseline.namespace.namespace_key,
         samples, [(1.0, 0.0) if quote in match.text else (0.0, 1.0) for _, match in samples],
     )
+    if multipart:
+        assert len(samples) == 2
     vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
     rows = (vector, _vector(summary, (1.0, 0.0)))
     runtime = _runtime((_item(source), _item(summary)), vectors=rows)
@@ -854,18 +877,23 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     runtime = replace(runtime, vector_index=stored_index)
     monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
     kwargs = dict(
-        query="How can the truck enter?", limit=2, mode="hybrid", rerank=False, graph=False,
+        query="Vehicle access instructions", limit=2, mode="hybrid", rerank=False, graph=False,
         principal=principal.owner_principal(surface="mcp"), purpose=None,
     )
 
     compiled = projection_runtime.find_projected_hits(tmp_path, runtime, **kwargs)
     default = projection_runtime.find_projected_hits(tmp_path, runtime, prefer_source_passages=True, **kwargs)
+    if layout == "catalog-capacity":
+        without_withheld = _runtime((unclipped_source, _item(summary)), vectors=rows)
+        assert projection_runtime.find_projected_hits(
+            tmp_path, without_withheld, prefer_source_passages=True, **kwargs,
+        ) == default
 
     assert compiled.hits[0].path == summary.item_identity
     hit = default.hits[0]
     assert hit.path == source.item_identity
     assert hit.transcript_ts == 19
-    assert default.incomplete_source_passages is clipped
+    assert default.incomplete_source_passages is multipart
     passage = hit.passage
     assert passage["part"] == 1 and quote in passage["text"]
     assert offset <= passage["offset"] and passage["length"] <= 4000

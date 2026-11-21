@@ -26,7 +26,7 @@ _MAX_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 _SNIPPET_CHARS = 320
 MAX_PROJECTED_TRANSCRIPT_SAMPLES = 512
 TIMED_SOURCE_FIELD = "timed_source"
-TIMED_SOURCE_PARTIAL = "partial"
+TIMED_SOURCE_HEAD = "head"
 
 
 class ProjectedRetrievalUnavailable(RuntimeError):
@@ -261,7 +261,7 @@ def _passage_in(
 def transcript_samples(
     variant: projections.ProjectionVariant, *, limit: int = MAX_PROJECTED_TRANSCRIPT_SAMPLES,
 ) -> tuple[tuple[int, transcript_passages.TranscriptMatch], ...]:
-    """Return timed turns whose offsets map into the released Source."""
+    """Return timed turns whose offsets map into the released first extraction part."""
     from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
 
     # Members have an independent live authorization check at search time.
@@ -270,27 +270,22 @@ def transcript_samples(
         or variant.search_fields.get("parent_media")
         or variant.search_fields.get("source_erasure") == "managed"
         or not transcript_passages.is_source(variant.item_identity)
+        or variant.head is None
     ):
         return ()
-    parts = []
-    if variant.head is not None:
-        head = variant.head
-        parts.append((1, variant.search_fields["body"][head.begin:head.end], 0, head.carrier_spans))
-    parts.extend(
-        (part.number, part.text, part.start, part.carrier_spans)
-        for part in variant.parts if part.start is not None
-    )
+    # Other parts use a shared catalog budget. Sampling them would expose its occupancy.
+    head = variant.head
+    text = variant.search_fields["body"][head.begin:head.end]
     samples = []
-    for part, text, base, cuts in parts:
-        for match in transcript_passages.bounded_turns(text, max_chars=MAX_PASSAGE_CHARS):
-            stored_start = _stored_position(match.start, cuts)
-            stored_end = _stored_position(match.end - 1, cuts) + 1
-            if stored_end - stored_start == match.end - match.start:
-                samples.append((part, transcript_passages.TranscriptMatch(
-                    base + stored_start, base + stored_end, match.text, match.timestamp,
-                )))
-                if len(samples) == limit:
-                    return tuple(samples)
+    for match in transcript_passages.bounded_turns(text, max_chars=MAX_PASSAGE_CHARS):
+        stored_start = _stored_position(match.start, head.carrier_spans)
+        stored_end = _stored_position(match.end - 1, head.carrier_spans) + 1
+        if stored_end - stored_start == match.end - match.start:
+            samples.append((1, transcript_passages.TranscriptMatch(
+                stored_start, stored_end, match.text, match.timestamp,
+            )))
+            if len(samples) == limit:
+                break
     return tuple(samples)
 
 
@@ -958,15 +953,17 @@ class ProjectedVectorIndex:
     ) -> tuple[ProjectedLexicalHit | None, bool]:
         """Verify and score the bank of one already admitted, competitive Source."""
         candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
-        partial = variant.search_fields.get(TIMED_SOURCE_FIELD) == TIMED_SOURCE_PARTIAL
         if not candidates:
-            return None, partial
+            return None, False
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:
             raise transcript_banks.TranscriptBankUnavailable("projected transcript measurements are missing")
         import numpy as np
 
-        partial |= len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
+        partial = (
+            variant.search_fields[TIMED_SOURCE_FIELD] == TIMED_SOURCE_HEAD
+            or len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
+        )
         candidates = candidates[:MAX_PROJECTED_TRANSCRIPT_SAMPLES]
         query = np.asarray(query_vector, dtype=np.float32)
         matrix = transcript_banks.load(root, self.namespace_key, digest, candidates, len(query))

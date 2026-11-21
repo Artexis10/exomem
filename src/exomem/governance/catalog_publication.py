@@ -527,17 +527,15 @@ def catalog_item(
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
             text = head or transcript_passages.source_text(parsed.body)
-            marks = len(transcript_passages.timed_lines(text))
-            for _, part, _ in parts:
-                if marks >= 2:
-                    break
-                marks += len(transcript_passages.timed_lines(part))
-            if marks >= 2:
+            if transcript_passages.is_transcript(text):
                 if parsed.frontmatter.get("source_identity") is not None:
                     # The existing Source eraser cannot account for this bank.
                     fields["source_erasure"] = "managed"
                 else:
-                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = "true"
+                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = (
+                        projected_retrieval.TIMED_SOURCE_HEAD
+                        if extraction_parts.count_of(parsed.frontmatter) > 1 else "true"
+                    )
                     head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
@@ -583,14 +581,9 @@ def fit_parts(
     def fit_variant(variant: projections.ProjectionVariant, keep: int) -> projections.ProjectionVariant:
         if len(variant.parts) <= keep:
             return variant
-        if projected_retrieval.TIMED_SOURCE_FIELD in variant.search_fields:
-            # Part 1 lives in the Source body and uses no additional catalog identity.
-            fields = {
-                **variant.search_fields,
-                projected_retrieval.TIMED_SOURCE_FIELD: projected_retrieval.TIMED_SOURCE_PARTIAL,
-            }
-            return replace(variant, parts=variant.parts[:keep], search_fields=fields)
-        return replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
+        # The timed head uses the Source body and consumes no additional catalog identity.
+        keep_head = keep > 0 or projected_retrieval.TIMED_SOURCE_FIELD in variant.search_fields
+        return replace(variant, parts=variant.parts[:keep], head=variant.head if keep_head else None)
 
     fitted: list[projection_store.ProjectionItemVariants] = []
     left_out: list[str] = []
@@ -899,7 +892,9 @@ def _target_vector_measurements(
         old = active_variants.get(variant_id)
         if (
             old is not None and previous is not None and previous.transcript_bank is not None
-            and (old.head, old.parts) == (variant.head, variant.parts)
+            and old.head == variant.head
+            and old.search_fields.get(projected_retrieval.TIMED_SOURCE_FIELD)
+            == variant.search_fields[projected_retrieval.TIMED_SOURCE_FIELD]
             and transcript_banks.carry(
                 vault_root, active_namespace.namespace_key, target_namespace.namespace_key, previous.transcript_bank,
             )

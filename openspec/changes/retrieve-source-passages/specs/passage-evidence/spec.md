@@ -6,6 +6,8 @@ Exomem SHALL split timestamped Source text at whole timed lines within the exist
 
 In default hybrid search, Exomem SHALL lift the highest ranked transcript in the neutral top three when a matching passage can be verified. It SHALL appear in the top three ahead of any summary in that prefix that cites it. Explicit compiled-preference settings SHALL retain their ranking policy. The passage SHALL include verbatim matched lines, stored-text offsets, and recorded timestamps when present. A result SHALL expose only passage bytes, positions, and ranking evidence admitted for the requesting principal. Incomplete publication SHALL remain visible.
 
+Governed semantic passage ranking SHALL sample the first authenticated extraction part. A selected transcript with further extraction parts SHALL report partial semantic passage coverage. Those parts retain the existing search and read paths.
+
 #### Scenario: A paraphrase matches a timestamped statement
 
 - **WHEN** a paraphrase finds a competitive passage in a transcript whose linked summary omits the statement
