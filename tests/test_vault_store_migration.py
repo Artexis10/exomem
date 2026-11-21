@@ -89,6 +89,9 @@ def vault(tmp_path, monkeypatch, coordinator_url, capsys):  # noqa: F811
     for name, value in _lease_environment(tmp_path, coordinator_url).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(capability, "RELEASED", RELEASED)
+    if sys.platform == "win32":
+        # Qualify the real NTFS migration path beyond the shipped platform refusal.
+        monkeypatch.setattr(migrate, "platform", "linux")
     with library_scope():
         root = legacy_vault(tmp_path / "vault")
         (root / ALPHA).write_text(
@@ -278,12 +281,13 @@ def test_a_file_edited_between_staging_and_install_refuses_the_migration(
     assert not mode.store_mode_active(vault)
 
 
-def _migrate_and_die(environment, released):
+def _migrate_and_die(environment, released, migration_platform):
     """`migrate --apply` in a fresh interpreter that the operating system kills inside the install transaction."""
     os.environ.clear()
     os.environ.update(environment)
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
     capability.RELEASED = released
+    migrate.platform = migration_platform
 
     def die(*arguments, **keywords):
         kill_self()
@@ -307,6 +311,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
         args=(
             {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
             RELEASED,
+            migrate.platform,
         ),
     )
     child.start()
