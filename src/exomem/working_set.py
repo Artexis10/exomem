@@ -1239,6 +1239,7 @@ def run_lanes(
     neighbourhood: frozenset[str] | None = None,
     precedent_reach: Callable[[], tuple[frozenset[str], frozenset[str]]] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     reached: dict[str, set[str]] | None = None,
     analysis: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
@@ -1342,6 +1343,7 @@ def run_lanes(
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
                     visible=visible,
+                    purpose=purpose,
                     status_basis=status_basis,
                     parent_reads=parent_reads,
                     request_segment=request_segment,
@@ -1737,7 +1739,7 @@ def attach_task_links(
             links = read_connections(
                 vault_root, [c["source_ref"] for c in candidates],
                 by_path=link_targets, visible=caller.visible, per_seed=TASK_LINKS_PER_CANDIDATE,
-                defer_why=True,
+                defer_why=True, purpose=caller.purpose,
             )
     except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
         log.debug("task-context links unavailable", exc_info=True)
@@ -1966,6 +1968,7 @@ def read_connections(
     visible: Callable[[str], bool] | None,
     per_seed: int,
     defer_why: bool = False,
+    purpose: str | None = None,
 ) -> dict[str, tuple[list[Connection], int]] | None:
     """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
 
@@ -1981,8 +1984,16 @@ def read_connections(
     `defer_why`, and each connection then carries `build_why` instead, to call once
     for a connection it is about to serve.
     """
-    from . import epistemic_graph, find, find_corpus, planning_values, relation_registry
+    from . import (
+        epistemic_graph,
+        find,
+        find_corpus,
+        planning_values,
+        published_admission,
+        relation_registry,
+    )
     from .governance import egress
+    from .vault_store import read as store_read
 
     # A request never stacks the O(corpus) cold proof of an inherited sidecar (#1454), as in the find graph lane.
     index = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT)
@@ -2034,14 +2045,33 @@ def read_connections(
         seed: sorted(targets.values(), key=lambda value: value[:3])[:per_seed]
         for seed, targets in ranked.items()
     }
-    reason_paths = set(selected)
-    reason_paths.update(
-        connection.target_path
-        for ordered in selected.values()
-        for _tier, _open_flag, _position, connection in ordered
-    )
-    with egress.release_decision_context(vault_root):
-        text_bounds = egress.page_text_bounds(vault_root, reason_paths)
+    def _page(rel: str):
+        return find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+
+    reason_pages = None
+    if not egress.unrestricted_source_access(vault_root, purpose=purpose):
+        reason_paths = set(selected)
+        reason_paths.update(
+            connection.target_path
+            for ordered in selected.values()
+            for _tier, _open_flag, _position, connection in ordered
+        )
+        with (
+            published_admission.deciding(reason_paths),
+            egress.release_decision_context(vault_root),
+            store_read.request_snapshot(vault_root),
+        ):
+            store_read.prefetch_pages(vault_root, reason_paths)
+            pages = {
+                rel: page for rel in reason_paths
+                if (page := _page(rel)) is not None and page.snapshot_hash
+            }
+            text_bounds = egress.page_text_bounds(
+                vault_root, pages, purpose=purpose,
+                raw_snapshot_hashes={rel: page.snapshot_hash for rel, page in pages.items()},
+            )
+        # A reason can quote from anywhere in a body. Keep only snapshots authorized in full.
+        reason_pages = {rel: page for rel, page in pages.items() if text_bounds[rel] is None}
     resolver = find.borrow_query_resolver(Path(vault_root), visible)
     seed_paths = set(seeds)
 
@@ -2051,11 +2081,7 @@ def read_connections(
 
     def _body(rel: str) -> str | None:
         """The page's prose for this caller, egressed under the path it was read from."""
-        # A connection can select prose anywhere in a page. An excerpt-only release
-        # authorizes only the canonical excerpt, so it can contribute a pointer without prose.
-        if text_bounds[rel] is not None:
-            return None
-        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+        page = _page(rel) if reason_pages is None else reason_pages.get(rel)
         if page is None:
             return None
         return egress.prose_for_caller(Path(vault_root), str(page.body or ""), owner_path=rel)
@@ -2309,6 +2335,7 @@ def _lane(
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     request_segment: str = "turn",
@@ -2358,7 +2385,7 @@ def _lane(
         return LaneResult(_entity_lane(vault_root, role, anchors=anchors))
     if role.lane == "graph":
         return LaneResult(
-            _graph_lane(vault_root, role, anchors=anchors, visible=visible)
+            _graph_lane(vault_root, role, anchors=anchors, visible=visible, purpose=purpose)
         )
     if role.lane == "evidence":
         return LaneResult(_evidence_lane(role, neighbourhood=neighbourhood))
@@ -2921,6 +2948,7 @@ def _graph_lane(
     *,
     anchors: Sequence[Any],
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
 ) -> tuple[LaneItem, ...]:
     """Each resolved anchor's ranked connections as pointers. A target's BODY belongs to another lane.
 
@@ -2954,7 +2982,7 @@ def _graph_lane(
     try:
         connections = read_connections(
             vault_root, seeds,
-            by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR,
+            by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR, purpose=purpose,
         )
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph connections failed", exc_info=True)
@@ -4515,6 +4543,7 @@ def _carried_material(
             freshness_snapshot=freshness_snapshot,
             neighbourhood=frozenset({path}),
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             admit=admit,
             status_basis=status_basis,
@@ -4797,6 +4826,7 @@ def _follow_up_packet(
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             status_basis=status_basis,
         )
@@ -5957,6 +5987,7 @@ def _compile_packet(
                 reached=reached,
             ),
             visible=visible,
+            purpose=purpose,
             reached=reached,
             analysis=analysis,
             request_anchors=resolution.anchors,

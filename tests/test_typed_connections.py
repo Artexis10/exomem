@@ -23,6 +23,7 @@ from exomem import (
     context_views,
     epistemic_graph,
     find,
+    find_corpus,
     lexstore,
     served_context,
     working_set,
@@ -483,3 +484,53 @@ def test_an_excerpt_only_page_supplies_a_connection_without_its_prose(
     inbound = next(connection for connection in listed if connection.direction == "inbound")
     assert inbound.target_path == report
     assert inbound.why == "supersedes (inbound)"
+
+
+def test_a_graph_reason_uses_the_declared_purpose(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    report = _page(vault, "visit-report", body=(
+        f"The revised visit report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after review\n"
+    ))
+    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+    write_rule(vault, ceiling=egress.LEVEL_EXCERPT, extra="purpose: audit\npurpose_condition: matches\n")
+    _built(vault).close()
+    _warm_resolver(monkeypatch)
+    resolved = type("Anchor", (), {"status": "resolved", "path": seed, "ref": seed})()
+
+    with request_scope(_external()):
+        reader = egress.reader_view(vault, purpose="audit")
+        items, _missing = working_set.run_lanes(
+            vault, anchors=[resolved], roles=[{"id": "connections"}],
+            registry=context_roles.load_roles(), visible=reader, purpose="audit",
+        )
+
+    assert [(item.path, item.why) for item in items] == [(report, "supersedes (inbound)")]
+
+
+def test_a_graph_reason_does_not_quote_an_unmatched_page_snapshot(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    report = _page(vault, "visit-report", body=(
+        f"The first report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after the first inspection\n"
+    ))
+    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+    read = find_corpus.CACHE.get
+    older = read(vault / report, vault)
+    assert older is not None
+    _page(vault, "visit-report", body=(
+        f"The revised report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after the second inspection\n"
+    ))
+    monkeypatch.setattr(find_corpus.CACHE, "get", lambda path, root: older if path == vault / report else read(path, root))
+
+    with request_scope(_external()):
+        visible = egress.restricted_release_filter(vault)
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=visible, per_seed=4)
+
+    listed, _omitted = served[seed]
+    assert [(connection.target_path, connection.why) for connection in listed] == [(report, "supersedes (inbound)")]
