@@ -80,7 +80,4 @@ Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was
       reported, not fatal.
 - [x] 6.4 Live: the personal service reports `sidecar_venv=True` on the release carrying 6.1-6.3 and
       diarizes one real recording with speaker labels.
-      Managed-install acceptance was verified on release 0.191.0: startup reported an enabled
-      sidecar and voice embedder, and governed reprocessing produced named speaker labels.
-      The broader two-speaker and embedding checks in 4.4 remain open.
 
