@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from exomem import diarizer_sidecar, extract
 
@@ -119,6 +122,57 @@ def test_happy_path_parses_turns(monkeypatch) -> None:
     monkeypatch.setattr(extract.subprocess, "run", _run)
     turns = extract._run_diarization(Path("x.wav"))
     assert turns == [(0.0, 1.5, "SPEAKER_00"), (1.5, 2.0, "SPEAKER_01")]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The reusable worker uses Linux parent-death signals.")
+def test_reusable_diarizer_reaps_a_timed_out_worker_and_recovers(monkeypatch, tmp_path) -> None:
+    """A stuck recording cannot strand a model or deny labels to the next recording."""
+    _fake_python(monkeypatch)
+    monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cuda")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="kernel-wsl2"))
+    actual_worker = diarizer_sidecar.worker_script()
+    shim = tmp_path / "lightweight_diarizer.py"
+    shim.write_text(
+        f"""import os
+import runpy
+import sys
+import time
+from types import SimpleNamespace
+
+main = runpy.run_path({str(actual_worker)!r})['main']
+sys.modules['torch'] = SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None))
+main.__globals__['_load_device_pipeline'] = lambda: (None, 'cuda')
+
+def diarize(path, load_pipeline):
+    load_pipeline()
+    if path.endswith('stuck.wav'):
+        time.sleep(60)
+    return [{{'start': 0, 'end': 1, 'label': str(os.getpid())}}]
+
+main.__globals__['_diarize'] = diarize
+raise SystemExit(main(sys.argv))
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(diarizer_sidecar, "worker_script", lambda: shim)
+
+    with diarizer_sidecar.reuse_for_media_worker():
+        [first_turn] = extract._run_diarization(Path("conversation.wav"))
+        [second_turn] = extract._run_diarization(Path("another.wav"))
+        assert second_turn == first_turn
+
+        monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "0.2")
+        assert extract._run_diarization(Path("stuck.wav")) is None
+        with pytest.raises(ChildProcessError):
+            os.waitpid(int(first_turn[2]), os.WNOHANG)
+
+        monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "30")
+        [next_turn] = extract._run_diarization(Path("recovery.wav"))
+        assert next_turn != first_turn
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(int(next_turn[2]), os.WNOHANG)
 
 
 def test_outfile_cleaned_up_after_run(monkeypatch) -> None:
