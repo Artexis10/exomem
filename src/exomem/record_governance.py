@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -177,6 +178,35 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
 
 def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
+
+
+def _bounded_enum_fields(choices_by_field: Mapping[str, Any]) -> tuple[dict[str, list[Any]], bool]:
+    fields: dict[str, list[Any]] = {}
+    remaining = collections.ENUM_CHOICES_WIRE_BYTES
+    for name, choices in choices_by_field.items():
+        if _inspection_field_name(name) is None:
+            continue
+        size = collections.enum_choices_wire_size(choices)
+        if size is None:
+            continue
+        size += len(json.dumps(name)) + 2
+        if size <= remaining:
+            fields[name] = list(choices)
+            remaining -= size
+    return fields, len(fields) != len(choices_by_field)
+
+
+def _inspection_enum_fields(value: Any) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"values", "truncated"}
+        or type(value["truncated"]) is not bool
+        or not isinstance(value["values"], Mapping)
+        or len(value["values"]) > collections._MAX_SCHEMA_FIELDS
+    ):
+        return None
+    fields, invalid = _bounded_enum_fields(value["values"])
+    return None if invalid else {"values": fields, "truncated": value["truncated"]}
 
 
 def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
@@ -698,6 +728,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans",
             "claims",
             "capture",
+            "enum_fields",
         } or not {
             "collection_id",
             "path",
@@ -755,6 +786,9 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         capture = _inspection_declared_capture(contract.get("capture")) if "capture" in contract else None
         if "capture" in contract and capture is None:
             return None
+        enum_fields = _inspection_enum_fields(contract["enum_fields"]) if "enum_fields" in contract else None
+        if "enum_fields" in contract and enum_fields is None:
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -765,6 +799,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans": [plan for plan in normalized_plans if plan is not None],
             **({"claims": claims} if claims is not None else {}),
             **({"capture": capture} if capture is not None else {}),
+            **({"enum_fields": enum_fields} if enum_fields is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -2246,6 +2281,8 @@ def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]
 
 
 def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, Any]:
+    declared_enums = {name: spec.enum for name, spec in manifest.schema.fields.items() if spec.enum}
+    enum_values, truncated = _bounded_enum_fields(declared_enums)
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,
@@ -2258,6 +2295,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "format_version": manifest.storage.format_version,
         },
         "plans": [],
+        **({"enum_fields": {"values": enum_values, "truncated": truncated}} if declared_enums else {}),
         **(
             {"claims": {name: list(values) for name, values in manifest.claims.items()}}
             if manifest.claims is not None

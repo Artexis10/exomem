@@ -4598,6 +4598,7 @@ class _Issue:
     #: candidate frontmatter round-trips as one block, so naming an empty field
     #: would claim an address the failure does not have.
     scope: str = ""
+    allowed: tuple[Any, ...] = ()
 
     def as_detail(self) -> dict[str, str]:
         detail: dict[str, str] = {}
@@ -4616,6 +4617,8 @@ def _issue_refusal(issues: list[_Issue]) -> collections.CollectionError:
         details["field"] = first.field
     if first.scope:
         details["scope"] = first.scope
+    if first.allowed:
+        details["allowed"] = first.allowed
     details["issues"] = [issue.as_detail() for issue in issues]
     return collections.CollectionError(first.code, first.headline or first.reason, details)
 
@@ -4685,6 +4688,7 @@ def _collect_field_issues(
                 code=failure.code,
                 reason=failure.reason,
                 received=_value_class(value),
+                allowed=failure.details.get("allowed", ()),
             )
         )
         return
@@ -4695,6 +4699,7 @@ def _collect_field_issues(
                 code=sub_failure.code,
                 reason=sub_failure.reason,
                 received=_value_class(sub_value),
+                allowed=sub_failure.details.get("allowed", ()),
             )
         )
 

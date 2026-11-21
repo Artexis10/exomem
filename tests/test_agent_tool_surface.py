@@ -276,6 +276,36 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
     assert "word_count: 50" in items and "word_count: 60" not in items
 
 
+def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build) -> None:
+    manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
+        "    word_count:\n      type: integer\n",
+        "    word_count:\n      type: enum\n      enum: [42, short, long]\n",
+    )
+
+    async def scenario(client):
+        created = await _call(client, "manage_memory", {"operation": "records.create", "arguments": {
+            "manifest_path": record_fixtures.LEDGER_COLLECTION_PATH,
+            "manifest_text": manifest, "why": "Track published entries", "scaffold": True}})
+        assert "error" not in created, created
+        args = {"collection": "Publications ledger", "why": "Log a published entry"}
+        refusal = await _call(client, "add_record", {
+            **args, "item": record_fixtures.ledger_item(word_count="medium")})
+        inspection = await _call(client, "inspect_memory", {
+            "operation": "records.inspect", "arguments": {"collection": args["collection"]}})
+        assert refusal["error"]["code"] == "SCHEMA_ENUM", refusal
+        assert "short" in refusal["error"].get("candidates", []), refusal
+        enums = inspection["contract"]["enum_fields"]
+        assert enums == {"values": {"word_count": [42, "short", "long"]}, "truncated": False}
+        added = await _call(client, "add_record", {
+            **args, "held": refusal["error"]["retry"]["arguments"]["held"],
+            "item": {"word_count": enums["values"]["word_count"][0]}})
+        assert "error" not in added, added
+        return await _call(client, "query_records", {"collection": args["collection"]})
+
+    rows = _session(build(), scenario)["rows"]
+    assert [row["word_count"] for row in rows] == [42]
+
+
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:
     async def scenario(client):
         created = await _call(client, "manage_memory", {"operation": "plans.create", "arguments": {

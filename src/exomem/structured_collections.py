@@ -70,6 +70,9 @@ _PRESENTATION_SCALAR_TYPES = frozenset(
 _MAX_DISCOVERY_CANDIDATES = 512
 _MAX_SCHEMA_FIELDS = 128
 _MAX_SCHEMA_DEPTH = 8
+_MAX_ENUM_VALUES = 64
+# Bound the published enum contract even when YAML aliases repeat a large value.
+ENUM_CHOICES_WIRE_BYTES = 16 * 1024
 _MAX_FROZEN_VALUES = 256
 _MAX_INFERENCE_PROVENANCE = 32
 _MAX_PATH_BYTES = 1024
@@ -196,7 +199,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "required": {"type": "boolean", "default": False},
             "enum": {
                 "type": "array",
-                "maxItems": 64,
+                "maxItems": _MAX_ENUM_VALUES,
                 "items": {"type": ["string", "integer", "number", "boolean"]},
             },
             "items": {"$ref": "#/$defs/field"},
@@ -3236,7 +3239,7 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     enum_raw = raw.get("enum", [])
     if enum_raw is None:
         enum_raw = []
-    if not isinstance(enum_raw, list) or len(enum_raw) > 64:
+    if not isinstance(enum_raw, list) or len(enum_raw) > _MAX_ENUM_VALUES:
         raise CollectionError("INVALID_ITEM_SCHEMA", "enum values must be bounded")
     enum = tuple(enum_raw)
     if any(type(value) not in {str, int, float, bool} for value in enum):
@@ -3534,6 +3537,25 @@ def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[s
     return MappingProxyType(join)
 
 
+def enum_choices_wire_size(choices: object) -> int | None:
+    """Return the encoded size of a non-empty enum that fits the reply budget."""
+    if not isinstance(choices, list | tuple) or not 1 <= len(choices) <= _MAX_ENUM_VALUES:
+        return None
+    size = len(choices) + 1  # List brackets and separators.
+    for choice in choices:
+        if type(choice) not in {str, bool, int, float}:
+            return None
+        if isinstance(choice, str) and len(choice) > ENUM_CHOICES_WIRE_BYTES - size:
+            return None
+        try:
+            size += len(json.dumps(choice, allow_nan=False))
+        except ValueError:
+            return None
+        if size > ENUM_CHOICES_WIRE_BYTES:
+            return None
+    return size
+
+
 def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool = False) -> None:
     if value is None:
         return
@@ -3575,7 +3597,8 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+        allowed = {"allowed": spec.enum} if enum_choices_wire_size(spec.enum) is not None else {}
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}", allowed)
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:
