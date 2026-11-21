@@ -309,8 +309,34 @@ def test_a_long_position_is_served_whole_beside_a_short_one_within_the_shipped_b
     assert block["overflow_refs"] == []
 
 
-def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A guest whose ceiling serves a page as a 600-character excerpt was handed a 1,792-character unit of it whole."""
+def _reach_page_as_a_served_leads_link_would(monkeypatch: pytest.MonkeyPatch, page: str, after_compile=None) -> None:
+    """This fixture's guest task context serves no leads, so `page` joins the reach as a served lead's link would.
+
+    `after_compile` runs once the block is compiled and before terminal egress decides it.
+    """
+    compile_block = positions.compile_block
+
+    def compile_with_page(root, caller, *, reach, **kwargs):
+        block = compile_block(root, caller, reach={*reach, page}, **kwargs)
+        if after_compile is not None:
+            after_compile()
+        return block
+
+    monkeypatch.setattr(positions, "compile_block", compile_with_page)
+
+
+def _eight_short_positions() -> tuple[list[str], str]:
+    """Eight dated positions of about 97 characters each: any one fits a 600-character excerpt, all eight do not."""
+    views = [f"I prefer cone {cone} for the stoneware body, view number {cone}, a fairly short line of text here to count" for cone in range(6, 14)]
+    body = "".join(f"- [preference] {view} (2026-03-0{day}) ^cone-{day + 5}\n\n" for day, view in enumerate(views, start=1))
+    return views, body
+
+
+def test_a_caller_served_page_excerpts_gets_a_long_position_counted_not_named(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guest whose ceiling serves a page as a 600-character excerpt was handed a 1,792-character unit of it whole.
+
+    Its unit refs are dead ends: that caller reads a page's excerpt, never one of its units, so a left-out unit is counted.
+    """
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     long_view = (
         "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. "
@@ -323,12 +349,7 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path
     )
     _withhold(vault, excerpted, ceiling=egress.LEVEL_EXCERPT)
     _ready(vault)
-    # This fixture's guest task context serves no leads, so the page joins the reach as a served lead's link would.
-    compile_block = positions.compile_block
-    monkeypatch.setattr(
-        positions, "compile_block",
-        lambda root, caller, *, reach, **kwargs: compile_block(root, caller, reach={*reach, excerpted}, **kwargs),
-    )
+    _reach_page_as_a_served_leads_link_would(monkeypatch, excerpted)
 
     owner = _activate(vault, turn=TURN, max_chars=8000)["positions"]
     guest = _activate(vault, _external(), turn=TURN, max_chars=8000)["positions"]
@@ -336,7 +357,75 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path
     assert len(long_view) > 1_500 > egress.PAGE_EXCERPT_MAX
     assert sorted(item["text"] for item in owner["items"]) == sorted([long_view, short_view])
     assert [item["text"] for item in guest["items"]] == [short_view]
-    assert [ref.rpartition("/")[2] for ref in guest["overflow_refs"]] == ["studio-equipment-log.md#crazing"]
+    assert guest["overflow_refs"] == []
+    assert guest["omitted"] == 1
+    assert hook._format_positions_block(guest).splitlines()[-1] == positions.overflow_line([], 1)
+
+
+def test_several_short_positions_on_an_excerpted_page_share_its_excerpt_bound(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each of eight 97-character positions fit the 600-character excerpt bound alone; together they handed the guest 776 characters of the page."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    views, body = _eight_short_positions()
+    _lead, excerpted = _lead_linking_to_a_long_page(vault, body)
+    _withhold(vault, excerpted, ceiling=egress.LEVEL_EXCERPT)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, excerpted)
+
+    owner = _activate(vault, turn=TURN, max_chars=8000)["positions"]
+    guest = _activate(vault, _external(), turn=TURN, max_chars=8000)["positions"]
+
+    assert sum(len(view) for view in views) > egress.PAGE_EXCERPT_MAX
+    assert len(owner["items"]) == len(views)
+    served = sum(len(item["text"]) for item in guest["items"])
+    assert 0 < served <= egress.PAGE_EXCERPT_MAX
+    assert len(guest["items"]) + guest["omitted"] == len(views)
+    assert guest["overflow_refs"] == []
+
+
+def test_a_page_the_caller_may_read_no_text_of_lists_no_unit_line_or_ref(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit on a page with a text bound of 0 was named by ref, a ref to a page whose text the caller may not read.
+
+    Admission already withholds a page below the release floor, so a bound of 0 reaches the compile only when the two
+    decisions part, as they can when a policy changes between them. The compile's own read of the bounds says 0 here.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. " * 40
+    _lead, page = _lead_linking_to_a_long_page(
+        vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n\n- [preference] I prefer cone 6 (2026-03-01) ^cone-six\n",
+    )
+    _withhold(vault, page, ceiling=egress.LEVEL_FULL)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page)
+    page_text_bounds, reads = egress.page_text_bounds, []
+
+    def bounds(root, paths, **kwargs):
+        reads.append(1)
+        return dict.fromkeys(paths, 0) if len(reads) == 1 else page_text_bounds(root, paths, **kwargs)
+
+    monkeypatch.setattr(egress, "page_text_bounds", bounds)
+
+    guest = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert reads
+    assert guest["positions"] == {"state": "empty", "items": [], "overflow_refs": [], "omitted": 0}
+
+
+def test_a_policy_that_tightens_before_terminal_egress_does_not_serve_more_than_the_new_excerpt_bound(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The block was compiled for a guest released the whole page, then the page's ceiling dropped to an excerpt."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    views, body = _eight_short_positions()
+    _lead, page = _lead_linking_to_a_long_page(vault, body)
+    _withhold(vault, page, ceiling=egress.LEVEL_FULL)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page, after_compile=lambda: _withhold(vault, page, ceiling=egress.LEVEL_EXCERPT))
+
+    packet = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert packet["positions"]["state"] == "unavailable"
+    assert packet["positions"]["items"] == []
+    assert all(view not in json.dumps(packet) for view in views)
 
 
 def test_the_positions_block_leads_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

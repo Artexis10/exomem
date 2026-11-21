@@ -6,7 +6,9 @@ unit query over the served leads and the link targets they list finds the pages 
 lifecycle, supersession, expiry and egress rules as the stance and the domain profiles. A page that supplies the
 stance or a domain profile is never read here: it has its own block and framing. The block has its own bound, the
 vault's `budgets.positions_max_chars`, beside the turn allowance, and a unit is served whole whenever it fits that
-bound. Positions answer the turn, so the block is compiled on every turn and never marked held for the conversation.
+bound. A caller served only an excerpt of a page gets that page's units up to the excerpt bound in total; the units
+left out are counted and never named, since that caller cannot read a unit by ref. Positions answer the turn, so the
+block is compiled on every turn and never marked held for the conversation.
 """
 
 from __future__ import annotations
@@ -178,35 +180,47 @@ def _compile(
         return _empty("unavailable", "currency"), []
     order = {item.ref: index for index, item in enumerate(admitted)}
     current = session_units.current(admitted, basis, today=today)
-    # A caller served excerpts of a page reads no more of its units than `read_page` would show of that page.
+    # `read_page` serves a restricted caller at most the page's excerpt bound of the page's text, so the units served
+    # from one page share that bound. This caps the amount of a page's unit text, not which of its text is served.
+    # A bound of 0 means the page's text is not served at all.
     page_bounds = {} if full_access else egress.page_text_bounds(
         root, {item.path for item, _review_due in current.items}, purpose=caller.purpose,
     )
+    remaining = dict(page_bounds)
     block = _empty()
     served: list[dict[str, Any]] = []
     leftover: list[working_set.LaneItem] = []
+    unreadable = 0
     for item, review_due in _ranked(current.items, query, page_dates, order):
+        page_bound = page_bounds.get(item.path)
+        if page_bound == 0:
+            # Neither a line nor a ref: the caller may read none of this page's text, so naming its unit would be a dead end.
+            continue
         line = {"ref": item.ref, "text": item.text, "title": item.title}
         if item.updated:
             line["date"] = item.updated
         if review_due:
             line["review_due"] = review_due
-        # Overflow is a reference, never a cut unit. Beyond the excerpt bound of the unit's page, the block's own bound
-        # is the only size test: a careful position runs long, and the working set's per-unit cap would turn exactly
-        # those into references.
-        page_bound = page_bounds.get(item.path)
-        if (page_bound is None or len(item.text) <= page_bound) and chars({"items": [*block["items"], line]}) <= limit:
+        # Beyond what remains of the page's excerpt bound, the block's own bound is the only size test: a careful
+        # position runs long, and the working set's per-unit cap would turn exactly those into references.
+        room = remaining.get(item.path)
+        if (room is None or len(item.text) <= room) and chars({"items": [*block["items"], line]}) <= limit:
             block["items"].append(line)
             served.append(working_set._served_unit(item))  # noqa: SLF001 - the shape admission decided
-        else:
+            if room is not None:
+                remaining[item.path] = room - len(item.text)
+        elif page_bound is None:
             leftover.append(item)
+        else:
+            # An excerpt-level caller cannot read a unit by ref, so a ref would be a dead end: the unit is only counted.
+            unreadable += 1
     # The references share the bound, after every line that fits.
     for item in leftover:
         refs = [*block["overflow_refs"], item.ref]
         if chars({**block, "overflow_refs": refs}) <= limit:
             block["overflow_refs"] = refs
             served.append(working_set._served_unit(item))  # noqa: SLF001 - a ref names the unit, so egress decides it
-    block["omitted"] = len(leftover) - len(block["overflow_refs"])
+    block["omitted"] = len(leftover) - len(block["overflow_refs"]) + unreadable
     if block["items"] or block["overflow_refs"] or block["omitted"]:
         # The framing leads the block: a model reads the items in the light of what it read first.
         block = {"about": ABOUT, **block, "state": "ready"}
@@ -257,4 +271,28 @@ def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any
     block, served = pinned
     if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(root, copy.deepcopy(served), purpose=caller.purpose)):
         return _empty("unavailable")
+    if not _within_page_bounds(root, caller, block, served):
+        return _empty("unavailable")
     return copy.deepcopy(block)
+
+
+def _within_page_bounds(root: Path, caller: Any, block: Mapping[str, Any], served: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the page bounds that hold now still admit what `_compile` served: a policy may tighten in between.
+
+    `served` lists the lines first, then the refs. A page text bound of 0 admits neither, and any other bound admits
+    lines only, up to the bound in total: the compile-time rule, decided again at the terminal.
+    """
+    if not served:
+        return True
+    bounds = egress.page_text_bounds(root, {unit["provenance"]["path"] for unit in served}, purpose=caller.purpose)
+    spent: dict[str, int] = {}
+    lines = len(block.get("items", ()))
+    for index, unit in enumerate(served):
+        path = unit["provenance"]["path"]
+        bound = bounds[path]
+        if bound is None:
+            continue
+        spent[path] = spent.get(path, 0) + len(unit["text"])
+        if index >= lines or spent[path] > bound:
+            return False
+    return True
