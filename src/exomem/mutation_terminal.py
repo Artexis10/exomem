@@ -3041,6 +3041,7 @@ def valid_record_receipt(value: Any) -> bool:
     # so `outcome: discarded` stays impossible for an append or an update.
     if operation == "discard":
         return _valid_discard_receipt(value)
+    # nosemgrep: ep-word-membership -- The record receipt's operation names are a closed protocol.
     if operation not in {"create", "append", "update", "retract"} or value.get("outcome") not in {
         "committed",
         "replayed",
