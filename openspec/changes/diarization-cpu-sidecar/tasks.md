@@ -78,6 +78,9 @@ Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was
 - [x] 6.3 `scripts/upgrade.sh` builds the sidecar for the active release, with the unit's
       `EXOMEM_STATE_ROOT`, after a managed switch while `EXOMEM_DIARIZE` is on; a failure is
       reported, not fatal.
-- [ ] 6.4 Live: the personal service reports `sidecar_venv=True` on the release carrying 6.1-6.3 and
+- [x] 6.4 Live: the personal service reports `sidecar_venv=True` on the release carrying 6.1-6.3 and
       diarizes one real recording with speaker labels.
+      Managed-install acceptance was verified on release 0.191.0: startup reported an enabled
+      sidecar and voice embedder, and governed reprocessing produced named speaker labels.
+      The broader two-speaker and embedding checks in 4.4 remain open.
 
