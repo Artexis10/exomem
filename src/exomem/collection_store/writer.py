@@ -629,9 +629,7 @@ class CollectionWriter:
                     "references": references,
                     "inbound": reference_index.inbound(
                         self._operation, self.connection, field_plan.manifest),
-                    "contract": record_governance._inspection_contract(
-                        field_plan.manifest, whole_fields=field_plan.whole_fields,
-                    ),
+                    "contract": record_governance._inspection_contract(field_plan.manifest),
                     "snapshot": snapshot,
                     "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
                                         *({"path": row_source(manifest, item), "hash": item["public_version"]}
@@ -762,7 +760,9 @@ class CollectionWriter:
             "references": references,
             "inbound": reference_index.inbound(
                 self._operation, self.connection, manifest),
-            "contract": record_governance._inspection_contract(manifest),
+            "contract": record_governance._inspection_contract(
+                manifest, include_enum_guidance=field_plan.owner and unrestricted and self._operation.policy.empty,
+            ),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
             "diagnostics": diagnostics[:64],
@@ -2420,7 +2420,9 @@ class CollectionWriter:
             planning._validate_declared_text(manifest, values)
             if before is not None:
                 planning._require_same_area_side(before, values)
-        values = records._validate_values(manifest, values, written=written, include_enum_choices=include_enum_choices)
+        values = records._validate_values(
+            manifest, values, written=written, enum_guidance_root=self.root if include_enum_choices else None,
+        )
         if declared.validators and validate_graph:
             validators = [types.named_validator(name) for name in declared.validators]
             plans = None

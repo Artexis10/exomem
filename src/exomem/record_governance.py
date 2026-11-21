@@ -22,6 +22,7 @@ from . import (
     freshness,
     memory_refs,
     mutation_terminal,
+    page_ids,
     query_compat,
     query_data,
     record_formats,
@@ -178,6 +179,33 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
 
 def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
+
+
+def allows_enum_guidance(root: Path, *, policy: Any | None = None) -> bool:
+    """Only a proven unrestricted owner in a vault with an empty policy gets hints."""
+    if not egress.unrestricted_content_access(root, effective_principal()):
+        return False
+    if policy is None:
+        active = _AUTHORIZATION_PASS.get()
+        policy = active[1] if active is not None and active[0] == root else egress.policy_module.load(root)
+    return policy.empty
+
+
+def _plain_enum_label(label: str) -> bool:
+    # Guidance has a closed plain-label format. It accepts no link, URI or path delimiters.
+    text = label.strip()
+    return (bool(text) and not page_ids.is_page_id(text)
+            and all(char in " _-" or char.isascii() and char.isalnum() for char in label)
+            and memory_refs.normalize_id(text) is None)
+
+
+def plain_enum_field(field: str) -> bool:
+    # An authored key that routes ordinary egress through the prose scanner is outside this optional format.
+    return _plain_enum_label(field) and not egress._artifact_text_key(field)
+
+
+def plain_enum_choices(choices: list[Any]) -> list[Any]:
+    return [choice for choice in choices if type(choice) is not str or _plain_enum_label(choice)]
 
 
 def _bounded_enum_fields(
@@ -1875,7 +1903,9 @@ def inspect_collection(
                 "kind": "collection",
                 "report_only": True,
                 "contract": {
-                    **_inspection_contract(manifest),
+                    **_inspection_contract(
+                        manifest, include_enum_guidance=manifest.supports_item_enum_guidance and allows_enum_guidance(root),
+                    ),
                     "plans": [
                         projected
                         for plan in manifest.links.plans
@@ -2291,14 +2321,17 @@ def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]
 def _inspection_contract(
     manifest: collections.CollectionManifest,
     *,
-    whole_fields: frozenset[str] | None = None,
+    include_enum_guidance: bool = False,
 ) -> dict[str, Any]:
     enum_values, truncated = ({}, False)
-    if manifest.supports_item_enum_guidance:
+    if include_enum_guidance and manifest.supports_item_enum_guidance:
         enum_values, truncated = _bounded_enum_fields({
-            name: spec.enum for name, spec in manifest.schema.fields.items()
-            if spec.enum and (whole_fields is None or name in whole_fields)
+            name: spec.enum for name, spec in manifest.schema.fields.items() if spec.enum
         })
+        plain_enums = {name: plain for name, choices in enum_values.items()
+                       if plain_enum_field(name) and (plain := plain_enum_choices(choices))}
+        truncated = truncated or plain_enums != enum_values
+        enum_values = plain_enums
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,

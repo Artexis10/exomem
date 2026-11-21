@@ -56,7 +56,6 @@ from .. import (
     find_corpus,
     memory_refs,
     originals,
-    page_ids,
     request_budget,
     reserved_paths,
     state_paths,
@@ -6122,10 +6121,6 @@ def _strip_page_provenance(
 class _ArtifactScanDemand:
     required: bool = False
     complete: bool = False
-    defer_record_enums: bool = False
-
-    def defers(self, location: tuple[str | int, ...]) -> bool:
-        return self.defer_record_enums and location == ("contract", "declared_enums")
 
 
 def _artifact_text_key(key: Any) -> bool:
@@ -6273,28 +6268,40 @@ def _record_enum_declarations(response: Any) -> dict[str, Any] | None:
 
 
 def _released_enum_choices(before: Any, after: Any) -> list[Any]:
-    """Both text filters preserve scalar positions and may rewrite text in place."""
     if not isinstance(before, list) or not isinstance(after, list) or len(before) != len(after):
         return []
     return [choice for original, choice in zip(before, after, strict=True)
             if type(choice) is type(original) and choice == original]
 
 
-def _reconcile_record_enum_declarations(
-    before: dict[str, Any], after: dict[str, Any], scan_text: Callable[[list[Any]], Any],
-) -> None:
-    declared, released = before.get("values"), after.get("values")
+def _record_enum_authorized_now(root: Path) -> bool:
+    from .. import record_governance
+
+    with policy_module.outside_request_policy_snapshot():
+        return record_governance.allows_enum_guidance(root, policy=policy_module.load(root))
+
+
+def _release_record_enum_declarations(root: Path, before: dict[str, Any], result: Any) -> bool:
+    after = _record_enum_declarations(result)
+    if after is None:
+        return False
+    if not _record_enum_authorized_now(root):
+        result["contract"].pop("declared_enums", None)
+        return False
+    declared, released = before["values"], after.get("values", {})
     delivered = {}
-    if isinstance(declared, Mapping) and isinstance(released, Mapping):
-        for field, choices in released.items():
-            admitted = _released_enum_choices(declared.get(field), choices)
-            if admitted:
-                scanned_field, *scanned_choices = scan_text([field, *admitted])
-                if scanned_field == field and (kept := _released_enum_choices(admitted, scanned_choices)):
-                    delivered[scanned_field] = kept
+    blocked = False
+    for field, choices in released.items():
+        admitted = _released_enum_choices(declared.get(field), choices)
+        if admitted:
+            (scanned_field, *scanned_choices), hit = scrubber.scrub_value([field, *admitted])
+            blocked = blocked or hit
+            if scanned_field == field and (kept := _released_enum_choices(admitted, scanned_choices)):
+                delivered[scanned_field] = kept
     after["values"] = delivered
     if delivered != declared:
         after["truncated"] = True
+    return blocked
 
 
 def _postfilter(
@@ -6383,7 +6390,6 @@ def _postfilter(
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
-        artifact_scan_demand.defer_record_enums = record_enums is not None
         result = _withheld_cross_check(
             vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding,
@@ -6396,9 +6402,7 @@ def _postfilter(
     # have been removed; scanning an ordinary released page body would change
     # the content the page decision explicitly authorized.
     scan_all = command_name in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"}
-    if record_enums is not None and _record_enum_declarations(result) is not None:
-        result = gate_artifact_references(vault_root, result, _scan_record_enums=True)
-    elif (scan_all or isinstance(result, str) or not artifact_scan_demand.complete
+    if (scan_all or isinstance(result, str) or not artifact_scan_demand.complete
             or artifact_scan_demand.required):
         result = gate_artifact_references(vault_root, result, scan_all=scan_all)
     if hasattr(result, "content") and hasattr(result, "structured_content"):
@@ -6408,18 +6412,9 @@ def _postfilter(
             _record_credential_block()
         return cleaned
     with call_spans.span("egress.scrub"):
-        gated_enums = _record_enum_declarations(result) if record_enums is not None else None
         cleaned, blocked = scrubber.scrub_value(result)
-        if gated_enums is not None and (released_enums := _record_enum_declarations(cleaned)) is not None:
-            def scrub_choices(choices: list[Any]) -> Any:
-                nonlocal blocked
-                scanned, hit = scrubber.scrub_value(choices)
-                blocked = blocked or hit
-                return scanned
-
-            _reconcile_record_enum_declarations(gated_enums, released_enums, scrub_choices)
-            if released_enums != record_enums:
-                released_enums["truncated"] = True
+        if record_enums is not None:
+            blocked = _release_record_enum_declarations(vault_root, record_enums, cleaned) or blocked
     if blocked:
         _record_credential_block()
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
@@ -6580,18 +6575,15 @@ def postfilter_error(
     )
     blocked = False
 
-    def _scrub(value: Any) -> Any:
-        nonlocal blocked
-        with call_spans.span("egress.scrub"):
-            cleaned, hit = scrubber.scrub_value(value)
-        blocked = blocked or hit
-        return cleaned
-
     def _clean(value: Any) -> Any:
+        nonlocal blocked
         # The same fixed labels as `postfilter`, aggregated across values.
         with call_spans.span("egress.artifact_gate"):
             cleaned = gate.gate_payload(value, scan_strings=True)
-        return _scrub(cleaned)
+        with call_spans.span("egress.scrub"):
+            cleaned, hit = scrubber.scrub_value(cleaned)
+        blocked = blocked or hit
+        return cleaned
 
     code = getattr(error, "code", None)
     args = tuple(error.args or ())
@@ -6603,16 +6595,18 @@ def postfilter_error(
         value = getattr(error, name, None)
         if value is None or value == code:
             continue
-        enum_details = (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
-                        and isinstance(value, Mapping))
-        cleaned = _clean({key: item for key, item in value.items() if key != "allowed"} if enum_details else value)
-        if enum_details and isinstance(cleaned, dict):
+        cleaned = _clean(value)
+        if (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
+                and isinstance(value, Mapping) and isinstance(value.get("allowed"), list)
+                and isinstance(cleaned, dict)):
+            allowed = cleaned.pop("allowed", None)
             if value.get("field") != cleaned.get("field") or value.get("retry_with") != cleaned.get("retry_with"):
                 cleaned.pop("retry_with", None)
-            elif isinstance(allowed := value.get("allowed"), list):
-                with call_spans.span("egress.artifact_gate"):
-                    scanned = gate.scan_optional_text(allowed) if gate._can_scan_optional_text() else []
-                if choices := _released_enum_choices(allowed, _scrub(scanned)):
+            elif isinstance(allowed, list) and _record_enum_authorized_now(vault_root):
+                with call_spans.span("egress.scrub"):
+                    neutral, hit = scrubber.scrub_value(allowed)
+                blocked = blocked or hit
+                if choices := _released_enum_choices(value.get("allowed"), neutral):
                     cleaned["allowed"] = choices
         if cleaned != value:
             _rewrite_error_attribute(error, name, cleaned)
@@ -7696,7 +7690,7 @@ class _ArtifactReferenceGate:
         self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
-        self._directly: dict[tuple[str, bool], tuple[str, ...]] = {}
+        self._directly: dict[str, tuple[str, ...]] = {}
         # Originals that the census lists no file for, each judged once on what its page binds; see `_filing`.
         self._filed: dict[str, tuple[str, ...] | None] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
@@ -7722,64 +7716,23 @@ class _ArtifactReferenceGate:
             with call_spans.span("egress.artifact_gate.index"):
                 self._index()
 
-    def _index(self, census: artifact_census.CensusView | None = None) -> None:
+    def _index(self) -> None:
         self._index_entered = True
-        self.census = census if census is not None else artifact_census.request_census(self.vault_root)
+        self.census = artifact_census.request_census(self.vault_root)
         self.filings = self.census.filings
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, managed_root_rel()
         )
-
-    def _can_scan_optional_text(self) -> bool:
-        if self.fail_closed:
-            return False
-        if self.census.published or (self._policy_empty() and not self.tombstones):
-            return True
-        census = artifact_census.published_view(self.vault_root, observe_only=True)
-        if census is None:
-            return False
-        self._index(census)
-        self._indexed = True
-        return True
-
-    def scan_optional_text(self, values: list[Any]) -> list[Any]:
-        from .. import markdown_regions, structured_collections
-
-        def scan(value: Any) -> Any:
-            if not isinstance(value, str):
-                return value
-            # CommonMark resolves and decodes destinations. Enum hints do not
-            # carry the document context needed to authorize those links.
-            if "[" in value:
-                try:
-                    if markdown_regions.local_links(value):
-                        return WITHHELD_REFERENCE
-                except ValueError:
-                    return WITHHELD_REFERENCE
-            # Markdown delimiters separate URI tokens in wikilinks and inline code.
-            text = value.replace("[", " ").replace("]", " ").replace("|", " ").replace("`", " ")
-            for match in _WRAPPED_ARTIFACT_REFERENCE.finditer(text):
-                token, _ = self._unwrap(match[0])
-                if memory_refs.parse_memory_ref(token) or structured_collections.parse_row_ref(token):
-                    return WITHHELD_REFERENCE
-            # The split supplies prose token boundaries. page_ids owns the short-ID format.
-            if any(page_ids.is_page_id(token.strip(".")) for token in re.split(r"[^\w.]+", value)):
-                return WITHHELD_REFERENCE
-            return self.gate_text(value, _optional_text=True)
-
-        return [scan(value) for value in values]
 
     def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
         found = (*self.census.paths(key), *self.tombstone_paths.get(key, ()))
         return self._with_filings(found, self.filings.paths(key))
 
-    def _directly_named(self, token: str, *, publish_discovery: bool) -> tuple[str, ...]:
-        key = (token, publish_discovery)
-        found = self._directly.get(key)
+    def _directly_named(self, token: str) -> tuple[str, ...]:
+        found = self._directly.get(token)
         if found is None:
-            found = artifact_census.direct_paths(self.vault_root, token, publish_discovery=publish_discovery)
-            self._directly[key] = found
+            found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
         return found
 
     def _filing(self, logical: str) -> tuple[str, ...] | None:
@@ -7826,9 +7779,7 @@ class _ArtifactReferenceGate:
         token = token.split("#", 1)[0].strip().strip("\"'").rstrip(".,;:!?")
         return token, wikilink
 
-    def resolve(
-        self, value: str, *, directory: str | None = None, _optional_text: bool = False,
-    ) -> tuple[str, ...] | None:
+    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
         if lifecycle.is_tombstoned_in(self.tombstones, token):
@@ -7838,8 +7789,6 @@ class _ArtifactReferenceGate:
             memory_id = memory_refs.parse_memory_ref(token)
             if memory_id is None:
                 return ()
-            if _optional_text:
-                return None
             # Redaction keeps raw hidden-owner evidence after pending withdrawal.
             # Potentially visible uncertainty omits the token, not admitted material.
             paths = memory_refs.paths_for_optional_references_read_only(
@@ -7884,7 +7833,7 @@ class _ArtifactReferenceGate:
             # names its file exactly, so one check on disk settles it.
             for shaped in (token, sibling):
                 if shaped is not None and "/" in shaped:
-                    named = self._directly_named(shaped, publish_discovery=not _optional_text)
+                    named = self._directly_named(shaped)
                     if named:
                         return tuple(sorted(named))
         return ()
@@ -7926,7 +7875,7 @@ class _ArtifactReferenceGate:
         self.verdicts[rel_path] = allowed
         return allowed
 
-    def gate_text(self, text: str, *, _optional_text: bool = False) -> str:
+    def gate_text(self, text: str) -> str:
         request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
@@ -7952,7 +7901,7 @@ class _ArtifactReferenceGate:
                     # The caller sent this. Echoing it back tells them nothing;
                     # replacing it tells them the item exists.
                     return token
-            candidates = self.resolve(token, _optional_text=_optional_text)
+            candidates = self.resolve(token)
             if candidates is None or (
                 candidates and not all(self._permits(rel) for rel in candidates)
             ):
@@ -8026,7 +7975,6 @@ def gate_artifact_references(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     scan_all: bool = False,
-    _scan_record_enums: bool = False,
 ) -> Any:
     """Recursively gate nested prompt/resource payloads with one verdict cache."""
     started = cpu_started = None
@@ -8039,20 +7987,7 @@ def gate_artifact_references(
             pass
     try:
         gate = _ArtifactReferenceGate(Path(vault_root), principal=principal, purpose=purpose)
-        declared = _record_enum_declarations(payload) if _scan_record_enums else None
-        if declared is not None:
-            # An authored field named for free text must not send optional enums
-            # through the ordinary artifact walk before the published-census check.
-            payload = {**payload, "contract": {**payload["contract"], "declared_enums": {}}}
-        gated = gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
-        if declared is not None and (released := _record_enum_declarations(gated)) is not None:
-            if gate._can_scan_optional_text():
-                checked = dict(declared)
-                _reconcile_record_enum_declarations(declared, checked, gate.scan_optional_text)
-                released.update(checked)
-            else:
-                released.update(values={}, truncated=True)
-        return gated
+        return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
     finally:
         if started is not None:
             # These fields measure the fixed artifact-gate API, never returned text or authority.
@@ -9691,8 +9626,6 @@ def filter_withheld_entries(
 
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         request_budget.checkpoint()
-        if _artifact_scan_demand is not None and _artifact_scan_demand.defers(location):
-            return node
         if isinstance(node, Mapping) and any(
             not _independent_content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
@@ -9781,8 +9714,6 @@ def filter_withheld_entries(
         a drift between the two costs requests and never a verdict.
         """
         request_budget.checkpoint()
-        if _artifact_scan_demand is not None and _artifact_scan_demand.defers(location):
-            return
         if isinstance(node, Mapping):
             here = _directory_of(node)
             here = directory if here is None else here

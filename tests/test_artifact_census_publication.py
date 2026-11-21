@@ -149,19 +149,9 @@ def test_a_path_shaped_reference_to_an_unindexed_file_is_checked_on_disk(
     _withhold_from_external(vault, "Notes/Patterns/**")
     _publish(vault)
     walks.clear()
-    relative = f"{WITHHELD_DIR}/orchid-direct-memo.txt"
-    _write(vault, relative)  # no event reached the watcher
+    _write(vault, f"{WITHHELD_DIR}/orchid-direct-memo.txt")  # no event reached the watcher
 
-    enums = {"values": {"severity": [f"See {relative} for the memo.", True]}, "truncated": False}
-    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
-        optional = egress.gate_artifact_references(
-            vault, {"contract": {"declared_enums": enums}}, _scan_record_enums=True,
-        )
-    assert optional["contract"]["declared_enums"] == {"values": {"severity": [True]}, "truncated": True}
-    observed = artifact_census.published_view(vault, observe_only=True)
-    assert observed is not None and observed.paths(relative.casefold()) == ()
-
-    by_path = _gate(vault, f"See {relative} for the memo.")
+    by_path = _gate(vault, f"See {WITHHELD_DIR}/orchid-direct-memo.txt for the memo.")
     by_folder_path = _gate(vault, "See Notes/Patterns/orchid-direct-memo.txt for the memo.")
     assert egress.WITHHELD_REFERENCE in by_path
     assert egress.WITHHELD_REFERENCE in by_folder_path
@@ -228,23 +218,6 @@ def test_an_unpublished_census_takes_the_walk_and_is_never_empty(
     assert egress.WITHHELD_REFERENCE in released
     assert "_walk_listings" in walks, "no census was published, yet the request did not walk"
     assert artifact_census.published_view(vault) is None
-
-
-def test_observing_the_census_neither_requests_publication_nor_builds_an_overlay(vault, monkeypatch):
-    assert artifact_census.published_view(vault, observe_only=True) is None
-    assert not artifact_census.rebuild_published(vault)
-    assert artifact_census.rebuild_published(vault, eager=True)
-    relative = f"{WITHHELD_DIR}/new-memo.txt"
-    _write(vault, relative)
-    artifact_census.note_created(vault, (relative,))
-
-    with monkeypatch.context() as observer:
-        observer.setattr(artifact_census, "_census_from_rels", lambda rels: pytest.fail("observer built an overlay"))
-        assert artifact_census.published_view(vault, observe_only=True) is None
-
-    published = artifact_census.published_view(vault)
-    assert published is not None and published.paths(relative.casefold()) == (relative,)
-    assert artifact_census.published_view(vault, observe_only=True) == published
 
 
 def test_a_burst_of_new_files_withdraws_the_census_to_the_walk(

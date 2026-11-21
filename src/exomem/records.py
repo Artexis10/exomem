@@ -282,7 +282,7 @@ def append_record(
     if held_id is None:
         can_hold = _holding_enabled(supplied_manifest, hold)
         try:
-            _validate_values(supplied_manifest, overrides, include_enum_choices=not can_hold)
+            _validate_values(supplied_manifest, overrides, enum_guidance_root=None if can_hold else root)
         except collections.CollectionError as error:
             # A holdable refusal is deferred to the guarded pass, which is the
             # only place a candidate may be preserved. Nothing else changes: the
@@ -311,7 +311,7 @@ def append_record(
                 "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
             )
         try:
-            values = _validate_values(manifest, item, include_enum_choices=True)
+            values = _validate_values(manifest, item, enum_guidance_root=root)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -1938,7 +1938,7 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         try:
-            values = _validate_values(manifest, merged, written=changes, include_enum_choices=True)
+            values = _validate_values(manifest, merged, written=changes, enum_guidance_root=root)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -4525,7 +4525,7 @@ def _validate_values(
     item: Mapping[str, Any],
     *,
     written: Collection[str] | None = None,
-    include_enum_choices: bool = False,
+    enum_guidance_root: Path | None = None,
 ) -> dict[str, Any]:
     """Validate one candidate, reporting every failing field in one refusal.
 
@@ -4579,7 +4579,7 @@ def _validate_values(
     if not issues and manifest.storage.strategy == "markdown-items" and not manifest.derived:
         _collect_round_trip_issues(manifest, value, issues)
     if issues:
-        raise _issue_refusal(manifest, issues, include_enum_choices=include_enum_choices)
+        raise _issue_refusal(manifest, issues, enum_guidance_root=enum_guidance_root)
     return value
 
 
@@ -4613,7 +4613,7 @@ class _Issue:
 
 def _issue_refusal(
     manifest: collections.CollectionManifest, issues: list[_Issue],
-    *, include_enum_choices: bool,
+    *, enum_guidance_root: Path | None,
 ) -> collections.CollectionError:
     first = issues[0]
     details: dict[str, Any] = {}
@@ -4621,9 +4621,11 @@ def _issue_refusal(
         details["field"] = first.field
     if first.scope:
         details["scope"] = first.scope
-    if (include_enum_choices and first.code == "SCHEMA_ENUM" and first.enum_choices
-            and manifest.supports_item_enum_guidance):
+    if (enum_guidance_root is not None and first.code == "SCHEMA_ENUM" and first.enum_choices
+            and manifest.supports_item_enum_guidance and record_governance.plain_enum_field(first.field)
+            and record_governance.allows_enum_guidance(enum_guidance_root)):
         allowed, _ = collections.enum_choices_for_wire(first.enum_choices)
+        allowed = record_governance.plain_enum_choices(allowed)
         if manifest.storage.strategy == "markdown-items":
             renderable = []
             for choice in allowed:

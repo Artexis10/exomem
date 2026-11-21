@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 import yaml
 from conftest import initialize_vault_state_offline
-from test_collection_store_summary import sqlite_text, summary_text
+from test_collection_store_summary import summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 
@@ -79,48 +79,6 @@ def release_document(basis, who=GUEST):
         "field_release": {**{key: basis[key] for key in ("version", "store_id", "collection_id", "classification_basis")},
             "paths": [{"path": "place", "subtree": True}, {"path": "label", "subtree": False}],
             "surface": who.surface, "issuer_family": who.issuer_family, "purpose": None, "release_version": 1}})
-
-
-def test_inspection_admits_enum_declarations_only_for_released_fields(store):
-    """A guest who can inspect the collection must not see its withheld field's declarations."""
-    from exomem.governance import artifact_census
-    from exomem.governance.policy import governance_root
-    from exomem.init import _SCAFFOLD
-
-    initialize_vault_state_offline(store.root, source="enum release fixture")
-    governance_root(store.root).mkdir(parents=True, exist_ok=True)
-    (governance_root(store.root) / "README.md").write_bytes((_SCAFFOLD / "_Governance/README.md").read_bytes())
-    front, body, _ = vault.parse_frontmatter(sqlite_text(manifest_text()), strict=True)
-    front["item_schema"]["fields"].update({
-        "state": {"type": "enum", "enum": ["complete", "awaiting"]},
-        "room": {"type": "enum", "enum": ["north", "south"], "classification": "location"},
-        "context": {"type": "object", "properties": {"zone": {"type": "enum", "enum": ["near", "far"]}}},
-    })
-    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
-    store.create_collection(manifest_path(), text, why="declare workflow fields", scaffold=False)
-    store.append_record(
-        CID, item={"title": "Survey", "state": "complete", "room": "north"},
-        item_key=KEY, why="record the survey",
-    )
-    assert artifact_census.rebuild_published(store.root, eager=True)
-
-    owner = tool(store, "record_memory", action="inspect", collection=CID)
-    guest = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
-    state = ["complete", "awaiting"]
-    room = ["north", "south"]
-    assert owner["contract"]["declared_enums"] == {"values": {"state": state, "room": room}, "truncated": False}
-    assert guest["contract"]["declared_enums"] == {"values": {"state": state}, "truncated": False}
-
-    basis = owner["field_release_basis"]
-    document = yaml.safe_load(release_document(basis))
-    document["field_release"]["paths"] = [{"path": "room", "subtree": False}]
-    proposal = govern(store, operation="propose", intent="Release the reviewed room information",
-        documents={"grants/room-field.yaml": yaml.safe_dump(document)},
-        selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
-    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
-    assert artifact_census.rebuild_published(store.root, eager=True)
-    released = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
-    assert released["contract"]["declared_enums"] == {"values": {"state": state, "room": room}, "truncated": False}
 
 
 def test_recipient_queries_metrics_and_nested_projection_before_hidden_value_decoding(store, monkeypatch):

@@ -10,8 +10,6 @@ import asyncio
 import json
 from pathlib import Path
 from shutil import copytree
-from types import SimpleNamespace
-from urllib.parse import quote
 
 import pytest
 import record_fixtures
@@ -22,9 +20,9 @@ from test_collection_store_service import service  # noqa: F401 - the SQLite wor
 from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
 from test_governance_postfilter import AWS_KEY, HIGH_ENTROPY
 
-from exomem import call_ledger, memory_refs, page_ids, semantic_contract, state_migration, structured_collections, writer_lease
+from exomem import call_ledger, state_migration, structured_collections, writer_lease
 from exomem import server as server_module
-from exomem.governance import artifact_census, egress
+from exomem.governance import artifact_census
 
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
@@ -41,7 +39,6 @@ def agent_vault(request):
         root = request.getfixturevalue("service").root
         schema = "Knowledge Base/_Schema"
         copytree(FIXTURE_VAULT / schema, root / schema, dirs_exist_ok=True)
-        assert artifact_census.rebuild_published(root, eager=True)
     else:
         request.getfixturevalue("vault")
     return strategy
@@ -299,41 +296,50 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
 
 
 @pytest.mark.parametrize("agent_vault", ["sqlite", "markdown-items"], indirect=True)
-def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_vault) -> None:
-    """An enum refusal used to leave an agent without values it could use to resume the held write."""
-    declaration = "[42, true, 1.0e+20, low, high]"
-    declared = [42, True, 1.0e20, "low", "high"]
-    offered = [42, True, "low", "high"]
+def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_vault, monkeypatch) -> None:
+    """The default owner can discover a severity label and correct a held write."""
+    declared = [42, True, 1.0e20, "low", "high severity"]
+    omitted = ["abcdefg.abcd", "[Read more](private%20note.md)", "11111111-1111-4111-8111-111111111111", AWS_KEY]
+    declaration = "[42, true, 1.0e+20, low, high severity, " + json.dumps(omitted)[1:]
+    offered = declared
+    suggested = "high severity"
     if agent_vault == "sqlite":
         declaration = declaration[:-1] + ", " + "x" * 17_000 + "]"
-        offered = declared
     else:
         declaration = '["!!int", "2026-02-30", ' + declaration[1:]
-        declared = ["!!int", "2026-02-30", *declared]
+        declared = ["2026-02-30", *declared]
+        offered = [42, True, "low", "high severity"]
+        suggested = True
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
-        f"    severity: {{type: enum, enum: {declaration}}}\n",
+        f"    release_hash: {{type: enum, enum: [{HIGH_ENTROPY}, true]}}\n"
+        f"    severity: {{type: enum, enum: {declaration}}}\n"
+        "    resource_group: {type: enum, enum: [default]}\n",
     ).replace("strategy: markdown-items", f"strategy: {agent_vault}")
-    item = record_fixtures.ledger_item(severity="undecided")
+    item = record_fixtures.ledger_item(severity="undecided", resource_group="default")
     del item["word_count"]
 
     async def scenario(client):
+        if agent_vault == "sqlite":
+            bootstrap = await _call(client, "read_instructions", {"profile": "compact"})
+            assert bootstrap["governance"]["audience"] == "owner"
+            assert bootstrap["governance"]["enabled"] is False
         created = await _call(client, "manage_memory", {"operation": "records.create", "arguments": {
             "manifest_path": record_fixtures.LEDGER_COLLECTION_PATH,
             "manifest_text": manifest, "why": "Track published entries", "scaffold": True}})
         assert "error" not in created, created
         target = {"collection": "Publications ledger"}
-        inspection = await _call(client, "inspect_memory", {"operation": "records.inspect", "arguments": target})
+        with monkeypatch.context() as cold:
+            cold.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum inspect walked the vault"))
+            inspection = await _call(client, "inspect_memory", {"operation": "records.inspect", "arguments": target})
         assert inspection["contract"]["storage"]["strategy"] == agent_vault
-        assert inspection["contract"]["declared_enums"] == {
-            "values": {"severity": declared},
-            "truncated": agent_vault == "sqlite",
-        }
+        projection = inspection["contract"]["declared_enums"]
+        assert projection == {"values": {"release_hash": [True], "severity": declared}, "truncated": True}
+        assert type(projection["values"]["release_hash"][0]) is bool
         refusal = await _call(client, "add_record", {**target, "why": "Log a published entry", "item": item})
         assert refusal.get("error", {}).get("code") == "SCHEMA_ENUM", refusal
         assert refusal["error"]["candidates"] == offered
-        suggested = refusal["error"]["candidates"][1]
-        assert type(suggested) is bool
+        assert type(refusal["error"]["candidates"][1]) is bool
         retry = refusal["error"]["retry"]["arguments"]
         assert list(retry["item"]) == ["severity"]
         added = await _call(client, "add_record", {
@@ -342,11 +348,11 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_va
         return await _call(client, "query_records", target)
 
     rows = _session(build(), scenario)["rows"]
-    assert [row["severity"] for row in rows] == [True]
-    assert type(rows[0]["severity"]) is bool
+    assert [row["severity"] for row in rows] == [suggested]
+    assert type(rows[0]["severity"]) is type(suggested)
 
 
-def test_restricted_enum_hints_follow_terminal_filtering(build, configured_boundary, vault, monkeypatch) -> None:
+def test_restricted_enum_writes_keep_held_without_building_guidance(build, configured_boundary, vault, monkeypatch) -> None:
     config, authenticate = configured_boundary
     scopes = vault / "Knowledge Base/_Governance/scopes"
     (scopes / "inbox.yaml").write_text(
@@ -359,21 +365,9 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     host = json.loads(config.read_text(encoding="utf-8"))
     host["capture_paths"].append(manifest.parent.relative_to(vault).as_posix())
     config.write_text(json.dumps(host), encoding="utf-8")
-    protected_field = f"Follow [[{Path(PRIVATE).stem}]]"
-    identity = "11111111-1111-4111-8111-111111111111"
-    unproved_identity = memory_refs.memory_ref(identity)
-    short_id = page_ids.page_id(identity, PRIVATE, "0" * 64)
-    row_refs = (structured_collections.record_ref(identity, "row"), structured_collections.plan_ref(identity, "row"))
-    encoded_link = f"[Read more]({quote(PRIVATE)})"
-    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, f"See `{unproved_identity}`",
-                           *row_refs, encoded_link, True])
+    declared = json.dumps(["high", f"See [[{PRIVATE}]]", True])
     manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
-        "    word_count:\n      type: integer\n",
-        f"    release_hash: {{type: enum, enum: {declared}}}\n"
-        f"    resource_group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n"
-        f"    {json.dumps(protected_field)}: {{type: enum, enum: [42]}}\n"
-        f"    {json.dumps(f'See ({short_id})')}: {{type: enum, enum: [17]}}\n"
-        f"    {AWS_KEY}: {{type: enum, enum: [false]}}\n",
+        "    word_count:\n      type: integer\n", f"    severity: {{type: enum, enum: {declared}}}\n",
     ), encoding="utf-8")
     authority = state_migration.assert_offline_migration_authority(source="restricted enum fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
@@ -381,61 +375,25 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
 
     async def scenario(client):
         target = {"collection": record_fixtures.LEDGER_COLLECTION_PATH}
-        operation = {"operation": "records.inspect", "arguments": target}
-        item = record_fixtures.ledger_item(release_hash="invalid")
+        item = record_fixtures.ledger_item(severity="invalid")
         del item["word_count"]
-        with monkeypatch.context() as cold:
-            cold.setattr(artifact_census, "published_view", lambda root, **kwargs: None)
-            with monkeypatch.context() as read_only:
-                read_only.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum scan walked the vault"))
-                path_candidates = egress._entry_candidate_paths
-
-                def reject_enum_probe(entry, *args, **kwargs):
-                    assert entry != encoded_link, "generic cross-check probed optional enum material"
-                    return path_candidates(entry, *args, **kwargs)
-
-                read_only.setattr(egress, "_entry_candidate_paths", reject_enum_probe)
-                cold_inspected = await _call(client, "inspect_memory", operation)
-            cold_refused = await _call(client, "add_record", {
-                **target, "why": "Log a cold entry", "item": {**item, "slug": "cold-entry"}})
-        assert cold_inspected["contract"]["declared_enums"] == {"values": {}, "truncated": True}
-        assert cold_inspected["lifecycle_guards"]["expected_container_hash"]
-        assert cold_refused.get("error", {}).get("code") == "SCHEMA_ENUM", cold_refused
-        assert "candidates" not in cold_refused["error"] and cold_refused["error"]["retry"]["arguments"]["held"]
-        assert artifact_census.rebuild_published(vault, eager=True)
-        with monkeypatch.context() as stale_identity:
-            stale_identity.setattr(
-                semantic_contract, "borrow_link_snapshot", lambda root: SimpleNamespace(reference_owners={}),
-            )
-            stale_identity.setattr(
-                memory_refs, "paths_for_optional_references_read_only",
-                lambda *args, **kwargs: pytest.fail("enum entered the identity lookup that can walk the vault"),
-            )
-            inspected = await _call(client, "inspect_memory", operation)
+        with monkeypatch.context() as restricted:
+            restricted.setattr(structured_collections, "enum_choices_for_wire",
+                               lambda *args: pytest.fail("restricted request built guidance"))
+            inspected = await _call(client, "inspect_memory", {"operation": "records.inspect", "arguments": target})
             refused = await _call(client, "add_record", {**target, "why": "Log an entry", "item": item})
-        assert "contract" in inspected, inspected
-        projection = inspected["contract"]["declared_enums"]
-        assert projection["truncated"] is True
-        assert projection["values"] == {"release_hash": [True]}
-        assert type(projection["values"]["release_hash"][0]) is bool
+        assert "declared_enums" not in inspected["contract"]
+        assert inspected["lifecycle_guards"]["expected_container_hash"]
         assert refused.get("error", {}).get("code") == "SCHEMA_ENUM", refused
-        choices = refused["error"]["candidates"]
-        assert choices == [True] and type(choices[0]) is bool
+        assert "candidates" not in refused["error"]
+        assert PRIVATE not in json.dumps([inspected, refused])
         retry = refused["error"]["retry"]["arguments"]
         saved = await _call(client, "add_record", {
-            **target, "why": "Correct the entry", "held": retry["held"], "item": {"release_hash": choices[0]}})
+            **target, "why": "Correct the entry", "held": retry["held"], "item": {"severity": True}})
         assert "error" not in saved, saved
-        bad_target = {**item, "release_hash": True, "slug": "second-entry", AWS_KEY: "invalid"}
-        blocked = await _call(client, "add_record", {**target, "why": "Log another entry", "item": bad_target})
-        assert blocked.get("error", {}).get("code") == "SCHEMA_ENUM", blocked
-        assert "candidates" not in blocked["error"] and "retry" not in blocked["error"], blocked
-        rows = await _call(client, "query_records", target)
-        return inspected, refused, blocked, rows
+        return await _call(client, "query_records", target)
 
-    inspected, refused, blocked, rows = _session(build(), scenario)
-    assert all(target not in json.dumps([inspected, refused, blocked])
-               for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY, unproved_identity, short_id, *row_refs, encoded_link))
-    assert [row["release_hash"] for row in rows["rows"]] == [True]
+    assert [row["severity"] for row in _session(build(), scenario)["rows"]] == [True]
 
 
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:
