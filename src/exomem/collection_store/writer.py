@@ -760,7 +760,9 @@ class CollectionWriter:
             "references": references,
             "inbound": reference_index.inbound(
                 self._operation, self.connection, manifest),
-            "contract": record_governance._inspection_contract(manifest),
+            "contract": record_governance._inspection_contract(
+                manifest, include_enum_guidance=field_plan.owner and unrestricted and self._operation.policy.empty,
+            ),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
             "diagnostics": diagnostics[:64],
@@ -2402,7 +2404,7 @@ class CollectionWriter:
 
     def _validate(
         self, manifest, declared, key, values, *, before=None, operation="append",
-        validate_graph=True, written=None,
+        validate_graph=True, written=None, include_enum_choices=False,
     ):
         _refuse_view_stamp(manifest, values)
         if declared.kind == "intended":
@@ -2418,7 +2420,9 @@ class CollectionWriter:
             planning._validate_declared_text(manifest, values)
             if before is not None:
                 planning._require_same_area_side(before, values)
-        values = records._validate_values(manifest, values, written=written)
+        values = records._validate_values(
+            manifest, values, written=written, enum_guidance_root=self.root if include_enum_choices else None,
+        )
         if declared.validators and validate_graph:
             validators = [types.named_validator(name) for name in declared.validators]
             plans = None

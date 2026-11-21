@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -21,6 +22,7 @@ from . import (
     freshness,
     memory_refs,
     mutation_terminal,
+    page_ids,
     query_compat,
     query_data,
     record_formats,
@@ -177,6 +179,68 @@ def _inspection_json(value: Any, *, depth: int = 0, nodes: list[int] | None = No
 
 def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
+
+
+def allows_enum_guidance(root: Path, *, policy: Any | None = None) -> bool:
+    """Only a proven unrestricted owner in a vault with an empty policy gets hints."""
+    if not egress.unrestricted_content_access(root, effective_principal()):
+        return False
+    if policy is None:
+        active = _AUTHORIZATION_PASS.get()
+        policy = active[1] if active is not None and active[0] == root else egress.policy_module.load(root)
+    return policy.empty
+
+
+def _plain_enum_label(label: str) -> bool:
+    # Guidance has a closed plain-label format. It accepts no link, URI or path delimiters.
+    text = label.strip()
+    return (bool(text) and not page_ids.is_page_id(text)
+            and all(char in " _-" or char.isascii() and char.isalnum() for char in label)
+            and memory_refs.normalize_id(text) is None)
+
+
+def plain_enum_field(field: str) -> bool:
+    # An authored key that routes ordinary egress through the prose scanner is outside this optional format.
+    return _plain_enum_label(field) and not egress._artifact_text_key(field)
+
+
+def plain_enum_choices(choices: list[Any]) -> list[Any]:
+    return [choice for choice in choices if type(choice) is not str or _plain_enum_label(choice)]
+
+
+def _bounded_enum_fields(
+    declarations: Mapping[str, list[Any] | tuple[Any, ...]],
+) -> tuple[dict[str, list[Any]], bool]:
+    fields: dict[str, list[Any]] = {}
+    remaining = collections.ENUM_CHOICES_WIRE_BYTES - 2  # JSON object braces.
+    for name, choices in declarations.items():
+        overhead = len(json.dumps(name)) + len(": ") + len(", ")
+        selected, size = collections.enum_choices_for_wire(choices, remaining - overhead)
+        if selected:
+            fields[name] = selected
+            remaining -= size + overhead
+        # Stop at the first partial declaration. An omitted value may cost more
+        # to encode than the remaining budget and may recur through YAML aliases.
+        if len(selected) != len(choices):
+            return fields, True
+    return fields, False
+
+
+def _inspection_declared_enums(value: Any) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"values", "truncated"}
+        or type(value["truncated"]) is not bool
+        or not isinstance(value["values"], Mapping)
+        or len(value["values"]) > collections._MAX_SCHEMA_FIELDS
+    ):
+        return None
+    declarations = value["values"]
+    if any(_inspection_field_name(name) is None or not isinstance(choices, list) or not choices
+           for name, choices in declarations.items()):
+        return None
+    fields, invalid = _bounded_enum_fields(declarations)
+    return None if invalid else {"values": fields, "truncated": value["truncated"]}
 
 
 def _inspection_observed_values(value: Any) -> dict[str, dict[str, Any]] | None:
@@ -698,6 +762,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans",
             "claims",
             "capture",
+            "declared_enums",
         } or not {
             "collection_id",
             "path",
@@ -755,6 +820,11 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         capture = _inspection_declared_capture(contract.get("capture")) if "capture" in contract else None
         if "capture" in contract and capture is None:
             return None
+        declared_enums = None
+        if "declared_enums" in contract:
+            declared_enums = _inspection_declared_enums(contract["declared_enums"])
+            if declared_enums is None or profile != "records" or strategy not in collections.ITEM_ROW_STORAGE:
+                return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -765,6 +835,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans": [plan for plan in normalized_plans if plan is not None],
             **({"claims": claims} if claims is not None else {}),
             **({"capture": capture} if capture is not None else {}),
+            **({"declared_enums": declared_enums} if declared_enums is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -1832,7 +1903,9 @@ def inspect_collection(
                 "kind": "collection",
                 "report_only": True,
                 "contract": {
-                    **_inspection_contract(manifest),
+                    **_inspection_contract(
+                        manifest, include_enum_guidance=manifest.supports_item_enum_guidance and allows_enum_guidance(root),
+                    ),
                     "plans": [
                         projected
                         for plan in manifest.links.plans
@@ -2245,7 +2318,20 @@ def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]
     return projected
 
 
-def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, Any]:
+def _inspection_contract(
+    manifest: collections.CollectionManifest,
+    *,
+    include_enum_guidance: bool = False,
+) -> dict[str, Any]:
+    enum_values, truncated = ({}, False)
+    if include_enum_guidance and manifest.supports_item_enum_guidance:
+        enum_values, truncated = _bounded_enum_fields({
+            name: spec.enum for name, spec in manifest.schema.fields.items() if spec.enum
+        })
+        plain_enums = {name: plain for name, choices in enum_values.items()
+                       if plain_enum_field(name) and (plain := plain_enum_choices(choices))}
+        truncated = truncated or plain_enums != enum_values
+        enum_values = plain_enums
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,
@@ -2258,6 +2344,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "format_version": manifest.storage.format_version,
         },
         "plans": [],
+        **({"declared_enums": {"values": enum_values, "truncated": truncated}} if enum_values or truncated else {}),
         **(
             {"claims": {name: list(values) for name, values in manifest.claims.items()}}
             if manifest.claims is not None

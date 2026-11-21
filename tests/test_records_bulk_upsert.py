@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from record_fixtures import (
@@ -300,6 +301,20 @@ def test_abort_writes_nothing_and_reports_every_would_be_outcome(vault_root: Pat
     assert any(field["field"] == "bogus" for field in result["rows"][2]["fields"])
     assert all("transition_id" not in row for row in result["rows"])
     assert _state(vault_root) == before
+
+
+def test_bulk_enum_rejection_does_not_render_retry_choices(vault_root: Path, monkeypatch) -> None:
+    text = LEDGER_MANIFEST_TEXT.replace("word_count:\n      type: integer", "word_count: {type: enum, enum: [42, 60]}")
+    (vault_root / LEDGER_COLLECTION_PATH).write_text(text, encoding="utf-8")
+    serialize = Mock(wraps=vault.serialize_frontmatter)
+    monkeypatch.setattr(vault, "serialize_frontmatter", serialize)
+
+    result = _bulk(vault_root, _rows(2, word_count=99))
+
+    assert result["committed"] is False
+    assert _outcomes(result) == ["rejected", "rejected"]
+    assert [row["code"] for row in result["rows"]] == ["SCHEMA_ENUM", "SCHEMA_ENUM"]
+    assert serialize.call_count == 0
 
 
 @pytest.mark.parametrize("vault_root", ["files", "store"], indirect=True)

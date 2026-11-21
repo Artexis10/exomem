@@ -68,6 +68,12 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | `discard` | Discard a held candidate with a reason. |
 | `describe` / `validate` | Read the contract or validate a proposed collection without committing it. |
 
+In a vault with governance disabled, an unrestricted owner can inspect plain
+top-level enum declarations for writable SQLite and Markdown item collections.
+`contract.declared_enums` lists the released values by field. `truncated` reports
+when inspection omits declarations or values. A single-item enum refusal can
+offer fewer choices, based on what the item format can carry.
+
 ## Collections in the store
 
 An admitted collection keeps its canonical declaration, rows, versions and audit

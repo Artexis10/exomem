@@ -70,6 +70,9 @@ _PRESENTATION_SCALAR_TYPES = frozenset(
 _MAX_DISCOVERY_CANDIDATES = 512
 _MAX_SCHEMA_FIELDS = 128
 _MAX_SCHEMA_DEPTH = 8
+_MAX_ENUM_VALUES = 64
+# Bound the published enum contract even when YAML aliases repeat a large value.
+ENUM_CHOICES_WIRE_BYTES = 16 * 1024
 _MAX_FROZEN_VALUES = 256
 _MAX_INFERENCE_PROVENANCE = 32
 _MAX_PATH_BYTES = 1024
@@ -196,7 +199,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "required": {"type": "boolean", "default": False},
             "enum": {
                 "type": "array",
-                "maxItems": 64,
+                "maxItems": _MAX_ENUM_VALUES,
                 "items": {"type": ["string", "integer", "number", "boolean"]},
             },
             "items": {"$ref": "#/$defs/field"},
@@ -1098,6 +1101,11 @@ class CollectionManifest:
     #: How the store derives this collection's item keys. It is store state, not manifest text: the store
     #: records it at creation and the writer overlays it on every manifest it hands out.
     item_key_scheme: str = item_keys.HASHED_V1
+
+    @property
+    def supports_item_enum_guidance(self) -> bool:
+        """Whether enum guidance applies to this collection's writable Records item rows."""
+        return self.semantic_profile == "records" and self.storage.item_rows and not self.derived
 
 
 def ignored_recipes_diagnostic(manifest: CollectionManifest) -> CollectionDiagnostic | None:
@@ -3236,7 +3244,7 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     enum_raw = raw.get("enum", [])
     if enum_raw is None:
         enum_raw = []
-    if not isinstance(enum_raw, list) or len(enum_raw) > 64:
+    if not isinstance(enum_raw, list) or len(enum_raw) > _MAX_ENUM_VALUES:
         raise CollectionError("INVALID_ITEM_SCHEMA", "enum values must be bounded")
     enum = tuple(enum_raw)
     if any(type(value) not in {str, int, float, bool} for value in enum):
@@ -3532,6 +3540,29 @@ def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[s
             )
         join[record_field] = plan_field
     return MappingProxyType(join)
+
+
+def enum_choices_for_wire(
+    choices: list[Any] | tuple[Any, ...], budget: int = ENUM_CHOICES_WIRE_BYTES
+) -> tuple[list[Any], int]:
+    """Keep enum choices that fit in the reply, with their JSON types and declared order."""
+    selected: list[Any] = []
+    size = 2  # JSON list brackets.
+    for choice in choices[:_MAX_ENUM_VALUES]:
+        if type(choice) not in {str, bool, int, float}:
+            continue
+        if isinstance(choice, str) and len(choice) > budget - size:
+            continue
+        try:
+            if isinstance(choice, str):
+                choice.encode("utf-8")
+            width = len(json.dumps(choice, allow_nan=False)) + bool(selected)
+        except ValueError:
+            continue
+        if size + width <= budget:
+            selected.append(choice)
+            size += width
+    return selected, size
 
 
 def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool = False) -> None:

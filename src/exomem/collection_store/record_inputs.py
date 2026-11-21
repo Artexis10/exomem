@@ -176,7 +176,7 @@ def append(writer, row, manifest, declared, arguments):
         views.store_identity(writer.connection), writer._container(row), key, values, body,
         writer._item(manifest.collection_id, key), resumed, held_basis, {})
     try:
-        candidate.values = writer._validate(manifest, declared, key, values)
+        candidate.values = writer._validate(manifest, declared, key, values, include_enum_choices=True)
         candidate.body, _ = records._normalize_item_origin(writer.root, manifest, key=key, values=candidate.values,
             body=body, prior_body=None, item_path=lambda: None, render=lambda value: value,
             prepare_inputs=False, _canonical_owner=True)
@@ -241,7 +241,7 @@ def update(writer, row, manifest, declared, arguments):
         supplied_body=body)
     try:
         candidate.values = writer._validate(manifest, declared, key, final, before=old_values, operation=operation,
-                                            written=changes)
+                                            written=changes, include_enum_choices=True)
     except collections.CollectionError as error:
         if resumed and resumed["kind"] == "view-correction":
             raise

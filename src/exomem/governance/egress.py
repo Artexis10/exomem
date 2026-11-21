@@ -6283,6 +6283,49 @@ def postfilter(
         return value
 
 
+def _record_enum_declarations(response: Any) -> dict[str, Any] | None:
+    contract = response.get("contract") if isinstance(response, Mapping) else None
+    enums = contract.get("declared_enums") if isinstance(contract, Mapping) else None
+    return enums if isinstance(enums, dict) else None
+
+
+def _released_enum_choices(before: Any, after: Any) -> list[Any]:
+    if not isinstance(before, list) or not isinstance(after, list) or len(before) != len(after):
+        return []
+    return [choice for original, choice in zip(before, after, strict=True)
+            if type(choice) is type(original) and choice == original]
+
+
+def _record_enum_authorized_now(root: Path) -> bool:
+    from .. import record_governance
+
+    with policy_module.outside_request_policy_snapshot():
+        return record_governance.allows_enum_guidance(root, policy=policy_module.load(root))
+
+
+def _release_record_enum_declarations(root: Path, before: dict[str, Any], result: Any) -> bool:
+    after = _record_enum_declarations(result)
+    if after is None:
+        return False
+    if not _record_enum_authorized_now(root):
+        result["contract"].pop("declared_enums", None)
+        return False
+    declared, released = before["values"], after.get("values", {})
+    delivered = {}
+    blocked = False
+    for field, choices in released.items():
+        admitted = _released_enum_choices(declared.get(field), choices)
+        if admitted:
+            (scanned_field, *scanned_choices), hit = scrubber.scrub_value([field, *admitted])
+            blocked = blocked or hit
+            if scanned_field == field and (kept := _released_enum_choices(admitted, scanned_choices)):
+                delivered[scanned_field] = kept
+    after["values"] = delivered
+    if delivered != declared:
+        after["truncated"] = True
+    return blocked
+
+
 def _postfilter(
     command_name: str,
     result: Any,
@@ -6368,6 +6411,7 @@ def _postfilter(
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
+        record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
         result = _withheld_cross_check(
             vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding,
@@ -6391,6 +6435,8 @@ def _postfilter(
         return cleaned
     with call_spans.span("egress.scrub"):
         cleaned, blocked = scrubber.scrub_value(result)
+        if record_enums is not None:
+            blocked = _release_record_enum_declarations(vault_root, record_enums, cleaned) or blocked
     if blocked:
         _record_credential_block()
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
@@ -6574,6 +6620,18 @@ def postfilter_error(
         if value is None or value == code:
             continue
         cleaned = _clean(value)
+        if (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
+                and isinstance(value, Mapping) and isinstance(value.get("allowed"), list)
+                and isinstance(cleaned, dict)):
+            allowed = cleaned.pop("allowed", None)
+            if value.get("field") != cleaned.get("field") or value.get("retry_with") != cleaned.get("retry_with"):
+                cleaned.pop("retry_with", None)
+            elif isinstance(allowed, list) and _record_enum_authorized_now(vault_root):
+                with call_spans.span("egress.scrub"):
+                    neutral, hit = scrubber.scrub_value(allowed)
+                blocked = blocked or hit
+                if choices := _released_enum_choices(value.get("allowed"), neutral):
+                    cleaned["allowed"] = choices
         if cleaned != value:
             _rewrite_error_attribute(error, name, cleaned)
     if blocked:
