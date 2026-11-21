@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 from _public_call import public_call
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from fastmcp import Client
+from test_collection_store_migration import env as store_env  # noqa: F401
 from test_derived_identifier_egress import (
     _WITHHELD_TARGET,
     _WRITE_SCOPE,
@@ -138,6 +140,279 @@ def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
             assert picked["id"] == error["candidates"][0]["id"]
 
     asyncio.run(run())
+
+
+def test_records_receipts_name_the_item_after_save_and_edit(build) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            manifest = records_manifest(join=False).replace(
+                "  fields:\n", "  fields:\n    condition: {type: string}\n",
+            )
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": manifest,
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            selector = {"collection": RECORDS_PATH, "why": "Track dispatch"}
+            saved = await _tool(client, "add_record", {**selector, "item": {
+                "occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch",
+            }})
+            rows = (await _tool(client, "query_records", {"collection": RECORDS_PATH}))["rows"]
+            updated = await _tool(client, "edit_record", {
+                **selector, "record": rows[0]["id"], "changes": {"condition": "intact"},
+            })
+
+            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
+            assert updated["user_summary"].startswith("Updated -> Panel shipment (")
+            assert saved["paths"] == updated["paths"]
+
+    asyncio.run(run())
+
+
+def test_planning_receipt_names_the_item(build) -> None:
+    from lifecycle_fixtures import PLANNING_PATH, planning_manifest
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _tool(client, "manage_memory", {"operation": "plans.create", "arguments": {
+                "manifest_path": PLANNING_PATH, "manifest_text": planning_manifest(),
+                "why": "Track the installation", "scaffold": True,
+            }})
+            saved = await _tool(client, "add_plan_item", {
+                "collection": PLANNING_PATH, "item": {"title": "Install the panel"},
+                "why": "Track the installation",
+            })
+
+            item = (await _tool(client, "query_plan_items", {"collection": PLANNING_PATH}))["rows"][0]
+            edited = await _tool(client, "edit_plan_item", {
+                "collection": PLANNING_PATH, "plan_item": item["id"], "why": "Record the mounting points",
+                "body": "Use the lower frame anchors.",
+            })
+
+            assert saved["user_summary"].startswith("Saved -> Install the panel (")
+            assert edited["user_summary"].startswith("Updated -> Install the panel (")
+            assert saved["paths"] == edited["paths"]
+
+    asyncio.run(run())
+
+
+def test_episode_receipt_names_the_saved_source(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            saved = await _tool(client, "save_episode", {
+                "subject": "Panel installation",
+                "summary": "Checked the fit before fastening.",
+                "worked_on": ["Verified the panel alignment."],
+            })
+            assert saved["user_summary"].startswith("Saved -> Panel installation (")
+            assert saved["path"].endswith(".md")
+
+    asyncio.run(run())
+
+
+def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/Records/item.md"
+    page = vault / path
+    page.parent.mkdir(exist_ok=True)
+    raw = b"---\r\ntitle: Panel shipment\r\n---\r\n\r\nFirst line\r\nSecond line\r\n"
+    page.write_bytes(raw)
+    result = {
+        "user_summary": f"Updated -> {path} (personal Exomem)",
+        "paths": [path],
+        "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
+        "after_item_hash": vault_module.content_hash(raw.decode()),
+    }
+
+    with request_scope(owner_principal()):
+        filtered = egress.filter_withheld_entries(vault, result, _item_receipt=True)
+        assert filtered["user_summary"] == "Updated -> Panel shipment (personal Exomem)"
+        page.write_bytes(raw.replace(b"Panel shipment", b"Moved on"))
+        assert egress.filter_withheld_entries(vault, result, _item_receipt=True) == result
+
+
+def test_replayed_file_receipt_uses_the_committed_recipe_until_access_is_configured(build, vault, monkeypatch) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    from exomem import access
+    from exomem.governance import egress
+
+    original_format = egress._name_receipt_title
+
+    def configure_access_after_formatting(result, path, title):
+        named = original_format(result, path, title)
+        assert "-> Panel shipment (" in named["user_summary"]
+        access.access_config_path(vault).write_text(
+            "excluded: [Records/Deliveries/Events]\n", encoding="utf-8",
+        )
+        return named
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            manifest = records_manifest(join=False).replace(
+                "item_schema:\n", "item_presentation:\n  version: 1\n  title: label\nitem_schema:\n",
+            ).replace("[occurred_on, title, event_type]", "[occurred_on, label, event_type]").replace(
+                "    title:\n", "    alternate: {type: string}\n    label:\n",
+            )
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": manifest,
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            arguments = {"collection": RECORDS_PATH, "why": "Track dispatch", "item": {
+                "occurred_on": "2026-02-01", "label": "Panel shipment",
+                "alternate": "Warehouse alias", "event_type": "dispatch",
+            }}
+            call = public_call("add_record", arguments)
+            meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: "dispatch-shipment"}
+            saved = (await client.call_tool(*call, meta=meta)).structured_content
+            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
+            path = saved["paths"][0]
+            committed = (vault / path).read_bytes()
+
+            declaration = vault / RECORDS_PATH
+            text = declaration.read_text(encoding="utf-8")
+            declaration.write_text(text.replace("  title: label\n", "  title: alternate\n"), encoding="utf-8")
+            replay = (await client.call_tool(*call, meta=meta)).structured_content
+            assert "-> Panel shipment (" in replay["user_summary"]
+            assert replay["after_item_hash"] == saved["after_item_hash"]
+
+            with monkeypatch.context() as patch:
+                patch.setattr(egress, "_name_receipt_title", configure_access_after_formatting)
+                excluded = (await client.call_tool(*call, meta=meta)).structured_content
+            assert excluded["user_summary"].endswith(f"-> {path} (personal Exomem)")
+            assert excluded["item_key"] == saved["item_key"]
+            assert excluded["after_item_hash"] == saved["after_item_hash"]
+
+            access.access_config_path(vault).write_text("readonly: []\n", encoding="utf-8")
+            configured = (await client.call_tool(*call, meta=meta)).structured_content
+            assert configured["user_summary"] == excluded["user_summary"]
+            assert (vault / path).read_bytes() == committed
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("refused_at", [1, 2], ids=["initial-read", "guard-recheck"])
+def test_receipt_sharing_refusal_uses_one_attempt(vault, monkeypatch, refused_at) -> None:
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/Records/item.md"
+    page = vault / path
+    page.parent.mkdir(exist_ok=True)
+    raw = b"---\ntitle: Panel shipment\n---\n"
+    page.write_bytes(raw)
+    receipt = {
+        "user_summary": f"Saved -> {path} (personal Exomem)",
+        "paths": [path],
+        "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
+        "after_item_hash": vault_module.content_hash(raw.decode()),
+    }
+    original_read = vault_module._read_bounded_guarded_snapshot
+    original_platform = vault_module._uses_windows_guarded_reader
+    attempts = 0
+
+    def read_shared_file(root, target, limit):
+        nonlocal attempts
+        attempts += 1
+        if attempts == refused_at:
+            cause = PermissionError("file is in use")
+            cause.winerror = 32
+            raise vault_module.PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from cause
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module, "_uses_windows_guarded_reader", original_platform)
+            return original_read(root, target, limit)
+
+    monkeypatch.setattr(vault_module, "_uses_windows_guarded_reader", lambda: True)
+    monkeypatch.setattr(vault_module, "_read_bounded_guarded_snapshot", read_shared_file)
+    with request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(vault, receipt, _item_receipt=True) == receipt
+    assert attempts == refused_at
+
+
+def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypatch) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    from exomem import reserved_paths
+    from exomem.governance import egress, store
+
+    name_item = egress._name_committed_file_item
+    observed = threading.Event()
+
+    def read_while_locked(root, result, path, version):
+        acquired, release, expired = threading.Event(), threading.Event(), threading.Event()
+
+        def hold():
+            with (
+                reserved_paths._subsystem_authority_scope("governance.store"),
+                reserved_paths._identity_coordination_scope(
+                    vault, descriptor_ids=("governance-store",), identity_may_change=False,
+                ),
+            ):
+                acquired.set()
+                if not release.wait(3):
+                    expired.set()
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert acquired.wait(3)
+            assert (vault / path).is_file()
+            named = name_item(root, result, path, version)
+            assert not expired.is_set()
+            observed.set()
+            return named
+        finally:
+            release.set()
+            holder.join(3)
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": records_manifest(join=False),
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            store.open_connection(vault).close()
+            monkeypatch.setattr(egress, "_name_committed_file_item", read_while_locked)
+            result = await _tool(client, "add_record", {"collection": RECORDS_PATH,
+                "item": {"occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch"},
+                "why": "Track dispatch",
+            })
+            assert observed.is_set()
+            assert result["outcome"] == "committed"
+            assert result["user_summary"].startswith("Saved -> Panel shipment (")
+
+    asyncio.run(run())
+
+
+def test_sqlite_write_keeps_its_receipt_summary(store_env, capsys, monkeypatch) -> None:  # noqa: F811
+    from conftest import _drain_background_threads
+    from test_collection_store_migration import WORK, legacy_vault, migrate, printed
+
+    root = legacy_vault(store_env)
+    assert migrate(root, "prepare", operator=False) == 0
+    printed(capsys)
+    assert migrate(root, "apply") == 0
+    printed(capsys)
+    _drain_background_threads()
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    async def run() -> None:
+        async with Client(server_module.build_server(require_auth=False)) as client:
+            saved = await _tool(client, "add_record", {
+                "collection": WORK, "why": "Track dispatch", "item": {"title": "Panel shipment"},
+            })
+            assert saved["outcome"] == "committed"
+            assert saved["user_summary"].startswith(f"Saved -> {saved['paths'][0]} (")
+            assert saved["item_key"] and saved["after_item_hash"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        writer_lease.reset_managers_for_tests()
 
 
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
