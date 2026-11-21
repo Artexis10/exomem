@@ -687,8 +687,8 @@ def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class UploadFiles(Wire):
     lane: Literal["source", "evidence", "import"] = Field(
-        description="Original, proof, or a local-only folder archive.")
-    expected_sha256: str | None = Field(default=None, description="SHA-256 of the file you intend to send.")
+        description="Original, proof, or personal-server folder archive.")
+    expected_sha256: str | None = Field(default=None, description="SHA-256 of the file to upload.")
     import_identity: str | None = Field(default=None, description="Durable external ID for a held Source upload.")
     hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
     detail: Detail | None = _DETAIL

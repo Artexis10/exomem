@@ -1570,7 +1570,7 @@
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Original, proof, or a local-only folder archive.",
+          "description": "Original, proof, or personal-server folder archive.",
           "enum": [
             "source",
             "evidence",
@@ -1580,7 +1580,7 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of the file you intend to send."
+          "description": "SHA-256 of the file to upload."
         },
         "import_identity": {
           "type": "string",
