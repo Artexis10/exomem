@@ -339,8 +339,8 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path
     assert [ref.rpartition("/")[2] for ref in guest["overflow_refs"]] == ["studio-equipment-log.md#crazing"]
 
 
-def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real-model replays used the block when it was read last with its framing first, and mostly ignored it mid-packet."""
+def test_the_positions_block_leads_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later refactor that puts the block back at the end or mid-packet loses the first-answer effect measured in replays."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
     _ready(vault)
@@ -348,8 +348,28 @@ def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(v
     packet = _activate(vault, turn=TURN, max_chars=8000)
 
     assert "served_context_id" in packet
-    assert list(packet)[-1] == "positions"
+    assert list(packet)[0] == "positions"
     assert list(packet["positions"]) == ["about", "state", "items", "overflow_refs", "omitted"]
+    # The packet's reported size is still the size of what is sent once the block has moved.
+    sent = json.dumps(
+        {**packet, "budget": {key: value for key, value in packet["budget"].items() if key != "serialized_chars"}},
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    assert packet["budget"]["serialized_chars"] == len(sent)
+
+
+def test_the_block_that_is_served_asks_for_the_position_first_and_never_for_agreement(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reverting the framing to the older passage still equals `positions.ABOUT`, so the served words are checked for the contract."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    about = _activate(vault, turn=TURN, max_chars=8000)["positions"]["about"]
+
+    assert about == positions.ABOUT
+    assert "open your first answer with it" in about
+    assert "state the recorded position before you answer yes or no" in about
+    assert "agree" not in about.lower()
 
 
 def test_a_vault_category_that_declares_the_trait_is_selected(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -485,3 +505,25 @@ def test_the_hook_renders_every_served_position_whole_under_its_framing() -> Non
     assert all(positions.item_line(item) in lines for item in block["items"])
     assert positions.overflow_line(block["overflow_refs"], block["omitted"]) in lines
     assert hook._POSITIONS_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["positions_max_chars"][1]
+
+
+def test_the_hook_renders_the_positions_before_the_map_and_the_task_leads() -> None:
+    """The service leads its response with the block; a hook that renders it after the map and the leads buries it again."""
+    packet = {
+        "map": {"generation": "map", "ref": "exomem://map", "items": [{"title": "Kiln log", "ref": "exomem://vault/log.md"}]},
+        "task_context": {
+            "state": "ready", "methods": {"reset": False, "items": []},
+            "candidates": [{"ref": "exomem://vault/log.md", "source_ref": "exomem://vault/log.md", "title": "Kiln log", "reason": "Named.", "read_ref": "exomem://vault/log.md"}],
+        },
+        "positions": {
+            "state": "ready", "about": positions.ABOUT, "overflow_refs": [], "omitted": 0,
+            "items": [{"ref": "exomem://vault/log.md#first", "text": "I prefer a slow cool below 600 degrees", "title": "Kiln log", "date": "2026-03-02"}],
+        },
+    }
+
+    text, *_ = hook._format_map_with_slice(packet, 4000, "")
+
+    lines = text.splitlines()
+    leading = next(index for index, line in enumerate(lines) if line.startswith("- positions:"))
+    assert leading < next(index for index, line in enumerate(lines) if line.startswith("- map:"))
+    assert leading < next(index for index, line in enumerate(lines) if line.startswith("- task lead:"))
