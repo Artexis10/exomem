@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -245,6 +245,13 @@ def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
     return value == "1"
 
 
+class StopSignal(Protocol):
+    """What a model-turn wait polls to end early: a `threading.Event`, or any object that answers
+    `is_set()` the same way."""
+
+    def is_set(self) -> bool: ...
+
+
 class ModelBusyError(RuntimeError):
     """Retryable refusal when admitted model work would consume general capacity."""
 
@@ -309,7 +316,7 @@ class ModelAdmissionGate:
     @contextlib.contextmanager
     def execution(
         self, *, wait: bool = True, work_class: str | None = None,
-        cancel_event: threading.Event | None = None,
+        cancel_event: StopSignal | None = None,
     ):
         with self.admission():
             if self._fair:
@@ -335,7 +342,7 @@ class ModelAdmissionGate:
         return foreground
 
     @contextlib.contextmanager
-    def _fair_execution(self, *, wait: bool, work_class: str, cancel_event: threading.Event | None):
+    def _fair_execution(self, *, wait: bool, work_class: str, cancel_event: StopSignal | None):
         if work_class not in {"foreground", "bulk"}:
             raise ValueError("unknown model work class")
         owner = threading.get_ident()
@@ -404,9 +411,9 @@ def _process_gate() -> ModelAdmissionGate:
         return _gate
 
 
-def model_execution(*, wait: bool = True):
+def model_execution(*, wait: bool = True, cancel_event: StopSignal | None = None):
     """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
-    return _process_gate().execution(wait=wait)
+    return _process_gate().execution(wait=wait, cancel_event=cancel_event)
 
 
 def model_admission():
