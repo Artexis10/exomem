@@ -321,13 +321,23 @@ def _identity_json(identity: Any) -> str | None:
     return encoded if json.loads(encoded) == identity else None
 
 
-def _weigh(key: tuple, source: _VerifiedSource) -> int:
-    """The bytes one memory entry keeps alive: its key's path and hash, its record and its Source.
+def _tuple_size(value: Any) -> int:
+    """The bytes a proof value keeps alive: a tuple of strings, numbers and nested tuples."""
+    weight = sys.getsizeof(value)
+    if isinstance(value, tuple):
+        weight += sum(_tuple_size(item) for item in value)
+    return weight
 
-    The vault root, the scope and the proof are shared by many entries and are not counted. Every
-    `PassageChunk` field is weighed, so a field added there is counted here too.
+
+def _weigh(key: tuple, source: _VerifiedSource, proof: tuple) -> int:
+    """The bytes one memory entry keeps alive: its key's path and hash, its proof, its record and Source.
+
+    The vault root and the scope are shared by every entry and are not counted. Each request builds
+    its own proof, so every entry is charged for one in full; entries that share a proof are
+    over-counted, which keeps the bound true. Every `PassageChunk` field is weighed, so a field
+    added there is counted here too.
     """
-    weight = sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key[2:])
+    weight = sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key[2:]) + _tuple_size(proof)
     weight += sys.getsizeof((None, None))  # The entry's (proof, source) record.
     weight += sys.getsizeof(source) + sys.getsizeof(source.exomem_id)
     weight += sys.getsizeof(source.identity_json) + sys.getsizeof(source.chunks)
@@ -387,7 +397,7 @@ class _VerifiedSources:
                     )
                 self._drop(key)
                 self._entries[key] = (proof, source)
-                self._held += _weigh(key, source)
+                self._held += _weigh(key, source, proof)
             while self._entries and (
                 len(self._entries) > self.max_entries or self.held_bytes() > self.max_bytes
             ):
@@ -406,11 +416,11 @@ class _VerifiedSources:
     def _drop(self, key: tuple) -> None:
         held = self._entries.pop(key, None)
         if held is not None:
-            self._held -= _weigh(key, held[1])
+            self._held -= _weigh(key, held[1], held[0])
 
 
-# An entry weighs about 850 bytes and each chunk of 500 characters about 900 more, so 16 MiB holds
-# 4096 Sources with about 14,000 chunks among them. `find.unload_ram_caches` releases it with the
+# An entry weighs about 1,450 bytes with its proof, and each chunk of 500 characters about 900 more,
+# so 16 MiB holds 4096 Sources with about 12,000 chunks among them. `find.unload_ram_caches` releases it with the
 # page cache.
 _VERIFIED_SOURCES = _VerifiedSources(max_entries=4096, max_bytes=16 * 1024 * 1024)
 

@@ -1048,7 +1048,7 @@ def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
     it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap. A
     Source identity's strings have no length limit, so its weight must grow with them."""
     memory = passage_evidence._VerifiedSources(max_entries=1000, max_bytes=1 << 40)
-    root, scope, proof = Path("/vault").absolute(), "kb", ("checkpoint", "catalogue", 7)
+    root, scope = Path("/vault").absolute(), "kb"
     for n in range(50):
         chunks = {
             number: passage_evidence.PassageChunk(
@@ -1062,10 +1062,16 @@ def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
         source = passage_evidence._VerifiedSource(
             f"lh{n:03d}gx.6h5l", passage_evidence._identity_json(identity), chunks
         )
+        # Each request builds its own proof, as `find._eligibility_proof` does, so the memory keeps one per entry.
+        checkpoint = freshness.RecallFreshnessCheckpoint(
+            hashlib.sha256(b"instance").hexdigest(), 41 + n, (n, 2 * n, hashlib.sha256(path.encode()).hexdigest()),
+            hashlib.sha256(b"policy").hexdigest(), hashlib.sha256(b"access").hexdigest(),
+        )
+        proof = (checkpoint, hashlib.sha256(f"catalogue {n}".encode()).hexdigest(), 7)
         memory.keep({(root, scope, path, hashlib.sha256(path.encode()).hexdigest()): source}, proof)
 
-    # The root, scope and proof belong to the caller.
-    assert memory.held_bytes() >= bytes_kept_alive(memory._entries, root, scope, proof)
+    # The root and scope belong to the caller.
+    assert memory.held_bytes() >= bytes_kept_alive(memory._entries, root, scope)
 
 
 def test_a_later_search_for_another_passage_of_a_remembered_source_still_finds_it(vault, passage_tools):
