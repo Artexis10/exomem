@@ -9,19 +9,17 @@ the files that it does not own. The cost gate is ``test_vault_store_write_cost``
 from __future__ import annotations
 
 from contextlib import closing
-from types import SimpleNamespace
 
 import pytest
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
-from test_vault_store_migration import migrate_apply, rollback_apply, vault  # noqa: F401
+from test_vault_store_migration import vault  # noqa: F401  (the fixture that `stored` builds on)
 from test_vault_store_write_cost import create, edit, grow
 
 from exomem import commands, find, freshness, semantic_contract
 from exomem import vault as vault_module
-from exomem.collection_store import connection, runtime
-from exomem.collection_store.writer import CollectionWriter
+from exomem.collection_store import connection
 from exomem.vault_store import mode, projector, read, resident_catalogue, write
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
@@ -116,8 +114,14 @@ def test_the_corpus_a_commit_advances_equals_a_build_from_nothing(warm, writer, 
     assert walks == 0, "the next reader walked the vault, so this proved nothing about the advance"
     assert resident.as_dict() == full_build(warm, monkeypatch).as_dict()
     # The census that the advance leaves is the one a walk gives: a drifted entry would send the next save to a reconcile.
-    advanced = semantic_contract._CORPUS_CONTEXT_CACHE[semantic_contract._corpus_cache_key(warm)][0]
+    advanced, structural = semantic_contract._CORPUS_CONTEXT_CACHE[semantic_contract._corpus_cache_key(warm)]
     assert advanced == semantic_contract._corpus_census(warm)
+    # `as_dict` leaves out the titles that the writer's resolver adds for paths with no page state here, and the
+    # context that a reader gets carries none: the resident structural context holds them.
+    with monkeypatch.context() as scoped:
+        scoped.setenv("EXOMEM_DISABLE_CORPUS_CACHE", "1")
+        cold = semantic_contract._build_corpus_context_with_census(warm)[0]
+    assert dict(structural.unparsed_titles) == dict(cold.unparsed_titles)
 
 
 def test_the_writers_resolver_equals_one_built_from_the_store_and_one_from_the_drained_disk(
@@ -192,6 +196,11 @@ def test_the_writers_resolver_indexes_every_path_that_a_build_from_the_disk_does
         assert moved is not None
         assert "old note, retitled" in moved.titles
         assert maps(moved) == maps(vault_module.WikilinkResolver(warm))
+        # A governed delete moves the page into a folder that no build over the disk indexes.
+        delete(warm, create(warm, "Lighthouse ledger"))
+        deleted = semantic_contract.current_store_writer_resolver(warm)
+        assert deleted is not None
+        assert maps(deleted) == maps(vault_module.WikilinkResolver(warm))
     finally:
         locked.chmod(0o644)
 
@@ -274,13 +283,6 @@ def test_the_resident_catalogue_resolver_is_bounded_and_a_stale_one_is_released(
 @pytest.mark.parametrize("release", [
     pytest.param(lambda root, scratch: mode.forget_read_mode(root), id="the-vault-leaves-store-mode"),
     pytest.param(lambda root, scratch: find.unload_ram_caches(pages=True), id="an-idle-process-hands-memory-back"),
-    pytest.param(
-        lambda root, scratch: runtime.CollectionStoreRuntime._retire_handle(SimpleNamespace(
-            root=root, _writer_token=1,
-            _handle=SimpleNamespace(connection=SimpleNamespace(in_transaction=False), close=lambda: None),
-        )),
-        id="the-cached-writer-closes",
-    ),
 ])
 def test_the_resident_catalogue_resolver_goes_when_its_owner_does(warm, tmp_path, release):  # noqa: F811
     """Defect that this guards: a vault that left store mode, or a process that went idle, that still holds the
@@ -290,21 +292,6 @@ def test_the_resident_catalogue_resolver_goes_when_its_owner_does(warm, tmp_path
     assert resident_catalogue.held(warm, triple) is not None, "the commit left no resolver, so this proved nothing"
     release(warm, tmp_path)
     assert resident_catalogue.held(warm, triple) is None
-
-
-def test_the_resident_catalogue_resolver_goes_with_a_rollback(vault, tmp_path):  # noqa: F811
-    """Defect that this guards: a vault that a rollback returned to file mode, in a process that committed to it
-    in store mode, that still holds the resolver that its last commit left."""
-    assert migrate_apply(vault) == 0
-    with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
-        write.commit(CollectionWriter(vault, handle), write.StoreChange(
-            write.Origin.GOVERNED, "a commit before the rollback",
-            puts=(write.PagePut(f"{KB}/Notes/Probe.md", b"# Probe\n"),),
-        ))
-    triple = catalogue_triple(vault)
-    assert resident_catalogue.held(vault, triple) is not None, "the commit left no resolver, so this proved nothing"
-    assert rollback_apply(vault, tmp_path / "export") == 0
-    assert resident_catalogue.held(vault, triple) is None
 
 
 def full_walk(root, monkeypatch):

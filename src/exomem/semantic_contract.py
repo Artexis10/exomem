@@ -3341,7 +3341,8 @@ def _reconcile_markdown_delta(
             # The cold build parses a stored page only when the identity census admits it, and
             # keeps its state when the vault corpus holds it too.
             identity_member = _stored_identity_member(kb_rel + "/", rel_path)
-            included = identity_member and read.corpus_member(rel_path, "vault")
+            corpus_member = read.corpus_member(rel_path, "vault")
+            included = identity_member and corpus_member
             raw = stored_bodies.get(rel_path) if identity_member else None
             try:
                 source = None if raw is None else raw.decode("utf-8")
@@ -3351,7 +3352,10 @@ def _reconcile_markdown_delta(
                 # The cold build's refusal, so that whether a page is accepted never depends on
                 # the cache. A parse that it accepts reads the identity that the state below holds.
                 _strict_page_identity(rel_path, source)
-            if unparsed is not None and rel_path in stored_bodies and not included:
+            # Only a page that a build over the disk indexes but the identity walk prunes (the cold
+            # build's `eligible` less its states); a page outside the vault corpus, such as a trashed
+            # one, is in no resolver.
+            if unparsed is not None and rel_path in stored_bodies and corpus_member and not identity_member:
                 unparsed[rel_path] = vault.display_title_from_bytes(stored_bodies[rel_path], rel_path)
         else:
             identity_member = in_kb and not reference_only_path

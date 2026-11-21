@@ -11,10 +11,12 @@ import pytest
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
 from exomem import held_fs, state_paths
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import capability, connection, replica, schema, views
 from exomem.collection_store.preview import preview_store
 from exomem.collection_store.runtime import CollectionStoreRuntime
+from exomem.vault_store import resident_catalogue
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
 
 
@@ -1394,6 +1396,17 @@ def test_retiring_the_handle_leaves_no_reader_open_on_the_store(runtime):
     with closing(sqlite3.connect(runtime.path, timeout=0)) as raw:
         assert raw.execute("PRAGMA journal_mode=DELETE").fetchone() == ("delete",)
     assert not runtime.path.with_name(runtime.path.name + "-wal").exists()
+
+
+def test_retiring_the_handle_releases_the_resolver_that_its_last_commit_left(runtime):
+    """Defect that this guards: a writer that went idle and closed its handle, in a process that stays up, that
+    still holds the megabytes of link resolver that its last store commit left."""
+    _create(runtime)
+    assert runtime._handle is not None, "no cached writer, so this proved nothing"
+    triple = (1, 1, "store:1:1")
+    resident_catalogue.remember(runtime.root, triple, ({}, vault_module.WikilinkResolver.from_entries(runtime.root, [])))
+    assert runtime.retire_idle_handle()
+    assert resident_catalogue.held(runtime.root, triple) is None
 
 
 def test_closing_the_handle_during_a_lend_lets_the_read_finish_and_closes_that_reader_after(handle):
