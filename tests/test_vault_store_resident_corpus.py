@@ -9,6 +9,7 @@ the files that it does not own. The cost gate is ``test_vault_store_write_cost``
 from __future__ import annotations
 
 import os
+import types
 from contextlib import closing
 
 import pytest
@@ -233,16 +234,28 @@ def test_a_link_to_a_file_that_cannot_be_parsed_is_stored_as_a_build_over_the_di
     assert any("[[Reference/Latin]]" in line for line in resident[0]), resident
 
 
+def add_page(beside, mode):
+    """A new Markdown page next to ``beside``, with the given permission bits."""
+    added = beside.with_name("Added.md")
+    added.write_bytes(b"---\ntitle: A later page\n---\n# A later page\n")
+    added.chmod(mode)
+    return added
+
+
 @pytest.mark.parametrize(("rel", "mode_before", "change"), [
     pytest.param("Reference/Readable.md", 0o644, lambda path: path.chmod(0), id="a-page-the-process-can-no-longer-read"),
     pytest.param("Reference/Locked.md", 0, lambda path: path.chmod(0o644), id="a-page-the-process-can-read-again"),
     pytest.param("Reference/Manual.md", 0o644, lambda path: os.link(path, path.with_suffix(".bin")), id="a-page-that-gains-a-second-link"),
+    pytest.param("Reference/Template.bin", 0o644, lambda path: os.link(path, path.with_name("Added.md")), id="a-new-page-that-is-a-second-link"),
+    pytest.param("Reference/Seed.md", 0o644, lambda path: add_page(path, mode=0), id="a-new-page-the-process-cannot-read"),
 ])
 def test_a_change_to_a_files_mode_or_links_reaches_the_writers_resolver(warm, rel, mode_before, change):  # noqa: F811
     """Defect that this guards: a resident proof that compares the size and mtime of the files and so misses a
     change that neither moves (a page's permissions, or a second hard link) but that decides whether a build
-    over the disk reads its title or indexes it at all. After each change, with no commit and no event, the
-    writer's resolver equals a build over the disk, before and after the next build of the corpus."""
+    over the disk reads its title or indexes it at all, and the same for a new path that the walk leaves out (a
+    second link) or reads as a title-less path (one the process cannot read), which the corpus's page delta must
+    judge as the walk does. After each change, with no commit and no event, the writer's resolver equals a build
+    over the disk, before and after the next build of the corpus."""
     path = keep_file(warm, rel, "---\ntitle: Distinctive Manual\n---\n# Manual\n")
     path.chmod(mode_before)
     try:
@@ -351,6 +364,41 @@ def test_the_disk_census_of_a_store_vault_is_the_full_walk_less_the_stored_pages
     assert census == frozenset(entry for entry in walked if entry[0] not in held)
     for rel in (f"{KB}/Records/Work/view.md", "Reference/Manual.md", "Loose.md"):
         assert rel in {entry[0] for entry in census}
+
+
+class WithoutLinkCount:
+    """A directory entry as Windows lists it: ``stat()`` reports no link count (the documented ``os.DirEntry.stat``)."""
+
+    def __init__(self, entry):
+        self._entry = entry
+
+    def __getattr__(self, name):
+        return getattr(self._entry, name)
+
+    def stat(self, **kwargs):
+        info = self._entry.stat(**kwargs)
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        return types.SimpleNamespace(**{**fields, "st_nlink": 0})
+
+
+@pytest.mark.parametrize("withheld", [False, True], ids=["a-listing-that-reports-links", "a-listing-that-withholds-them"])
+def test_a_patched_census_entry_equals_the_walks_for_the_same_file(warm, monkeypatch, withheld):  # noqa: F811
+    """Defect that this guards: a census entry that the walk and the patch of a save record differently (a
+    listing that withholds the link count, as Windows does, against the stat that the patch takes), so that every
+    census read after a save sees a changed file and builds the corpus from nothing. The entry of the same file,
+    with a second hard link, is the same from the walk and from the patch, and holds that link."""
+    page = keep_file(warm, "Reference/Linked.md", "---\ntitle: Linked\n---\n")
+    os.link(page, page.with_name("Linked copy.bin"))
+    if withheld:
+        listing = types.SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+        listing.scandir = lambda path: (WithoutLinkCount(entry) for entry in os.scandir(path))
+        monkeypatch.setattr(semantic_contract, "os", listing)
+    walked = {entry[0]: entry for entry in semantic_contract._disk_page_census(warm)}["Reference/Linked.md"]
+    patched = semantic_contract._patch_markdown_census(
+        warm, (), changed_paths=("Reference/Linked.md",), deleted_paths=()
+    )
+    assert patched == (walked,)
+    assert walked[5] == 2, "the entry holds the link count that the vault walk's rule reads"
 
 
 def test_an_alias_below_the_knowledge_base_still_refuses_the_census(warm):  # noqa: F811

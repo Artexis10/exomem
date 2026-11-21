@@ -2669,7 +2669,9 @@ def _markdown_name(name: str) -> bool:
 _FileEntry = tuple[str, str, int, int, int, int, int, int]
 
 
-def _file_entry(rel: str, info: os.stat_result) -> _FileEntry:
+def _file_entry(
+    rel: str, info: os.stat_result, path: str | os.PathLike[str], *, follow_symlinks: bool = True
+) -> _FileEntry:
     """The census entry of a Markdown file, from the one stat that the walk takes of it.
 
     Size and mtime say that its bytes may have changed. The mode (type and permission bits), the link
@@ -2677,7 +2679,14 @@ def _file_entry(rel: str, info: os.stat_result) -> _FileEntry:
     hard link, and a page that the process cannot read has no title. A chmod, a link or a chown moves
     neither size nor mtime. An access-control list or a security label is in no stat result, so no entry
     carries it.
+
+    The link count is the one that the vault walk's rule reads (``lstat``). A directory entry's own stat
+    withholds it (zero) on Windows, so only there is the file stat'ed again, as ``semantic_census`` does
+    for the file id; on POSIX the entry costs no further stat. A walk and a patch then record the same
+    entry for the same file on every platform.
     """
+    if not info.st_nlink:
+        info = os.stat(path, follow_symlinks=follow_symlinks)
     return (rel, "f", info.st_size, info.st_mtime_ns, info.st_mode, info.st_nlink, info.st_uid, info.st_gid)
 
 
@@ -2739,7 +2748,7 @@ def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add(_file_entry(rel, info))
+            entries.add(_file_entry(rel, info, child.path, follow_symlinks=False))
 
     def loose_walk(directory: Path, directory_rel: str) -> None:
         # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
@@ -2765,7 +2774,7 @@ def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
                     # that vanished between the listing and the stat is not in
                     # this snapshot.
                     continue
-                entries.add(_file_entry(rel, info))
+                entries.add(_file_entry(rel, info, child.path))
 
     try:
         try:
@@ -3148,7 +3157,7 @@ def _patch_markdown_census(
         except FileNotFoundError:
             entries.pop(rel_path, None)
         else:
-            entries[rel_path] = _file_entry(rel_path, info)
+            entries[rel_path] = _file_entry(rel_path, info, path)
     return tuple(sorted(entries.values()))
 
 
@@ -3314,7 +3323,10 @@ def _reconcile_markdown_delta(
 
     In store mode a stored page is read from the store, as the cold build reads
     it, and judged by the cold build's rules for a stored page, its strict
-    frontmatter parse included.
+    frontmatter parse included. A file is judged as the walk judges it
+    (``vault.walk_vault_md_admits``) and read as the cold build reads it
+    (``_read_loose_page``), so that a new hard link or a file that cannot be read
+    is what a build from nothing makes of it.
     """
     from . import capture_inventory
 
@@ -3331,6 +3343,7 @@ def _reconcile_markdown_delta(
     owned = _store_census_owns(root)
     stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
     unparsed = None if context.unparsed_titles is None else dict(context.unparsed_titles)
+    walk_listings: dict[Path, frozenset[str] | None] = {}
     stored_bodies: Mapping[str, bytes] = {}
     if stored:
         from .vault_store import read
@@ -3380,16 +3393,18 @@ def _reconcile_markdown_delta(
                 unparsed[rel_path] = vault.display_title_from_bytes(stored_bodies[rel_path], rel_path)
         else:
             identity_member = in_kb and not reference_only_path
-            included = not vault.in_excluded_scan_dir(rel_path) and (
-                ".sync-conflict-" not in PurePosixPath(rel_path).name
-            )
+            # The walk's own rule (`vault.walk_vault_md_admits`), as the cold build gets its paths from the
+            # walk: a hard link, an alias, a conflict copy or a path in a skipped folder is no page of the corpus.
+            included = vault.walk_vault_md_admits(root, source_path, walk_listings)
             if in_kb:
                 source = _identity_guarded_delta_source(root, rel_path)
+            elif included:
+                source = _read_loose_page(root, rel_path, source_path)
+                if source is None and unparsed is not None:
+                    # The cold build indexes such a path with the title that it can read, and no page state.
+                    unparsed[rel_path] = vault.WikilinkResolver.read_title(source_path)
             else:
-                try:
-                    source = _read_corpus_source(root, source_path)
-                except FileNotFoundError:
-                    source = None
+                source = None
         if capture_inventory.raw_path(root, rel_path):
             raw_changes[rel_path] = (capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
                                      if source is not None else None)
@@ -4681,19 +4696,9 @@ def _build_corpus_context_uncached(
         request_budget.checkpoint()
         if rel_path.startswith(kb_prefix):
             continue
-        try:
-            source = _read_corpus_source(root, disk_path)
-        except (OSError, UnicodeDecodeError) as error:
-            if (
-                activation.is_managed_governed_path(root, disk_path)
-                and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
-            ):
-                raise activation_manifest.ActivationManifestError(
-                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
-                    f"could not read governed semantic page {disk_path}: {error}",
-                ) from error
-            continue
-        consume(rel_path, source)
+        source = _read_loose_page(root, rel_path, disk_path)
+        if source is not None:
+            consume(rel_path, source)
     if candidate is not None:
         states[candidate.path] = candidate
         identity_census = identity_census.with_page(
@@ -4742,6 +4747,26 @@ def _unparsed_titles(
         elif rel in bodies:  # a stored page that the store no longer holds is not in a build either
             titles[rel] = vault.display_title_from_bytes(bodies[rel], rel)
     return MappingProxyType(titles)
+
+
+def _read_loose_page(root: Path, rel_path: str, disk_path: Path) -> str | None:
+    """The text of a Markdown page outside the Knowledge Base that the walk yields; None when it is skipped.
+
+    The cold build and the page delta share this rule. A file that is not UTF-8 text, or that the process
+    cannot read, is no page state; one in a read-write governed folder refuses the build instead.
+    """
+    try:
+        return _read_corpus_source(root, disk_path)
+    except (OSError, UnicodeDecodeError) as error:
+        if (
+            activation.is_managed_governed_path(root, disk_path)
+            and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+        ):
+            raise activation_manifest.ActivationManifestError(
+                "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+                f"could not read governed semantic page {disk_path}: {error}",
+            ) from error
+        return None
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:
