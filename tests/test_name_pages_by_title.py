@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -210,9 +211,7 @@ def test_episode_receipt_names_the_saved_source(build) -> None:
     asyncio.run(run())
 
 
-def test_committed_crlf_title_uses_the_logical_markdown_under_policy(vault) -> None:
-    from test_governance_egress import _external, write_rule, write_scope
-
+def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
     from exomem.governance import egress
     from exomem.governance.principal import owner_principal
 
@@ -221,31 +220,99 @@ def test_committed_crlf_title_uses_the_logical_markdown_under_policy(vault) -> N
     page.parent.mkdir(exist_ok=True)
     raw = b"---\r\ntitle: Panel shipment\r\n---\r\n\r\nFirst line\r\nSecond line\r\n"
     page.write_bytes(raw)
-    write_scope(vault, paths="Records/**")
-    write_rule(vault, ceiling=0)
-    version = vault_module.content_hash(raw.decode())
-    with request_scope(_external()):
-        assert egress._committed_file_item_title(vault, path, version, _external()) is None
+    result = {
+        "user_summary": f"Updated -> {path} (personal Exomem)",
+        "paths": [path],
+        "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
+        "after_item_hash": vault_module.content_hash(raw.decode()),
+    }
+
     with request_scope(owner_principal()):
-        assert egress._committed_file_item_title(vault, path, version, owner_principal()) == "Panel shipment"
+        filtered = egress.filter_withheld_entries(vault, result, _item_receipt=True)
+        assert filtered["user_summary"] == "Updated -> Panel shipment (personal Exomem)"
         page.write_bytes(raw.replace(b"Panel shipment", b"Moved on"))
-        assert egress._committed_file_item_title(vault, path, version, owner_principal()) is None
+        assert egress.filter_withheld_entries(vault, result, _item_receipt=True) == result
 
 
-def test_optional_item_title_failure_keeps_the_mcp_receipt(build, monkeypatch) -> None:
+def test_replayed_file_receipt_uses_the_committed_recipe_and_current_access(build, vault) -> None:
     from lifecycle_fixtures import RECORDS_PATH, records_manifest
 
-    from exomem.collection_store.connection import busy
-    from exomem.governance import egress
+    from exomem import access
 
-    attempted = False
+    async def run() -> None:
+        async with Client(build()) as client:
+            manifest = records_manifest(join=False).replace(
+                "item_schema:\n", "item_presentation:\n  version: 1\n  title: label\nitem_schema:\n",
+            ).replace("[occurred_on, title, event_type]", "[occurred_on, label, event_type]").replace(
+                "    title:\n", "    alternate: {type: string}\n    label:\n",
+            )
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": manifest,
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            arguments = {"collection": RECORDS_PATH, "why": "Track dispatch", "item": {
+                "occurred_on": "2026-02-01", "label": "Panel shipment",
+                "alternate": "Warehouse alias", "event_type": "dispatch",
+            }}
+            call = public_call("add_record", arguments)
+            meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: "dispatch-shipment"}
+            saved = (await client.call_tool(*call, meta=meta)).structured_content
+            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
+            path = saved["paths"][0]
+            committed = (vault / path).read_bytes()
 
-    def unavailable(*args):
-        nonlocal attempted
-        attempted = True
-        raise busy("the optional title reader is busy")
+            declaration = vault / RECORDS_PATH
+            text = declaration.read_text(encoding="utf-8")
+            declaration.write_text(text.replace("  title: label\n", "  title: alternate\n"), encoding="utf-8")
+            replay = (await client.call_tool(*call, meta=meta)).structured_content
+            assert "-> Panel shipment (" in replay["user_summary"]
+            assert replay["after_item_hash"] == saved["after_item_hash"]
 
-    monkeypatch.setattr(egress, "_committed_file_item_title", unavailable)
+            access.access_config_path(vault).write_text("excluded: [Records/Deliveries/Events]\n", encoding="utf-8")
+            excluded = (await client.call_tool(*call, meta=meta)).structured_content
+            assert excluded["user_summary"].endswith(f"-> {path} (personal Exomem)")
+            assert excluded["item_key"] == saved["item_key"]
+            assert excluded["after_item_hash"] == saved["after_item_hash"]
+            assert (vault / path).read_bytes() == committed
+
+    asyncio.run(run())
+
+
+def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypatch) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    from exomem import reserved_paths
+    from exomem.governance import egress, store
+
+    read_title = egress._committed_file_item_title
+    observed = threading.Event()
+
+    def read_while_locked(*args):
+        acquired, release, expired = threading.Event(), threading.Event(), threading.Event()
+
+        def hold():
+            with (
+                reserved_paths._subsystem_authority_scope("governance.store"),
+                reserved_paths._identity_coordination_scope(
+                    vault, descriptor_ids=("governance-store",), identity_may_change=False,
+                ),
+            ):
+                acquired.set()
+                if not release.wait(3):
+                    expired.set()
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert acquired.wait(3)
+            assert (vault / args[1]).is_file()
+            title = read_title(*args)
+            assert not expired.is_set()
+            observed.set()
+            return title
+        finally:
+            release.set()
+            holder.join(3)
 
     async def run() -> None:
         async with Client(build()) as client:
@@ -253,23 +320,22 @@ def test_optional_item_title_failure_keeps_the_mcp_receipt(build, monkeypatch) -
                 "manifest_path": RECORDS_PATH, "manifest_text": records_manifest(join=False),
                 "why": "Track dispatch", "scaffold": True,
             }})
+            store.open_connection(vault).close()
+            monkeypatch.setattr(egress, "_committed_file_item_title", read_while_locked)
             result = await _tool(client, "add_record", {"collection": RECORDS_PATH,
                 "item": {"occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch"},
                 "why": "Track dispatch",
             })
-            assert attempted
+            assert observed.is_set()
             assert result["outcome"] == "committed"
-            assert result["user_summary"].startswith(f"Saved -> {result['paths'][0]} (")
-            assert result["item_key"] and result["after_item_hash"]
+            assert result["user_summary"].startswith("Saved -> Panel shipment (")
 
     asyncio.run(run())
 
 
-def test_sqlite_receipts_name_current_rows_while_views_are_stale(store_env, capsys, monkeypatch) -> None:  # noqa: F811
+def test_sqlite_write_keeps_its_receipt_summary(store_env, capsys, monkeypatch) -> None:  # noqa: F811
     from conftest import _drain_background_threads
-    from test_collection_store_migration import PLANNING, WORK, legacy_vault, migrate, printed
-
-    from exomem.collection_store import preview, runtime
+    from test_collection_store_migration import WORK, legacy_vault, migrate, printed
 
     root = legacy_vault(store_env)
     assert migrate(root, "prepare", operator=False) == 0
@@ -277,38 +343,17 @@ def test_sqlite_receipts_name_current_rows_while_views_are_stale(store_env, caps
     assert migrate(root, "apply") == 0
     printed(capsys)
     _drain_background_threads()
-    monkeypatch.setattr(runtime.StoreServer, "_views_tick", lambda self: 60.0)
     monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
 
     async def run() -> None:
         async with Client(server_module.build_server(require_auth=False)) as client:
-            serving = runtime._server(root)
-
-            def publish_initial_view():
-                writer = preview.bound_writer(root)
-                return serving._write(writer.reconcile_views, pending_only=True)
-
-            for collection, add, query, edit, selector in (
-                (WORK, "add_record", "query_records", "edit_record", "record"),
-                (PLANNING, "add_plan_item", "query_plan_items", "edit_plan_item", "plan_item"),
-            ):
-                common = {"collection": collection, "why": "Track dispatch"}
-                saved = await _tool(client, add, {**common, "item": {"title": "Initial title"}})
-                assert saved["user_summary"].startswith("Saved -> Initial title (")
-                listed = await _tool(client, query, {"collection": collection})
-                row = next(item for item in listed["rows"] if item["title"] == "Initial title")
-                view = root / saved["paths"][0]
-                serving.call(publish_initial_view, wake_maintenance=False)
-                before = view.read_bytes()
-                assert b"Initial title" in before
-                updated = await _tool(client, edit, {**common, selector: row["id"],
-                                                       "changes": {"title": "Current title"}})
-                assert updated["user_summary"].startswith("Updated -> Current title (")
-                assert updated["collection_id"] == saved["collection_id"]
-                assert updated["outcome"] == "committed"
-                assert updated["after_item_hash"] != saved["after_item_hash"]
-                assert view.read_bytes() == before
+            saved = await _tool(client, "add_record", {
+                "collection": WORK, "why": "Track dispatch", "item": {"title": "Panel shipment"},
+            })
+            assert saved["outcome"] == "committed"
+            assert saved["user_summary"].startswith(f"Saved -> {saved['paths'][0]} (")
+            assert saved["item_key"] and saved["after_item_hash"]
 
     try:
         asyncio.run(run())

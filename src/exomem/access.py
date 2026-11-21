@@ -111,25 +111,38 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
     Unreadable, replaced, or over-limit bytes fail closed; an absent policy has
     the stable explicit ``missing`` identity.
     """
+    try:
+        raw = _bounded_policy_bytes(vault_root)
+    except (OSError, ValueError):
+        return None
+    return PublicationPolicySnapshot(
+        MISSING_POLICY_FINGERPRINT if raw is None else hashlib.sha256(raw).hexdigest()
+    )
+
+
+def _bounded_policy_bytes(vault_root: Path) -> bytes | None:
+    from . import vault
+
     root = Path(vault_root)
     path = access_config_path(root)
     try:
         path.lstat()
     except FileNotFoundError:
-        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT)
-    except OSError:
         return None
-    try:
-        from . import vault
+    raw, _guard = vault.read_bounded_guarded_bytes(
+        root, path.relative_to(root).as_posix(), limit=PUBLICATION_POLICY_MAX_BYTES,
+    )
+    return raw
 
-        raw, _guard = vault.read_bounded_guarded_bytes(
-            root,
-            path.relative_to(root).as_posix(),
-            limit=PUBLICATION_POLICY_MAX_BYTES,
-        )
-    except (OSError, ValueError):
+
+def bounded_access_tier(vault_root: Path, rel_path: str) -> str | None:
+    """Apply the ordinary tiers to guarded access bytes, or return None if unavailable."""
+    try:
+        raw = _bounded_policy_bytes(vault_root)
+        cfg = _empty_policy() if raw is None else parse_config(raw)
+    except (OSError, ValueError, yaml.YAMLError):
         return None
-    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest())
+    return tier_in(cfg, rel_path)
 
 
 def _policy_signature(path: Path) -> _PolicySignature:

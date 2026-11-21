@@ -6137,6 +6137,7 @@ def _withheld_cross_check(
     purpose: str | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
     _current_parent_binding: tuple[str, str] | None = None,
+    _item_receipt: bool = False,
 ) -> Any:
     """Second, independent check that nothing sub-notice survived to the wire.
 
@@ -6155,7 +6156,8 @@ def _withheld_cross_check(
     """
     return filter_withheld_entries(vault_root, result, principal=principal, purpose=purpose,
                                    _artifact_scan_demand=_artifact_scan_demand,
-                                   _current_parent_binding=_current_parent_binding)
+                                   _current_parent_binding=_current_parent_binding,
+                                   _item_receipt=_item_receipt)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -6235,88 +6237,47 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 
-def _committed_file_item_title(root: Path, path: str, version: str, who: RequestPrincipal) -> str | None:
+def _committed_file_item_title(root: Path, path: str, version: str) -> str | None:
+    """Read only the ordinary image released by the terminal path filter."""
     from .. import document_containers, record_formats
-    from ..collection_store import authority, connection, ownership, replica
-    from ..vault_store import read as vault_store_read
 
-    # The release helper can route to the collection store. Only run it when local
-    # placement rules out an authority lookup or replica verification.
-    if (connection.store_path(root).exists() or replica.replica_path(root).exists()
-            or authority.marker_path(root).exists() or ownership.enrollment(root)[1]
-            or vault_store_read.serves(root, path)):
-        return None
     if (reserved_paths.classify_logical(path).disposition != reserved_paths.PathDisposition.ORDINARY
             or raw_protection.marked(path) or document_containers.in_payload_tree(path)):
         return None
-    raw, guard = vault._read_bounded_guarded_snapshot(root, path, record_formats._MAX_ITEM_BYTES)
-    if guard.expected_content_hash != version:
+    # Optional prose shares the direct-read tier rules and never opens governance authority.
+    budget = request_budget.current()
+    delay = min(0.1, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS) if budget else 0.1
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=delay))
+    try:
+        with request_budget.checking(check):
+            check()
+            tier = access.bounded_access_tier(root, path)
+            if tier is None or tier == access.TIER_EXCLUDED:
+                return None
+            raw, guard = vault._read_bounded_guarded_snapshot(root, path, record_formats._MAX_ITEM_BYTES)
+            if guard.expected_content_hash != version:
+                return None
+            page = find_corpus._parse_page_after_checkpoint(root / path, 0, root, content=raw, resolved_relative=path)
+            if page is None or not page.frontmatter_valid or "container_member" in page.frontmatter:
+                return None
+            if any(bridges.parse_bridge_frontmatter(page.frontmatter)):
+                return None
+            guard.recheck(root)
+            check()
+            return page.title
+    except (Exception, request_budget.ReadBudgetExhausted):  # noqa: BLE001 - optional prose cannot refuse a commit
         return None
-    page = find_corpus.parse_page(root / path, 0, root, content=raw, resolved_relative=path)
-    if page is None or not page.frontmatter_valid or "container_member" in page.frontmatter:
-        return None
-    if any(bridges.parse_bridge_frontmatter(page.frontmatter)):
-        return None
-    if _release_level_for_markdown_snapshot(
-        root, path, raw, principal=who, purpose=None, policy=policy_module.load(root),
-    ) < LEVEL_FULL:
-        return None
-    guard.recheck(root)
-    return page.title
 
 
-def _name_committed_receipt(root: Path, result: dict[str, Any], command_name: str) -> dict[str, Any]:
-    """Name the released write target in prose and keep the structured receipt intact."""
+def _name_receipt_title(result: dict[str, Any], path: str, title: str | None) -> dict[str, Any]:
+    """Replace the one subject of the summary and preserve the receipt fields."""
     from ..mutation_terminal import _lead
 
-    text = result.get("user_summary")
-    if not isinstance(text, str):
-        return result
-    if command_name == "episode_memory":
-        source = result.get("source")
-        if not isinstance(source, Mapping) or not isinstance(source.get("path"), str):
-            return result
-        paths, title = [source["path"]], source.get("title")
-    else:
-        # The receipt protocol fixes these two successful item-write outcomes.
-        if result.get("outcome") not in ("committed", "replayed"):
-            return result
-        paths = result.get("paths")
-        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
-            return result
-
-    # One row may affect several generated files. The summary names the row.
-    head, separator, tail = text.partition(_lead("", paths))
-    if not separator:
-        return result
-    if command_name != "episode_memory":
-        version, cid = result.get("after_item_hash"), result.get("collection_id")
-        key = result.get("item_key" if command_name == "record_memory" else "plan_id")
-        if not all(isinstance(value, str) for value in (version, cid, key)):
-            return result
-        who = effective_principal()
-        # Session-scoped authorization can open a separate blocking authority store.
-        if not who.resolved or who.verified_authorization_session is not None:
-            return result
-        # Allow a small point read without spending the delivery reserve of this write.
-        budget = request_budget.current()
-        delay = min(0.1, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS) if budget else 0.1
-        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=delay))
-        try:
-            with request_budget.checking(check):
-                check()
-                writer = bound_writer(root)
-                if writer is None:
-                    path = paths[0]
-                    title = (_committed_file_item_title(root, path, version, who)
-                             if len(paths) == 1 and _is_markdown_path(path) else None)
-                else:
-                    title = writer.committed_item_title(cid, key, version, check)
-                check()
-        except (Exception, request_budget.ReadBudgetExhausted):  # noqa: BLE001 - optional prose cannot refuse a commit
-            return result
-    if isinstance(title, str) and title.strip():
-        return {**result, "user_summary": f"{head} -> {title}{tail}"}
+    summary = result.get("user_summary")
+    if isinstance(summary, str) and path and isinstance(title, str) and title.strip():
+        head, separator, tail = summary.partition(_lead("", [path]))
+        if separator:
+            return {**result, "user_summary": f"{head} -> {title}{tail}"}
     return result
 
 
@@ -6431,16 +6392,14 @@ def _postfilter(
 
     surface = current_active_surface()
     mcp = surface is not None and surface.surface == "mcp"
-    if mcp and isinstance(result, dict) and command_name in {"record_memory", "plan_memory"}:
-        # The path filter can discard a stale materialized view before the canonical row is named.
-        result = _name_committed_receipt(vault_root, result, command_name)
+    item_receipt = mcp and command_name in {"record_memory", "plan_memory"}
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         result = _withheld_cross_check(
             vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
-            _current_parent_binding=parent_binding,
+            _current_parent_binding=parent_binding, _item_receipt=item_receipt,
         )
     from ..collection_store import governance as canonical_governance
 
@@ -6461,7 +6420,9 @@ def _postfilter(
         return cleaned
     if mcp and command_name == "episode_memory" and isinstance(result, dict):
         # Episodes reuse the already released Source.
-        result = _name_committed_receipt(vault_root, result, command_name)
+        source = result.get("source")
+        if isinstance(source, Mapping) and isinstance(source.get("path"), str):
+            result = _name_receipt_title(result, source["path"], source.get("title"))
     with call_spans.span("egress.scrub"):
         cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
@@ -9223,6 +9184,7 @@ def filter_withheld_entries(
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
     explicit_reference_markup: bool = False,
     _current_parent_binding: tuple[str, str] | None = None,
+    _item_receipt: bool = False,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -9778,6 +9740,20 @@ def filter_withheld_entries(
             for resolved in _resolve_vault_item(candidate)
         )
     filtered = _walk(payload)
+    if _item_receipt and policy.empty and who.resolved and writer is None and isinstance(filtered, dict):
+        paths, version = filtered.get("paths"), filtered.get("after_item_hash")
+        if (isinstance(paths, list) and len(paths) == 1 and isinstance(paths[0], str)
+                and isinstance(version, str) and _is_markdown_path(paths[0])
+                and isinstance(filtered.get("user_summary"), str)
+                and isinstance(filtered.get("item_key", filtered.get("plan_id")), str)):
+            path = paths[0]
+            decision = decisions_by_path.get(path)
+            if (resolved_items.get(path) == (path,) and decision is not None
+                    and decision.level == LEVEL_FULL and not decision.release_strip):
+                # The ordinary path decision is already complete. The receipt binds the exact title bytes,
+                # so a replay needs no current manifest recipe and a SQLite row token cannot pass.
+                title = _committed_file_item_title(vault_root, path, version)
+                filtered = _name_receipt_title(filtered, path, title)
     if (
         isinstance(payload, Mapping)
         and {"items", "summary", "shown", "total", "truncated", "note"}.issubset(payload)

@@ -392,49 +392,6 @@ class CollectionWriter:
         )
         return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
 
-    def committed_item_title(self, cid: str, key: str, version: str, check: Callable[[], None]) -> str | None:
-        """Release the title of one committed row within the caller's optional-read allowance."""
-        from .. import document_containers, provenance
-        from ..governance import bridges, egress, raw_protection
-
-        self._require_operation_context()
-        # Use the admitted checkout's database, without queuing or waiting for a SQLite lock.
-        with connection.reader_snapshot(self.handle.path, busy_timeout_ms=0) as conn:
-            # Bound materialization in SQLite before loading item data in any storage encoding.
-            conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, record_formats._MAX_ITEM_BYTES)
-            with connection.checked_sql(conn, check):
-                row = conn.execute(
-                    "SELECT row_id,row_version,payload_hash,view_path FROM items "
-                    "WHERE collection_id=? AND item_key=?", (cid, key),
-                ).fetchone()
-                if row is None or tokens.item_version(cid, key, row[1], row[2]) != version:
-                    return None
-                check()
-                operation = governance.OperationAuthorization(self.root, conn, mutation=False)
-                try:
-                    subject = next(governance.iter_subjects(conn, cid, operation.logical_vault_id, row_key=key), None)
-                    if subject is None:
-                        return None
-                    policy_path = subject.basis.subject.path
-                    if raw_protection.marked(policy_path) or document_containers.in_payload_tree(policy_path):
-                        return None
-                    for target in (operation.manifest_subject(cid), subject):
-                        decision = operation.decision(target)
-                        if decision.level < egress.LEVEL_FULL or decision.release_strip:
-                            return None
-                    manifest = operation.field_manifest(cid)
-                    if not operation.holds_every_field(manifest):
-                        return None
-                    check()
-                    body = conn.execute("SELECT body FROM items WHERE row_id=?", (row[0],)).fetchone()[0]
-                    values = typed_storage.item_values(conn, row[0])
-                finally:
-                    operation.close()
-                if "container_member" in values or any(bridges.parse_bridge_frontmatter(values)):
-                    return None
-                title = record_formats.item_display_title(manifest, values, body, row[3] or policy_path)
-                return provenance.withheld_prose(title, owner_path=policy_path)
-
     def row_body(self, cid: str, key: str) -> dict[str, str]:
         """``body``: the Markdown body of row ``key`` of ``cid``; or ``body_withheld`` with its reason.
 
