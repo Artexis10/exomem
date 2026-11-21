@@ -81,3 +81,8 @@ Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was
 - [x] 6.4 Live: the personal service reports `sidecar_venv=True` on the release carrying 6.1-6.3 and
       diarizes one real recording with speaker labels.
 
+## 7. Bounded CUDA reuse
+
+- [x] 7.1 Scope the reusable CUDA sidecar to the personal WSL2 media worker's lifetime.
+- [x] 7.2 Verify transcript parity, elapsed time, memory use, and process cleanup on an isolated worker.
+- [ ] 7.3 Verify the installed release with a short multi-recording batch in an authorized GPU window.

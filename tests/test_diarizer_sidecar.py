@@ -16,6 +16,9 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from exomem import diarizer_sidecar, extract
 
@@ -119,6 +122,90 @@ def test_happy_path_parses_turns(monkeypatch) -> None:
     monkeypatch.setattr(extract.subprocess, "run", _run)
     turns = extract._run_diarization(Path("x.wav"))
     assert turns == [(0.0, 1.5, "SPEAKER_00"), (1.5, 2.0, "SPEAKER_01")]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The reusable worker uses Linux parent-death signals.")
+@pytest.mark.parametrize("failure", ["stuck", "invalid-turns"])
+def test_reusable_diarizer_reaps_a_failed_worker_and_recovers(monkeypatch, tmp_path, capfd, failure) -> None:
+    """A timeout or malformed result cannot strand a model or deny labels to the next recording."""
+    _fake_python(monkeypatch)
+    monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cuda")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="kernel-wsl2"))
+    actual_worker = diarizer_sidecar.worker_script()
+    shim = tmp_path / "lightweight_diarizer.py"
+    shim.write_text(
+        f"""import os
+import runpy
+import sys
+import time
+from types import SimpleNamespace
+
+main = runpy.run_path({str(actual_worker)!r})['main']
+sys.modules['torch'] = SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None))
+main.__globals__['_load_device_pipeline'] = lambda: (None, 'cuda')
+
+def diarize(path, load_pipeline):
+    load_pipeline()
+    os.write(1, b'native diarizer diagnostic')
+    if path.endswith('stuck.wav'):
+        time.sleep(60)
+    if path.endswith('invalid-turns.wav'):
+        return [{{'start': 0, 'end': 1, 'label': None}}]
+    return [{{'start': 0, 'end': 1, 'label': str(os.getpid())}}]
+
+main.__globals__['_diarize'] = diarize
+raise SystemExit(main(sys.argv))
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(diarizer_sidecar, "worker_script", lambda: shim)
+
+    with diarizer_sidecar.reuse_for_media_worker():
+        [first_turn] = extract._run_diarization(Path("conversation.wav"))
+        [second_turn] = extract._run_diarization(Path("another.wav"))
+        assert second_turn == first_turn
+
+        if failure == "stuck":
+            monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "0.2")
+        assert extract._run_diarization(Path(f"{failure}.wav")) is None
+        with pytest.raises(ChildProcessError):
+            os.waitpid(int(first_turn[2]), os.WNOHANG)
+
+        monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "30")
+        [next_turn] = extract._run_diarization(Path("recovery.wav"))
+        assert next_turn != first_turn
+
+    with pytest.raises(ChildProcessError):
+        os.waitpid(int(next_turn[2]), os.WNOHANG)
+    assert "native diarizer diagnostic" not in capfd.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The reusable worker is scoped to WSL2.")
+def test_automatic_cuda_diarization_keeps_one_shot_workers(monkeypatch) -> None:
+    """A diarizer's resident GPU memory must not influence the next automatic device decision."""
+    from exomem import accel
+
+    _fake_python(monkeypatch)
+    monkeypatch.delenv("EXOMEM_DIARIZE_DEVICE", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="kernel-wsl2"))
+    monkeypatch.setattr(accel, "cuda_if_performance", lambda: "cuda")
+
+    def one_shot(command, **kwargs):
+        assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "0"
+        data = {"turns": [{"start": 0, "end": 1, "label": "SPEAKER_00"}]}
+        Path(command[3]).write_text(json.dumps(data), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def unexpected_reuse(*args, **kwargs):
+        pytest.fail("automatic routing must run the diarizer once per recording")
+
+    monkeypatch.setattr(diarizer_sidecar.WorkerSession, "run", unexpected_reuse)
+    monkeypatch.setattr(extract.subprocess, "run", one_shot)
+    with diarizer_sidecar.reuse_for_media_worker():
+        assert extract._run_diarization(Path("first.wav")) == [(0.0, 1.0, "SPEAKER_00")]
+        assert extract._run_diarization(Path("second.wav")) == [(0.0, 1.0, "SPEAKER_00")]
 
 
 def test_outfile_cleaned_up_after_run(monkeypatch) -> None:
