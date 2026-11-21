@@ -150,6 +150,47 @@ def test_rest_preview_that_exhausts_its_disk_budget_returns_warming(vault, monke
     assert error["retry_after_ms"] > 0
 
 
+@pytest.mark.parametrize("stage", ["admission", "planning", "response"])
+def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, monkeypatch, stage):
+    import time
+    from types import SimpleNamespace
+
+    from exomem import reclassify_source, request_budget, server_rest
+    from exomem.governance import authorization_request
+
+    source = "Knowledge Base/Sources/Other/field-samples.md"
+    page = vault / source
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\nsource_type: other\n---\n# Field samples\n", encoding="utf-8")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    elapsed = 0.0
+    clock = SimpleNamespace(monotonic=lambda: elapsed, time=time.time, perf_counter=time.perf_counter)
+    monkeypatch.setattr(request_budget, "time", clock)
+    monkeypatch.setattr(server_rest, "time", clock)
+    monkeypatch.setattr(request_budget, "budget_seconds", lambda: 1.0)
+    target, operation = {
+        "admission": (authorization_request, "verify_authorization_context"),
+        "planning": (reclassify_source, "_referrer_outcome"),
+        "response": (server_rest.RestJSONResponse, "render"),
+    }[stage]
+    original = getattr(target, operation)
+
+    def expire_after(*args, **kwargs):
+        nonlocal elapsed
+        result = original(*args, **kwargs)
+        elapsed = 2.0
+        return result
+
+    monkeypatch.setattr(target, operation, expire_after)
+    answer = client.post("/api/manage_memory_file", headers=_auth(), json={
+        "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+    })
+
+    assert answer.status_code == 503, answer.json()
+    assert answer.json()["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+    assert "data" not in answer.json() or answer.json()["data"] is None
+
+
 def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     for name in PRODUCT_ROUTES:

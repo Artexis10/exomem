@@ -10,6 +10,7 @@ import os
 import secrets
 import time
 import typing
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from . import (
     cli_ops,
     edit_operations,
     local_ingress,
+    request_budget,
     runtime_resources,
     semantic_authoring,
     upload_tokens,
@@ -367,11 +369,12 @@ def register_rest_facade(
     def _register_rest(cmd: commands_module.Command, exposed_name: str) -> None:
         @mcp_app.custom_route(f"/api/{exposed_name}", methods=["POST"])
         async def _served(request: Request, _cmd: commands_module.Command = cmd) -> JSONResponse:
+            entered = time.monotonic()
             # Everything the handler does with a restricted refusal happens inside its floor.
             async with projection_timing.surface_refusal_floor():
-                return await _handler(request, _cmd)
+                return await _handler(request, _cmd, entered)
 
-        async def _handler(request: Request, _cmd: commands_module.Command) -> JSONResponse:
+        async def _handler(request: Request, _cmd: commands_module.Command, entered: float) -> JSONResponse:
             # On local ingress the gate in front of this route already verified
             # a local client token; nothing else is accepted there.
             local_grant = local_ingress.current_grant()
@@ -463,6 +466,11 @@ def register_rest_facade(
                     kwargs = cli_ops.coerce(
                         _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                     )
+                    check = None
+                    if _cmd.name == "manage_memory_file" and kwargs.get("operation") == "propose-reclassification":
+                        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
+                            seconds=request_budget.budget_seconds(), entry=entered,
+                        ))
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
@@ -473,7 +481,10 @@ def register_rest_facade(
                         with (
                             capabilities.active_surface(surface_descriptor),
                             principal_module.request_scope(bound_principal),
+                            request_budget.checking(check) if check is not None else nullcontext(),
                         ):
+                            if check is not None:
+                                check()
                             return invoke_command(
                                 _cmd,
                                 *injected,
@@ -485,11 +496,23 @@ def register_rest_facade(
                                 **kwargs,
                             )
 
-                    result = await run_in_threadpool(invoke_bound)
-                    changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
-                    limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
-                    if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
-                        raise authorization_request.AuthorizationContextUnavailable
+                    try:
+                        result = await run_in_threadpool(invoke_bound)
+                        changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
+                        limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
+                        if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
+                            raise authorization_request.AuthorizationContextUnavailable
+                        preview_response = None
+                        if check is not None:
+                            check()
+                            preview_response = RestJSONResponse(cli_ops.envelope(True, data=result))
+                            check()
+                    except request_budget.ReadBudgetExhausted:
+                        if check is None:
+                            raise
+                        from .reclassify_source import preview_warming
+
+                        raise preview_warming() from None
                 except runtime_resources.ModelBusyError as exc:
                     outcome = "refused"
                     err = cli_ops.error_dict(exc)
@@ -529,7 +552,7 @@ def register_rest_facade(
                 _log_rest_success(
                     tool=_cmd.name, duration_ms=round((time.perf_counter() - t0) * 1000, 2)
                 )
-                response = RestJSONResponse(cli_ops.envelope(True, data=result))
+                response = preview_response if preview_response is not None else RestJSONResponse(cli_ops.envelope(True, data=result))
                 outcome = "abstained" if isinstance(result, dict) and result.get("abstained") else "ok"
                 return response
 

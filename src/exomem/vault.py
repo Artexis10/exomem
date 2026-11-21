@@ -8393,6 +8393,15 @@ class _InboundGeneration:
     # Reconcile, request-triggered recovery and exact preview fallback share this slot.
     building: threading.Lock = field(default_factory=threading.Lock)
 
+    def recovery_stop(self, *, observing: bool) -> threading.Event | None:
+        owner = self.owner
+        if owner is None:
+            return None
+        stop, observer_alive = owner
+        if stop.is_set() or (observing and (observer_alive is None or not observer_alive())):
+            return None
+        return stop
+
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
 _INBOUND_INDEX_GENERATIONS: dict[str, _InboundGeneration] = {}
@@ -8428,13 +8437,7 @@ def inbound_recovery_stop(
     if not freshness.event_indexes_enabled() or _store_inbound_mode(vault_root):
         return None
     state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
-    owner = state.owner if state is not None else None
-    if owner is None:
-        return None
-    stop, observer_alive = owner
-    if stop.is_set() or (observing and (observer_alive is None or not observer_alive())):
-        return None
-    return stop
+    return state.recovery_stop(observing=observing) if state is not None else None
 
 
 def inbound_recovery_available(vault_root: Path) -> bool:
@@ -8449,12 +8452,13 @@ def inbound_recovery_available(vault_root: Path) -> bool:
 
 
 @contextmanager
-def inbound_build_slot(vault_root: Path) -> Iterator[bool]:
-    """Share the owner's build lock without queuing a served preview behind a walk."""
+def _disk_inbound_build_slot(vault_root: Path) -> Iterator[bool]:
+    """Admit one disk preview only while no live observer owns recovery."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-    acquired = state.building.acquire(blocking=False)
+        observing = freshness.event_indexes_enabled() and state.recovery_stop(observing=True) is not None
+        acquired = not observing and state.building.acquire(blocking=False)
     try:
         yield acquired
     finally:
@@ -8551,17 +8555,15 @@ def checked_disk_inbound_wikilinks(
             freshness.external_pending_epoch(vault_root),
         )
 
-    with inbound_build_slot(vault_root) as acquired:
+    with _disk_inbound_build_slot(vault_root) as acquired:
         if not acquired:
             return None
-        # REST has no origin context. Give its disk work the same configured allowance as MCP.
-        budget = request_budget.current() or request_budget.RequestBudget(seconds=request_budget.budget_seconds())
-        check = request_budget.current_checkpoint() or request_budget.ReadCheckpoint(budget)
+        check = request_budget.current_checkpoint()
+        if check is None and (budget := request_budget.current()) is not None:
+            check = request_budget.ReadCheckpoint(budget)
         try:
             with request_budget.checking(check):
                 start = epoch()
-                if start[2] is not None and inbound_recovery_stop(vault_root, observing=True) is not None:
-                    return None  # defer to a watcher that observed a change after the scheduling decision
                 started_ns = time.time_ns()
                 before = inventory()
                 data = _build_inbound_index(vault_root, paths=before)

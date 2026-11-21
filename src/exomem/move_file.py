@@ -544,6 +544,7 @@ def plan_inbound_rewrites(
     named_in: Sequence[str] = (),
     paired: tuple[str, str] | None = None,
     undo: bool = False,
+    check: Callable[[], None] | None = None,
 ) -> list[InboundRewrite]:
     """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
@@ -576,6 +577,8 @@ def plan_inbound_rewrites(
         and pointer_write.identity_at(vault_root, old_rel) is not None
     )
     for rel in pages:
+        if check is not None:
+            check()
         if rel == old_rel:
             continue
         try:

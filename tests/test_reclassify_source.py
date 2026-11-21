@@ -260,7 +260,7 @@ def test_polling_watcher_does_not_serve_stale_preview_between_sweeps(vault, sour
         watcher.stop()
 
 
-@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "pending-during-scheduling"])
+@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "pending-during-scheduling", "declined"])
 def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
     from exomem import find, freshness
     from exomem import vault as vault_module
@@ -281,7 +281,8 @@ def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source
         vault_module.evict_inbound_index(vault)
 
         def decline_after_event(root):
-            freshness.mark_external_pending(root)
+            if gap == "pending-during-scheduling":
+                freshness.mark_external_pending(root)
             return False
 
         monkeypatch.setattr(find, "schedule_inbound_rebuild", decline_after_event)

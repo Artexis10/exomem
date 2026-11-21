@@ -2726,14 +2726,12 @@ def _possibly_visible_without_bytes(
 ) -> tuple[str, ...]:
     """Keep paths whose content could contribute to this caller's release."""
     policy = policy_module.load(root)
-    candidates = []
-    for path in paths:
-        request_budget.checkpoint()
-        if raw_protection.permits(root, path, who, resolve_bytes=False) is not False:
-            candidates.append(path)
+    candidates = raw_protection.possibly_released_without_bytes(root, paths, who, policy=policy)
+    if not candidates:
+        return ()
     if policy.blocked or not who.resolved or bound_writer(root) is not None:
         # File membership cannot prove a canonical projection hidden.
-        return tuple(candidates)
+        return candidates
     declared_purpose = _declared_purpose(root, who, purpose)
     try:
         boundary = connector_boundary.snapshot(root, policy)
@@ -8583,12 +8581,12 @@ class ReaderView:
             )
 
     def possibly_visible_without_bytes(self, paths: Iterable[str]) -> tuple[str, ...]:
-        """Retain undecided paths when one of their files could not be read completely."""
+        """Retain paths whose current metadata cannot prove withholding."""
         who = self._principal if self._principal is not None else effective_principal()
-        held = _proven_withheld()
         tombstones = lifecycle.tombstoned_paths(self._root)
-        candidates = (path for path in paths if path not in held and not lifecycle.is_tombstoned_in(tombstones, path))
-        return _possibly_visible_without_bytes(self._root, candidates, who, self._purpose, RELEASE_FLOOR)
+        candidates = (path for path in paths if not lifecycle.is_tombstoned_in(tombstones, path))
+        with policy_module.outside_request_policy_snapshot():
+            return _possibly_visible_without_bytes(self._root, candidates, who, self._purpose, RELEASE_FLOOR)
 
     def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
         """Project one actual clipped bundle before it spends a compiler slot."""

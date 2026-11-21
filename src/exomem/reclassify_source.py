@@ -44,12 +44,14 @@ from . import (
     path_mentions,
     pointer_write,
     record_formats,
+    request_budget,
     semantic_writes,
     source_pointers,
     source_taxonomy,
     vault,
     vocabulary_resolution,
 )
+from .cli_ops import OpError
 from .governance import egress
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
@@ -677,7 +679,7 @@ def propose(
 
     inbound = _preview_inbound(vault_root, rel)
     outcome = (
-        _referrer_outcome(vault_root, rel, text, destination, inbound)
+        _referrer_outcome(vault_root, rel, text, destination, inbound, check=request_budget.current_checkpoint())
         if destination is not None
         else _ReferrerOutcome()
     )
@@ -747,7 +749,6 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
 
 def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     from . import find
-    from .cli_ops import OpError
     from .governance.principal import effective_principal
     from .vault_store.mode import store_mode_for_reads
 
@@ -755,20 +756,24 @@ def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     if effective_principal().surface not in ("mcp", "rest") or store_mode_for_reads(vault_root):
         return _visible_inbound(vault_root, rel)
 
-    reader = egress.reader_view(vault_root)
     owner = vault.inbound_recovery_stop(vault_root, observing=True)
-    recovering = False
     if owner is not None:
+        reader = egress.reader_view(vault_root)
         inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader)
-        if vault.inbound_recovery_stop(vault_root, observing=True) is owner:
-            if inbound is not None:
-                return inbound
-            recovering = find.schedule_inbound_rebuild(vault_root)
-    if not recovering:
+        if inbound is not None and vault.inbound_recovery_stop(vault_root, observing=True) is owner:
+            return inbound
+        find.schedule_inbound_rebuild(vault_root)
+    else:
+        reader = egress.reader_view(vault_root, withheld=frozenset())
         inbound = vault.checked_disk_inbound_wikilinks(vault_root, rel, visible=reader)
         if inbound is not None:
             return inbound
-    raise OpError(
+    raise preview_warming()
+
+
+def preview_warming() -> OpError:
+    """The fact-free retry shared by an incomplete or expired preview."""
+    return OpError(
         "RECLASSIFICATION_PREVIEW_WARMING",
         "The source's references are still being checked. Retry the same preview shortly.",
         details={"retry_after_ms": 1000},
@@ -792,6 +797,7 @@ def _referrer_outcome(
     inbound: list[InboundLink],
     *,
     undo: bool = False,
+    check: Callable[[], None] | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -827,6 +833,7 @@ def _referrer_outcome(
     refusals: list[dict[str, str]] = []
     plans = move_file_module.plan_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
+        check=check,
     )
     for item in plans:
         if not writable_page(item.path):
