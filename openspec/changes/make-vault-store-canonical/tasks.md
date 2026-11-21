@@ -242,12 +242,12 @@
 
 ## 7. Acceptance and switch
 
-Switch path (owner decision, 2026-11-21). The owner's vault switches (7.4) when all of these hold:
+Switch path (2026-11-21). The owner decided the save bar, that no restricted caller reads the owner's vault, and that the gate lift ships in a normal release. The read bar, the top `index.md` fix and the recovery window are rulings made for the owner under that save bar; the owner can relax them. The owner's vault switches (7.4) when all of these hold:
 - 7.1 passes on a disposable copy of the owner's vault, including the hard kills that close 2.4;
 - 7.2 passes on an installed wheel, and 7.3 passes against the store-mode build;
 - on that copy, a store-mode save is no slower than a file-mode save (2.2), measured on the same instrument. The work toward the owner's one-second save budget, set on 2026-11-17, continues after the switch;
-- on that copy, the owner's reads are no slower than in file mode, for the first request after the warm-up and for later requests (the owner cells of 3.2), and the warm-up of a managed store-mode process is run once to check that its file-mode freshness rebaseline costs no real time (3.2);
-- 3.1's adopt write-back of the top `index.md`, which can overwrite a newer stored index while the projection lags, is fixed;
+- on that copy, the owner's reads are no slower than in file mode, for the first request after the warm-up and for later requests (the owner cells of 3.2; the 300 ms and one-second read budgets of 3.2 continue after the switch), and the warm-up of a managed store-mode process is run once to check that its file-mode freshness rebaseline costs no real time (3.2);
+- 3.1's write-backs of the top `index.md`, which could overwrite a newer stored index while the projection lags, are fixed (see 3.1);
 - on that copy, 7.1 measures how long a governed recovery's restored content stays out of recall in store mode (2.5: it stays tombstoned until the vector drain embeds it and a reconcile runs, where file mode embeds it in the write); a window longer than the vector drain's ordinary lag is fixed before the switch;
 - a release lifts the gate: `VAULT_STORE_V1` joins the released capabilities, `availability.require_servable` serves a released store-mode vault, and the same release makes `exomem store-mode migrate` refuse on Windows with a named reason until 6.3 passes. Store mode is entered only by that explicit command, and file mode stays the default.
 
@@ -256,9 +256,10 @@ These do not gate the owner's switch:
 - 3.2's store route for `collections rollback`, which is later work, and `writer_lease._durable_graph_outcome`, which no store-mode route reaches;
 - 6.3 (native Windows), because the owner's vault runs on Linux;
 - 5.1 to 5.4 (stage 2), 6.2 (Cloud cells), 8.1 and 8.2;
-- the other Left items of 2.5 and 3.1, which are old debt, background work or err on the safe side;
+- the other Left items of 2.5 and 3.1, which are old debt, background work, performance only or err on the safe side; none overwrites or hides data.
 
 - [ ] 7.1 Rehearse on a disposable copy of a real vault: the replayed write stream, hard kills, the recall canary cases and the graph-lane cases.
+  - Note: ticking 7.1 does not meet the switch path above by itself. The owner-read comparison and the governed-recovery window are measured on the same copy too, and the rehearsal driver cannot measure that window yet: it sets `EXOMEM_DISABLE_EMBEDDINGS=1`, so the vector drain never runs, and its stream recovers ordinary pages, not governed ones.
   - Progress (2026-11-16): on a copy of about 14,500 pages, `store-mode migrate` applied and the whole-table check against a fresh derivation found 0 differences across 15 tables, with integrity `ok`. No run has yet reached the store-mode answers, the kills or the rollback. Those runs led to the driver's replica adoption, its release of a copy's standing store claim, its 30 s lease term and its `--long-step-seconds` bound.
 - [ ] 7.2 Run the installed-wheel product journey in store mode.
   - Progress (2026-11-16): the store arm passed 84 of its 85 steps. The failing step found a profile that omitted a page saved earlier in the session while it reported itself current: the activation index and the context catalogue listed pages from their projected files, which lag a commit. They now list a store-mode vault's pages from the store. A rerun on a wheel with that fix is pending.
