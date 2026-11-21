@@ -22,7 +22,7 @@ A tentative claim fails the baseline test, so it gets no facet and no affiliatio
 
 ### The rules take no map room
 
-The stance, skills and positions blocks have their own bounds, so they neither reduce `max_chars` nor count in `budget.used_chars`. `rules` follows them. The server counts and reserves the block without `rules`, so the first request of a session keeps the map it had and the smallest `max_chars` that receives the block does not move. `budget.serialized_chars` still counts `rules`, because it names what is sent. The hook subtracts `say` from its working-set ceiling and renders `rules` on top, so its output is at most that ceiling plus `_CAPTURE_RULES_MAX_CHARS`.
+The stance, skills and positions blocks have their own bounds, so they neither reduce `max_chars` nor count in `budget.used_chars`. `rules` follows them. The server counts and reserves the block without `rules`, so the first request of a session keeps the map it had and the smallest `max_chars` that receives the block does not move. `budget.serialized_chars` still counts `rules`, because it names what is sent. The hook subtracts `say` from its working-set ceiling and renders `rules` on top, so its output is at most the working-set ceiling plus 1 (the separator) plus the rules allowance, `_CAPTURE_RULES_MAX_CHARS`.
 
 ## Risks
 

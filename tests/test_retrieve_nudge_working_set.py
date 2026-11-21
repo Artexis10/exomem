@@ -849,7 +849,7 @@ def test_the_full_rule_takes_no_room_from_the_retrieved_material(
     """The rules have their own render budget: the ceiling that fits `say` and the block still shows all of it.
 
     A hook that counted the rules against the ceiling would cut the working set on the first turn, which is the
-    turn where recall matters most. The whole injection is the ceiling plus the rules.
+    turn where recall matters most. The whole injection is the ceiling plus 1 (the separator) plus the rules.
     """
     from exomem import prominence
 
