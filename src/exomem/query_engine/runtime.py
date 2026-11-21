@@ -290,7 +290,8 @@ class ReadSession:
         selection = self._selected_fields(cid, fields)
 
         if layout is None:
-            with self.connection.blobopen("items", "values_json", row_id, readonly=True) as blob:
+            # A blob handle needs the base table; ``items`` is a view, and the admitted row is current.
+            with self.connection.blobopen("item_rows", "values_json", row_id, readonly=True) as blob:
                 return read_selected_tree(blob, selection, max_bytes=max_bytes, check=check)
         check()
         try:

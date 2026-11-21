@@ -19,7 +19,7 @@ def projection_db(tmp_path):
     with closing(sqlite3.connect(tmp_path / "projection.sqlite", isolation_level=None)) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("BEGIN")
-        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY,values_json TEXT NOT NULL) STRICT")
+        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY,values_json TEXT NOT NULL) STRICT")
         yield conn
 
 
@@ -39,12 +39,12 @@ def test_hostile_labels_are_data_and_large_integer_source_bytes_are_unchanged(pr
     install(projection_db, plan)
     value = {field: 2**2000 + 1, "unindexed": {"source": "unchanged"}}
     canonical = json.dumps(value, separators=(",", ":"))
-    projection_db.execute("INSERT INTO items VALUES(?,?)", (1, canonical))
+    projection_db.execute("INSERT INTO item_rows VALUES(?,?)", (1, canonical))
     payload = plan.encode(value)
     projection_db.execute(plan.upsert_sql, (1, "first", 1, payload))
     assert json.loads(payload) == [list(scalar_key(value[field], "number"))]
     assert "unindexed" not in payload and "source" not in payload
-    assert projection_db.execute("SELECT values_json FROM items WHERE row_id=1").fetchone()[0] == canonical
+    assert projection_db.execute("SELECT values_json FROM item_rows WHERE row_id=1").fetchone()[0] == canonical
     assert projection_db.execute(f"SELECT k0_tag,k0_key FROM {plan.table_name}").fetchone() == scalar_key(value[field], "number")
     # SQLite's generated-column metadata identifies VIRTUAL, not stored copies.
     assert [column[6] for column in projection_db.execute(f"PRAGMA table_xinfo({plan.table_name})")][-2:] == [2, 2]
@@ -87,16 +87,16 @@ def test_projection_maintenance_and_ddl_share_the_callers_transaction(projection
     plan = build_projection_plan(CID, {"value": {"type": "integer"}},
                                  (IndexSpec("sample", (IndexKey("value"),)),))
     install(projection_db, plan)
-    projection_db.execute("INSERT INTO items VALUES(1,'{\"value\":1}')")
+    projection_db.execute("INSERT INTO item_rows VALUES(1,'{\"value\":1}')")
     projection_db.execute(plan.upsert_sql, (1, "first", 1, plan.encode({"value": 1})))
     projection_db.execute("COMMIT")
     projection_db.execute("BEGIN")
-    projection_db.execute("UPDATE items SET values_json='{\"value\":2}' WHERE row_id=1")
+    projection_db.execute("UPDATE item_rows SET values_json='{\"value\":2}' WHERE row_id=1")
     projection_db.execute(plan.upsert_sql, (1, "first", 2, plan.encode({"value": 2})))
     replacement = build_projection_plan(CID, {"value": {"type": "integer"}}, plan.indexes, generation=2)
     install(projection_db, replacement)
     projection_db.execute("ROLLBACK")
-    assert projection_db.execute("SELECT values_json FROM items").fetchone() == ('{"value":1}',)
+    assert projection_db.execute("SELECT values_json FROM item_rows").fetchone() == ('{"value":1}',)
     assert projection_db.execute(f"SELECT row_version,k0_key FROM {plan.table_name}").fetchone() == (1, scalar_key(1, "integer")[1])
     assert projection_db.execute("SELECT name FROM sqlite_schema WHERE name=?", (replacement.table_name,)).fetchone() is None
 
@@ -108,7 +108,7 @@ def test_composite_range_and_keyset_use_declared_index_at_100k_rows(projection_d
     install(projection_db, plan)
     for n in range(100_000):
         values = {"bucket": "even" if n % 2 == 0 else "odd", "amount": n % 1000}
-        projection_db.execute("INSERT INTO items VALUES(?,?)", (n, json.dumps(values)))
+        projection_db.execute("INSERT INTO item_rows VALUES(?,?)", (n, json.dumps(values)))
         projection_db.execute(plan.upsert_sql, (n, f"{n:06d}", 1, plan.encode(values)))
     tag, bucket = scalar_key("even", "string")
     number_tag, low = scalar_key(100, "integer")

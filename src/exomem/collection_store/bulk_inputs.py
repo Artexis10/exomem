@@ -131,10 +131,12 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
         if path is not None:
             occupied[collections._portable_path_key(path)] = 1
         source_guards[resolved.path] = resolved.guard
-        plans.append((key, values, effective, path, before, resolved.path))
+        # A retracted row is the predecessor of its revival: the write names its version, never its content.
+        predecessor = before or candidate.retracted
+        plans.append((key, values, effective, path, predecessor, resolved.path))
         source_inputs.append(version_sources.effect_input(key,
             tokens.payload_hash(manifest.schema.version, key, values, effective), effective,
-            before, explicit=[resolved], prepared=origin))
+            predecessor, explicit=[resolved], prepared=origin))
         if origin is not None:
             origins.append(origin)
         outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
@@ -160,6 +162,7 @@ class Candidate:
     natural_key: str | None = None
     derived: bool = False
     before: dict | None = None
+    retracted: dict | None = None
     conflict: list[str] | None = None
 
     @property
@@ -223,19 +226,23 @@ def _current(writer, cid, candidates):
     if not requested:
         return
     # Keep bounded request rows outside indexed lookups; SQLite can otherwise choose a whole-collection scan.
+    # The rows come from item_rows so a retracted row under a requested key is found; it holds no natural key,
+    # so the natural-key branch can only meet current rows.
     cursor = writer.connection.execute(
         "WITH requested AS (SELECT json_extract(value,'$[0]') AS item_key,"
         "json_extract(value,'$[1]') AS natural_key FROM json_each(?)), touched AS ("
-        "SELECT i.row_id FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.item_key=r.item_key UNION "
-        "SELECT i.row_id FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.natural_key=r.natural_key "
+        "SELECT i.row_id FROM requested r CROSS JOIN item_rows i ON i.collection_id=? AND i.item_key=r.item_key UNION "
+        "SELECT i.row_id FROM requested r CROSS JOIN item_rows i ON i.collection_id=? AND i.natural_key=r.natural_key "
         "WHERE r.natural_key IS NOT NULL) "
-        "SELECT i.* FROM touched t JOIN items i ON i.row_id=t.row_id", (json.dumps(requested), cid, cid))
+        "SELECT i.* FROM touched t JOIN item_rows i ON i.row_id=t.row_id", (json.dumps(requested), cid, cid))
     try:
         columns = [column[0] for column in cursor.description]
         rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
     finally:
         cursor.close()
-    current = typed_storage.hydrate(writer.connection, rows)
+    # A retracted row has no current payload to hydrate, and its content never carries into a revival.
+    gone = {row["item_key"]: row for row in rows if row["retracted_txn"] is not None}
+    current = typed_storage.hydrate(writer.connection, [row for row in rows if row["retracted_txn"] is None])
     by_key = {row["item_key"]: row for row in current}
     holders = {}
     for row in current:
@@ -245,4 +252,5 @@ def _current(writer, cid, candidates):
         if candidate.error is not None:
             continue
         candidate.before = by_key.get(candidate.key)
+        candidate.retracted = gone.get(candidate.key)
         candidate.conflict = sorted(holder for holder in holders.get(candidate.natural_key, ()) if holder != candidate.key)

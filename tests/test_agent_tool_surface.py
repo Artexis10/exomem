@@ -610,3 +610,16 @@ def test_an_uncoded_fault_names_the_tool_the_agent_called_not_the_command_behind
 
     assert reply["is_error"] is True
     assert "'read_page'" in reply["text"] and "read_memory" not in reply["text"], reply
+
+
+def test_a_correction_missing_every_field_is_refused_once_with_all_of_them(build) -> None:
+    # Agents spent three calls learning one missing field at a time.
+    async def scenario(client):
+        return await _call(client, "save_source", {
+            "title": "Harbour lanterns", "source_kind": "paper", "options": {"correction": {}},
+        })
+
+    refusal = _session(build(), scenario)["error"]
+
+    assert refusal["code"] == "INVALID_ARGUMENT"
+    assert all(field in refusal["message"] for field in ("supersedes", "expected_hash", "reason"))

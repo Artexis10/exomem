@@ -46,7 +46,7 @@ def current(layout: NativeLayout, name: str, *, canonical: bool = True, temporar
     """Keep payload cells incrementally readable; the query plan adds expression indexes."""
     metadata = MetaData()
     if canonical and not temporary:
-        items = tables.items.to_metadata(metadata)
+        items = tables.item_rows.to_metadata(metadata)
         reference = (ForeignKey(items.c.row_id),)
     else:
         # Derived and admitted TEMP rows have no cross-file foreign key authority.
@@ -65,7 +65,7 @@ def current(layout: NativeLayout, name: str, *, canonical: bool = True, temporar
 def history(layout: NativeLayout) -> Table:
     metadata = MetaData()
     identity = tables.version_identity.to_metadata(metadata)
-    tables.items.to_metadata(metadata)
+    tables.item_rows.to_metadata(metadata)
     return Table(layout.version_table, metadata,
         Column("row_id", Integer, primary_key=True), Column("row_version", Integer, primary_key=True),
         Column("body", Text, nullable=False), *payload_columns(layout),

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import anyio
@@ -26,6 +29,8 @@ from exomem import (
     freshness,
     lexstore,
     memory_refs,
+    page_names,
+    passage_evidence,
     readiness,
     reserved_paths,
     runtime_resources,
@@ -35,6 +40,23 @@ from exomem import (
     server_runtime,
 )
 from exomem import vault as vault_module
+from exomem.governance.principal import owner_principal, request_scope
+
+# `install_encoder` replaces the encoder seam; a test of which model turn the query takes runs this one.
+REAL_EMBED_TEXTS = embeddings.embed_texts
+
+
+def bytes_kept_alive(holder, *owned_elsewhere):
+    """The size of every object `holder` reaches, once each, leaving out `owned_elsewhere`."""
+    seen, pending, kept = {id(item) for item in owned_elsewhere}, [holder], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen or isinstance(item, type):
+            continue
+        seen.add(id(item))
+        kept += sys.getsizeof(item)
+        pending.extend(gc.get_referents(item))
+    return kept
 
 
 def publish_reference(vault):
@@ -920,6 +942,253 @@ def test_a_published_cut_is_never_applied_to_other_source_bytes(vault, passage_t
     assert list(passage_evidence.source_chunks(second, entry)) == list(passage_evidence.declared_chunks(second))
 
 
+def test_source_bytes_edited_after_publication_are_read_again_not_served_from_memory(
+    vault, passage_tools, monkeypatch
+):
+    """Reading and hashing every selected Source on each search was a third of a search's work; a
+    memory of verified passages that outlived an edit would attest the old text instead."""
+    # The capture starts a background graph rebuild that can unpublish the corpus after the edit.
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["entry"], first
+    reads = []
+    resolve = find._resolve_page
+    monkeypatch.setattr(
+        find,
+        "_resolve_page",
+        lambda root, path, *args, **kwargs: reads.append(path) or resolve(root, path, *args, **kwargs),
+    )
+
+    assert call("search_memory", request)["hits"] == first["hits"]
+    assert saved["source"]["path"] not in reads
+
+    # The owner edits the passage in an editor, and the corpus republishes before the index re-embeds.
+    path = vault / saved["source"]["path"]
+    path.write_text(path.read_text().replace("The lantern burns oil.", "The lantern burns whale oil."))
+    publish_reference(vault)
+    edited = call("search_memory", request)
+
+    assert "error" not in edited, edited
+    assert edited["hits"] == []
+    assert edited["withheld_chunks"] == 1
+    assert saved["source"]["path"] in reads
+
+
+def test_an_erased_source_is_not_served_from_memory_while_the_index_still_selects_it(
+    vault, passage_tools, monkeypatch
+):
+    """An erasure advances the retirement generation once its derived rows are gone. A memory kept
+    past that would serve the erased passage to an index that still selects it, as a lagging one can."""
+    from exomem import source_custody, writer_lease
+
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Erased log", source_kind="session",
+        passages=[{"key": "entry", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["entry"], first
+    reads = []
+    resolve = find._resolve_page
+    monkeypatch.setattr(
+        find,
+        "_resolve_page",
+        lambda root, path, *args, **kwargs: reads.append(path) or resolve(root, path, *args, **kwargs),
+    )
+    assert call("search_memory", request)["hits"] == first["hits"]
+    assert saved["source"]["path"] not in reads
+
+    (vault / saved["source"]["path"]).unlink()
+    with writer_lease.active_manager().mutation_guard(vault):
+        assert source_custody.advance_retirement_generation(vault)
+    erased = call("search_memory", request)
+
+    assert "error" not in erased, erased
+    assert erased["hits"] == []
+    assert erased["withheld_chunks"] == 1
+
+
+@pytest.mark.parametrize(("bound", "value", "held"), [("max_entries", 2, 2), ("max_bytes", 0, 0)])
+def test_the_memory_of_verified_passages_stays_within_its_bound(
+    vault, passage_tools, monkeypatch, bound, value, held
+):
+    """Every Source a search reads adds an entry, so an unbounded memory grows with the corpus."""
+    call, _encoder = passage_tools
+    for name in ("one", "two", "three"):
+        saved = commands.op_capture_source(
+            vault, schema.load_source_schema(vault), title=f"Log {name}", source_kind="session",
+            passages=[{"key": name, "text": f"The lantern burns {name}."}],
+        )
+        assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    monkeypatch.setattr(passage_evidence._VERIFIED_SOURCES, bound, value)
+
+    reply = call("search_memory", {"query": "lantern", "limit": 3, "options": {"result_level": "passage"}})
+
+    assert {hit["passage_key"] for hit in reply["hits"]} == {"one", "two", "three"}, reply
+    assert len(passage_evidence._VERIFIED_SOURCES) == held
+
+
+def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
+    """Weighing an entry by its frontmatter dict and chunk strings alone counted under half the bytes
+    it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap. A
+    Source identity's strings have no length limit, so its weight must grow with them."""
+    memory = passage_evidence._VerifiedSources(max_entries=1000, max_bytes=1 << 40)
+    root, scope = Path("/vault").absolute(), "kb"
+    for n in range(50):
+        chunks = {
+            number: passage_evidence.PassageChunk(
+                f"record/{n}/{number}", number + 1, hashlib.sha256(f"{n}/{number}".encode()).hexdigest(),
+                4000 + 1000 * number, 500, f"{n:03d} {number} " + "word " * 99,
+            )
+            for number in range(3)
+        }
+        path = f"Knowledge Base/Sources/Sessions/2026-11-21-source-{n:03d}.md"
+        identity = {"system": "example-video", "record_id": f"{n:04d}-" + "x" * 2000, "revision": "1"}
+        source = passage_evidence._VerifiedSource(
+            f"lh{n:03d}gx.6h5l", passage_evidence._identity_json(identity), chunks
+        )
+        # Each request builds its own proof, as `find._eligibility_proof` does, so the memory keeps one per entry.
+        checkpoint = freshness.RecallFreshnessCheckpoint(
+            hashlib.sha256(b"instance").hexdigest(), 41 + n, (n, 2 * n, hashlib.sha256(path.encode()).hexdigest()),
+            hashlib.sha256(b"policy").hexdigest(), hashlib.sha256(b"access").hexdigest(),
+        )
+        proof = (checkpoint, hashlib.sha256(f"catalogue {n}".encode()).hexdigest(), 7)
+        memory.keep({(root, scope, path, hashlib.sha256(path.encode()).hexdigest()): source}, proof)
+
+    # The root and scope belong to the caller.
+    assert memory.held_bytes() >= bytes_kept_alive(memory._entries, root, scope)
+
+
+def test_a_later_search_for_another_passage_of_a_remembered_source_still_finds_it(vault, passage_tools):
+    """The memory keeps only the chunks a search selected. Serving it to a search that selects another
+    chunk of that Source would withhold a passage that matches."""
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[
+            {"key": "lamp", "text": "The lantern burns oil."},
+            {"key": "bell", "text": "The harbour bell rings at dawn."},
+        ],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    lamp = call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
+    assert [hit["passage_key"] for hit in lamp["hits"]] == ["lamp"], lamp
+
+    bell = call("search_memory", {"query": "harbour bell", "limit": 1, "options": {"result_level": "passage"}})
+
+    assert [hit["passage_key"] for hit in bell["hits"]] == ["bell"], bell
+    assert bell["withheld_chunks"] == 0
+
+
+def test_releasing_the_page_cache_releases_the_memory_of_verified_passages(monkeypatch):
+    """The idle reclaimer hands page text back through the page cache; a memory it missed would keep
+    up to 16 MiB of that text resident in a pod without swap."""
+    memory = passage_evidence._VerifiedSources(max_entries=10, max_bytes=1 << 20)
+    monkeypatch.setattr(passage_evidence, "_VERIFIED_SOURCES", memory)
+    chunk = passage_evidence.PassageChunk("entry", 1, "0" * 64, 0, 22, "The lantern burns oil.")
+    memory.keep({("vault", "kb", "Source.md", "0" * 64): passage_evidence._VerifiedSource("id", "null", {0: chunk})}, ())
+
+    find.unload_ram_caches(pages=True)
+
+    assert len(memory) == 0
+
+
+def test_a_source_identity_holding_a_yaml_set_stays_within_the_memory_bound(vault, passage_tools, monkeypatch):
+    """`source_identity` is frontmatter, and YAML parses `!!set` there. Weighing skipped a set's
+    members, so a few such Sources held many times the memory's bound in a pod without swap."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    memory = passage_evidence._VerifiedSources(max_entries=10, max_bytes=4096)
+    monkeypatch.setattr(passage_evidence, "_VERIFIED_SOURCES", memory)
+    call, _encoder = passage_tools
+    saved = call("save_source", {"title": "Harbour log", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "ledger",
+                                                                 "revision": "one"},
+                                             "passages": [{"key": "entry", "text": "The lantern burns oil."}]}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    text = path.read_text()
+    assert '"revision": "one"}' in text, text
+    members = ", ".join(f"member-{n}-" + "x" * 1000 for n in range(20))
+    path.write_text(text.replace('"revision": "one"}', '"revision": !!set {' + members + "}}", 1))
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+
+    reply = call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
+
+    assert [hit["passage_key"] for hit in reply["hits"]] == ["entry"], reply
+    # The vault root, the scope and the proof belong to the search, not to the memory.
+    shared = [part for key, (proof, _source) in memory._entries.items() for part in (key[0], key[1], proof)]
+    assert bytes_kept_alive(memory._entries, *shared) <= memory.max_bytes
+
+
+def test_changing_a_returned_source_identity_does_not_change_a_later_answer(vault, passage_tools, monkeypatch):
+    """An in-process caller that edits a reply in place, as one merging results may, changed the
+    identity that the memory of verified passages gave every later request."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    identity = {"system": "archive", "record_id": "ledger", "revision": "one"}
+    saved = call("save_source", {"title": "Harbour log", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": identity,
+                                             "passages": [{"key": "entry", "text": "The lantern burns oil."}]}})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    with request_scope(owner_principal()):
+        first = commands.op_ask_memory(vault, query="lantern", result_level="passage", limit=1)
+        assert [hit["source_identity"] for hit in first["hits"]] == [identity], first
+        first["hits"][0]["source_identity"]["record_id"] = "invented"
+
+        later = commands.op_ask_memory(vault, query="lantern", result_level="passage", limit=1)
+
+    assert [hit["source_identity"] for hit in later["hits"]] == [identity], later
+
+
+def test_an_unpublished_key_edit_is_never_answered_from_memory_or_from_a_fresh_read(
+    vault, passage_tools, monkeypatch
+):
+    """A passage answer attests the bytes the corpus published. An edit that no file event reported
+    was withheld while the memory held the Source, but a fresh read answered it as evidence."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[{"key": "published-key", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["published-key"], first
+    path = vault / saved["source"]["path"]
+    path.write_text(path.read_text().replace("published-key", "unpublished-key"))
+
+    remembered = call("search_memory", request)
+    passage_evidence._VERIFIED_SOURCES.clear()
+    fresh = call("search_memory", request)
+
+    assert [hit["passage_key"] for hit in remembered["hits"]] == ["published-key"], remembered
+    assert fresh["hits"] == [], fresh
+    assert fresh["withheld_chunks"] == 1
+
+
 def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools, monkeypatch):
     """The capture's overlap check encoded title-prefixed paragraphs that the index could not
     reuse, so every passage of a capture was encoded twice."""
@@ -1188,6 +1457,124 @@ def test_abandoned_passage_search_stops_before_it_encodes(vault, passage_tools, 
 
     asyncio.run(search_then_leave())
     assert caller_left.is_set()
+    assert encoder.texts[before:] == []
+
+
+def test_a_capture_encode_does_not_hold_up_a_passage_query_on_a_concurrent_encoder(
+    vault, passage_tools, monkeypatch
+):
+    """A capture encodes its Source one inference per shared turn; a search must not queue behind each one."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    # The served ONNX encoder runs inferences side by side; the fixture's plain model does not. The
+    # query runs the real encode path, which picks the turn each inference takes.
+    concurrent = SimpleNamespace(
+        texts_fit=lambda _texts: True,
+        concurrent_encodes=True,
+        encode=lambda texts, **_options: encoder(texts),
+    )
+    monkeypatch.setattr(embeddings, "_MODEL", concurrent)
+    monkeypatch.setattr(embeddings, "get_model", lambda: concurrent)
+    monkeypatch.setattr(embeddings, "embed_texts", REAL_EMBED_TEXTS)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    shared = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
+    inferring, release = threading.Event(), threading.Event()
+
+    def capture_inference():
+        # A capture holds one admission for its Source and the shared turn for each inference.
+        with shared.admission(), shared.execution():
+            inferring.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capture = pool.submit(capture_inference)
+        assert inferring.wait(5)
+        try:
+            search = pool.submit(
+                call,
+                "search_memory",
+                {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+            )
+            reply = search.result(timeout=5)
+        finally:
+            release.set()
+        capture.result()
+    assert [hit["passage_key"] for hit in reply["hits"]] == ["record"], reply
+    assert shared.admitted_count() == 0
+
+
+def test_abandoned_passage_search_leaves_its_model_turn_queue_at_once(vault, passage_tools, monkeypatch):
+    """A search queued behind another encode must free its admission when its caller leaves, not after that encode."""
+    call, encoder = passage_tools
+    saved = call(
+        "save_source",
+        {
+            "title": "Survey",
+            "source_kind": "session",
+            "tags": ["readers"],
+            "options": {"passages": [{"key": "record", "text": "The lantern burns oil."}]},
+        },
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    with monkeypatch.context() as service:
+        # Cells run the service profile, whose turn queue is the one a waiter can leave.
+        service.setenv("EXOMEM_CLOUD_CELL", "1")
+        service.setenv("EXOMEM_CLOUD_RESOURCE_POLICY", "service-v1")
+        gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    holding, release = threading.Event(), threading.Event()
+
+    def other_encode():
+        with gate.admission(), gate.execution():
+            holding.set()
+            assert release.wait(10)
+
+    def settles(condition, seconds):
+        deadline = time.monotonic() + seconds
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return condition()
+
+    mcp = server.build_server(require_auth=False)
+    before = len(encoder.texts)
+
+    async def search_then_leave():
+        async with Client(mcp) as client:
+            async with anyio.create_task_group() as caller:
+                caller.start_soon(
+                    client.call_tool,
+                    "search_memory",
+                    {"query": "lantern", "tags": ["readers"], "options": {"result_level": "passage"}},
+                )
+                queued = lambda: gate.waiting_counts()["foreground"] == 1  # noqa: E731
+                assert await anyio.to_thread.run_sync(settles, queued, 10)
+                caller.cancel_scope.cancel()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        holder = pool.submit(other_encode)
+        assert holding.wait(5)
+        try:
+            asyncio.run(search_then_leave())
+            # Only the other encode still holds the gate while it runs.
+            left = lambda: gate.waiting_counts()["foreground"] == 0 and gate.admitted_count() == 1  # noqa: E731
+            assert settles(left, 5)
+        finally:
+            release.set()
+        holder.result()
     assert encoder.texts[before:] == []
 
 

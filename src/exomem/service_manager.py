@@ -2448,11 +2448,16 @@ def main(argv: list[str] | None = None) -> int:
         from . import artifact_lifecycle
 
         artifact_lifecycle.claim_launcher_support(args.lifecycle_state_compatibility)
-        from .runtime_resources import bootstrap, preload_local_dotenv_policy
+        from .runtime_resources import (
+            bootstrap,
+            configure_gil_switch_interval,
+            preload_local_dotenv_policy,
+        )
 
         # Native pools keep their first-import limits, even after environment changes.
         preload_local_dotenv_policy()
         bootstrap()
+        configure_gil_switch_interval()
         from . import logging_config, server, thread_dump
 
         # `kill -USR1 <worker pid>` writes a per-thread CPU and stack dump to the log directory.

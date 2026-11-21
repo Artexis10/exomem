@@ -652,7 +652,7 @@ def assemble(conn, material, check):
     for key, natural, version, values, body, payload, path, governance_json in material.items:
         check()
         try:
-            row_id = conn.execute("INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,"
+            row_id = conn.execute("INSERT INTO item_rows(collection_id,item_key,natural_key,row_version,schema_version,"
                 "values_json,body,payload_hash,view_path,created_txn,updated_txn,governance_json) "
                 "VALUES(?,?,?,1,?,?,?,?,?,?,?,?)",
                 (cid, key, natural, version, values, body, payload, path, checkpoint, checkpoint, governance_json)).lastrowid

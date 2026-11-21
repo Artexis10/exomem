@@ -174,6 +174,17 @@ def test_the_judge_reads_the_labels_of_the_sessions_sources_and_nothing_else() -
     assert incidents.judge_context({}, saved) == ""
 
 
+def test_the_judge_sees_which_saved_source_a_correction_superseded() -> None:
+    facts = {
+        "sources": [
+            {"path": "first", "corrected": True, "frontmatter": {"title": "The 2015 article", "source_type": "article"}},
+            {"path": "second", "corrected": False, "frontmatter": {"title": "A thesis summary", "source_type": "research-report"}},
+        ]
+    }
+    saved = incidents.session_sources(facts, before=[])
+    assert [row.get("superseded_by_a_correction", False) for row in saved] == [True, False]
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

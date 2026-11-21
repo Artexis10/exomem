@@ -2832,7 +2832,7 @@ def _valid_agent_history(value: Mapping[str, Any] | None, *, semantic_profile="r
         return False
     # These are the implemented Records/Planning audit wire operations, not collection vocabulary.
     if semantic_profile == "records":
-        operations = ("create", "append", "update", "revise", "rebaseline", "bulk_upsert", "view_move")
+        operations = ("create", "append", "update", "retract", "revise", "rebaseline", "bulk_upsert", "view_move")
     elif semantic_profile == "planning":
         operations = ("plan_create", "plan_add", "plan_update", "plan_triage", "plan_revise", "plan_rebaseline")
     else:
