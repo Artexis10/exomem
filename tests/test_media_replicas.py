@@ -565,6 +565,73 @@ def test_a_replica_entry_that_cannot_name_an_object_is_a_failed_candidate_and_no
     assert [step["failed"] for step in failed] == ["ValueError"]
 
 
+@pytest.mark.parametrize("store_present", [True, False])
+def test_replication_distinguishes_a_lost_version_from_an_unavailable_store(
+        vault: Path, selected_store, mirrored: Path, store_present: bool) -> None:
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    assert media_store.evict(vault, original)
+    root = Path(selected_store[0]["root"])
+    _stored_file(root, pointer).unlink()
+    if not store_present:
+        (root / media_store.STORE_MARKER).unlink()
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.replicate(vault, original, MIRROR)
+
+    row = _replica_row(vault, store=pointer.store)
+    if store_present:
+        assert refused.value.code == media_store.NO_VERIFIED_SOURCE
+        assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, "absent")
+    else:
+        assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+        assert (row["state"], row["failure"]) == (media_replicas.UPLOAD_VERIFIED, None)
+
+
+@pytest.mark.parametrize("source_locator_valid", [True, False])
+def test_replication_reads_only_the_source_needed_for_one_target_attempt(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        source_locator_valid: bool) -> None:
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    _replicate_all(vault)
+    assert media_store.evict(vault, original)
+    target = tmp_path / "target"
+    target.mkdir()
+    media_store.write_store_marker(target, "target")
+    values, config = selected_store
+    values["stores"].append({"name": "target", "adapter": "filesystem", "root": str(target),
+                             "failure_domain": "disk-c", **IMMEDIATE})
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    if not source_locator_valid:
+        sidecar = original.with_name(original.name + ".md")
+        sidecar.write_text(sidecar.read_text().replace(pointer.version, "a/b"))
+    real_open = media_store.FilesystemStore.open
+    real_upload = media_store.FilesystemStore.upload
+    reads: list[str] = []
+    attempts: list[str] = []
+
+    def counted(store, name, version):
+        reads.append(store.name)
+        return real_open(store, name, version)
+
+    def unavailable(store, *args, **kwargs):
+        if store.name == "target":
+            attempts.append(store.name)
+            raise OSError("target is offline")
+        return real_upload(store, *args, **kwargs)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", counted)
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", unavailable)
+
+    with pytest.raises(media_store.MediaStoreError, match="target is offline"):
+        media_store.replicate(vault, original, "target")
+
+    assert reads == ([pointer.store] if source_locator_valid else [MIRROR])
+    assert attempts == ["target"]
+    assert [replica.store for replica in originals.original_state(vault, original).replicas] == [MIRROR]
+
+
 def test_a_declared_media_edge_store_has_no_connection_of_its_own(vault: Path, selected_store, mirrored: Path) -> None:
     """The edge is one connection for the process: a second declared store of that adapter would be the same place."""
     values, config = selected_store
@@ -939,12 +1006,14 @@ def _sampled(vault: Path) -> list[tuple[str, int]]:
 def test_a_sample_that_decrypts_to_the_binding_proves_the_key(vault: Path, selected_store, mirrored: Path) -> None:
     """Only a decrypt shows that the key still opens a replica; a hash of its ciphertext cannot."""
     _replicated(vault)
+    _due_again(vault)  # no recorded HEAD proof for either version
     _unproven(vault)
 
     assert media_replicas.sample(vault) == 2  # the eviction store's pointer and the mirror's replica
 
     assert [proven for _path, proven in _sampled(vault)] == [True]
     assert _replica_row(vault)["state"] == media_replicas.UPLOAD_VERIFIED
+    assert media_replicas.status(vault)["totals"]["never_checked"] == 0
 
 
 def test_a_sample_writes_no_plaintext_to_disk(vault: Path, selected_store, mirrored: Path, tmp_path: Path,
@@ -1503,6 +1572,27 @@ def test_a_repair_that_finds_the_binding_rebound_since_its_row_was_read_quaranti
 
     states = [_replica_row(vault, store=store)["state"] for store in ("test-store", MIRROR)]
     assert (result.rescheduled, states) == (1, [media_replicas.UPLOAD_VERIFIED] * 2)
+
+
+def test_fixity_uses_the_current_size_of_the_binding_that_names_the_replica(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    original = _stored(vault, "Recordings")
+    pointer = _offload(vault, original)
+    _replicate_all(vault)
+    sidecar = original.with_name(original.name + ".md")
+    current = sidecar.read_text()
+    stale = current.replace(f"binary_size: {len(TRANSCRIPT)}", f"binary_size: {len(TRANSCRIPT) + 1}")
+    stale = stale.replace(f"artifact_size: {len(TRANSCRIPT)}", f"artifact_size: {len(TRANSCRIPT) + 1}")
+    assert stale != current
+    sidecar.write_text(stale)
+    original_fixity.walk(vault)
+    sidecar.write_text(current)
+    original.write_bytes(DAMAGED)
+
+    assert original_fixity.run_pass(vault, budget=len(TRANSCRIPT)).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert _replica_row(vault, store=pointer.store)["state"] == media_replicas.UPLOAD_VERIFIED
 
 
 def test_a_repair_does_not_read_a_quarantined_replica_and_names_it_in_the_route(

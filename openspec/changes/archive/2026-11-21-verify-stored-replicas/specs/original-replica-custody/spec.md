@@ -35,6 +35,7 @@ The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL 
 
 - **WHEN** a sampled replica decrypts and its plaintext hashes to the binding
 - **THEN** the replica's last check reads `decrypted` with its time
+- **AND** the replica does not count as never checked, even if no `head` check has reached it
 
 #### Scenario: The budget is spent
 
@@ -50,7 +51,7 @@ The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL 
 
 A replica SHALL be quarantined when its store answers that the version is absent, when the store returns another size or SHA-256 than the entry records, or when a sample's plaintext does not match the binding. A store that is unavailable, does not answer as itself or times out SHALL NOT quarantine a replica. A quarantined replica SHALL NOT be a repair candidate, and eviction SHALL NOT drop an original's local bytes while its pointer is quarantined. When eviction's own `head` of the store serving eviction does not match the pointer, eviction SHALL quarantine that pointer and the status SHALL report the finding.
 
-The worker SHALL then write a new version into the same store. The source SHALL be the local original when its bytes hash to the binding, or else another replica that is not quarantined, copied as ciphertext and hashed against its own recorded digest. The publication SHALL replace exactly the quarantined entry in the binding, compared by object and version, under the vault mutation guard. The damaged version SHALL stay in its store, and the finding SHALL name it. With no verified source, the replica SHALL stay quarantined, and the finding SHALL read `no_verified_source`. Check results SHALL live in the derived replica table. A rebuild SHALL keep them for a row whose object and version are unchanged.
+The worker SHALL then write a new version into the same store. The source SHALL be the local original when its bytes hash to the binding, or else another replica that is not quarantined, copied as ciphertext and hashed against its own recorded digest. During replication or re-copy, a source read that confirms the version is absent SHALL quarantine that version. An unusable locator SHALL leave any remaining candidates eligible. After a verified source is found, a failed target upload SHALL end the attempt. The publication SHALL replace exactly the quarantined entry in the binding, compared by object and version, under the vault mutation guard. The damaged version SHALL stay in its store, and the finding SHALL name it. With no verified source, the replica SHALL stay quarantined, and the finding SHALL read `no_verified_source`. Check results SHALL live in the derived replica table. A rebuild SHALL keep them for a row whose object and version are unchanged.
 
 #### Scenario: The drill's damaged stored copy
 

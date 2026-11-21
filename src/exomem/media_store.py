@@ -104,6 +104,13 @@ class ReplicaMismatch(MediaStoreError):
         self.failure = failure
 
 
+class ReplicaAbsent(MediaStoreError):
+    """The identified store confirms that it does not hold this version."""
+
+    def __init__(self):
+        super().__init__("MEDIA_STORE_UNAVAILABLE", "the pinned version is absent from the store")
+
+
 #: The finding when ciphertext that matches its record is refused by the key: the identity or the recipient is wrong.
 KEY_REFUSED = "key_refused"
 
@@ -281,14 +288,13 @@ class FilesystemStore:
             self._require_marker(_marker_in(filesystem))
             yield filesystem
 
-    def _path(self, name: str, version: str) -> str:
+    def _validate_locator(self, name: str, version: str) -> None:
         if not originals.is_sha256(name) or not version or Path(version).name != version or version in {".", ".."}:
             raise ValueError("invalid object locator")
-        return f"{name}/{version}"
 
     def upload(self, name: str, stream: BinaryIO, *, size: int, sha256: str) -> str:
         version = uuid.uuid4().hex
-        self._path(name, version)
+        self._validate_locator(name, version)
         if not originals.is_sha256(sha256) or size < 0:
             raise ValueError("invalid upload declaration")
         if self.max_object_bytes is not None and size > self.max_object_bytes:
@@ -302,15 +308,21 @@ class FilesystemStore:
 
     @contextmanager
     def open(self, name: str, version: str):
-        relative = self._path(name, version)
+        self._validate_locator(name, version)
         with self._held() as filesystem:
-            with filesystem.parent(name).require() as parent:
-                with filesystem.file(parent, Path(relative).name).require() as file:
+            parent_result = filesystem.parent(name)
+            if parent_result.error is not None and parent_result.error.code == "MISSING":
+                raise ReplicaAbsent() from parent_result.error
+            with parent_result.require() as parent:
+                found = filesystem.file(parent, version)
+                if found.error is not None and found.error.code == "MISSING":
+                    raise ReplicaAbsent() from found.error
+                with found.require() as file:
                     with os.fdopen(os.dup(file.descriptor), "rb") as stream:
                         yield stream
 
     def head(self, name: str, version: str) -> ObjectHead | None:
-        self._path(name, version)
+        self._validate_locator(name, version)
         with self._held() as filesystem:
             parent_result = filesystem.parent(name)
             if parent_result.error is not None and parent_result.error.code == "MISSING":
@@ -355,16 +367,20 @@ def store_for(vault: Path, name: str | None = None) -> Store:
     entry = originals.store_entry(config, name)
     if entry is None:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "no media store of that name is configured")
-    if not entry.serves_eviction and not entry.available:
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store's descriptor is incomplete")
-    if (refusal := connection_refusal(entry)) is not None:
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
-    backend = _adapter(entry.connection, entry.name)
+    backend = _entry_adapter(entry)
     if isinstance(backend, FilesystemStore):
         from . import media_replicas
 
         backend.store_id = media_replicas.declared_store_id(vault, entry.name)
     return backend
+
+
+def _entry_adapter(entry: originals.StoreEntry) -> Store:
+    if not entry.serves_eviction and not entry.available:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store's descriptor is incomplete")
+    if (refusal := connection_refusal(entry)) is not None:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", refusal)
+    return _adapter(entry.connection, entry.name)
 
 
 def connection_refusal(entry: originals.StoreEntry) -> str | None:
@@ -1516,15 +1532,17 @@ def replica_damage(error: MediaStoreError) -> str | None:
     return error.failure if isinstance(error, ReplicaMismatch) else None
 
 
-def _quarantine_found(vault: Path, binary_rels: Sequence[str], reference: StoredObject, failure: str) -> None:
-    """Record that the store does not hold `reference` as named: eviction's own head found a damaged or missing replica.
+def _quarantine_found(vault: Path, binary_rels: Sequence[str], reference: StoredObject, failure: str, *,
+                      entry: originals.StoreEntry | None = None) -> None:
+    """Record that the store does not hold `reference` as named.
 
     The level is the one the store's descriptor lets a check prove, so a store that cannot recompute never reads as
     content-checked.
     """
     from . import media_replicas
 
-    entry = originals.store_entry(_settings(vault), reference.store)
+    if entry is None:
+        entry = originals.store_entry(_settings(vault), reference.store)
     level = media_replicas.scheduled_level(entry) if entry is not None else None
     media_replicas.quarantine_all(vault, binary_rels, reference, level=level or media_replicas.PRESENCE, failure=failure)
 
@@ -2035,9 +2053,10 @@ def _note_replica(vault: Path, path: Path, replica: StoredObject, verified_at: f
         log.warning("a published replica is not yet in the replica table: %s", type(error).__name__)
 
 
-def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object], backend: Store, name: str,
-                     source: StoredObject, source_backend: Store) -> tuple[ObjectHead, str]:
-    """Copy `source`, a stored version of an original, from `source_backend` into `backend` as `name`.
+@contextmanager
+def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object],
+                     source: StoredObject, source_backend: Store) -> Iterator[tuple[ObjectHead, BinaryIO]]:
+    """Stage `source` and hold its reserved space until the caller finishes with it.
 
     The bytes are hashed on the way and must match the entry's recorded size and digest, which its own upload
     confirmed; a difference raises `ReplicaMismatch`. The key is not needed, and the plaintext never exists here.
@@ -2056,8 +2075,7 @@ def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object
             if head.sha256 != source.ciphertext_sha256:
                 raise ReplicaMismatch("digest_mismatch")
             ciphertext.seek(0)
-            with _transport("upload"):
-                return head, backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
+            yield head, ciphertext
 
 
 def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
@@ -2169,26 +2187,37 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
                        if candidate is not None and candidate.store != target)
     damaged = media_replicas.damaged_among(vault, candidates)
     stores = originals.store_entries(config)
+    store_ids = media_replicas.declared_store_ids(vault, (candidate.store for candidate in candidates))
     for candidate in candidates:
         if (candidate.store, candidate.object, candidate.version) in damaged:
             continue
         holder = stores.get(candidate.store)
         if holder is None or not holder.available or holder.retrieval_class != originals.IMMEDIATE:
             continue  # a retrieval that is not immediate is the owner's to ask for, never a background read
-        try:
-            source_backend = store_for(vault, candidate.store)
-            if isinstance(source_backend, FilesystemStore):
-                source_backend.require_identity()
-            head, version = _copy_ciphertext(ledger, token, config, backend, name, candidate, source_backend)
-        except ReplicaMismatch as mismatch:
-            _quarantine_found(vault, [relative], candidate, mismatch.failure)
-            continue
-        except MediaStoreError as error:
-            if error.code != "MEDIA_STORE_UNAVAILABLE":
-                raise
-            outage = error
-            continue
-        return head, version, candidate
+        with ExitStack() as staged:
+            try:
+                source_backend = _entry_adapter(holder)
+                if isinstance(source_backend, FilesystemStore):
+                    source_backend.store_id = store_ids.get(candidate.store)
+                    try:
+                        source_backend._validate_locator(candidate.object, candidate.version)
+                    except ValueError:
+                        continue  # this candidate's locator cannot name an object in its store
+                head, ciphertext = staged.enter_context(_copy_ciphertext(ledger, token, config, candidate, source_backend))
+            except ReplicaAbsent:
+                _quarantine_found(vault, [relative], candidate, _ABSENT, entry=holder)
+                continue
+            except ReplicaMismatch as mismatch:
+                _quarantine_found(vault, [relative], candidate, mismatch.failure, entry=holder)
+                continue
+            except MediaStoreError as error:
+                if error.code != "MEDIA_STORE_UNAVAILABLE":
+                    raise
+                outage = error
+                continue
+            with _transport("upload"):
+                version = backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
+            return head, version, candidate
     if outage is not None:
         raise outage
     raise MediaStoreError(NO_VERIFIED_SOURCE, "no copy of the original verifies now")

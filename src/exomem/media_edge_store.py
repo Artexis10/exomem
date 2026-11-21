@@ -17,6 +17,7 @@ import httpx
 
 from . import originals
 from .media_edge_protocol import (
+    ABSENT_CODE,
     ADMIT_ACTION,
     OBJECTS_PATH,
     SHA256_HEADER,
@@ -28,7 +29,7 @@ from .media_edge_protocol import (
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
-from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, _declared_chunks
+from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, ReplicaAbsent, _declared_chunks
 
 URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 CREDENTIAL_FILE_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
@@ -57,6 +58,16 @@ def _refusal(response: httpx.Response, size: int | None = None) -> MediaStoreErr
         except (ValueError, KeyError, TypeError):
             pass  # an edge that does not state its bound is faulty, not a final refusal
     return _unavailable(f"the media edge answered {response.status_code}")
+
+
+def _read_refusal(response: httpx.Response) -> MediaStoreError:
+    if response.status_code == STATUS_ABSENT:
+        try:
+            if response.json()["code"] == ABSENT_CODE:
+                return ReplicaAbsent()
+        except (ValueError, KeyError, TypeError):
+            pass  # a proxy's 404 does not say what the store holds
+    return _refusal(response)
 
 
 class _Reader:
@@ -145,5 +156,5 @@ class EdgeStore:
             with client.stream("GET", f"{OBJECTS_PATH}{name}", params={"version": version}) as response:
                 if response.status_code != 200:
                     response.read()
-                    raise _refusal(response)
+                    raise _read_refusal(response)
                 yield _Reader(response)

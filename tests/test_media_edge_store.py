@@ -13,13 +13,15 @@ import pytest
 
 from exomem import media_replicas, media_store, originals
 from exomem.media_edge_protocol import (
+    ABSENT_CODE,
     COLLECTOR_AUDIENCE,
     OBJECTS_PATH,
+    STATUS_ABSENT,
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
 from exomem.media_edge_store import CREDENTIAL_FILE_ENV, URL_ENV, EdgeStore
-from exomem.media_store import MediaStoreError, ObjectTooLarge
+from exomem.media_store import MediaStoreError, ObjectTooLarge, ReplicaAbsent
 from tests.test_media_edge import CELL_A, Harness
 from tests.test_media_store import _offload, _preserved, selected_store  # noqa: F401
 from tests.test_upload_sessions import _listening
@@ -79,6 +81,16 @@ def test_an_unreachable_edge_is_an_outage(tmp_path: Path):
     with pytest.raises(MediaStoreError) as outage:
         _upload(_store("127.0.0.1", port, tmp_path))
     assert outage.value.code == "MEDIA_STORE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize(("body", "absent"), [({"code": ABSENT_CODE}, True), ({"code": "NOT_FOUND"}, False)])
+def test_a_download_404_proves_absence_only_when_the_edge_names_it(tmp_path: Path, body, absent):
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        with pytest.raises(MediaStoreError) as refused, _store(host, port, tmp_path).open("1" * 64, "version"):
+            pytest.fail("a 404 cannot return a stream")
+
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert isinstance(refused.value, ReplicaAbsent) == absent
 
 
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811

@@ -685,21 +685,27 @@ def declared_store_id(vault: Path, store: str) -> str | None:
     Without a record the marker's name alone identifies the store, as before a declaration; the owner declares the
     store again to record the id that its root carries, after a lost ledger as well.
     """
+    return declared_store_ids(vault, (store,)).get(store)
+
+
+def declared_store_ids(vault: Path, stores: Iterable[str]) -> dict[str, str]:
+    """Read the recorded marker IDs for a group of candidate stores in one query."""
     from . import media_store
 
+    names = tuple(dict.fromkeys(stores))
     ledger = MediaJobStore(vault, create=False)
-    if not ledger.path.exists():
-        return None
+    if not names or not ledger.path.exists():
+        return {}
     try:
         with closing(ledger._connect(readonly=True)) as conn:
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'media_store_ids'").fetchone() is None:
-                return None
-            row = conn.execute("SELECT store_id FROM media_store_ids WHERE store = ?", (store,)).fetchone()
+                return {}
+            return dict(conn.execute("SELECT store, store_id FROM media_store_ids "
+                                     "WHERE store IN (SELECT value FROM json_each(?))", (json.dumps(names),)))
     except (sqlite3.Error, OSError) as error:
         # Not knowing the recorded id is not the same as there being none: the store is not served on a guess.
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE",
                                           f"the store's recorded identity cannot be read: {type(error).__name__}") from error
-    return None if row is None else row["store_id"]
 
 
 def record_store_id(vault: Path, store: str, store_id: str) -> None:
@@ -803,7 +809,7 @@ def _count_checks(vault: Path, stats: dict[str, Any], entry: originals.StoreEntr
         stats["checks_not_scheduled"] = {"replicas": waiting["replicas"] + row["replicas"],
                                          "reasons": sorted({*waiting["reasons"], why})}
     else:
-        stats["never_checked"] += row["replicas"]
+        stats["never_checked"] += row["replicas"] - row["decrypted"]
     proof = stats["checks"][DECRYPTED]
     proof["replicas"] += row["decrypted"]
     if row["oldest_decrypted"] is not None and (proof["oldest_at"] is None or row["oldest_decrypted"] < proof["oldest_at"]):

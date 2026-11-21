@@ -732,7 +732,7 @@ def _replica_copies(vault: Path, row: Row) -> list[dict[str, str]]:
 
 def _repair_replicas(
     vault: Path, row: Row,
-) -> tuple[dict[tuple[str, str, str] | None, tuple[originals.StoredObject, bool]], str]:
+) -> tuple[dict[tuple[str, str, str] | None, tuple[originals.StoredObject, bool]], int | None, str]:
     """Read the current binding and the damage records once before trying stored copies.
 
     None is the lookup key for the eviction pointer. All candidates must come from the binding that holds the
@@ -751,9 +751,9 @@ def _repair_replicas(
             versions[None] = snapshot.reference
         damaged = media_replicas.damaged_among(vault, versions.values())
     except (ValueError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
-        return {}, "unreadable"
+        return {}, None, "unreadable"
     return {key: (replica, (replica.store, replica.object, replica.version) in damaged)
-            for key, replica in versions.items()}, "no_longer_listed"
+            for key, replica in versions.items()}, snapshot.binary_size, "no_longer_listed"
 
 
 def _replica_unusable(vault: Path, replica: originals.StoredObject) -> str | None:
@@ -977,10 +977,11 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         downloaded = replica or copy["source"] == KEPT_COPY  # a copy that cost a download, now or before
         try:
             reference = None
+            expected = row
             if replica:
                 if replica_inputs is None:
                     replica_inputs = _repair_replicas(vault, row)
-                versions, unreadable = replica_inputs
+                versions, bound_size, unreadable = replica_inputs
                 key = None if copy["source"] == MEDIA_STORE else (copy["store"], copy["object"], copy["version"])
                 if (entry := versions.get(key)) is None:
                     tried.append({**copy, "failed": unreadable})
@@ -992,7 +993,8 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
                 if (reason := _replica_unusable(vault, reference)) is not None:
                     tried.append({**copy, "failed": reason})
                     continue
-            staged = _stage(vault, row, copy, pace, reference=reference)
+                expected = replace(row, size=bound_size)
+            staged = _stage(vault, expected, copy, pace, reference=reference)
         except _Changed:
             result.rescheduled += 1  # The binding was rebound since the row was read: the next pass decides afresh.
             return
