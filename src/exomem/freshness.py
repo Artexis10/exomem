@@ -1721,6 +1721,27 @@ def consumer_checkpoint(vault_root: Path, scope: str) -> FreshnessCheckpoint:
         return FreshnessCheckpoint(_instance_id, generation, derived)
 
 
+def _consumer_delta_available(
+    key: tuple[str, str], checkpoint: FreshnessCheckpoint, generation: int,
+) -> bool:
+    """Whether retained generations can bridge the checkpoint. Caller holds `_lock`."""
+    if checkpoint.triple is None or checkpoint.instance_id != _instance_id:
+        return False
+    if checkpoint.generation == generation:
+        return True
+    history = _history.get(key)
+    return bool(history and history[0][0] <= checkpoint.generation < generation)
+
+
+def consumer_delta_available(vault_root: Path, scope: str, checkpoint: FreshnessCheckpoint) -> bool:
+    """Check for a possible patch without computing the current triple or enumerating paths."""
+    if not event_indexes_enabled():
+        return False
+    key = _key(vault_root, scope)
+    with _lock:
+        return key in _live and _consumer_delta_available(key, checkpoint, _generations.get(key, 0))
+
+
 def delta_since(
     vault_root: Path, scope: str, checkpoint: FreshnessCheckpoint
 ) -> ConsumerDelta:
@@ -1741,18 +1762,7 @@ def delta_since(
         to = FreshnessCheckpoint(_instance_id, generation, triple(vault_root, scope))
         incomplete = ConsumerDelta(checkpoint, to, False, frozenset(), frozenset())
 
-        # A checkpoint captured before this scope was ever live (non-live: triple
-        # is None, generation 0) is NOT a complete empty baseline — nothing proves
-        # the corpus was empty at that point, and initialization (`seed`/first
-        # `reconcile`) mints a fresh generation no history bridges. Such a
-        # checkpoint can never yield a complete delta; in particular the
-        # `generation == generation` fast path below must not treat a triple-None,
-        # gen-0 checkpoint as "already current". A live scope always derives a
-        # non-None triple, so this rejects only genuine pre-initialization points.
-        if checkpoint.triple is None:
-            return incomplete
-        # A checkpoint from another process/registry has no bridgeable history here.
-        if checkpoint.instance_id != _instance_id:
+        if not _consumer_delta_available(key, checkpoint, generation):
             return incomplete
         # Same generation is complete only when the FULL checkpoint matches.
         # Generation alone cannot bless a malformed/misaligned triple with an
@@ -1761,21 +1771,8 @@ def delta_since(
             if checkpoint != to:
                 return incomplete
             return ConsumerDelta(checkpoint, to, True, frozenset(), frozenset())
-        if checkpoint.generation > generation:
-            return incomplete
-
-        hist = _history.get(key) or []
-        # No retained events but the generation moved on (e.g. a drifted reconcile
-        # cleared history): the gap is unbridgeable.
-        if not hist:
-            return incomplete
-        # The oldest retained event bridges from its `prev_gen`; a checkpoint older
-        # than that predates the window (overflow / over-old) and is incomplete.
-        if checkpoint.generation < hist[0][0]:
-            return incomplete
-
         touched: set[str] = set()
-        for _prev, new, paths in hist:
+        for _prev, new, paths in _history[key]:
             if new > checkpoint.generation:
                 touched |= paths
         m = _maps.get(key, {})

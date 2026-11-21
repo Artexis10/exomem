@@ -8594,22 +8594,30 @@ def _catch_up_inbound(
     return False
 
 
-def inbound_rebuild_needed(vault_root: Path) -> bool:
+def inbound_rebuild_needed(vault_root: Path, *, check_patch_chain: bool = False) -> bool:
     """Whether only an owner build can restore this vault's index.
 
-    True when nothing is resident, or the resident data has no proven checkpoint.
-    Data that is resident under a checkpoint merely behind the registry is
-    completed by the patch the watcher is about to run, so a rebuild would repeat
-    work the patch does for the cost of the change.
+    A managed preview checks without waiting for the index lock. A reseed or
+    expired history needs a build even when a prior checkpoint is resident.
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
-    with _INBOUND_INDEX_LOCK:
-        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
-    return cached is None or cached[1].checkpoint is None
+    root = str(vault_root.resolve())
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=not check_patch_chain):
+        return False
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        checkpoint = cached[1].checkpoint if cached is not None else None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return checkpoint is None or (
+        check_patch_chain and not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
+    )
 
 
-def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+def prime_inbound_index(
+    vault_root: Path, *, eager: bool = False, defer_to_patch: bool = False,
+) -> bool:
     """Rebuild requested link metadata on the existing background owner.
 
     At most one pass builds a vault's index at a time: a caller that finds
@@ -8629,6 +8637,8 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
     if not state.building.acquire(blocking=False):
         return False
     try:
+        if defer_to_patch and not inbound_rebuild_needed(vault_root, check_patch_chain=True):
+            return False
         data = _inbound_index(vault_root, require_current=True)
     finally:
         state.building.release()
@@ -9185,12 +9195,15 @@ def cached_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    read_hashes: Mapping[str, str | None] | None = None,
 ) -> list[InboundLink] | None:
     """Borrow complete current evidence without a walk, build or cache wait.
 
     For a reader other than the owner (`visible` given), data that lags the
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
+
+    A file-mode planner can require the cache to have seen the same guarded bytes.
 
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
@@ -9310,6 +9323,9 @@ def cached_inbound_wikilinks(
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
             or not registry_current()
+            or (read_hashes is not None and any(
+                sha is None or cached[1].sources.get(path) != sha for path, sha in read_hashes.items()
+            ))
         ):
             return None
     finally:

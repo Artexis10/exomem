@@ -34,25 +34,37 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from types import MappingProxyType
 from typing import Any, Literal
 
-from . import move_file as move_file_module
 from . import (
+    file_watcher,
+    foreground_priority,
+    freshness,
+    lexstore,
     originals,
     page_lineage,
     path_mentions,
     pointer_write,
+    recall_policy,
     record_formats,
+    request_budget,
     semantic_writes,
     source_pointers,
     source_taxonomy,
+    vault,
     vocabulary_resolution,
 )
+from . import move_file as move_file_module
+from .cli_ops import OpError
+from .governance import egress
+from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
     PathGuard,
+    PathGuardError,
     PlannedWrite,
     VaultPathError,
     admit_write_target,
@@ -602,8 +614,34 @@ def propose(
     approved it. The report names only pages the caller may see.
     """
     vault_root = Path(vault_root)
+    who = effective_principal()
+    surface = who.surface
+    owner = managed_preview_stop(vault_root, who)
+    check = request_budget.current_checkpoint()
+    served = surface == "rest" or (surface == "mcp" and request_budget.current() is not None)
+    if served and (owner is None) != (check is None):
+        # The transport selected whether to manage this preview before the leaf.
+        raise preview_warming()
+    if owner is None:
+        return _propose(vault_root, path, source_kind=source_kind, domain=domain)
+
+    try:
+        with foreground_priority.cancellable(owner):
+            foreground_priority.check_cancelled()
+            result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner)
+            foreground_priority.check_cancelled()
+            if managed_preview_stop(vault_root, who) is not owner:
+                raise preview_warming()
+            return result
+    except foreground_priority.BulkCancelled:
+        raise preview_warming() from None
+
+
+def _propose(
+    vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
+) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
-    text, _ = read_guarded_text(vault_root, absolute)
+    text, source_guard = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
 
@@ -672,12 +710,28 @@ def propose(
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
-    inbound = _visible_inbound(vault_root, rel)
+    generation = _preview_generation(vault_root) if owner is not None else None
+    inbound = (
+        _visible_inbound(vault_root, rel) if owner is None
+        else _managed_preview_inbound(vault_root, rel, owner)
+    )
+    read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
     outcome = (
-        _referrer_outcome(vault_root, rel, text, destination, inbound)
+        _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes)
         if destination is not None
         else _ReferrerOutcome()
     )
+    if owner is not None and read_hashes is not None:
+        foreground_priority.check_cancelled()
+        try:
+            source_guard.recheck(vault_root)
+        except PathGuardError:
+            raise preview_warming() from None
+        if (
+            _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound
+            or _preview_generation(vault_root) != generation
+        ):
+            raise preview_warming()
     return ReclassifyProposal(
         path=rel,
         current_kind=current_kind,
@@ -707,6 +761,31 @@ def propose(
 _PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
 
 
+def is_preview_call(command: str, arguments: Mapping[str, object]) -> bool:
+    """Select the read-only preview operation from the command schema."""
+    return command == "manage_memory_file" and arguments.get("operation") == _PREVIEW_CALL["operation"]
+
+
+def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | None:
+    """A live managed observer can prove the unrestricted owner's preview."""
+    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
+    if who.surface not in ("mcp", "rest"):
+        return None
+    stop = file_watcher.observing_inbound_recovery_stop(vault_root)
+    return stop if stop is not None and egress.unrestricted_content_access(vault_root, who) else None
+
+
+def _preview_generation(vault_root: Path) -> tuple:
+    """Bind both the literal inbound index and the projected prose candidates."""
+    return (
+        freshness.consumer_checkpoint_instance(),
+        freshness.generation(vault_root, "vault"),
+        freshness.recall_generation(vault_root, "kb"),
+        recall_policy.recall_policy_identity(vault_root),
+        freshness.external_pending_epoch(vault_root),
+    )
+
+
 @dataclass(frozen=True)
 class _ReferrerOutcome:
     rewritten: tuple[str, ...] = ()
@@ -734,14 +813,34 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     """Inbound links over the caller's view, as in a vault without the pages
     withheld from it: a writer other than the owner never learns of a link
     from a page it may not see."""
-    from .governance import egress
-
     visible = egress.visible_page_filter(vault_root)
     return [
         hit
         for hit in find_inbound_wikilinks(vault_root, rel, visible=visible, lineage=False)
         if visible is None or visible(hit.path)
     ]
+
+
+def _managed_preview_inbound(
+    vault_root: Path, rel: str, owner: Event, *, read_hashes: Mapping[str, str | None] | None = None,
+) -> list[InboundLink]:
+    from . import find
+
+    inbound = vault.cached_inbound_wikilinks(vault_root, rel, read_hashes=read_hashes)
+    if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
+        if inbound is not None:
+            return inbound
+        find.schedule_inbound_rebuild(vault_root, stop=owner)
+    raise preview_warming()
+
+
+def preview_warming() -> OpError:
+    """The fact-free retry shared by an incomplete or expired preview."""
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_WARMING",
+        "The source's references are still being checked. Retry the same preview shortly.",
+        details={"retry_after_ms": 1000},
+    )
 
 
 def _link_form(raw_target: str) -> str:
@@ -761,6 +860,7 @@ def _referrer_outcome(
     inbound: list[InboundLink],
     *,
     undo: bool = False,
+    read_hashes: dict[str, str | None] | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -772,15 +872,29 @@ def _referrer_outcome(
     from .governance import connector_boundary, egress
     from .vault_store import read as store_read
 
+    def borrow_resolver() -> vault.WikilinkResolver:
+        from .find import borrow_query_resolver
+
+        resolver = borrow_query_resolver(vault_root)
+        if resolver is None:
+            raise preview_warming()
+        return resolver
+
     relocating = destination != rel
     writable_page = connector_boundary.effect_admission(vault_root)
     paired = move_file_module.paired_move(vault_root, rel, destination) if relocating else None
     visible = egress.visible_page_filter(vault_root)
-    lookup = (
-        path_mentions.find_pages(vault_root, [rel, *([paired[0]] if paired else [])])
-        if relocating
-        else None
-    )
+    lookup = None
+    if relocating:
+        targets = [rel, *([paired[0]] if paired else [])]
+        if read_hashes is None:
+            lookup = path_mentions.find_pages(vault_root, targets)
+        elif (checkpoint := freshness.live_recall_checkpoint(vault_root, "kb")) is not None:
+            with lexstore.admitted_catalog_scope(vault_root):
+                lexstore.bind_admitted_catalog(vault_root, {"kb": checkpoint})
+                lookup = path_mentions.find_pages(vault_root, targets)
+        else:
+            lookup = path_mentions.Lookup((), False)
     named_in = [
         page
         for page in (lookup.pages if lookup is not None else ())
@@ -796,8 +910,12 @@ def _referrer_outcome(
     refusals: list[dict[str, str]] = []
     plans = move_file_module.plan_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
+        check=foreground_priority.check_cancelled if read_hashes is not None else None,
+        resolver_factory=borrow_resolver if read_hashes is not None else None,
     )
     for item in plans:
+        if read_hashes is not None:
+            read_hashes[item.path] = item.guard.expected_content_hash
         if not writable_page(item.path):
             continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0
@@ -815,6 +933,10 @@ def _referrer_outcome(
         elif item.append_only:
             for form in sorted(forms.get(item.path, ())):
                 unchanged.setdefault(form, []).append(item.path)
+    if read_hashes is not None:
+        planned_paths = forms.keys() | set(named_in)
+        if not planned_paths.issubset(read_hashes):
+            raise preview_warming()
     if relocating:
         _, self_links = semantic_writes.rewrite_wikilinks_for_move(text, rel, destination)
         if self_links:

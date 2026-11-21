@@ -6243,19 +6243,20 @@ def postfilter(
     *,
     request_kwargs: Mapping[str, Any] | None = None,
     checkpoint: request_budget.ReadCheckpoint | None = None,
+    reprove_aggregate: bool = False,
 ) -> Any:
     """Release a whole result under an optional request-owned allowance."""
     with request_budget.checking(checkpoint), (
-        policy_module.outside_request_policy_snapshot() if checkpoint is not None else nullcontext()
+        policy_module.outside_request_policy_snapshot() if reprove_aggregate else nullcontext()
     ):
         request_budget.checkpoint()
         value = _postfilter(command_name, result, vault_root, request_kwargs=request_kwargs)
         request_budget.checkpoint()
-        if checkpoint is not None:
+        if reprove_aggregate:
             # Filtering cannot remove a withheld page's contribution from aggregate counts.
             with state_paths.outside_resolution_scope(), state_paths.resolution_scope():
                 refusal = owner_only_aggregate(vault_root, checkpoint=checkpoint)
-            checkpoint()
+            request_budget.checkpoint()
             if refusal is not None:
                 return refusal
         return value

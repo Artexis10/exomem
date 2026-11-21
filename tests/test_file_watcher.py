@@ -1267,6 +1267,7 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (object, object))
     w = file_watcher.FileWatcher(tmp_path)
     assert w.start() is False
+    assert file_watcher.observing_inbound_recovery_stop(tmp_path) is None
 
 
 def test_file_watcher_dispatch_thread_restarts_after_stop(
@@ -1301,6 +1302,59 @@ def test_file_watcher_dispatch_thread_restarts_after_stop(
         assert watcher._thread is not None
         time.sleep(0.02)
         assert watcher._thread.is_alive(), "resumed dispatch thread exited on the stale stop event"
+    finally:
+        watcher.stop()
+
+
+def test_restart_waits_for_the_previous_run_to_exit(vault):
+    watcher = file_watcher.FileWatcher(vault)
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, daemon=True)
+    watcher._reconcile_thread = worker
+    worker.start()
+    watcher.stop()
+    try:
+        assert not watcher.start()
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert watcher.start()
+    try:
+        assert watcher.wait_until_seeded(10)
+        watcher.arm_optional_recovery()
+        assert file_watcher.observing_inbound_recovery_stop(vault) is not None
+    finally:
+        watcher.stop()
+
+
+def test_restart_cannot_replace_the_run_that_stop_is_still_cleaning_up(vault, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    watcher = file_watcher.FileWatcher(vault)
+    entered, release = threading.Event(), threading.Event()
+    original = watcher._raw_witness.withdraw
+
+    def hold_shutdown(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(watcher._raw_witness, "withdraw", hold_shutdown)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stopping = pool.submit(watcher.stop)
+            assert entered.wait(5)
+            restarting = pool.submit(watcher.start)
+            try:
+                with pytest.raises(TimeoutError):
+                    restarting.result(timeout=0.5)
+            finally:
+                release.set()
+            stopping.result(timeout=5)
+            assert restarting.result(timeout=5)
+        assert watcher.wait_until_seeded(10)
     finally:
         watcher.stop()
 

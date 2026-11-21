@@ -498,8 +498,13 @@ class RefusalFloorMiddleware(Middleware):
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
-    def __init__(self, *, hosted: bool = False, traffic_monitor=None) -> None:
+    def __init__(
+        self, *, hosted: bool = False, traffic_monitor=None, vault_root: Path | None = None,
+        surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
+    ) -> None:
         self.hosted = hosted
+        self.vault_root = vault_root
+        self.surface_descriptor = surface_descriptor
         if traffic_monitor is None:
             from .runtime_readiness import get_silent_traffic_monitor
 
@@ -507,6 +512,7 @@ class CallTraceMiddleware(Middleware):
         self.traffic_monitor = traffic_monitor
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
+        from . import request_budget
         from .command_surface import (
             current_activation_result,
             mcp_request_context,
@@ -618,8 +624,41 @@ class CallTraceMiddleware(Middleware):
             # Read before `call_next` consumes or translates the message, so the
             # ledger records the call that was actually made.
             ledger_args = _extract_tool_args(context.message)
+            check = None
+            if self.vault_root is not None and tool_name == "manage_memory_file":
+                from .governance.principal import effective_principal
+                from .reclassify_source import is_preview_call, managed_preview_stop
+
+                budget = request_budget.current()
+                if (budget is not None and is_preview_call(tool_name, ledger_args)
+                        and managed_preview_stop(self.vault_root, effective_principal()) is not None):
+                    check = request_budget.ReadCheckpoint(budget)
             try:
-                result = await call_next(context)
+                try:
+                    with request_budget.checking(check) if check is not None else nullcontext():
+                        result = await call_next(context)
+                        if check is not None:
+                            check()
+                except request_budget.ReadBudgetExhausted:
+                    if check is None:
+                        raise
+                    from .cli_ops import public_refusal
+                    from .command_surface import _log_tool_failure, agent_refusal_result
+                    from .reclassify_source import preview_warming
+
+                    error = preview_warming()
+                    _log_tool_failure(tool=tool_name, request_id=request_id, code=error.code,
+                                      duration_ms=round((time.perf_counter() - t0) * 1000, 2),
+                                      message=str(error))
+                    tool = await context.fastmcp_context.fastmcp.get_tool(tool_name)
+                    surface = (
+                        capabilities.active_surface(self.surface_descriptor)
+                        if self.surface_descriptor is not None else nullcontext()
+                    )
+                    with surface:
+                        result = tool.convert_result(agent_refusal_result(
+                            public_refusal(error), error, tool_name, ledger_args, ledger_args, write=False,
+                        ))
                 dur = round((time.perf_counter() - t0) * 1000, 2)
                 # A ContextVar set inside the synchronous tool wrapper (which
                 # runs in FastMCP's anyio threadpool) does not propagate back
@@ -1071,16 +1110,6 @@ def build_server(
     from .public_surface import PASSTHROUGH_COMMANDS, build_tools, public_surface
 
     surface = public_surface()
-    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
-    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
-    # Cloud traces retain their content-free form after name normalization.
-    mcp.add_middleware(CallTraceMiddleware(hosted=cloud))
-    mcp.add_middleware(RenderedRefusalMiddleware())
-    available = {command.name for command in product_commands}
-    discovery = PreferredToolDiscovery(frozenset(
-        public for command, public in PASSTHROUGH_COMMANDS.items() if command in available
-    ))
-    mcp.add_transform(discovery)
     surface_descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="mcp",
         profile="product-cloud" if cloud else "product",
@@ -1100,6 +1129,18 @@ def build_server(
             for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
+    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
+    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
+    # Cloud traces retain their content-free form after name normalization.
+    mcp.add_middleware(CallTraceMiddleware(
+        hosted=cloud, vault_root=runtime.vault_root, surface_descriptor=surface_descriptor,
+    ))
+    mcp.add_middleware(RenderedRefusalMiddleware())
+    available = {command.name for command in product_commands}
+    discovery = PreferredToolDiscovery(frozenset(
+        public for command, public in PASSTHROUGH_COMMANDS.items() if command in available
+    ))
+    mcp.add_transform(discovery)
     if cloud:
         from .cell_identity import register_identity_route
 

@@ -16,7 +16,9 @@ Every fixture here is synthetic.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import threading
 from pathlib import Path
 from unittest.mock import ANY
 
@@ -54,6 +56,267 @@ def _body(vault: Path, rel: str) -> str:
 
     _, body, _ = parse_frontmatter((vault / rel).read_text(encoding="utf-8"))
     return body
+
+
+def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+    from test_collection_store_s1_gate import _until
+
+    from exomem import file_watcher, find, freshness, move_file, readiness, request_budget, server
+    from exomem import vault as vault_module
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    captured = _capture(vault, source_schema, title="Harbor measurements")
+    note = f"{KB}/Notes/move-me.md"
+    destination = f"{KB}/Notes/moved.md"
+    (vault / note).write_text(f"# Measurements\n\n[[{captured.path}]]\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+    mcp = server.build_server(require_auth=False)
+    mcp._exomem_local_runtime_activation.fallback_seconds = 60
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.02)
+    assert watcher.start()
+    started, release = threading.Event(), threading.Event()
+    builders: list[str] = []
+    original_build = vault_module._build_inbound_index
+
+    def paused_build(root: Path):
+        builders.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(15)
+        return original_build(root)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            async def call(tool: str, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            moved = await call(
+                "manage_memory_file", operation="move", old_path=note, new_path=destination,
+            )
+            assert moved.get("paths") == [note, destination], moved
+            assert vault_module.inbound_recovery_available(vault)
+            assert not readiness.is_warming()
+            assert freshness.generation(vault, "vault") is not None
+            await asyncio.to_thread(_until, lambda: not freshness.external_pending(vault))
+            # Withdraw the cache after the move, as an idle quiet-mode service may.
+            vault_module.evict_inbound_index(vault)
+            monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+            preview = {
+                "operation": "propose-reclassification", "path": captured.path,
+                "source_kind": "dataset-export",
+            }
+            try:
+                cold = await call("manage_memory_file", **preview)
+                assert cold["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert cold["error"]["retry"]["after_s"] > 0
+                assert "references" not in cold and "preview_digest" not in cold
+                assert await asyncio.to_thread(started.wait, 5)
+                overlap, records = await asyncio.gather(
+                    call("manage_memory_file", **preview),
+                    call("query_records", collection="Meter readings", limit=1),
+                )
+                assert overlap["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert records.get("rows"), records
+            finally:
+                release.set()
+            assert await asyncio.to_thread(find.await_recall_resolver_warm)
+            warm = await call("manage_memory_file", **preview)
+            assert warm.get("references") == 2, warm
+            assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
+            assert warm["preview_digest"]
+
+            expired = threading.Event()
+            plan = move_file.plan_inbound_rewrites
+
+            class Budget(request_budget.RequestBudget):
+                def remaining(self):
+                    return 0.0 if expired.is_set() else super().remaining()
+
+            def expire_during_planning(*args, **kwargs):
+                expired.set()
+                return plan(*args, **kwargs)
+
+            monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+            monkeypatch.setattr(move_file, "plan_inbound_rewrites", expire_during_planning)
+            timed_out = await call("manage_memory_file", **preview)
+            assert timed_out["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+            assert "references" not in timed_out and "preview_digest" not in timed_out
+
+    try:
+        assert watcher.wait_until_seeded(10)
+        watcher.arm_optional_recovery()
+        asyncio.run(exercise())
+        assert builders == ["exomem-inbound-index-warm"]
+    finally:
+        release.set()
+        watcher.stop()
+
+
+@pytest.mark.parametrize("fault", [
+    "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link", "catalogue-candidates",
+])
+def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
+    from _public_call import public_call
+    from fastmcp import Client
+    from fastmcp.tools import FunctionTool
+    from test_agent_tool_surface import _call
+
+    from exomem import (
+        file_watcher,
+        find,
+        freshness,
+        move_file,
+        path_mentions,
+        request_budget,
+        server,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance import egress
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    referrer = (
+        f"{KB}/Evidence/field-log.md" if fault in ("cold-resolver", "catalogue-link")
+        else f"{KB}/Notes/field-log.md"
+    )
+    (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
+    link = f"[[{source.removesuffix('.md')}]]"
+    original_reference = {
+        "catalogue-link": f"See `{source}`.",
+        "catalogue-candidates": "The field log identifies the samples.",
+    }.get(fault, link)
+    (vault / referrer).write_text(f"# Field log\n\n{original_reference}\n", encoding="utf-8")
+    freshness.seed(vault, "vault", (
+        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+    ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    if fault in ("catalogue-link", "catalogue-candidates"):
+        freshness.seed(vault, "kb", (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault / KB)
+        ))
+        lexstore.ensure_fresh(vault)
+        lookup = path_mentions.find_pages(vault, [source])
+        assert lookup.complete
+        assert lookup.pages == ((referrer,) if fault == "catalogue-link" else ())
+        find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    mcp = server.build_server(require_auth=False)
+    expired = threading.Event()
+
+    class Budget(request_budget.RequestBudget):
+        def remaining(self):
+            return 0.0 if expired.is_set() else super().remaining()
+
+    monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+    if fault in ("release", "render"):
+        target, name = (egress, "postfilter") if fault == "release" else (FunctionTool, "convert_result")
+        convert = getattr(target, name)
+
+        def expire(*args, **kwargs):
+            expired.set()
+            return convert(*args, **kwargs)
+
+        monkeypatch.setattr(target, name, expire)
+    elif fault in ("removed-link", "changed-source", "catalogue-link"):
+        plan = move_file.plan_inbound_rewrites
+
+        def edit_during_planning(*args, **kwargs):
+            # Hold watcher delivery back, so the planner sees the edit before the cache does.
+            changed = source if fault == "changed-source" else referrer
+            body = link if fault == "catalogue-link" else "# Edited while planning"
+            (vault / changed).write_text(f"{body}\n", encoding="utf-8")
+            return plan(*args, **kwargs)
+
+        monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
+    elif fault == "catalogue-candidates":
+        find_pages = path_mentions.find_pages
+
+        def publish_prose_edit_after_lookup(*args, **kwargs):
+            lookup = find_pages(*args, **kwargs)
+            assert lookup.complete and not lookup.pages
+            page = vault / referrer
+            page.write_text(f"See `{source}`.\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[page])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[referrer], deleted_rels=[])
+            return lookup
+
+        monkeypatch.setattr(path_mentions, "find_pages", publish_prose_edit_after_lookup)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            if fault == "cold-resolver":
+                find._RESOLVER_CACHE.pop(vault, None)
+            call = public_call("manage_memory_file", {
+                "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+            })
+            retry = await _call(client, *call)
+            assert retry.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
+            assert "references" not in retry and "preview_digest" not in retry
+            if fault == "render":
+                assert retry["error"]["retry"]["tool"] == "inspect_memory"
+            if fault == "cold-resolver":
+                assert await asyncio.to_thread(find.await_recall_resolver_warm)
+                preview = await _call(client, *call)
+                assert preview["referrers"]["pointer_repointed"] == [referrer]
+                assert preview["preview_digest"]
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        stop.set()
+
+
+@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])
+def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
+    from exomem import file_watcher, find, freshness
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import owner_principal, request_scope
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    source = _capture(vault, source_schema, title="Stream flow measurements").path
+    entries = [(str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)]
+    freshness.seed(vault, "vault", entries)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: None if stop.is_set() else stop)
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    if gap == "external-pending":
+        freshness.mark_external_pending(vault)
+    elif gap == "new-seed":
+        freshness.seed(vault, "vault", entries)
+    else:
+        lookup = vault_module.cached_inbound_wikilinks
+
+        def stop_during_lookup(*args, **kwargs):
+            inbound = lookup(*args, **kwargs)
+            stop.set()
+            return inbound
+
+        monkeypatch.setattr(vault_module, "cached_inbound_wikilinks", stop_during_lookup)
+
+    builds = []
+    original_build = vault_module._build_inbound_index
+
+    def counted_build(root, **kwargs):
+        builds.append(threading.current_thread().name)
+        return original_build(root, **kwargs)
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", counted_build)
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(OpError) as retry:
+        rc.propose(vault, source, source_kind="dataset-export")
+    assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+    assert find.await_recall_resolver_warm()
+    assert builds == (["exomem-inbound-index-warm"] if gap == "new-seed" else [])
 
 
 # ---------------------------------------------------------------------------

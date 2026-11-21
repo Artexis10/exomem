@@ -203,6 +203,32 @@ _WATCHERS_LOCK = threading.Lock()
 _WATCHERS: dict[str, weakref.WeakSet[FileWatcher]] = {}
 
 
+def observing_inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
+    """The stop signal for a seeded file watcher with live event delivery."""
+    from .vault_store.mode import store_mode_for_reads
+
+    if not freshness.event_indexes_enabled() or store_mode_for_reads(vault_root):
+        return None
+    root = _canon_root(vault_root)
+    with _WATCHERS_LOCK:
+        watchers = tuple(_WATCHERS.get(root, ()))
+    for watcher in watchers:
+        stop = watcher._stop
+        dispatch = watcher._thread
+        reconcile = watcher._reconcile_thread
+        observer_alive = getattr(watcher._observer, "is_alive", None)
+        if (
+            watcher._importer is None and watcher._optional_recovery_armed
+            and watcher._seed_complete.is_set() and watcher._seed_succeeded
+            and dispatch is not None and dispatch.is_alive()
+            and reconcile is not None and reconcile.is_alive()
+            and observer_alive is not None and observer_alive()
+            and not stop.is_set()
+        ):
+            return stop
+    return None
+
+
 def _canon_root(vault_root: Path) -> str:
     try:
         return str(vault_root.resolve())
@@ -1326,6 +1352,7 @@ class FileWatcher:
         self._kb_root = managed_root(vault_root)
         self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
@@ -2826,8 +2853,6 @@ class FileWatcher:
         return self._importer is not None or freshness.event_indexes_enabled()
 
     def _start_reconcile_thread(self) -> None:
-        if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
-            return
         self._reconcile_thread = threading.Thread(
             target=self._run_reconcile,
             name="kb-freshness-reconcile",
@@ -2839,6 +2864,16 @@ class FileWatcher:
 
     def start(self) -> bool:
         """Start observation, or reconcile-only polling when watchdog is absent."""
+        with self._lifecycle_lock:
+            return self._start()
+
+    def _start(self) -> bool:
+        observer_alive = getattr(self._observer, "is_alive", None)
+        if (observer_alive is not None and observer_alive()) or any(
+            worker is not None and worker.is_alive() for worker in (self._thread, self._reconcile_thread)
+        ):
+            log.warning("file watcher: a previous worker is still running; restart deferred")
+            return False
         if not self._vault_root.is_dir():
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
@@ -2847,17 +2882,17 @@ class FileWatcher:
             log.info("file watcher: %s not found; not watching", kb_root)
             return False
 
-        # Hosted quiesce/resume deliberately reuses the watcher instance. A
-        # stopped threading.Event is sticky, so reset both loop controls before
-        # recreating the dispatch/observer threads.
+        # A restarted watcher gets a new stop signal. A rebuild from the
+        # previous run must still see its own run's shutdown.
         self._raw_witness = capture_inventory.new_raw_witness(self._vault_root)
-        self._stop.clear()
+        self._stop = foreground_priority.StopEvent()
         self._wake.clear()
         self._seed_published.clear()
         self._seed_complete.clear()
         self._seed_succeeded = False
         self._startup_recovery_started = False
         self._dispatch_waits_for_seed = False
+        self._observer = None
 
         try:
             Observer, FileSystemEventHandler = _import_watchdog()
@@ -2945,10 +2980,13 @@ class FileWatcher:
             self._stop.set()
             self._wake.set()
             self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                return False
             self._thread = None
             if self._runs_reconcile():
+                self._observer = None
                 self._dispatch_waits_for_seed = False
-                self._stop.clear()
+                self._stop = foreground_priority.StopEvent()
                 self._wake.clear()
                 self._start_reconcile_thread()
                 return True
@@ -2959,8 +2997,12 @@ class FileWatcher:
         return True
 
     def stop(self) -> None:
-        self._raw_witness.withdraw(stopped=True)
+        with self._lifecycle_lock:
+            self._stop_workers()
+
+    def _stop_workers(self) -> None:
         self._stop.set()
+        self._raw_witness.withdraw(stopped=True)
         self._wake.set()
         self._seed_published.set()
         self._seed_complete.set()
