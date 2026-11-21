@@ -117,10 +117,15 @@ def matched_passage(
         content, _guard = read_guarded_text(vault_root, path)
     except (OSError, UnicodeError):
         return None
-    content = markdown_lf(content)
-    frontmatter, body, _ = parse_frontmatter(content)
+    if number > 1:
+        part = extraction_parts.part_document(content)
+        if part is None:
+            return None
+        frontmatter, text = part
+    else:
+        frontmatter, body, _ = parse_frontmatter(markdown_lf(content))
+        text = preserve.extracted_text(body)
     title = frontmatter.get("title")
-    text = extraction_parts.text_of_part(content) if number > 1 else preserve.extracted_text(body)
     return passage_in(
         text,
         number=number,

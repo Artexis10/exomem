@@ -476,6 +476,22 @@ def test_a_part_two_search_offset_ignores_preserved_notes_after_a_carriage_retur
     assert hit.passage["text"] == opened["body"] == quote
 
 
+def test_a_multipart_read_cannot_release_an_unrelated_page_at_a_part_path(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    first = "[0:03] We inspected the gate."
+    source.write_text(
+        f"---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n## Extracted text\n\n{first}\n",
+        encoding="utf-8",
+    )
+    part.write_bytes(b"---\ntype: insight\n---\n\r## Extracted text\r\rAn unrelated note.\r")
+
+    with pytest.raises(ValueError, match="PART_MISSING"):
+        commands.op_read_memory(vault, path=path, offset=len(first))
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path

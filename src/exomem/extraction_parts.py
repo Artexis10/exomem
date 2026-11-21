@@ -186,6 +186,15 @@ def text_of_part(content: str) -> str:
     return content[start + len(marker) :].removesuffix("\n")
 
 
+def part_document(content: str) -> tuple[dict, str] | None:
+    """Read a page at a declared part path only if it carries a Source binding."""
+    content = markdown_lf(content)
+    frontmatter, _, _ = parse_frontmatter(content)
+    if "part_of" not in frontmatter:
+        return None
+    return frontmatter, text_of_part(content)
+
+
 def count_of(frontmatter: Mapping[str, object]) -> int:
     """The number of parts a Source page lists, itself included; 1 when it has no further part."""
     value = frontmatter.get("extraction_parts")
@@ -489,7 +498,10 @@ def _by_stat(memo: dict[Path, tuple[tuple[int, int, int], int]], path: Path, mea
 
 def _part_text(vault_root: Path, page: Path, number: int) -> str:
     raw, _guard = read_guarded_text(vault_root, part_path(page, number))
-    return text_of_part(markdown_lf(raw))
+    part = part_document(raw)
+    if part is None:
+        raise FileNotFoundError("a declared extraction part has no Source binding")
+    return part[1]
 
 
 def _part_length(vault_root: Path, page: Path, number: int) -> int:
@@ -559,10 +571,10 @@ def stored_parts(
                 raw, _guard = read_guarded_text(vault_root, vault_root / relative)
             except (OSError, ValueError):  # a guard refusal or bad UTF-8 is a part that does not read
                 break
-        raw = markdown_lf(raw)
-        if "part_of" not in parse_frontmatter(raw)[0]:
+        part = part_document(raw)
+        if part is None:
             break
-        texts.append(text_of_part(raw))
+        texts.append(part[1])
     starts = bounds_of(len(first), (len(text) for text in texts))
     return tuple((number, text, starts[number - 1]) for number, text in enumerate(texts, 2))
 
