@@ -280,8 +280,8 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
     ("declaration", "invalid", "path", "choices", "offered", "corrected", "truncated", "fallback_yaml"),
     [
         (
-            "{type: enum, enum: [42, short, long]}", "medium", ["word_count"],
-            [42, "short", "long"], [42, "short", "long"], 42, False, False,
+            "{type: enum, enum: [42, 1.0e+20, short, long]}", "medium", ["word_count"],
+            [42, 1.0e20, "short", "long"], [42, "short", "long"], 42, False, False,
         ),
         (
             "{type: array, items: {type: enum, enum: [42, " + "x" * 17_000 + ", true, short]}}",

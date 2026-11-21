@@ -2304,6 +2304,8 @@ def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_pat
 
 
 def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path: Path) -> None:
+    from exomem import records
+
     fixture = copy_x3_fixture(tmp_path)
     manifest_file = fixture / "_collection.md"
     text = manifest_file.read_text(encoding="utf-8").replace(
@@ -2315,11 +2317,21 @@ def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path:
     )
     manifest_file.write_text(text, encoding="utf-8")
     (fixture / "Training Log.md").write_text(
-        "## Sessions (newest first)\n\n### 2026-08-03 · Pull · Partial\n", encoding="utf-8",
+        "## Sessions (newest first)\n\n### 2026-08-02 · Pull · Partial\n", encoding="utf-8",
     )
 
-    [record] = record_formats.load_adapter(tmp_path, _manifest(tmp_path, fixture)).read().records
+    manifest = _manifest(tmp_path, fixture)
+    adapter = record_formats.load_adapter(tmp_path, manifest)
+    [record] = adapter.read().records
     assert record.values["status"] == "partial"
+    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note="Partial")
+    assert error.details["allowed"] == ["partial"]
+    resumed = records.append_record(
+        tmp_path, manifest.path, held=error.details["held"]["held_id"],
+        item={"status": "partial"}, why="correct the status",
+    )
+    assert resumed["outcome"] == "committed"
+    assert [entry.values["status"] for entry in adapter.read().records] == ["partial", "partial"]
 
 
 def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:

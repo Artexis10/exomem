@@ -4644,27 +4644,26 @@ def _enum_choice_can_render(
     problems: list[_Issue] = []
     _collect_value_representation(field, field, choice, manifest.storage.item_rows, problems)
     spec = manifest.schema.fields[field]
-    if (manifest.storage.strategy == "markdown-items" and spec.type == "array"
-            and spec.items is not None and spec.items.type == "enum"):
-        # The file writer's inline scalar arrays can change a choice's JSON type.
-        _collect_round_trip_issues(manifest, {field: [choice]}, problems)
+    if manifest.storage.strategy == "markdown-items":
+        # The file writer may change the YAML type of numbers and inline array members.
+        if spec.type == "enum":
+            _collect_round_trip_issues(manifest, {field: choice}, problems)
+        elif spec.type == "array" and spec.items is not None and spec.items.type == "enum":
+            _collect_round_trip_issues(manifest, {field: [choice]}, problems)
     if tokens is not None:
         if len(members) == 1:
-            if field == tokens.note_field:
-                if not isinstance(choice, str) or choice != choice.strip():
-                    return False
-                if any(
-                    held_values.get(name) != expected
-                    for name, expected in record_formats.log_derived_values(manifest, choice).items()
-                ):
-                    return False
-            else:
-                derived = record_formats.log_derived_values(manifest, held_values.get(tokens.note_field))
-                if field in derived:
-                    expected = derived[field]
-                    return not problems and type(choice) is type(expected) and choice == expected
-                if field not in tokens.heading_string_fields or not isinstance(choice, str) or choice != choice.strip():
-                    return False
+            changes_note = field == tokens.status_note_field
+            note = choice if changes_note else held_values.get(tokens.status_note_field)
+            derived = record_formats.log_derived_values(manifest, note)
+            if field in derived:
+                expected = derived[field]
+                return not problems and type(choice) is type(expected) and choice == expected
+            if changes_note and any(held_values.get(name) != expected for name, expected in derived.items()):
+                return False
+            if field not in tokens.heading_string_fields and field != tokens.note_field:
+                return False
+            if not isinstance(choice, str) or choice != choice.strip():
+                return False
             values = {field: choice}
         elif len(members) == 2 and field == tokens.container_field:
             if members[1] not in tokens.child_fields or not isinstance(choice, str) or choice != choice.strip():

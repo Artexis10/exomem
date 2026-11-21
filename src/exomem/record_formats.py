@@ -164,6 +164,13 @@ class _HeadingGrammar:
     separator: str
     note: _HeadingNote | None
 
+    @property
+    def status_note_field(self) -> str | None:
+        # Older logs can put the note in an ordinary heading column.
+        if self.note is not None:
+            return self.note.field
+        return next((field.name for field in self.fields if field.name == "note"), None)
+
 
 class CollectionAdapter(Protocol):
     mutable: bool
@@ -342,8 +349,7 @@ class MarkdownLogAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "INVALID_RECORD_HEADING", "record heading does not match its manifest grammar"
                 )
-            note_value = values[grammar.note.field] if grammar.note is not None else values.get("note")
-            values.update(_status_values(descriptor, note_value))
+            values.update(_status_values(descriptor, values.get(grammar.status_note_field)))
             children = _child_rows(
                 block, item.start, prefix, delimiter, child_fields, _MAX_CHILD_ROWS - child_count
             )
@@ -854,7 +860,7 @@ def render_markdown_log_item(
                     "UNREPRESENTABLE_RECORD_VALUE", "note cannot render"
                 )
             title += f"{grammar.note.open}{note.strip()}{grammar.note.close}"
-    derived = _status_values(descriptor, values.get(grammar.note.field) if grammar.note else None)
+    derived = _status_values(descriptor, values.get(grammar.status_note_field))
     for name, value in derived.items():
         if values.get(name) != value:
             raise collections.CollectionError(
@@ -3128,6 +3134,7 @@ class LogGrammarTokens:
     heading_string_fields: tuple[str, ...]
     separator: str
     note_field: str | None
+    status_note_field: str | None
     note_open: str | None
     note_close: str | None
     container_field: str
@@ -3162,6 +3169,7 @@ def log_grammar_tokens(
         ),
         separator=grammar.separator,
         note_field=note.field if note is not None else None,
+        status_note_field=grammar.status_note_field,
         note_open=note.open if note is not None else None,
         note_close=note.close if note is not None else None,
         container_field=container,
