@@ -97,7 +97,7 @@ The block leads because a block placed last, or mid-packet, did not reliably ope
 
 #### Scenario: The block is read first, framing first
 - **WHEN** a maps response serves a `positions` block with items
-- **THEN** `positions` is the response's first field, `about` is the block's first field, and `budget.serialized_chars` equals the length of the response without that field
+- **THEN** `positions` is the response's first field, `about` is the block's first field, and `budget.serialized_chars` equals the length of the response without the `serialized_chars` field
 
 #### Scenario: A client renders the block before the map and the leads
 - **WHEN** a client renders a response that carries a map, task leads and a `positions` block
