@@ -4643,6 +4643,11 @@ def _enum_choice_can_render(
     field = members[0]
     problems: list[_Issue] = []
     _collect_value_representation(field, field, choice, manifest.storage.item_rows, problems)
+    spec = manifest.schema.fields[field]
+    if (manifest.storage.strategy == "markdown-items" and spec.type == "array"
+            and spec.items is not None and spec.items.type == "enum"):
+        # The file writer's inline scalar arrays can change a choice's JSON type.
+        _collect_round_trip_issues(manifest, {field: [choice]}, problems)
     if tokens is not None:
         if len(members) == 1:
             if field == tokens.note_field:

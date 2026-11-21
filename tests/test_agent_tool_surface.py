@@ -277,22 +277,25 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
 
 
 @pytest.mark.parametrize(
-    ("declaration", "invalid", "path", "choices", "corrected", "truncated", "fallback_yaml"),
+    ("declaration", "invalid", "path", "choices", "offered", "corrected", "truncated", "fallback_yaml"),
     [
-        ("{type: enum, enum: [42, short, long]}", "medium", ["word_count"], [42, "short", "long"], 42, False, False),
+        (
+            "{type: enum, enum: [42, short, long]}", "medium", ["word_count"],
+            [42, "short", "long"], [42, "short", "long"], 42, False, False,
+        ),
         (
             "{type: array, items: {type: enum, enum: [42, " + "x" * 17_000 + ", true, short]}}",
-            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], True, False,
+            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], ["short"], True, False,
         ),
         (
             r'{type: enum, enum: ["\uD800", 42]}',
-            "medium", ["word_count"], [42], 42, True, True,
+            "medium", ["word_count"], [42], [42], 42, True, True,
         ),
     ],
     ids=["field", "array-item-with-oversized-choice", "unencodable-choice-on-yaml-fallback"],
 )
 def test_an_agent_can_repair_a_record_with_a_declared_enum_value(
-    build, monkeypatch, declaration, invalid, path, choices, corrected, truncated, fallback_yaml,
+    build, monkeypatch, declaration, invalid, path, choices, offered, corrected, truncated, fallback_yaml,
 ) -> None:
     if fallback_yaml:
         import yaml
@@ -322,7 +325,7 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(
         inspection = await _call(client, "inspect_memory", {
             "operation": "records.inspect", "arguments": {"collection": args["collection"]}})
         assert refusal["error"]["code"] == "SCHEMA_ENUM", refusal
-        assert refusal["error"]["candidates"] == choices
+        assert refusal["error"]["candidates"] == offered
         enums = inspection["contract"]["enum_fields"]
         assert enums == {"values": [{"path": path, "choices": choices}], "truncated": truncated}
         retry = refusal["error"]["retry"]["arguments"]

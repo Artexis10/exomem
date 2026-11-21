@@ -342,7 +342,7 @@ class MarkdownLogAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "INVALID_RECORD_HEADING", "record heading does not match its manifest grammar"
                 )
-            note_value = values[grammar.note.field] if grammar.note is not None else None
+            note_value = values[grammar.note.field] if grammar.note is not None else values.get("note")
             values.update(_status_values(descriptor, note_value))
             children = _child_rows(
                 block, item.start, prefix, delimiter, child_fields, _MAX_CHILD_ROWS - child_count

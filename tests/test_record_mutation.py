@@ -2303,6 +2303,25 @@ def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_pat
     assert recent.values["status"] == "partial"
 
 
+def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path: Path) -> None:
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_file = fixture / "_collection.md"
+    text = manifest_file.read_text(encoding="utf-8").replace(
+        '    note:\n      field: note\n      open: " ("\n      close: ")"\n', "",
+    ).replace(
+        '    separator: " · "\n', '      - name: note\n        type: string\n    separator: " · "\n',
+    ).replace(
+        "  fields:\n    occurred_on:", "  fields:\n    note: {type: string}\n    occurred_on:",
+    )
+    manifest_file.write_text(text, encoding="utf-8")
+    (fixture / "Training Log.md").write_text(
+        "## Sessions (newest first)\n\n### 2026-08-03 · Pull · Partial\n", encoding="utf-8",
+    )
+
+    [record] = record_formats.load_adapter(tmp_path, _manifest(tmp_path, fixture)).read().records
+    assert record.values["status"] == "partial"
+
+
 def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:
     from exomem import records
 
