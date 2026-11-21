@@ -81,6 +81,7 @@ REPLICA = "replica"
 POOL_BLOB = "pool_blob"
 STORED_ORIGINAL = "stored_original"
 LOCAL_IMPORT = "local_import"
+KEPT_COPY = "kept_copy"  # the verified copy that an earlier attempt could not put in place, kept in private state
 IMPORT_AGAIN = "import_again"  # a text original's outside file, which only a new import brings back
 VAULT_STORE = "vault_store"  # in store mode, the store's own page, which still fences the expected text
 # The copies whose path is a vault path; the others name a file outside the vault.
@@ -108,6 +109,8 @@ DEFAULT_WALK_SECONDS = 86400.0
 BUDGET_FLOOR_BYTES = 64 * 1024**2
 _CHUNK = 1024 * 1024
 _SQLITE_TIMEOUT_SECONDS = 5.0
+#: A kept copy is named by the binding SHA-256 it hashes to, so a row has at most one.
+_KEPT_SUFFIX = ".kept"
 
 
 class _Undecodable(Exception):
@@ -562,6 +565,7 @@ def run_pass(vault: Path, *, budget: int | None = None, rate: float | None = Non
     with closing(_connect(vault)) as connection, connection:
         unresolved = connection.execute(
             f"SELECT COUNT(*) FROM originals WHERE state IN ({_marks(UNRESOLVED)})", UNRESOLVED).fetchone()[0]
+        _drop_unneeded_kept_copies(vault, connection)
         _set_meta(connection, credit=carried, pass_at=time.time(), unresolved=unresolved,
                   unreadable=result.unreadable, rescheduled=result.rescheduled)
     return result
@@ -737,10 +741,16 @@ def _replica_unusable(vault: Path, row: Row, copy: dict[str, str]) -> str | None
     """Why a restore does not read this replica: a reason token, or None when it may."""
     from . import media_store
 
+    from . import media_replicas
+
     try:
         replica = _listed(vault, row, copy)
-        return "no_longer_listed" if replica is None else media_store.replica_unusable(vault, replica)
-    except (ValueError, reserved_paths.ReservedPathLeafError):
+        if replica is None:
+            return "no_longer_listed"
+        if media_replicas.has_quarantined(vault, (replica,)):
+            return "quarantined"  # a check or an earlier repair found its bytes damaged: it is not read again
+        return media_store.replica_unusable(vault, replica)
+    except (ValueError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
         return "unreadable"
     except media_store.MediaStoreError as error:
         return error.code
@@ -779,6 +789,7 @@ def clear_staging(vault: Path) -> None:
 
     A restore notes each temporary's name before it writes one, so a name noted here may name no file.
     Only a name in the reserved publish namespace is removed, so a damaged note cannot name an original.
+    A kept copy (`_KEPT_SUFFIX`) stays: a pass rehashes it, and drops it when its row no longer needs it.
     """
     from . import media_store
 
@@ -822,7 +833,11 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
     """
     from . import archive_members, media_store
 
+    if copy["source"] == KEPT_COPY:
+        return _rehash_kept(vault, row, pace)
     staged = private_state.store(vault, STORE_DIRNAME) / f"{secrets.token_hex(16)}.part"
+    reference = None
+    damage = None
     try:
         with open(staged, "xb") as sink:
             with archive_members.blob_writer(sink) if row.kind == BLOB else _plain(sink) as target:
@@ -845,13 +860,68 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
             os.fsync(sink.fileno())
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
-        failure = "hash_mismatch"
+        failure, damage = "hash_mismatch", "plaintext_mismatch"
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
         failure = str(getattr(error, "code", None) or type(error).__name__)
+        damage = media_store.replica_damage(error) if isinstance(error, media_store.MediaStoreError) else None
     staged.unlink(missing_ok=True)
+    if reference is not None and damage is not None:
+        _quarantine(vault, row, reference, damage)
     return failure
+
+
+def _quarantine(vault: Path, row: Row, replica: originals.StoredObject, failure: str) -> None:
+    """Record that a replica fixity downloaded does not decrypt to the binding: no repair reads it again."""
+    from . import media_replicas
+
+    try:
+        media_replicas.quarantine(vault, row.path, replica, level=media_replicas.DECRYPTED, failure=failure)
+    except (sqlite3.Error, OSError):
+        log.warning("original fixity: a damaged replica was not recorded", exc_info=True)
+
+
+def _kept_path(vault: Path, sha256: str) -> Path:
+    return private_state.store(vault, STORE_DIRNAME) / f"{sha256}{_KEPT_SUFFIX}"
+
+
+def _rehash_kept(vault: Path, row: Row, pace: _Pace) -> Path | str:
+    """The copy that an earlier attempt kept, when it still hashes to the binding; else the token, and it is dropped."""
+    kept = _kept_path(vault, row.sha256)
+    digest, size = hashlib.sha256(), 0
+    try:
+        for chunk in pace.chunks(_file_parts(kept)):
+            digest.update(chunk)
+            size += len(chunk)
+        if digest.hexdigest() == row.sha256 and (row.size is None or size == row.size):
+            return kept
+        failure = "hash_mismatch"
+    except OSError:
+        failure = "unreadable"
+    kept.unlink(missing_ok=True)
+    return failure
+
+
+def _keep(vault: Path, row: Row, staged: Path) -> None:
+    """Keep a verified copy that could not be put in place, so the next attempt downloads nothing."""
+    kept = _kept_path(vault, row.sha256)
+    if staged != kept:
+        try:
+            os.replace(staged, kept)
+        except OSError:
+            log.warning("original fixity: a verified copy could not be kept", exc_info=True)
+            staged.unlink(missing_ok=True)
+
+
+def _drop_unneeded_kept_copies(vault: Path, connection: sqlite3.Connection) -> None:
+    """Remove each kept copy whose row restored, changed its hash or retired: only an unresolved row uses one."""
+    folder = table_path(vault).parent
+    needed = {sha256 for (sha256,) in connection.execute(
+        "SELECT sha256 FROM originals WHERE state = ?", (CORRUPT_NO_COPY,))}
+    for kept in folder.glob(f"*{_KEPT_SUFFIX}") if folder.is_dir() else ():
+        if kept.name.removesuffix(_KEPT_SUFFIX) not in needed:
+            kept.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -870,25 +940,30 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         copies = [copy for copy in copies if copy["source"] != STORED_ORIGINAL or originals.pooled(vault, copy["path"]) is None]
         install = _install_pooled
     kept = _kept_trash(vault, row, hashed)
+    if row.kind == FILE and _kept_path(vault, row.sha256).is_file():
+        copies = [{"source": KEPT_COPY}, *copies]  # verified by an earlier attempt: it costs no download
     # The replicas this pass named and did not restore from, with why: the route records them (D8).
     tried: list[dict[str, str]] = []
     for copy in copies:
         replica = copy["source"] in (MEDIA_STORE, REPLICA)
+        downloaded = replica or copy["source"] == KEPT_COPY  # a copy that cost a download, now or before
         if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
             tried.append({**copy, "failed": reason})
             continue
         staged = _stage(vault, row, copy, pace)
         if isinstance(staged, str):
-            if replica:
+            if downloaded:
                 tried.append({**copy, "failed": staged})
             continue
         trashed: list[str] = []
+        keep = False
         try:
             identity = install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
         except (_Changed, OpError):
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
         except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+            keep = downloaded
             # The copy verified but could not be put in place. The row keeps its last identity and
             # verification time, so the next pass finds it changed or due, and tries again.
             code = getattr(error, "code", None) or type(error).__name__
@@ -901,7 +976,10 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
             _count(result, CORRUPT_NO_COPY)
             return
         finally:
-            staged.unlink(missing_ok=True)
+            if keep:
+                _keep(vault, row, staged)
+            else:
+                staged.unlink(missing_ok=True)
         _after_restore(vault, row)
         _record(vault, row, state=RESTORED, identity=identity, cause=cause, route=[*tried, copy], verified=True)
         _count(result, RESTORED)
@@ -1207,8 +1285,9 @@ def _fix(state: str) -> str:
     return ("Restore the file from a backup, or copy a candidate from the route after checking its SHA-256. "
             "A replica entry names an encrypted object in a store: decrypt it with the identity of its key version. "
             "An entry marked failed says why fixity did not restore from it; owner_restores means its store is not "
-            "immediate, so the owner retrieves it. An entry with a code verified but could not be put in place, "
-            "and the next pass tries it again. "
+            "immediate, so the owner retrieves it, and quarantined means a check found its bytes damaged. An entry "
+            "with a code verified but could not be put in place, and the next pass tries it again from a copy that "
+            "it keeps (kept_copy), so it downloads nothing twice. "
             "A vault_store entry is the store's own page: settle the held item with keep-store. "
             "The original is as Exomem found it.")
 

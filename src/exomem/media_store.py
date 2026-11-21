@@ -1357,10 +1357,34 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> 
     try:
         head = write_stored_original(vault, replica, _NullSink(), store=replica.store)
     except MediaStoreError as error:
-        if error.code != "MEDIA_ORIGINAL_UNVERIFIED":
+        if (damage := replica_damage(error)) is None:
             raise
-        return "decrypt_failed"
+        return damage
     return None if head == expected else "plaintext_mismatch"
+
+
+def replica_damage(error: MediaStoreError) -> str | None:
+    """The failure token when a read of a stored version failed because its bytes are damaged; None for an outage.
+
+    A size that differs from the record is `size_mismatch`; ciphertext that does not decrypt is `decrypt_failed`.
+    """
+    if isinstance(error, ReplicaMismatch):
+        return error.failure
+    return "decrypt_failed" if error.code == "MEDIA_ORIGINAL_UNVERIFIED" else None
+
+
+def _quarantine_found(vault: Path, binary_rel: str, reference: StoredObject, mismatch: ReplicaMismatch) -> None:
+    """Record that the store holds another version than `reference` names: eviction's own head found a damaged replica.
+
+    The level is the one the store's descriptor lets a check prove, so a store that cannot recompute never reads as
+    content-checked.
+    """
+    from . import media_replicas
+
+    entry = originals.store_entry(_settings(vault), reference.store)
+    level = media_replicas.scheduled_level(entry) if entry is not None else None
+    media_replicas.quarantine(vault, binary_rel, reference, level=level or media_replicas.PRESENCE,
+                              failure=mismatch.failure)
 
 
 def _confirmed(store: Store, reference: StoredObject) -> bool:
@@ -1759,23 +1783,29 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
         return reference
 
 
+# The finding of a quarantined replica that no copy can replace: neither the local original nor another entry verifies.
+NO_VERIFIED_SOURCE = "no_verified_source"
 # A replica copy that these codes refuse meets the same refusal when it is tried again: its bytes or its target decide.
 # Any other failure is an outage or a change that a later attempt can pass. Closed codes that this module raises.
 # nosemgrep: ep-word-set -- the closed set of refusal codes that replicate raises; they are not words a person typed.
 REPLICA_REFUSAL_CODES = frozenset({
     "MEDIA_OBJECT_TOO_LARGE", "MEDIA_ORIGINAL_UNVERIFIED", "MEDIA_REPLICA_STORE_UNKNOWN", "MEDIA_REPLICA_STORE_REFUSED",
+    NO_VERIFIED_SOURCE,
 })
 
 
-def require_replica_store(vault: Path, name: str) -> originals.StoreEntry:
-    """The declared store `name`, when it can take a replica now; else `MediaStoreError` says why."""
+def require_replica_store(vault: Path, name: str, *, serves_eviction: bool = False) -> originals.StoreEntry:
+    """The declared store `name`, when it can take a replica now; else `MediaStoreError` says why.
+
+    The store that serves eviction takes a replica only from `serves_eviction=True`: a copy again of its pointer.
+    """
     config = _settings(vault)
     if config.get("enabled") is not True:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store is disabled")
     entry = originals.store_entry(config, name)
     if entry is None:
         raise MediaStoreError("MEDIA_REPLICA_STORE_UNKNOWN", "no store of that name is declared")
-    if entry.serves_eviction:
+    if entry.serves_eviction and not serves_eviction:
         raise MediaStoreError("MEDIA_REPLICA_STORE_REFUSED",
                               "offload fills the store that serves eviction; name another declared store")
     if not entry.available:
@@ -1836,24 +1866,26 @@ def _note_replica(vault: Path, path: Path, replica: StoredObject, verified_at: f
         log.warning("a published replica is not yet in the replica table: %s", type(error).__name__)
 
 
-def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object], vault: Path, backend: Store,
-                     name: str, source: StoredObject) -> tuple[ObjectHead, str]:
-    """Copy the eviction store's ciphertext of an evicted original into `backend` as `name`.
+def _copy_ciphertext(ledger: MediaJobStore, token: str, config: dict[str, object], backend: Store, name: str,
+                     source: StoredObject, source_backend: Store) -> tuple[ObjectHead, str]:
+    """Copy `source`, a stored version of an original, from `source_backend` into `backend` as `name`.
 
-    The bytes are hashed on the way and must match the pointer's recorded size and digest, which its own upload
-    confirmed. The key is not needed, and the plaintext never exists here.
+    The bytes are hashed on the way and must match the entry's recorded size and digest, which its own upload
+    confirmed; a difference raises `ReplicaMismatch`. The key is not needed, and the plaintext never exists here.
     """
     with _ciphertext_reserved(ledger, token, config, source.ciphertext_size):
         with tempfile.TemporaryFile() as ciphertext:
             digest, size = hashlib.sha256(), 0
-            with closing(_stored_chunks(store_for(vault), source)) as chunks:
+            with closing(_stored_chunks(source_backend, source)) as chunks:
                 for chunk in chunks:
                     digest.update(chunk)
                     size += len(chunk)
                     ciphertext.write(chunk)
             head = ObjectHead(size, digest.hexdigest())
-            if head != ObjectHead(source.ciphertext_size, source.ciphertext_sha256):
-                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the stored ciphertext differs from its pinned digest")
+            if head.size != source.ciphertext_size:
+                raise ReplicaMismatch("size_mismatch")
+            if head.sha256 != source.ciphertext_sha256:
+                raise ReplicaMismatch("digest_mismatch")
             ciphertext.seek(0)
             with _transport("upload"):
                 return head, backend.upload(name, ciphertext, size=head.size, sha256=head.sha256)
@@ -1911,7 +1943,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
         else:
             assert snapshot.reference is not None
             key_version = snapshot.reference.key_version
-            head, version = _copy_ciphertext(ledger, token, config, vault, backend, name, snapshot.reference)
+            head, version = _copy_ciphertext(ledger, token, config, backend, name, snapshot.reference, store_for(vault))
         replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
         if not _confirmed(backend, replica):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
@@ -1928,6 +1960,128 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
                      (ledger._relative(path), name))
 
         _publishing(vault, "media_store_replica_publish", publish)
+    return replica
+
+
+def _entry_in(snapshot: OriginalSnapshot, store: str) -> StoredObject | None:
+    """The entry that a binding lists for `store`: its pointer when `store` serves eviction, else its replica."""
+    return next((entry for entry in (snapshot.reference, *snapshot.replicas)
+                 if entry is not None and entry.store == store), None)
+
+
+def _repoint_cache(vault: Path, ledger: MediaJobStore, snapshot: OriginalSnapshot, old: StoredObject,
+                   new: StoredObject) -> None:
+    """After a pointer is replaced, the cache row that names `old` names `new`, and a refusal about `old` is stale.
+
+    The row keys on the pointer (`_recorded_identity`): left as it was, a cached original would never match its
+    cache again and eviction would keep refusing it.
+    """
+    from . import media_bindings
+
+    _durable(ledger, "UPDATE media_cache SET reference = ? WHERE binary_rel = ? AND reference = ?",
+             (_reference_key(new), media_bindings.snapshot_key(vault, snapshot), _reference_key(old)))
+    _durable(ledger, "DELETE FROM media_offload_refusals WHERE binary_rel = ?", (ledger._relative(snapshot.path),))
+
+
+def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: dict[str, object], backend: Store,
+                       name: str, snapshot: OriginalSnapshot, target: str) -> tuple[ObjectHead, str, str]:
+    """Copy the ciphertext of another entry of the binding into `backend`: the head, the version and the key version.
+
+    Each entry that is not quarantined is tried in the binding's order. One whose bytes differ from its record is
+    quarantined as the finding it is, and the next is tried. A store that cannot answer ends the attempt as an outage
+    when no entry copied; only when every entry was tried does the original have no verified source.
+    """
+    from . import media_replicas
+
+    relative = ledger._relative(snapshot.path)
+    outage: MediaStoreError | None = None
+    for candidate in (snapshot.reference, *snapshot.replicas):
+        if candidate is None or candidate.store == target or media_replicas.has_quarantined(vault, (candidate,)):
+            continue
+        try:
+            source_backend = store_for(vault, candidate.store)
+            if isinstance(source_backend, FilesystemStore):
+                source_backend.require_identity()
+            head, version = _copy_ciphertext(ledger, token, config, backend, name, candidate, source_backend)
+        except ReplicaMismatch as mismatch:
+            _quarantine_found(vault, relative, candidate, mismatch)
+            continue
+        except MediaStoreError as error:
+            if error.code != "MEDIA_STORE_UNAVAILABLE":
+                raise
+            outage = error
+            continue
+        return head, version, candidate.key_version
+    if outage is not None:
+        raise outage
+    raise MediaStoreError(NO_VERIFIED_SOURCE, "no copy of the original verifies now")
+
+
+def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
+    """Replace the quarantined entry that a binding lists for `store_name` with a new version in the same store.
+
+    The source is the original on the volume when its bytes hash to the binding, else another entry's ciphertext (see
+    `_copy_from_replica`); with neither, it raises `no_verified_source` and the binding stays as it was. The new
+    version publishes under the vault boundary only if the binding is the one read first, so an entry that a later
+    write replaced is never overwritten. The damaged version stays in its store. Returns None when the binding no longer lists
+    the entry that the table quarantined: that finding is stale and nothing is written.
+    """
+    from . import media_replicas
+
+    vault = Path(vault).resolve()
+    config = _settings(vault)
+    entry = require_replica_store(vault, store_name, serves_eviction=True)
+    backend = store_for(vault, store_name)
+    if isinstance(backend, FilesystemStore):
+        backend.require_identity()
+    ledger = MediaJobStore(vault)
+    relative = ledger._relative(path)
+    scope = "" if entry.serves_eviction else store_name  # the record of an upload is per store; empty serves eviction
+    with _pin(vault, path) as (_ledger, token), ExitStack() as held:
+        snapshot = original_state(vault, path)
+        if snapshot.binary_sha256 is None or snapshot.binary_size is None:
+            raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
+        damaged = _entry_in(snapshot, store_name)
+        if damaged is None or not media_replicas.is_quarantined(vault, relative, damaged):
+            return None
+        source = None
+        if snapshot.state in ("local", "cached"):  # the binding states whose bytes are on this volume: `originals` fixes them
+            local = held.enter_context(_open_local_original(vault, relative, snapshot))
+            if _digest(local.stream) == ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+                local.stream.seek(0)
+                _bind_pin(ledger, token, snapshot, local)
+                source = local
+        with _guard(vault, "media_store_replica_protect"):
+            if source is not None:
+                source.require_current()
+            if original_state(vault, path) != snapshot:
+                raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+            name = _upload_name(ledger, snapshot, scope)
+            _protect(ledger, snapshot, name, uploadable=True, replica_store=scope)
+        if source is not None:
+            key_version = str(config["key_version"])
+            head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream, snapshot.binary_size)
+        else:
+            head, version, key_version = _copy_from_replica(vault, ledger, token, config, backend, name, snapshot,
+                                                            store_name)
+        replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
+        if not _confirmed(backend, replica):
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
+
+        def publish() -> None:
+            if source is not None:
+                source.require_current()
+            _seal(ledger, snapshot, name)
+            # The prepared edit re-reads the sidecar and refuses unless it is still the one that `snapshot` names.
+            if entry.serves_eviction:
+                _commit_reference(vault, prepare_reference(vault, snapshot, replica))
+                _repoint_cache(vault, ledger, snapshot, damaged, replica)
+            else:
+                _commit_reference(vault, prepare_replica(vault, snapshot, replica))
+            _note_replica(vault, path, replica, time.time())
+            _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
+
+        _publishing(vault, "media_store_replica_recopy", publish)
     return replica
 
 
@@ -2243,7 +2397,7 @@ def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
         remaining = reference.ciphertext_size
         while chunk := stream.read(min(1024 * 1024, remaining + 1)):
             if len(chunk) > remaining:
-                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext exceeds its recorded size")
+                raise ReplicaMismatch("size_mismatch")
             remaining -= len(chunk)
             yield chunk
 
@@ -2637,8 +2791,15 @@ def _evict_one(vault: Path, path: Path) -> str:
     if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
         return KEPT  # An original that could not come back stays (D3).
     identity = _identity(vault, path)
+    from . import media_replicas
+
+    if media_replicas.has_quarantined(vault, (snapshot.reference,)):
+        return KEPT  # A pointer that a check or an earlier pass found damaged authorizes nothing; its new copy replaces it.
     try:
         confirmed = _confirmed(store_for(vault), snapshot.reference)
+    except ReplicaMismatch as mismatch:
+        _quarantine_found(vault, ledger._relative(path), snapshot.reference, mismatch)
+        return KEPT
     except MediaStoreError as error:
         # An unavailable or unverified version cannot authorize removal; an outage also ends the pass.
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
@@ -2697,6 +2858,17 @@ def _evict_one(vault: Path, path: Path) -> str:
             conn.close()
 
 
+def _quarantine_shared(vault: Path, ledger: MediaJobStore, key: str, reference: StoredObject,
+                       mismatch: ReplicaMismatch) -> None:
+    """Quarantine `reference` for each original bound to the pooled object `key` whose pointer it is."""
+    with closing(ledger._connect(readonly=True)) as conn:
+        bound = conn.execute("SELECT binary_rel, reference FROM media_bindings WHERE object_key = ? "
+                             "AND reference IS NOT NULL", (key,)).fetchall()
+    for row in bound:
+        if originals.stored_reference(json.loads(row["reference"])) == reference:
+            _quarantine_found(vault, row["binary_rel"], reference, mismatch)
+
+
 def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, config: dict[str, object]) -> str:
     """Confirm distinct own recovery versions outside the guard; unlink once under physical pin exclusion."""
     from . import media_bindings, original_pool
@@ -2709,12 +2881,21 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
     if (facts is None or facts.resident_only or not facts.recoverable or facts.pinned
             or bounds is None or not bounds.hydration_fits(facts.size)):
         return KEPT
+    from . import media_replicas
+
+    if media_replicas.has_quarantined(vault, facts.references):
+        return KEPT  # See `_evict_one`: a damaged pointer authorizes nothing.
     with original_pool.open_object(vault, facts.sha256, facts.size) as source:
         version = source.version
     try:
         backend = store_for(vault)
-        if not all(_confirmed(backend, reference) for reference in facts.references):
-            return KEPT
+        for reference in facts.references:
+            try:
+                if not _confirmed(backend, reference):
+                    return KEPT
+            except ReplicaMismatch as mismatch:
+                _quarantine_shared(vault, ledger, key, reference, mismatch)
+                return KEPT
     except MediaStoreError as error:
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
     with _guard(vault, "media_store_evict_shared"), closing(ledger._connect()) as conn:

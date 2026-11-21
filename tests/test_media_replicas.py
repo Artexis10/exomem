@@ -6,6 +6,7 @@ and the real `age`. The data is invented.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -16,9 +17,20 @@ from pathlib import Path
 import pytest
 from test_media_store import _offload, _preserved
 from test_media_store import selected_store as selected_store
-from test_original_fixity import DAMAGED, TRANSCRIPT, _findings, _fixity_on, _stored  # noqa: F401
+from test_original_fixity import DAMAGED, TRANSCRIPT, _count_downloads, _findings, _fixity_on, _stored  # noqa: F401
 
-from exomem import commands, media_jobs, media_replicas, media_store, original_fixity, originals
+from exomem import (
+    artifact_lifecycle,
+    commands,
+    held_fs,
+    media_bindings,
+    media_jobs,
+    media_replicas,
+    media_store,
+    original_fixity,
+    original_pool,
+    originals,
+)
 
 MIRROR = "mirror"
 IMMEDIATE = {"retrieval_class": "immediate", "head_recomputes": True}
@@ -309,7 +321,9 @@ def test_the_status_counts_protection_from_the_table_and_reads_unknown_when_the_
     unknown = media_replicas.status(vault)
     assert (unknown["state"], unknown["stores"], unknown["totals"]) == ("unknown", None, None)
     assert media_replicas.work(vault)  # the background rebuild
-    assert media_replicas.status(vault)["totals"]["replicas"] == 4
+    rebuilt = media_replicas.status(vault)["totals"]
+    assert rebuilt["replicas"] == 4
+    assert (rebuilt["never_checked"], rebuilt["checks"][media_replicas.CONTENT]["replicas"]) == (4, 0)  # no history to trust
 
 
 def test_the_status_reads_one_index_and_the_page_returns_originals_by_path(vault: Path, selected_store, mirrored: Path) -> None:
@@ -319,10 +333,8 @@ def test_the_status_reads_one_index_and_the_page_returns_originals_by_path(vault
     _measured(vault)
 
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        plan = " ".join(row[3] for row in ledger.execute(
-            "EXPLAIN QUERY PLAN SELECT store, key_version, state, COUNT(*), COUNT(verified_at), MIN(verified_at) "
-            "FROM media_replicas GROUP BY store, key_version, state"))
-    assert "COVERING INDEX media_replicas_status" in plan
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._GROUPS, (202611,)))
+    assert "COVERING INDEX media_replicas_status" in plan and "TEMP B-TREE" not in plan
     first = media_replicas.page(vault, limit=2)
     second = media_replicas.page(vault, after=first["next_after"], limit=2)
     paths = [row["path"] for row in (*first["originals"], *second["originals"])]
@@ -972,3 +984,524 @@ def test_the_sample_pick_and_the_month_release_read_the_sample_index_with_no_sor
                                                             (MIRROR, "1", 202611, 8)))
     assert "USING INDEX media_replicas_sample" in pick and "TEMP B-TREE" not in pick
     assert "USING INDEX media_replicas_sample" in release
+
+
+def test_the_eviction_gate_reads_the_index_of_quarantined_rows(vault: Path, selected_store, mirrored: Path) -> None:
+    """Eviction asks this for every candidate: a scan of every replica would cost the size of the store each time."""
+    _replicated(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DAMAGED, ("o", "v")))
+    assert "USING COVERING INDEX media_replicas_damaged" in plan
+
+
+# --- verify-stored-replicas: findings from a check and from eviction ---------------------------------------
+
+
+def _due_again(vault: Path) -> None:
+    """Make every replica due for its next check, as a month from now would."""
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET checked_at = 0, level = NULL")
+
+
+def _stored_file(root: Path, replica: originals.StoredObject) -> Path:
+    [stored] = [path for path in _objects(root) if path.parent.name == replica.object]
+    return stored
+
+
+def _damage_a_byte(path: Path) -> None:
+    data = bytearray(path.read_bytes())
+    data[-1] ^= 1
+    path.write_bytes(bytes(data))
+
+
+@pytest.mark.parametrize(("damage", "failure"), [
+    pytest.param(lambda path: path.unlink(), "absent", id="the-store-lost-the-object"),
+    pytest.param(lambda path: path.write_bytes(path.read_bytes()[:-1]), "size_mismatch", id="the-object-is-short"),
+    pytest.param(_damage_a_byte, "digest_mismatch", id="one-byte-is-flipped"),
+])
+def test_a_check_quarantines_a_replica_that_the_store_lost_or_holds_damaged(
+        vault: Path, selected_store, mirrored: Path, damage, failure: str) -> None:
+    """A check that only counted what it read would leave a lost copy listed as one of the owner's safe copies."""
+    _relative, replica = _replicated(vault)
+    damage(_stored_file(mirrored, replica))
+    _due_again(vault)
+
+    media_replicas.check(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.CONTENT, failure)
+    assert (row["object"], row["version"]) == (replica.object, replica.version)  # the finding names the damaged version
+
+
+def test_eviction_keeps_an_original_whose_stored_copy_is_damaged_and_reports_the_finding(
+        vault: Path, selected_store) -> None:
+    """The drill: eviction's own head used to refuse silently, leaving the owner unaware that the stored copy was gone."""
+    values, _config = selected_store
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    _damage_a_byte(Path(values["root"]) / reference.object / reference.version)
+
+    assert not media_store.evict(vault, path)
+
+    row = _replica_row(vault, store=reference.store)
+    # The eviction store declares no `head_recomputes`, so its head never proves content: the finding says presence.
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.PRESENCE,
+                                                            "digest_mismatch")
+    assert (row["object"], row["version"]) == (reference.object, reference.version)
+    assert path.exists()  # the local original is the only intact copy
+
+
+def test_eviction_keeps_an_original_whose_pointer_is_quarantined_even_when_the_store_reads_well(
+        vault: Path, selected_store) -> None:
+    """A pointer that a check found damaged must not be trusted again because a later read of the store passes."""
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    media_replicas.quarantine(vault, path.relative_to(vault).as_posix(), reference, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+
+    assert not media_store.evict(vault, path)
+
+    assert path.exists()
+
+
+def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_damaged_pointer(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool's eviction path confirms each filing's pointer too: a damaged one must be a finding there as well."""
+    values, _config = selected_store
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    content = path.read_bytes()
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    digest = hashlib.sha256(content).hexdigest()
+    with original_pool.prepare(vault, digest, len(content), held_fs.Chunks(lambda: [content])) as prepared:
+        prepared.publish()
+    path.unlink()
+    assert media_bindings.rebuild(vault)
+    with media_store.open_original(vault, path):  # a read records the cache identity that an eviction needs
+        pass
+    _damage_a_byte(Path(values["root"]) / reference.object / reference.version)
+
+    assert not media_store.evict(vault, path)
+
+    row = _replica_row(vault, store=reference.store)
+    assert (row["binary_rel"], row["state"], row["failure"]) == (path.relative_to(vault).as_posix(),
+                                                                 media_replicas.QUARANTINED, "digest_mismatch")
+    assert original_pool.object_path(vault, digest).exists()
+
+
+# --- verify-stored-replicas: copying a quarantined replica again ---------------------------------------------
+
+
+def _recopy_all(vault: Path) -> None:
+    """Run the worker's copy units until the queue has nothing it can settle, as the service would."""
+    while media_replicas.drain(vault):
+        pass
+
+
+def _queued(vault: Path) -> list[tuple[str, str, str, str | None]]:
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        return list(ledger.execute("SELECT store, kind, state, code FROM media_replica_queue ORDER BY store"))
+
+
+def _entry(vault: Path, path: Path | str, store: str) -> originals.StoredObject:
+    snapshot = originals.original_state(vault, path)
+    return next(entry for entry in (snapshot.reference, *snapshot.replicas) if entry is not None and entry.store == store)
+
+
+def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The drill's end: a finding that nothing repaired would leave the owner with one copy for good."""
+    relative, damaged = _replicated(vault)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    assert _replica_row(vault)["state"] == media_replicas.QUARANTINED
+
+    _recopy_all(vault)
+
+    fresh = _entry(vault, relative, MIRROR)
+    assert (fresh.object, fresh.version) != (damaged.object, damaged.version)
+    assert media_store.check_replica(vault, fresh) is None
+    row = _replica_row(vault)
+    assert (row["object"], row["version"], row["state"]) == (fresh.object, fresh.version, media_replicas.UPLOAD_VERIFIED)
+    assert _stored_file(mirrored, damaged).exists()  # the damaged version stays in its store, named by the finding
+    assert [item for item in _queued(vault) if item[0] == MIRROR] == []
+
+
+def test_a_replica_is_copied_again_as_ciphertext_from_another_replica_when_the_original_left_the_volume(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """An evicted original has no local bytes: the copy must come from a replica that is still good, and stay ciphertext."""
+    values, _config = selected_store
+    relative, damaged = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    _recopy_all(vault)
+
+    fresh = _entry(vault, relative, MIRROR)
+    assert (fresh.object, fresh.version) != (damaged.object, damaged.version)
+    assert (fresh.key_version, fresh.ciphertext_sha256) == (pointer.key_version, pointer.ciphertext_sha256)
+    assert media_store.check_replica(vault, fresh) is None
+    assert originals.original_state(vault, relative).reference == pointer
+
+
+def test_a_damaged_pointer_of_an_evicted_original_is_replaced_from_a_replica_and_the_original_reads_again(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The store that serves eviction is replaced the same way: otherwise a damaged pointer leaves the original unreadable."""
+    values, _config = selected_store
+    relative, _mirror = _replicated(vault)
+    content = (vault / relative).read_bytes()
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+    assert _replica_row(vault, store=pointer.store)["state"] == media_replicas.QUARANTINED
+
+    _recopy_all(vault)
+
+    fresh = originals.original_state(vault, relative).reference
+    assert (fresh.object, fresh.version) != (pointer.object, pointer.version)
+    with media_store.open_original(vault, relative) as source:
+        assert source.stream.read() == content
+
+
+def test_a_replica_that_fixity_downloads_and_cannot_decrypt_is_quarantined_with_the_failure(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A repair that skipped the finding would try the same bad copy at every later damage, and the owner never learn of it."""
+    original = _stored(vault, "Recordings")
+    reference = _offload(vault, original)
+    _replicate_all(vault)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    original.write_bytes(DAMAGED)
+    first = Path(selected_store[0]["root"]) / reference.object / reference.version
+    first.write_bytes(os.urandom(first.stat().st_size))
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    row = _replica_row(vault, store=reference.store)
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
+                                                            "decrypt_failed")
+    assert [item[:2] for item in _queued(vault) if item[0] == reference.store] == [(reference.store, media_replicas.RECOPY)]
+
+
+def test_a_repair_does_not_read_a_quarantined_replica_and_names_it_in_the_route(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The finding is a promise: a quarantined copy is not downloaded again for every repair."""
+    original = _stored(vault, "Recordings")
+    reference = _offload(vault, original)
+    _replicate_all(vault)
+    media_replicas.quarantine(vault, original.relative_to(vault).as_posix(), reference, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    original.write_bytes(DAMAGED)
+    reads = _count_downloads(monkeypatch)
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert reads == [MIRROR]
+    [finding] = _findings(vault)
+    [tried, used] = finding.meta["route"]
+    assert (tried["source"], tried["failed"], used["source"]) == ("media_store", "quarantined", "replica")
+
+
+def test_a_damaged_local_original_is_not_the_source_of_a_copy_again(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """Encrypting what the volume holds would pass the damage on as a fresh, verified-looking replica."""
+    relative, damaged = _replicated(vault)
+    path = vault / relative
+    content = path.read_bytes()
+    pointer = originals.original_state(vault, relative).reference
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    path.write_bytes(bytes(reversed(content)))  # the same size, other bytes: the original is damaged too
+
+    _recopy_all(vault)
+
+    fresh = _entry(vault, relative, MIRROR)
+    assert fresh.ciphertext_sha256 == pointer.ciphertext_sha256  # the pointer's ciphertext, not the damaged file's
+    expected = media_store.ObjectHead(len(content), hashlib.sha256(content).hexdigest())
+    assert media_store.sample_replica(vault, fresh, expected) is None
+
+
+def test_a_cached_original_whose_pointer_was_replaced_can_still_be_evicted(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The cache row keys on the pointer: left on the damaged one, eviction would refuse the original for good."""
+    values, _config = selected_store
+    relative, _mirror = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+    _recopy_all(vault)
+    assert originals.original_state(vault, relative).reference != pointer
+
+    assert media_store.evict(vault, vault / relative)
+
+
+def test_a_replica_that_went_bad_since_its_last_check_is_not_copied_it_is_quarantined(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A source is trusted only as far as its bytes hash: copying an unchecked damaged replica would spread the damage."""
+    values, _config = selected_store
+    relative, damaged = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)  # after the check: the table still trusts it
+    assert _replica_row(vault, store=pointer.store)["state"] != media_replicas.QUARANTINED
+
+    _recopy_all(vault)
+
+    assert _replica_row(vault, store=pointer.store)["state"] == media_replicas.QUARANTINED
+    assert _entry(vault, relative, MIRROR) == damaged
+    assert [item[2:] for item in _queued(vault) if item[0] == MIRROR] == [(media_replicas.REFUSED, "no_verified_source")]
+
+
+def test_a_quarantined_replica_with_no_verified_source_stays_quarantined_and_the_binding_is_unchanged(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """With both copies damaged and the original gone, a copy of either would spread the damage under a fresh name."""
+    values, _config = selected_store
+    relative, damaged = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    before = originals.original_state(vault, relative)
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    _recopy_all(vault)
+
+    assert originals.original_state(vault, relative) == before
+    assert [(store, state, code) for store, _kind, state, code in _queued(vault)] == [
+        (MIRROR, media_replicas.REFUSED, "no_verified_source"),
+        (pointer.store, media_replicas.REFUSED, "no_verified_source"),
+    ]
+
+
+def test_a_binding_edited_while_a_replica_is_copied_again_is_not_overwritten(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The copy runs outside the guard: its publication must replace the entry it found damaged, never a newer one."""
+    relative, damaged = _replicated(vault)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    monkeypatch.setattr(media_replicas, "_RETRY_SECONDS", 3600)
+    newer = originals.StoredObject(1, MIRROR, damaged.key_version, "e" * 64, "a-newer-version", 9, "f" * 64)
+    upload = media_store.FilesystemStore.upload
+
+    def edit_the_binding_after_the_upload(self, name, stream, *, size, sha256):
+        result = upload(self, name, stream, size=size, sha256=sha256)
+        if self.root == mirrored:
+            media_store._publishing(vault, "test_concurrent_edit", lambda: media_store._commit_reference(
+                vault, media_store.prepare_replica(vault, originals.original_state(vault, relative), newer)))
+        return result
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", edit_the_binding_after_the_upload)
+    _recopy_all(vault)
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", upload)
+
+    assert _entry(vault, relative, MIRROR) == newer  # the concurrent edit stands
+    assert _queued(vault) == [(MIRROR, media_replicas.RECOPY, media_replicas.PENDING, "MEDIA_ORIGINAL_CHANGED")]
+
+    monkeypatch.setattr(media_replicas, "_RETRY_SECONDS", 0)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replica_queue SET retry_at = 0")
+    _recopy_all(vault)
+
+    assert _entry(vault, relative, MIRROR) == newer  # the retry finds the finding stale and writes nothing
+    assert _queued(vault) == []
+
+
+# --- verify-stored-replicas: what the owner sees ----------------------------------------------------------
+
+
+def _mirror_stats(vault: Path) -> dict[str, object]:
+    return {stats["name"]: stats for stats in media_replicas.status(vault)["stores"]}[MIRROR]
+
+
+def test_the_status_keeps_each_proof_level_apart_and_never_calls_a_presence_check_content(
+        vault: Path, selected_store, tmp_path: Path) -> None:
+    """A store that only echoes the digest it was given must not raise the owner's count of content-verified copies."""
+    _declare(vault, selected_store, tmp_path / "mirror", head_recomputes=False)
+    _replicated(vault)
+    media_replicas.rebuild(vault)
+    media_replicas.check(vault)
+
+    status = media_replicas.status(vault)
+
+    levels = {name: {level: proof["replicas"] for level, proof in stats["checks"].items()}
+              for name, stats in {stats["name"]: stats for stats in status["stores"]}.items()}
+    assert (levels[MIRROR][media_replicas.PRESENCE], levels[MIRROR][media_replicas.CONTENT]) == (1, 0)
+    assert levels["test-store"][media_replicas.CONTENT] == 1  # the eviction store recomputes, so its check is content
+    assert status["totals"]["checks"][media_replicas.CONTENT]["replicas"] == 1
+    assert status["totals"]["never_checked"] == 0
+
+
+def test_the_status_reports_a_replica_of_an_unscheduled_store_with_the_reason_and_not_as_never_checked(
+        vault: Path, selected_store) -> None:
+    """A store that states no `head_recomputes` is never checked by design: reading that as a backlog would never clear."""
+    _offload(vault, _preserved(vault))
+    media_replicas.rebuild(vault)
+    media_replicas.check(vault)
+
+    status = media_replicas.status(vault)
+
+    [store] = [stats for stats in status["stores"] if stats["replicas"]]
+    assert store["checks_not_scheduled"] == {"replicas": 1, "reasons": [media_replicas.HEAD_NOT_DECLARED]}
+    assert store["never_checked"] == 0
+    assert status["totals"]["checks_not_scheduled"] == store["checks_not_scheduled"]
+
+
+def test_the_status_counts_a_replica_that_no_check_has_reached_as_never_checked(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    _replicated(vault)
+    media_replicas.rebuild(vault)
+    _due_again(vault)  # as a replica that a new version or a rebuild left with no history
+
+    mirror = _mirror_stats(vault)
+
+    assert (mirror["never_checked"], mirror["checks_not_scheduled"], mirror["quarantined"]) == (1, None, 0)
+
+
+def test_the_status_gives_the_sample_budget_what_it_spent_and_the_replicas_skipped_for_size(
+        vault: Path, selected_store, tmp_path: Path) -> None:
+    """A budget that the owner cannot see used up would read as sampling that silently stopped working."""
+    mirror_root = tmp_path / "mirror"
+    _declare(vault, selected_store, mirror_root)
+    paths = [_preserved(vault, category=category) for category in ("a", "b", "c")]
+    for path in paths:
+        _offload(vault, path)
+    _replicate_all(vault)
+    one_replica = originals.original_state(vault, paths[0]).replicas[0].ciphertext_size
+    _declare(vault, selected_store, mirror_root, sample_bytes_per_month=one_replica + 1)
+    _unproven(vault)
+    media_replicas.sample(vault)
+    media_replicas.rebuild(vault)
+
+    sample = _mirror_stats(vault)["sample"]
+
+    assert (sample["budget_bytes"], sample["spent_bytes"], sample["skipped_for_size"]) == (one_replica + 1, one_replica, 2)
+    assert sample["not_sampled"] == []
+    assert _mirror_stats(vault)["checks"][media_replicas.DECRYPTED]["replicas"] == 1
+
+
+def test_the_status_gives_the_reason_for_each_replica_that_is_not_sampled(
+        vault: Path, selected_store, tmp_path: Path) -> None:
+    _declare(vault, selected_store, tmp_path / "mirror", sample_bytes_per_month=0)
+    _replicated(vault)
+    media_replicas.rebuild(vault)
+
+    sample = _mirror_stats(vault)["sample"]
+
+    assert (sample["budget_bytes"], sample["not_sampled"]) == (0, [{"reason": media_replicas.SAMPLING_OFF, "replicas": 1}])
+
+
+def test_a_finding_reaches_the_owner_through_the_status_and_the_findings_list_with_its_copy_again_pending(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The drill's last step: a damaged byte the owner is never told about is the same as no check."""
+    relative, damaged = _replicated(vault)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    media_replicas.rebuild(vault)
+
+    assert _mirror_stats(vault)["quarantined"] == 1
+    [finding] = media_replicas.findings(vault)["findings"]
+
+    assert (finding["path"], finding["store"], finding["failed_level"], finding["failure"]) == (
+        relative, MIRROR, media_replicas.CONTENT, "digest_mismatch")
+    assert (finding["object"], finding["version"]) == (damaged.object, damaged.version)  # the version that stays
+    assert finding["found_at"] is not None
+    assert finding["recopy"] == {"state": media_replicas.PENDING, "code": None}
+
+
+def test_the_findings_list_reads_a_page_at_a_time_by_path_and_store(vault: Path, selected_store, mirrored: Path) -> None:
+    paths = [_preserved(vault, category=category) for category in ("a", "b", "c")]
+    for path in paths:
+        _offload(vault, path)
+    _replicate_all(vault)
+    for path in paths:
+        [replica] = originals.original_state(vault, path).replicas
+        _damage_a_byte(_stored_file(mirrored, replica))
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    first = media_replicas.findings(vault, limit=2)
+    second = media_replicas.findings(vault, after=tuple(first["next_after"]), limit=2)
+
+    listed = [item["path"] for item in (*first["findings"], *second["findings"])]
+    assert listed == sorted(path.relative_to(vault).as_posix() for path in paths)
+    assert (len(first["findings"]), second["next_after"]) == (2, None)
+
+
+def test_a_finding_that_no_copy_can_replace_names_the_refusal(vault: Path, selected_store, mirrored: Path) -> None:
+    values, _config = selected_store
+    relative, damaged = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+    _recopy_all(vault)
+
+    recopies = {item["store"]: item["recopy"] for item in media_replicas.findings(vault)["findings"]}
+
+    assert recopies == {MIRROR: {"state": media_replicas.REFUSED, "code": media_store.NO_VERIFIED_SOURCE},
+                        pointer.store: {"state": media_replicas.REFUSED, "code": media_store.NO_VERIFIED_SOURCE}}
+
+
+def test_the_per_original_view_and_the_page_show_each_replicas_check_and_its_finding(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, damaged = _replicated(vault)
+    media_replicas.rebuild(vault)
+    _due_again(vault)
+    media_replicas.check(vault)
+    [passed] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
+    assert (passed["last_check"]["level"], passed["finding"]) == (media_replicas.CONTENT, None)
+
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    for view in (media_replicas.original_view(vault, relative)["replicas"],
+                 media_replicas.page(vault)["originals"][0]["replicas"]):
+        [found] = [item for item in view if item["store"] == MIRROR]
+        assert (found["state"], found["last_check"], found["finding"]["failure"]) == (
+            media_replicas.QUARANTINED, None, "digest_mismatch")
+
+
+def test_the_findings_pick_reads_the_index_of_quarantined_rows_in_path_order(vault: Path, selected_store) -> None:
+    _offload(vault, _preserved(vault))
+    media_replicas.rebuild(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._FINDINGS, ("", "", 8)))
+
+    assert "USING INDEX media_replicas_findings" in plan and "TEMP B-TREE" not in plan
+    assert "USING PRIMARY KEY" in plan or "USING COVERING INDEX" in plan  # the queue is read by its key
+
+
+def test_the_findings_command_prints_the_page_that_the_owner_reads(
+        vault: Path, selected_store, mirrored: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from exomem import __main__ as cli
+
+    relative, damaged = _replicated(vault)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    assert cli._media_replicas_main(["findings", "--vault", str(vault)]) == 0
+
+    [finding] = json.loads(capsys.readouterr().out)["findings"]
+    assert (finding["path"], finding["store"]) == (relative, MIRROR)

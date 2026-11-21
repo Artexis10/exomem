@@ -5188,7 +5188,8 @@ def _media_replicas_main(argv: list[str]) -> int:
     """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
     parser = argparse.ArgumentParser(
         prog="exomem media-replicas",
-        description="Declare a replica store, confirm that you exported its key, or list the replicas by original.",
+        description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
+                    "the replicas that a check found damaged.",
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -5203,6 +5204,10 @@ def _media_replicas_main(argv: list[str]) -> int:
     listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
     listing.add_argument("--after", help="the path that the previous page ended on")
     listing.add_argument("--limit", type=int, default=100)
+    found = actions.add_parser("findings", parents=[common], help="list the replicas that a check found damaged")
+    found.add_argument("--after-path", help="the path that the previous page ended on")
+    found.add_argument("--after-store", default="", help="the store that the previous page ended on")
+    found.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
     if not args.vault:
         print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
@@ -5218,6 +5223,9 @@ def _media_replicas_main(argv: list[str]) -> int:
             print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
         elif args.action == "confirm-key-export":
             print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "findings":
+            cursor = None if args.after_path is None else (args.after_path, args.after_store)
+            print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
         else:
             print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
     except (media_store.MediaStoreError, ValueError) as error:

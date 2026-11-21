@@ -16,7 +16,7 @@ import math
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -110,6 +110,9 @@ def initialize(conn: sqlite3.Connection) -> None:
                  f"WHERE state <> '{QUARANTINED}'")
     # The quarantined rows, which the findings list reads in path order.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_findings ON media_replicas(binary_rel, store) "
+                 f"WHERE state = '{QUARANTINED}'")
+    # The same rows by the stored version, which eviction asks about before it drops an original's local bytes.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_damaged ON media_replicas(object, version) "
                  f"WHERE state = '{QUARANTINED}'")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
@@ -214,6 +217,31 @@ def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *,
                          (replica.store, binary_rel, PENDING, RECOPY))
     if changed:
         wake()
+
+
+#: A quarantined row of one stored version: the lookup of `media_replicas_damaged`, which holds only quarantined rows.
+_DAMAGED = f"SELECT 1 FROM media_replicas WHERE state = '{QUARANTINED}' AND object = ? AND version = ? LIMIT 1"
+
+
+def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:
+    """Whether the table holds any of these stored versions as quarantined: what eviction asks before it trusts a pointer.
+
+    One lookup per reference through the index of quarantined rows. An object has a handful of versions, never a
+    number that grows with the store.
+    """
+    with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
+        return any(conn.execute(_DAMAGED, (reference.object, reference.version)).fetchone() for reference in references)
+
+
+#: One replica as the table holds it, quarantined: the primary-key lookup that tells a copy again whether its finding stands.
+_QUARANTINED_AT = ("SELECT 1 FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+                   f"AND state = '{QUARANTINED}'")
+
+
+def is_quarantined(vault: Path, binary_rel: str, replica: originals.StoredObject) -> bool:
+    """Whether the table holds exactly this entry of this original as quarantined."""
+    with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
+        return conn.execute(_QUARANTINED_AT, (binary_rel, replica.store, replica.object, replica.version)).fetchone() is not None
 
 
 def _replicas_of(snapshot: originals.OriginalSnapshot) -> Iterator[originals.StoredObject]:
@@ -417,8 +445,119 @@ def record_store_id(vault: Path, store: str, store_id: str) -> None:
 # --- status -----------------------------------------------------------------------------------------
 
 
+#: Everything the aggregate counts, in one pass over `media_replicas_status`: the grouping is a prefix of that index and
+#: every column read is in it, so the table itself is never touched. The parameter is the current UTC month.
+_GROUPS = ("SELECT store, key_version, state, level, COUNT(*) AS replicas, COUNT(verified_at) AS timed, "
+           "MIN(verified_at) AS oldest, MIN(NULLIF(checked_at, 0)) AS oldest_checked, "
+           "SUM(decrypted_at > 0) AS decrypted, MIN(NULLIF(decrypted_at, 0)) AS oldest_decrypted, "
+           "SUM(sample_month = ?) AS skipped, SUM(sample_month < 0) AS unsampleable "
+           "FROM media_replicas GROUP BY store, key_version, state, level")
+
+#: Why a replica is not sampled, beyond the reasons `media_store.unreadable_reason` gives.
+SAMPLING_OFF = "sampling_off"
+NO_EXACT_DIGEST = "no_exact_digest"  # its binding lists no plaintext digest to hash against
+STORE_NOT_DECLARED = "store_not_declared"
+#: Why a store's replicas get no scheduled check.
+HEAD_NOT_DECLARED = "head_recomputes_not_declared"
+STORE_UNAVAILABLE = "store_unavailable"
+
+
 def _unknown(reason: str, **extra: object) -> dict[str, object]:
     return {"state": "unknown", "reason": reason, "as_of": None, "stores": None, "totals": None, **extra}
+
+
+def _check_counts() -> dict[str, object]:
+    """The check values of one store, or of all: each level counted apart, so a presence check is never content."""
+    return {
+        "quarantined": 0, "never_checked": 0, "checks_not_scheduled": None,
+        "checks": {level: {"replicas": 0, "oldest_at": None} for level in (PRESENCE, CONTENT, DECRYPTED)},
+    }
+
+
+def _sample_budget(entry: originals.StoreEntry | None, spent: int, month: int) -> dict[str, object]:
+    """One store's sampled-check budget this UTC month; the budget is None for a store that is not declared."""
+    return {"month": f"{month // 100}-{month % 100:02d}", "budget_bytes":
+            None if entry is None else max(0, entry.sample_bytes_per_month), "spent_bytes": spent,
+            "skipped_for_size": 0, "not_sampled": []}
+
+
+def _sample_totals(stores: list[dict[str, object]]) -> dict[str, object]:
+    budgets = [store["budget_bytes"] for store in stores]
+    return {"budget_bytes": None if None in budgets else sum(budgets),
+            "spent_bytes": sum(store["spent_bytes"] for store in stores),
+            "skipped_for_size": sum(store["skipped_for_size"] for store in stores),
+            "not_sampled": [{"reason": reason, "replicas": count} for reason, count in sorted(
+                _sum_reasons(store["not_sampled"] for store in stores).items())]}
+
+
+def _sum_reasons(lists: Iterable[list[dict[str, object]]]) -> dict[str, int]:
+    summed: dict[str, int] = {}
+    for found in lists:
+        for item in found:
+            summed[item["reason"]] = summed.get(item["reason"], 0) + item["replicas"]
+    return summed
+
+
+def _unscheduled_reason(entry: originals.StoreEntry | None) -> str | None:
+    """Why a store's replicas get no scheduled check, or None when they do: a descriptor value or the store's state."""
+    if entry is None:
+        return STORE_NOT_DECLARED
+    if scheduled_level(entry) is not None:
+        return None
+    return HEAD_NOT_DECLARED if entry.head_recomputes is None else STORE_UNAVAILABLE
+
+
+def _count_checks(vault: Path, stats: dict[str, Any], entry: originals.StoreEntry | None, row: sqlite3.Row) -> None:
+    """Add one group of the grouped query to its store's check values."""
+    from . import media_store
+
+    if row["state"] == QUARANTINED:
+        stats["quarantined"] += row["replicas"]
+        return
+    if row["level"] in stats["checks"]:
+        proof = stats["checks"][row["level"]]
+        proof["replicas"] += row["replicas"]
+        if row["oldest_checked"] is not None and (proof["oldest_at"] is None or row["oldest_checked"] < proof["oldest_at"]):
+            proof["oldest_at"] = row["oldest_checked"]
+    elif (why := _unscheduled_reason(entry)) is not None:
+        waiting = stats["checks_not_scheduled"] or {"replicas": 0, "reasons": []}
+        stats["checks_not_scheduled"] = {"replicas": waiting["replicas"] + row["replicas"],
+                                         "reasons": sorted({*waiting["reasons"], why})}
+    else:
+        stats["never_checked"] += row["replicas"]
+    proof = stats["checks"][DECRYPTED]
+    proof["replicas"] += row["decrypted"]
+    if row["oldest_decrypted"] is not None and (proof["oldest_at"] is None or row["oldest_decrypted"] < proof["oldest_at"]):
+        proof["oldest_at"] = row["oldest_decrypted"]
+    # The reason a replica is not sampled is a property of its store and key version, so it is read here from the
+    # group, never from a store.
+    reason = (STORE_NOT_DECLARED if entry is None
+              else SAMPLING_OFF if entry.sample_bytes_per_month <= 0
+              else media_store.unreadable_reason(vault, row["store"], row["key_version"]))
+    if reason is None:
+        stats["sample"]["skipped_for_size"] += row["skipped"]
+        reason, replicas = NO_EXACT_DIGEST, row["unsampleable"]
+    else:
+        replicas = row["replicas"]
+    if replicas:
+        listed = {item["reason"]: item for item in stats["sample"]["not_sampled"]}
+        listed.setdefault(reason, {"reason": reason, "replicas": 0})["replicas"] += replicas
+        stats["sample"]["not_sampled"] = sorted(listed.values(), key=lambda item: item["reason"])
+
+
+def _add_checks(totals: dict[str, Any], stats: dict[str, Any]) -> None:
+    """Fold one store's check values into the aggregate."""
+    totals["quarantined"] += stats["quarantined"]
+    totals["never_checked"] += stats["never_checked"]
+    if (found := stats["checks_not_scheduled"]) is not None:
+        waiting = totals["checks_not_scheduled"] or {"replicas": 0, "reasons": []}
+        totals["checks_not_scheduled"] = {"replicas": waiting["replicas"] + found["replicas"],
+                                          "reasons": sorted({*waiting["reasons"], *found["reasons"]})}
+    for level, proof in stats["checks"].items():
+        folded = totals["checks"][level]
+        folded["replicas"] += proof["replicas"]
+        if proof["oldest_at"] is not None and (folded["oldest_at"] is None or proof["oldest_at"] < folded["oldest_at"]):
+            folded["oldest_at"] = proof["oldest_at"]
 
 
 def status(vault: Path) -> dict[str, object]:
@@ -438,9 +577,10 @@ def status(vault: Path) -> dict[str, object]:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
             census = _census(conn)
             exports = _exports(conn)
-            groups = conn.execute(
-                "SELECT store, key_version, state, COUNT(*) AS replicas, COUNT(verified_at) AS timed, "
-                "MIN(verified_at) AS oldest FROM media_replicas GROUP BY store, key_version, state").fetchall()
+            month = _month(time.time())
+            groups = conn.execute(_GROUPS, (month,)).fetchall()
+            spent = {row["store"]: row["bytes"] for row in conn.execute(
+                "SELECT store, bytes FROM media_replica_samples WHERE month = ?", (month,))}
             queue = conn.execute("SELECT store, state, COUNT(*) AS n FROM media_replica_queue WHERE kind = ? "
                                  "GROUP BY store, state", (REPLICATE,)).fetchall()
             reach = _observations(conn)
@@ -473,6 +613,7 @@ def status(vault: Path) -> dict[str, object]:
             "replicas": 0, "verified_at_upload": 0, "recoverable": 0, "not_recoverable": 0,
             "recoverability_unknown": 0, "not_recoverable_reasons": [], "recoverability_unknown_reasons": [],
             "oldest_verified_at": None, "verification_time_unknown": 0,
+            **_check_counts(), "sample": _sample_budget(entry, spent.get(name, 0), month),
         }
     for row in groups:
         stats = stores[row["store"]]
@@ -482,6 +623,7 @@ def status(vault: Path) -> dict[str, object]:
         stats["verification_time_unknown"] += row["replicas"] - row["timed"]
         if row["oldest"] is not None and (stats["oldest_verified_at"] is None or row["oldest"] < stats["oldest_verified_at"]):
             stats["oldest_verified_at"] = row["oldest"]
+        _count_checks(vault, stats, entries.get(row["store"]), row)
         recoverable, reason = recoverability(config, row["key_version"], exports)
         if recoverable is True:
             stats["recoverable"] += row["replicas"]
@@ -515,12 +657,31 @@ def status(vault: Path) -> dict[str, object]:
         "stores_without_failure_domain": undeclared,
         "oldest_verified_at": min(times) if times else None,
         "verification_time_unknown": sum(stats["verification_time_unknown"] for stats in holding),
+        **_check_counts(),
+        "sample": _sample_totals([stats["sample"] for stats in holding]),
     }
+    for stats in holding:
+        _add_checks(totals, stats)
     for stats in (*stores.values(), totals):
         stats["oldest_verified_at"] = _iso(stats["oldest_verified_at"])
+        for proof in stats["checks"].values():
+            proof["oldest_at"] = _iso(proof["oldest_at"])
     return {"state": "measured", "reason": None, "as_of": _iso(census["rebuilt_at"]),
             "unread_originals": census["unread"], "source": "media ledger table, rebuilt from the bindings",
             "stores": list(stores.values()), "totals": totals}
+
+
+def _check_view(row: sqlite3.Row) -> dict[str, object]:
+    """What a replica's checks proved, as an owner reads it: the last scheduled check's level and time, the last
+    decrypt proof, and the finding of a quarantined replica. A replica never checked has no check, not a zero time."""
+    quarantined = row["state"] == QUARANTINED
+    return {
+        "last_check": ({"level": row["level"], "at": _iso(row["checked_at"])}
+                       if row["level"] is not None and not quarantined else None),
+        "decrypted_at": _iso(row["decrypted_at"] or None),
+        "finding": ({"failed_level": row["level"], "failure": row["failure"], "at": _iso(row["checked_at"])}
+                    if quarantined else None),
+    }
 
 
 def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str, object]:
@@ -543,8 +704,9 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
                 "SELECT DISTINCT binary_rel FROM media_replicas WHERE binary_rel > ? ORDER BY binary_rel LIMIT ?",
                 (after or "", limit + 1))]
             rows = conn.execute(
-                "SELECT binary_rel, store, object, version, key_version, verified_at, state FROM media_replicas "
-                "WHERE binary_rel > ? AND binary_rel <= ? ORDER BY binary_rel, store",
+                "SELECT binary_rel, store, object, version, key_version, verified_at, state, level, checked_at, "
+                "decrypted_at, failure FROM media_replicas WHERE binary_rel > ? AND binary_rel <= ? "
+                "ORDER BY binary_rel, store",
                 (after or "", paths[min(limit, len(paths)) - 1] if paths else "")).fetchall()
     except (sqlite3.Error, OSError) as error:
         return _unknown(f"the replica state cannot be read: {type(error).__name__}", originals=None, next_after=None)
@@ -560,10 +722,47 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "recoverable": recoverable, "reason": reason, "key_version": row["key_version"],
+            **_check_view(row),
         })
     return {"state": "measured", "reason": None, "as_of": _iso(census["rebuilt_at"]),
             "originals": [{"path": path, "replicas": found} for path, found in listed.items()],
             "next_after": next(reversed(listed)) if more and listed else None}
+
+
+#: The quarantined replicas in path order, with the state of the copy that will replace each: a range of
+#: `media_replicas_findings` and one primary-key lookup in the queue per row of the page.
+_FINDINGS = ("SELECT r.binary_rel, r.store, r.object, r.version, r.level, r.failure, r.checked_at, "
+             "q.state AS queue_state, q.code AS queue_code "
+             "FROM media_replicas AS r LEFT JOIN media_replica_queue AS q "
+             f"ON q.store = r.store AND q.binary_rel = r.binary_rel AND q.kind = '{RECOPY}' "
+             f"WHERE r.state = '{QUARANTINED}' AND (r.binary_rel, r.store) > (?, ?) "
+             "ORDER BY r.binary_rel, r.store LIMIT ?")
+
+
+def findings(vault: Path, *, after: tuple[str, str] | None = None, limit: int = 100) -> dict[str, object]:
+    """The quarantined replicas by original and store, `limit` at a time; `next_after` is the cursor for the next page.
+
+    Each finding names the original, the store, the damaged version that stays in its store, the level that failed and
+    why, when, and the copy again: pending, or refused with its code, or none when no copy is queued.
+    """
+    vault = Path(vault).resolve()
+    limit = max(1, min(int(limit), 500))
+    try:
+        with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
+            census = _census(conn)
+            rows = conn.execute(_FINDINGS, (*(after or ("", "")), limit + 1)).fetchall()
+    except (sqlite3.Error, OSError) as error:
+        return _unknown(f"the replica state cannot be read: {type(error).__name__}", findings=None, next_after=None)
+    if census is None:
+        return _unknown("the replica table is being rebuilt from the bindings", findings=None, next_after=None)
+    shown = rows[:limit]
+    return {"state": "measured", "reason": None, "as_of": _iso(census["rebuilt_at"]),
+            "findings": [{
+                "path": row["binary_rel"], "store": row["store"], "object": row["object"], "version": row["version"],
+                "failed_level": row["level"], "failure": row["failure"], "found_at": _iso(row["checked_at"]),
+                "recopy": None if row["queue_state"] is None else {"state": row["queue_state"], "code": row["queue_code"]},
+            } for row in shown],
+            "next_after": [shown[-1]["binary_rel"], shown[-1]["store"]] if len(rows) > limit else None}
 
 
 def original_view(vault: Path, path: str) -> dict[str, object]:
@@ -576,25 +775,30 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
     entries = originals.store_entries(config)
     ledger = MediaJobStore(vault, create=False)  # a read never recreates a table
     exports: dict[str, float] = {}
-    times: dict[str, float] = {}
+    recorded: dict[str, sqlite3.Row] = {}
     if ledger.path.exists():  # With no ledger the binding alone lists the replicas, and nothing is confirmed.
         with closing(ledger._connect(readonly=True)) as conn:
             exports = _exports(conn)
             try:
-                times = {row["store"]: row["verified_at"] for row in conn.execute(
-                    "SELECT store, verified_at FROM media_replicas WHERE binary_rel = ?",
-                    (snapshot.path.relative_to(vault).as_posix(),))}
+                recorded = {row["store"]: row for row in conn.execute(
+                    "SELECT store, object, version, verified_at, state, level, checked_at, decrypted_at, failure "
+                    "FROM media_replicas WHERE binary_rel = ?", (snapshot.path.relative_to(vault).as_posix(),))}
             except sqlite3.OperationalError:
-                times = {}
+                recorded = {}
     found = []
     for replica in _replicas_of(snapshot):
         entry = entries.get(replica.store)
         recoverable, reason = recoverability(config, replica.key_version, exports)
+        row = recorded.get(replica.store)
+        # A row that names another version describes a replica that the binding no longer lists: no check applies.
+        checked = row if row is not None and (row["object"], row["version"]) == (replica.object, replica.version) else None
         found.append({
-            "store": replica.store, "state": UPLOAD_VERIFIED, "verified_at": _iso(times.get(replica.store)),
+            "store": replica.store, "state": UPLOAD_VERIFIED if checked is None else checked["state"],
+            "verified_at": _iso(row["verified_at"]) if row is not None else None,
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "recoverable": recoverable, "reason": reason, "key_version": replica.key_version,
+            **(_check_view(checked) if checked is not None else {"last_check": None, "decrypted_at": None, "finding": None}),
         })
     return {"state": "measured", "reason": None, "original_state": snapshot.state, "replicas": found}
 
@@ -707,13 +911,16 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
             continue
         code = None
         try:
-            media_store.replicate(vault, vault / row["binary_rel"], row["store"])
+            if row["kind"] == RECOPY:
+                media_store.recopy(vault, vault / row["binary_rel"], row["store"])
+            else:
+                media_store.replicate(vault, vault / row["binary_rel"], row["store"])
         except media_store.MediaStoreError as error:
             code = error.code
         except (OSError, ValueError, sqlite3.Error) as error:
             code = type(error).__name__
         if code is None:
-            _settle(ledger, row, DONE, None)
+            _settle_done(ledger, row)
             settled += 1
         elif code == media_store.STORE_BUSY_CODE:
             # Ordinary contention with a foreground write: it spends no attempt, and the round ends so that the
@@ -735,6 +942,16 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
             _settle(ledger, row, REFUSED, code)
             settled += 1
     return settled
+
+
+def _settle_done(ledger: MediaJobStore, row: sqlite3.Row) -> None:
+    """A finished copy leaves a done row for the scan's progress; a finished copy again leaves nothing to count."""
+    if row["kind"] != RECOPY:
+        _settle(ledger, row, DONE, None)
+        return
+    with closing(ledger._connect()) as conn, conn:
+        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
+                     (row["store"], row["binary_rel"], RECOPY))
 
 
 def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | None, *, attempts: int | None = None) -> None:

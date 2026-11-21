@@ -367,6 +367,79 @@ def test_a_restore_that_cannot_put_its_copy_in_place_tries_again_at_the_next_pas
     assert original.read_bytes() == TRANSCRIPT
 
 
+def _count_downloads(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """Record the store of each download of a stored version: the read that a kept copy exists to avoid."""
+    downloads: list[str | None] = []
+    real = media_store.write_stored_original
+
+    def counted(vault, reference, sink, *, store=None):
+        downloads.append(store)
+        return real(vault, reference, sink, store=store)
+
+    monkeypatch.setattr(media_store, "write_stored_original", counted)
+    return downloads
+
+
+def _damaged_with_a_blocked_trash(vault: Path) -> tuple[Path, Path]:
+    """A cached original whose bytes changed, its pointer intact, and the Trash folder blocked: the restore finds a
+    verified copy and cannot put it in place."""
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    trash = vault / "Knowledge Base" / "_trash"
+    trash.write_bytes(b"")
+    original.write_bytes(DAMAGED)
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+    return original, trash
+
+
+def test_the_retry_after_a_failed_trash_move_reads_the_kept_copy_and_downloads_nothing(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replica download costs the owner egress and time: the retry must not pay it again for bytes already verified."""
+    original, trash = _damaged_with_a_blocked_trash(vault)
+    downloads = _count_downloads(monkeypatch)
+    trash.unlink()
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert downloads == []
+    [finding] = _findings(vault)
+    assert [step["source"] for step in finding.meta["route"]] == ["kept_copy"]
+    assert not original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest()).exists()
+
+
+def test_a_kept_copy_that_no_longer_hashes_to_the_binding_is_never_installed(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The kept copy sits in private state for days: bytes that changed there must not replace the owner's original."""
+    original, trash = _damaged_with_a_blocked_trash(vault)
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    kept.write_bytes(DAMAGED)
+    downloads = _count_downloads(monkeypatch)
+    trash.unlink()
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert downloads == [None]  # the pointer was read again: the kept copy failed its hash and was dropped
+    [finding] = _findings(vault)
+    [tried, used] = finding.meta["route"]
+    assert (tried["source"], tried["failed"], used["source"]) == ("kept_copy", "hash_mismatch", "media_store")
+
+
+def test_a_kept_copy_goes_when_the_original_is_whole_again(vault: Path, selected_store) -> None:
+    """A kept copy is the plaintext of an original: it must not outlive the finding that it served."""
+    original, _trash = _damaged_with_a_blocked_trash(vault)
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    assert kept.exists()
+
+    original.write_bytes(TRANSCRIPT)  # the owner put the bytes back by hand
+    original_fixity.run_pass(vault, budget=0)
+
+    assert not kept.exists()
+
+
 def test_a_replace_that_keeps_failing_keeps_one_trash_copy_of_the_changed_bytes(
         vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original = _stored(vault, "Recordings")
