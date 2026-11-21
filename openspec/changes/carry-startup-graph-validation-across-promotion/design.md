@@ -29,6 +29,8 @@ The fallback retains source proof rather than merely postponing watcher validati
 
 The final decision uses a short canonical hold to bind the sidecar, durable epoch, policy and observation state.
 Corpus work stays outside that hold.
+The graph source gate retains the exact live observer identity through startup consumption.
+A stopped or replaced backend invalidates that carry before reads or writes can publish graph state.
 Buffered events remain pending through normal seeding and catch-up.
 A seed generation or stat-keyed cache hit cannot certify the source proof.
 The existing read-proof memo and resolver must bind to the exact proved live checkpoint before callers reuse them.
@@ -48,6 +50,14 @@ After a negative or ambiguous optimistic check, a stop-aware `try_hold` loop sam
 A lock miss, SQLite busy result or renewed holder keeps the result pending.
 A governed write exceeding the former retry budget does not justify suspension or rebuild.
 Shutdown cancels the wait; a lifecycle deadline leaves repair pending.
+
+Stable structural metadata loss uses the existing durable full-rebuild marker and graph repair owner.
+That owner rebuilds only after validating the canonical floor and checkpoint, without changing those canonical bytes.
+Fatal SQLite corruption ends startup validation as a fenced failure with the full marker retained.
+It does not repeatedly build a replacement or move the graph family while readers may hold it.
+Explicit offline replacement retains its existing quiescence requirement.
+Watcher-enabled and watcherless startup use the same recovery owner.
+A passive server constructor does not start this lifecycle.
 
 Cold source proof runs outside the hold.
 A final short comparison must bind its negative evidence before suspension.
@@ -79,6 +89,7 @@ Partial passes commit their rows with one bounded coverage record in existing `g
 That record names the exact canonical checkpoint digest and its successfully committed required paths, with their source or absence witnesses.
 It also binds the policy and topology proof that justified those rows.
 Path names alone never certify later source state.
+The final seal rechecks source guards from earlier partial passes as well as the current pass before acknowledging their combined coverage.
 Its size follows the checkpoint's existing path cap; it is not an unbounded history.
 Missing or mismatched coverage proves nothing.
 A moved checkpoint restores the record's represented debt to the durable queue before the record is reset or rebound under proved lineage.
@@ -112,6 +123,8 @@ Graph lag and the doctor retain the existing last-readable warning; restricted g
 Cold startup must still prove current source and topology conditions before reusing held lineage.
 A path or weak stat tuple cannot justify unreadable bytes across the unwatched interval.
 Untrusted generation guards, offline movement and unreadable external observations retain the existing proof or recovery path.
+Grace and queue-age probes use indexed bounded lookups.
+Exact path retirement preserves a conservative root observation interval while debt remains, without rescanning every pending mark.
 After commit, the same canonical hold retires only proved `(path, epoch)` observations.
 Durable receipts keep their existing revision compare-and-swap.
 A failed transaction clears neither observations nor receipts.
