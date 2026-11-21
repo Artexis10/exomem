@@ -106,6 +106,7 @@ class WorkerSession:
                     env=env,
                     pass_fds=(fd,),
                     stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,  # Native library output must stay out of MCP stdout.
                 )
         except BaseException:
             parent.close()

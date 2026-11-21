@@ -1091,7 +1091,8 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
     try:
         try:
             env = _diarizer_child_env()
-            if env.get("CUDA_VISIBLE_DEVICES") != "":
+            # Automatic routing measures free VRAM. A resident sidecar must not skew that decision.
+            if env.get("EXOMEM_DIARIZE_DEVICE", "").lower() == "cuda" and env.get("CUDA_VISIBLE_DEVICES") != "":
                 session = diarizer_sidecar.current_worker_session.get()
             command = [str(py), str(_diarizer_worker_script()), str(path), str(out_path)]
             timeout = _diarizer_timeout(path)

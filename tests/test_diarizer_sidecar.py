@@ -125,7 +125,7 @@ def test_happy_path_parses_turns(monkeypatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="The reusable worker uses Linux parent-death signals.")
-def test_reusable_diarizer_reaps_a_timed_out_worker_and_recovers(monkeypatch, tmp_path) -> None:
+def test_reusable_diarizer_reaps_a_timed_out_worker_and_recovers(monkeypatch, tmp_path, capfd) -> None:
     """A stuck recording cannot strand a model or deny labels to the next recording."""
     _fake_python(monkeypatch)
     monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cuda")
@@ -146,6 +146,7 @@ main.__globals__['_load_device_pipeline'] = lambda: (None, 'cuda')
 
 def diarize(path, load_pipeline):
     load_pipeline()
+    os.write(1, b'native diarizer diagnostic')
     if path.endswith('stuck.wav'):
         time.sleep(60)
     return [{{'start': 0, 'end': 1, 'label': str(os.getpid())}}]
@@ -173,6 +174,34 @@ raise SystemExit(main(sys.argv))
 
     with pytest.raises(ChildProcessError):
         os.waitpid(int(next_turn[2]), os.WNOHANG)
+    assert "native diarizer diagnostic" not in capfd.readouterr().out
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The reusable worker is scoped to WSL2.")
+def test_automatic_cuda_diarization_keeps_one_shot_workers(monkeypatch) -> None:
+    """A diarizer's resident GPU memory must not influence the next automatic device decision."""
+    from exomem import accel
+
+    _fake_python(monkeypatch)
+    monkeypatch.delenv("EXOMEM_DIARIZE_DEVICE", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(os, "uname", lambda: SimpleNamespace(release="kernel-wsl2"))
+    monkeypatch.setattr(accel, "cuda_if_performance", lambda: "cuda")
+
+    def one_shot(command, **kwargs):
+        assert kwargs["env"]["CUDA_VISIBLE_DEVICES"] == "0"
+        data = {"turns": [{"start": 0, "end": 1, "label": "SPEAKER_00"}]}
+        Path(command[3]).write_text(json.dumps(data), encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def unexpected_reuse(*args, **kwargs):
+        pytest.fail("automatic routing must run the diarizer once per recording")
+
+    monkeypatch.setattr(diarizer_sidecar.WorkerSession, "run", unexpected_reuse)
+    monkeypatch.setattr(extract.subprocess, "run", one_shot)
+    with diarizer_sidecar.reuse_for_media_worker():
+        assert extract._run_diarization(Path("first.wav")) == [(0.0, 1.0, "SPEAKER_00")]
+        assert extract._run_diarization(Path("second.wav")) == [(0.0, 1.0, "SPEAKER_00")]
 
 
 def test_outfile_cleaned_up_after_run(monkeypatch) -> None:
