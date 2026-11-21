@@ -280,15 +280,14 @@ def append_record(
         else None
     )
     if held_id is None:
+        can_hold = _holding_enabled(supplied_manifest, hold)
         try:
-            _validate_values(supplied_manifest, overrides)
+            _validate_values(supplied_manifest, overrides, include_enum_choices=not can_hold)
         except collections.CollectionError as error:
             # A holdable refusal is deferred to the guarded pass, which is the
             # only place a candidate may be preserved. Nothing else changes: the
             # same refusal is raised a moment later from inside the boundary.
-            if not _holding_enabled(supplied_manifest, hold) or (
-                error.code not in _CANDIDATE_CONTENT_CODES
-            ):
+            if not can_hold or error.code not in _CANDIDATE_CONTENT_CODES:
                 raise
     if body is not None:
         _validate_body(body)
@@ -312,7 +311,7 @@ def append_record(
                 "UNREPRESENTABLE_RECORD_BODY", "markdown-log storage cannot represent item bodies"
             )
         try:
-            values = _validate_values(manifest, item)
+            values = _validate_values(manifest, item, include_enum_choices=True)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -1939,7 +1938,7 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         try:
-            values = _validate_values(manifest, merged, written=changes)
+            values = _validate_values(manifest, merged, written=changes, include_enum_choices=True)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -4526,6 +4525,7 @@ def _validate_values(
     item: Mapping[str, Any],
     *,
     written: Collection[str] | None = None,
+    include_enum_choices: bool = False,
 ) -> dict[str, Any]:
     """Validate one candidate, reporting every failing field in one refusal.
 
@@ -4536,6 +4536,7 @@ def _validate_values(
     ``written`` names the fields whose values this write supplies; ``None`` is a whole new row.
     A required value it supplies must be non-null. Any other is checked as it was stored, so a
     required field must be present and may hold the ``null`` an earlier release admitted.
+    Only single-item refusals expose enum choices, so their callers opt in to proving them.
     """
     if not isinstance(item, Mapping):
         raise collections.CollectionError("INVALID_ITEM", "item must be an object")
@@ -4578,7 +4579,7 @@ def _validate_values(
     if not issues and manifest.storage.strategy == "markdown-items" and not manifest.derived:
         _collect_round_trip_issues(manifest, value, issues)
     if issues:
-        raise _issue_refusal(manifest, issues)
+        raise _issue_refusal(manifest, issues, include_enum_choices=include_enum_choices)
     return value
 
 
@@ -4612,6 +4613,7 @@ class _Issue:
 
 def _issue_refusal(
     manifest: collections.CollectionManifest, issues: list[_Issue],
+    *, include_enum_choices: bool,
 ) -> collections.CollectionError:
     first = issues[0]
     details: dict[str, Any] = {}
@@ -4619,7 +4621,8 @@ def _issue_refusal(
         details["field"] = first.field
     if first.scope:
         details["scope"] = first.scope
-    if first.code == "SCHEMA_ENUM" and first.enum_choices and manifest.supports_item_enum_guidance:
+    if (include_enum_choices and first.code == "SCHEMA_ENUM" and first.enum_choices
+            and manifest.supports_item_enum_guidance):
         allowed, _ = collections.enum_choices_for_wire(first.enum_choices)
         if manifest.storage.strategy == "markdown-items":
             renderable = []

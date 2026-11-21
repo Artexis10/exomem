@@ -2404,7 +2404,7 @@ class CollectionWriter:
 
     def _validate(
         self, manifest, declared, key, values, *, before=None, operation="append",
-        validate_graph=True, written=None,
+        validate_graph=True, written=None, include_enum_choices=False,
     ):
         _refuse_view_stamp(manifest, values)
         if declared.kind == "intended":
@@ -2420,7 +2420,7 @@ class CollectionWriter:
             planning._validate_declared_text(manifest, values)
             if before is not None:
                 planning._require_same_area_side(before, values)
-        values = records._validate_values(manifest, values, written=written)
+        values = records._validate_values(manifest, values, written=written, include_enum_choices=include_enum_choices)
         if declared.validators and validate_graph:
             validators = [types.named_validator(name) for name in declared.validators]
             plans = None
