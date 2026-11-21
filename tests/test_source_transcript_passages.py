@@ -78,6 +78,14 @@ def test_legacy_block_vector_cannot_choose_one_of_multiple_turns():
 
 
 
+def test_legacy_vector_cannot_place_repeated_continuation_text():
+    text = "[0:03] We should wait  by the gate.\n[0:19] Final reminder.\n\nwait by the gate."
+
+    assert transcript_passages.match(
+        text, chunk="Meeting\n\nwait by the gate.", title="Meeting", query="where should we assemble",
+    ) is None
+
+
 def test_out_of_range_timestamps_stay_ordinary_text():
     invalid = f"[{'9' * 400}:00:00] A malformed timestamp."
     text = f"{invalid}\n[0:03] First report.\n[0:18] Second report."

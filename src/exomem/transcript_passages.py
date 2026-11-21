@@ -96,7 +96,7 @@ def match(
         return None
     query = query.strip().strip('"')
     # Normalize literal whitespace without interpreting the user's intent.
-    dense = _locate(text, chunk.removeprefix(f"{title}\n\n")) if chunk else None
+    dense = _locate(text, chunk.removeprefix(f"{title}\n\n"), unique=True) if chunk else None
     exact = None
     if query and dense is not None:
         low, high = dense
@@ -124,15 +124,17 @@ def match(
     return None
 
 
-def _locate(text: str, piece: str, *, ignore_case: bool = False) -> tuple[int, int] | None:
-    if not ignore_case and piece and (start := text.find(piece)) >= 0:
-        return start, start + len(piece)
+def _locate(
+    text: str, piece: str, *, ignore_case: bool = False, unique: bool = False,
+) -> tuple[int, int] | None:
     words = piece.split()
     if not words:
         return None
-    pattern = r"\s+".join(re.escape(word) for word in words)
-    found = re.search(pattern, text, re.IGNORECASE if ignore_case else 0)
-    return found.span() if found is not None else None
+    pattern = re.compile(r"\s+".join(re.escape(word) for word in words), re.IGNORECASE if ignore_case else 0)
+    found = pattern.search(text)
+    if found is None or (unique and pattern.search(text, found.start() + 1) is not None):
+        return None  # A legacy vector can carry repeated text without its timestamp.
+    return found.span()
 
 
 def preferred_position(order: Sequence[str], source: str, cites: Callable[[str], bool]) -> int:

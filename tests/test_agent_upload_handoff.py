@@ -57,14 +57,14 @@ def _prepare(env, data=b"exact original\n", *, lane="source", **kwargs):
         )
 
 
-def _post(env, descriptor, data=b"exact original\n", **fields):
+def _post(env, descriptor, data=b"exact original\n", *, filename="original.txt", **fields):
     async def send():
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=env[-1]), base_url="https://capture.example",
         ) as client:
             return await client.post(
                 "/upload", headers={"Authorization": "Bearer " + descriptor["token"]},
-                files={"file": ("original.txt", data, "text/plain")},
+                files={"file": (filename, data, "text/plain")},
                 data={"hold": "1", "lane": "source", **fields},
             )
     return asyncio.run(send())
@@ -794,6 +794,27 @@ def test_import_id_survives_a_new_hosted_upload_and_stays_scoped_to_the_importer
     assert retirement_bound["code"] == "IMPORT_RECEIPT_UNAVAILABLE"
     available = capture(b"another file\r\n", import_identity="retirement-check")
     assert available["outcome"] == "stored"
+
+
+def test_import_id_refuses_a_container_with_a_normalized_extension(upload_env, source_schema):
+    from test_document_containers import container_bytes
+
+    from exomem import commands
+
+    vault, who, *_ = upload_env
+    data = container_bytes([("note.txt", b"Original document.")])
+    handoff = _prepare(upload_env, data, import_identity="example-container")
+    uploaded = _post(upload_env, handoff, data, filename="record.asi?ce")
+    assert uploaded.status_code == 201, uploaded.text
+
+    with principal.request_scope(who):
+        result = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Example container", source_kind="session",
+            files=[uploaded.json()["file"]],
+        )
+
+    assert result["files"][0]["code"] == "IMPORT_IDENTITY_COMPOUND_SOURCE"
+    assert result["summary"] == {"stored": 0, "failed": 1}
 
 
 def test_import_retry_completes_the_original_after_source_publication_stops(

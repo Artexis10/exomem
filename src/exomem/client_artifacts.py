@@ -1806,10 +1806,12 @@ def _commit_staged_sources(
                 ):
                     raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Use the held Source's import ID in a single-file capture.")
                 key = import_key or held_key
-                if key is not None and document_containers.is_container(artifact.filename):
-                    raise SafeFetchError(
-                        "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
-                    )
+                if key is not None:
+                    safe_name = add_module.source_artifact_name(artifact.filename)
+                    if document_containers.is_container(safe_name):
+                        raise SafeFetchError(
+                            "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
+                        )
                 import_capture = (
                     source_imports.ImportCapture.bind(vault_root, key, artifact, title=item_title, source_fields=source_fields)
                     if key is not None else None
