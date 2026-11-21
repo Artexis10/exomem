@@ -566,19 +566,6 @@ def test_a_stop_drains_no_longer_than_its_bound_and_the_next_start_projects_the_
     assert queued(stored) == set()
 
 
-def rollout_override():
-    """The journey's `sitecustomize.py`, which opens the two store-mode rollout fences in a child
-    process, as the store-mode fixtures open them in this one."""
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_product_loop.py"
-    spec = importlib.util.spec_from_file_location("e2e_product_loop_for_replicas", script)
-    journey = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = journey  # registered before it runs, as its dataclasses need
-    spec.loader.exec_module(journey)
-    return journey._ROLLOUT_OVERRIDE
-
-
 REST_KEY = "replica-rest-key"
 
 
@@ -594,23 +581,12 @@ def http_replica(root, tmp_path, name, *, activation_after=None):
     import subprocess
     import urllib.request
 
-    shim = tmp_path / f"rollout-{name}"
-    shim.mkdir(exist_ok=True)
-    override = rollout_override()
-    if activation_after is not None:
-        override += (
-            "\n_OPENERS['exomem.server_runtime'] = lambda module: "
-            "module.LocalRuntimeActivation.__init__.__kwdefaults__.update("
-            f"fallback_seconds={float(activation_after)!r})\n"
-        )
-    (shim / "sitecustomize.py").write_text(override, encoding="utf-8")
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     listener.close()
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join(filter(None, (str(shim), os.environ.get("PYTHONPATH")))),
         "EXOMEM_REST_API_KEY": REST_KEY,
         "EXOMEM_WRITER_LEASE_REPLICA_ID": name,
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / f"lease-{name}"),
@@ -623,9 +599,24 @@ def http_replica(root, tmp_path, name, *, activation_after=None):
     }
     log_path = tmp_path / f"{name}.log"
     script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_http_server.py"
+    command = [sys.executable, str(script)]
+    if activation_after is not None:
+        # This case controls the fallback timer while exercising real startup admission.
+        command = [
+            sys.executable, "-c", """
+import runpy
+import sys
+from exomem.server_runtime import LocalRuntimeActivation
+
+delay = float(sys.argv.pop(1))
+script = sys.argv.pop(1)
+LocalRuntimeActivation.__init__.__kwdefaults__["fallback_seconds"] = delay
+runpy.run_path(script, run_name="__main__")
+""", str(activation_after), str(script),
+        ]
     with log_path.open("w", encoding="utf-8") as console:
         process = subprocess.Popen(
-            [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
+            [*command, "--host", "127.0.0.1", "--port", str(port)],
             env=env, stdout=console, stderr=subprocess.STDOUT,
         )
         url = f"http://127.0.0.1:{port}"
