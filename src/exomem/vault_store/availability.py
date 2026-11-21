@@ -24,9 +24,15 @@ OFF_THREAD = "VAULT_STORE_OFF_THREAD"
 SERVICE_REQUIRED = "VAULT_STORE_SERVICE_REQUIRED"
 PAGES_AT_RISK = "VAULT_STORE_PAGES_AT_RISK"
 STORE_ELSEWHERE = "VAULT_STORE_ELSEWHERE"
+CLAIM_DISPLACED = "VAULT_STORE_CLAIM_DISPLACED"
+CLAIM_UNKNOWN = "VAULT_STORE_CLAIM_UNKNOWN"
 WRITER_UNROUTED = "VAULT_STORE_WRITER_UNROUTED"
 
 ROLLBACK = "`exomem store-mode rollback`"
+ROLLBACK_HELD = (
+    "Stop the service and run `exomem store-mode rollback --apply --export-held "
+    "--export-to EXPORT_DIR --why REASON` on this state root."
+)
 ELSEWHERE_REASON = (
     "The vault's replica says another state root holds this vault's pages in the collection store, "
     "so a file-mode service here would write Markdown beside them."
@@ -90,9 +96,9 @@ def require_supported_lease(config) -> None:
 def require_servable(vault_root: Path) -> None:
     """Admit a store-mode vault on a supported build with a single-host writer lease.
 
-    The release check protects the store's pages from builds that cannot serve them.
-    The owner can switch builds or roll back if this build refuses. File mode warns
-    about an interrupted mode change and checks whether another root holds the store.
+    A root that lost its store claim cannot serve stale pages or commit new writes.
+    An unreadable decision needs a compatible build. File mode warns about an
+    interrupted mode change and checks whether another root holds the store.
     """
     if not mode.store_mode_active(vault_root):
         inconsistency = marker_inconsistency(vault_root)
@@ -101,6 +107,7 @@ def require_servable(vault_root: Path) -> None:
         require_no_store_elsewhere(vault_root)
         return
     from .. import writer_lease
+    from . import marker
 
     require_supported_lease(writer_lease.LeaseConfig.from_env())
     if not capability.vault_store_enabled():
@@ -108,6 +115,17 @@ def require_servable(vault_root: Path) -> None:
             NOT_SERVED,
             f"this vault's pages live in the collection store and this build cannot serve them: run {ROLLBACK} "
             "to return them to files, or start a build that serves store mode")
+    claim = marker.view(vault_root).claim(in_store_mode=True)
+    if claim == marker.DISPLACED:
+        raise connection.CollectionStoreError(
+            CLAIM_DISPLACED, f"This root's store claim no longer stands. {ROLLBACK_HELD}"
+        )
+    if claim == marker.UNKNOWN:
+        raise connection.CollectionStoreError(
+            CLAIM_UNKNOWN,
+            "This build cannot read the store-mode decision. "
+            f"Use a compatible build before you roll back. {ROLLBACK_HELD}",
+        )
 
 
 def require_no_store_elsewhere(vault_root: Path) -> None:

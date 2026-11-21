@@ -29,6 +29,8 @@ roll a vault back with the capability off.
 
 from __future__ import annotations
 
+from sys import platform
+
 from .. import state_migration
 from .. import structured_collections as collections
 from . import connection
@@ -139,8 +141,14 @@ def require_records_summary_route(vault_root, writer, action, values, *, prove=N
 
 
 def vault_store_enabled() -> bool:
-    """Whether this build supports activating and serving store mode. Rollback stays available."""
+    """Whether this build enables the vault-store release capability."""
     return VAULT_STORE_V1 in RELEASED
+
+
+def vault_store_migration_platform_supported() -> bool:
+    """Whether the platform supports entering store mode. Existing stores can still serve."""
+    # Python defines win32 for native Windows, where migration awaits NTFS acceptance.
+    return platform != "win32"
 
 
 def collections_migrate_enabled() -> bool:

@@ -912,6 +912,34 @@ keeps every row, history entry and preserved source, pauses import jobs and
 refuses summary reads with `COLLECTION_STORE_DISABLED`. A later release does
 not turn the vault's summary collections back on.
 
+### Store mode for vault pages
+
+New vaults start in file mode. On Linux or macOS, an owner can move a vault's
+pages and indexes into its existing collection store. The service reads the
+pages from SQLite and projects them back to Markdown. Native Windows
+migration is unavailable. An existing store-mode vault can still serve reads
+or roll back there.
+
+Use a loopback lease coordinator with `EXOMEM_WRITER_LEASE_TOPOLOGY=single-host`.
+Keep the service's vault, state root, and lease environment in your shell.
+Start the service once to build the indexes, then stop it and set
+`EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`.
+
+1. Run `exomem store-mode migrate --dry-run` to check the store, lease, and indexes.
+2. Run `exomem store-mode migrate --apply --why 'Enable store mode'` to move the vault.
+3. Run `exomem store-mode status` and check for `mode=store`.
+4. Start the service on the same state root so it serves the stored pages.
+
+To return to files, stop the service. From a directory outside the vault, run
+`exomem store-mode rollback --apply --export-to ./store-mode-export --why 'Return to file mode'`.
+Use a new or empty export directory. Add `--export-held` to keep unimported
+edits in the export before the store's pages replace the Markdown projections.
+Check for `mode=file` before starting the service again.
+
+If a former holder refuses with `VAULT_STORE_CLAIM_DISPLACED`, follow its
+offline rollback instructions on that state root. If it reports
+`VAULT_STORE_CLAIM_UNKNOWN`, use a build that can read the decision first.
+
 ### A release that changes the collection store's schema
 
 A release can change the schema of the live collection store. 0.119.0 changed

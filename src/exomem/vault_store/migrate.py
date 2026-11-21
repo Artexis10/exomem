@@ -18,7 +18,6 @@ from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from sys import platform
 
 from .. import (
     __version__,
@@ -259,12 +258,11 @@ def preflight(vault_root: Path) -> dict:
     mode, the vault marker and the sidecars before staging any changes.
     """
     admission.require_owner(vault_root, "store-mode migrate")
-    # Python defines win32 for native Windows, where migration awaits NTFS acceptance.
-    if platform == "win32":
+    if not capability.vault_store_migration_platform_supported():
         raise OpError(
             "VAULT_STORE_WINDOWS_UNSUPPORTED",
             "store-mode migration is not yet supported on Windows. A file-mode vault stays in file mode.",
-            "Run `exomem store-mode status` to check the vault's mode.",
+            "To switch, run `exomem store-mode migrate --dry-run` on Linux or macOS with the vault and its store.",
         )
     if not capability.vault_store_enabled():
         raise OpError(

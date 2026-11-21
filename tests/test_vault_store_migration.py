@@ -91,7 +91,7 @@ def vault(tmp_path, monkeypatch, coordinator_url, capsys):  # noqa: F811
     monkeypatch.setattr(capability, "RELEASED", RELEASED)
     if sys.platform == "win32":
         # Qualify the real NTFS migration path beyond the shipped platform refusal.
-        monkeypatch.setattr(migrate, "platform", "linux")
+        monkeypatch.setattr(capability, "platform", "linux")
     with library_scope():
         root = legacy_vault(tmp_path / "vault")
         (root / ALPHA).write_text(
@@ -154,7 +154,7 @@ def test_windows_migration_refuses_and_leaves_the_vault_in_file_mode(
     vault, capsys, monkeypatch, arguments,
 ):
     """A Windows owner can trigger an unqualified migration or gets a generic preflight refusal."""
-    monkeypatch.setattr(migrate, "platform", "win32")
+    monkeypatch.setattr(capability, "platform", "win32")
     before = vault_bytes(vault)
 
     assert store_mode(vault, "migrate", *arguments) == 1
@@ -162,6 +162,9 @@ def test_windows_migration_refuses_and_leaves_the_vault_in_file_mode(
     refusal = capsys.readouterr().err
     assert "VAULT_STORE_WINDOWS_UNSUPPORTED" in refusal
     assert "not yet supported on Windows" in refusal
+    assert store_mode(vault, "status") == 0
+    status = printed(capsys)
+    assert (status["mode"], status["gate"]) == (mode.FILE_MODE, "off")
     assert mode.state(vault) == mode.FILE_MODE
     assert vault_bytes(vault) == before
 
@@ -287,7 +290,7 @@ def _migrate_and_die(environment, released, migration_platform):
     os.environ.update(environment)
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
     capability.RELEASED = released
-    migrate.platform = migration_platform
+    capability.platform = migration_platform
 
     def die(*arguments, **keywords):
         kill_self()
@@ -311,7 +314,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
         args=(
             {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
             RELEASED,
-            migrate.platform,
+            capability.platform,
         ),
     )
     child.start()
@@ -362,7 +365,7 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
     )
     assert migrate_apply(vault) == 0
     with monkeypatch.context() as windows:
-        windows.setattr(migrate, "platform", "win32")
+        windows.setattr(capability, "platform", "win32")
         assert answers() == before
         assert rollback_apply(vault, tmp_path / "export") == 0
     assert not mode.store_mode_active(vault)

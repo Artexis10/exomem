@@ -7,8 +7,8 @@ replaced. Each subcommand declares here what it touches, and each declared handl
 vault it resolved, at the point where it resolves it. The declaration lives here, not in ``__main__``, because
 the handlers that resolve a vault sit in other modules, and the lean ``cell-media-*`` routes must not load the CLI.
 
-A ``PAGES`` entry refuses a store-mode vault for good, whether or not the build serves store mode: the command
-works outside the service, and no rollout gate changes that. Each entry names what its owner does instead.
+A ``PAGES`` entry refuses a store-mode vault because the command works outside the service.
+Each entry names the command or tool the owner can use.
 """
 
 from __future__ import annotations
