@@ -811,13 +811,14 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "multipart", "catalog-capacity"])
+@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "multipart", "catalog-capacity", "one-turn-head"])
 def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, layout):
     background = "We went over the morning schedule. " * 130 if layout == "long-turn" else ""
     quote = "Leave it open until the truck arrives."
-    text = f"[00:03] We inspected the gate.\n[00:19] {background}{quote}"
+    earlier = "" if layout == "one-turn-head" else "[00:03] We inspected the gate.\n"
+    text = f"{earlier}[00:19] {background}{quote}"
     path = "Knowledge Base/Sources/gate.md"
-    multipart = layout in {"multipart", "catalog-capacity"}
+    multipart = layout in {"multipart", "catalog-capacity", "one-turn-head"}
     declaration = "extraction_parts: 2\n" if multipart else ""
     policy = Policy(fingerprint="f" * 64)
     source_item = catalog_publication.catalog_item(
@@ -860,7 +861,7 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
         samples, [(1.0, 0.0) if quote in match.text else (0.0, 1.0) for _, match in samples],
     )
     if multipart:
-        assert len(samples) == 2
+        assert len(samples) == (1 if layout == "one-turn-head" else 2)
     vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
     rows = (vector, _vector(summary, (1.0, 0.0)))
     runtime = _runtime((_item(source), _item(summary)), vectors=rows)
