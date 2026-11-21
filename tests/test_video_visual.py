@@ -155,7 +155,7 @@ def test_worker_frame_write_failure_still_upserts_vectors(
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
     monkeypatch.setattr(
         media_worker.scene_frames,
-        "write_scene_frames",
+        "prepare_scene_frames",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
     w = media_worker.MediaWorker(vault, execution_mode="inline")
@@ -340,10 +340,11 @@ def test_worker_reembed_gate_off_not_enqueued(vault, monkeypatch: pytest.MonkeyP
 
 def test_process_reembed_calls_upsert(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
-    monkeypatch.setattr(
-        media_worker.index_sync, "upsert_after_write",
-        lambda root, paths: called.setdefault("paths", paths),
-    )
+    def refresh(root, paths):
+        called["paths"] = paths
+        return media_worker.index_sync.IndexComponentOutcome("embeddings", "completed", "stub")
+
+    monkeypatch.setattr(media_worker.index_sync, "refresh_embeddings", refresh)
     sidecar = vault / "Knowledge Base/Evidence/T/clips/demo.mp4.md"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text("---\nmedia_type: video\n---\n", encoding="utf-8")
