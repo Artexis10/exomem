@@ -192,6 +192,51 @@ def stage(
             _remove(lock_path)
 
 
+@contextlib.contextmanager
+def _probe_lock(lock_path: Path) -> Iterator[bool | None]:
+    """Yield True while this process holds an existing lock nobody else holds, False when another process
+    does, and None when this host cannot say.
+
+    The probe never creates, truncates or follows a link: it opens the existing file as it is, so a planted
+    link cannot make the sweep write outside the stage root. A host whose `flock` is unsupported (or a
+    platform without `fcntl`) yields None, and the stage stays where it is.
+    """
+    try:
+        import fcntl
+    except ImportError:  # no fcntl on this platform: only the library's own lock can be probed
+        probe = FileLock(lock_path, timeout=0, thread_local=False)
+        try:
+            probe.acquire()
+        except Timeout:
+            yield False
+            return
+        except OSError:
+            yield None
+            return
+        try:
+            yield True
+        finally:
+            probe.release()
+        return
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        yield None
+        return
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        except OSError:
+            yield None
+            return
+        yield True
+    finally:
+        os.close(descriptor)
+
+
 def sweep(vault_root: Path) -> SweepReport:
     """Remove each stage whose owner is proven gone; leave every other entry where it is.
 
@@ -200,6 +245,14 @@ def sweep(vault_root: Path) -> SweepReport:
     cannot be proven either way and stays too, reported as `unproven`.
     """
     root = stage_root(vault_root)
+    try:
+        root_info = os.lstat(root)
+    except FileNotFoundError:
+        return SweepReport()
+    if not stat.S_ISDIR(root_info.st_mode):
+        # A symlinked or replaced stage root is not ours to walk: nothing under it can be proven an orphan.
+        log.warning("upload stage root is not a plain directory; the sweep left it alone")
+        return SweepReport(unproven=1)
     try:
         scanner = os.scandir(root)
     except FileNotFoundError:
@@ -213,7 +266,7 @@ def sweep(vault_root: Path) -> SweepReport:
                 truncated = True
                 break
             named = _STAGE_NAME.fullmatch(entry.name)
-            if named is not None:
+            if named is not None and not entry.is_symlink():
                 (parts if named["kind"] == _PART_SUFFIX else locks).add(named["stem"])
     removed = live = unproven = 0
     for stem in sorted(parts | locks):
@@ -221,19 +274,14 @@ def sweep(vault_root: Path) -> SweepReport:
             unproven += 1
             continue
         lock_path = root / f"{stem}{_LOCK_SUFFIX}"
-        probe = FileLock(lock_path, timeout=0, thread_local=False)
-        try:
-            probe.acquire()
-        except Timeout:
-            live += 1
-            continue
-        except OSError:
-            unproven += 1
-            continue
-        try:
+        with _probe_lock(lock_path) as free:
+            if free is None:
+                unproven += 1
+                continue
+            if not free:
+                live += 1
+                continue
             _remove(root / f"{stem}{_PART_SUFFIX}")
-        finally:
-            probe.release()
         _remove(lock_path)
         removed += 1
     report = SweepReport(removed=removed, live=live, unproven=unproven, truncated=truncated)

@@ -21,7 +21,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import original_pool, server_transfer, upload_sessions, upload_stage, writer_lease
+from exomem import (
+    artifact_lifecycle,
+    original_pool,
+    server_transfer,
+    upload_sessions,
+    upload_stage,
+    writer_lease,
+)
 from exomem import vault as vault_module
 
 SMALL = 16 * 1024 * 1024
@@ -112,7 +119,10 @@ def test_a_big_upload_commit_holds_the_boundary_no_longer_than_a_small_one(
     vault: Path, monkeypatch: pytest.MonkeyPatch, pooled: bool
 ) -> None:
     if pooled:
-        original_pool.activate_at_start(vault)
+        # A new archive records no intent in the fixture vault, so `activate_at_start` would leave the pool off.
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+        original_pool.enable(vault)
+        assert original_pool.enabled(vault)
     recording = _RecordingManager(writer_lease.get_manager())
     monkeypatch.setattr(writer_lease, "get_manager", lambda: recording)
 

@@ -204,3 +204,32 @@ def test_a_part_without_its_lock_file_is_reported_and_left_in_place(tmp_path: Pa
 
     assert (report.removed, report.unproven) == (0, 1)
     assert stray.read_bytes() == b"bytes of unknown ownership"
+
+
+def test_a_planted_link_in_the_stage_root_never_lets_the_sweep_write_outside_it(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"a file the sweep must never touch")
+    root = upload_stage.stage_root(tmp_path)
+    root.mkdir(parents=True)
+    (root / ("b" * 32 + ".part")).write_bytes(b"a stage")
+    (root / ("b" * 32 + ".lock")).symlink_to(outside)
+
+    report = upload_stage.sweep(tmp_path)
+
+    assert outside.read_bytes() == b"a file the sweep must never touch"
+    assert report.removed == 0
+
+
+def test_a_stage_root_that_is_a_link_is_not_walked(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / ("c" * 32 + ".part")).write_bytes(b"not ours")
+    (elsewhere / ("c" * 32 + ".lock")).write_bytes(b"")
+    root = upload_stage.stage_root(tmp_path)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    root.symlink_to(elsewhere, target_is_directory=True)
+
+    report = upload_stage.sweep(tmp_path)
+
+    assert (report.removed, report.unproven) == (0, 1)
+    assert sorted(entry.name for entry in elsewhere.iterdir()) == ["c" * 32 + ".lock", "c" * 32 + ".part"]
