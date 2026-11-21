@@ -1192,8 +1192,8 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     timed get SEMANTIC SEGMENT chunks (each starting with its `[timestamp]`
     marker — what `find` surfaces as `transcript_match_at`), with the sections
     before/after `## Extracted text` still paragraph-chunked in document order.
-    Every other page — and the gate-off world — returns `chunk_text` output
-    unchanged (equality-tested).
+    Timestamped text Sources group lines into turns before applying the ordinary
+    chunk cap. Other pages use the paragraph chunker.
 
     Segmenting a timed transcript ENCODES: the segmenter scores every gap
     between timed lines with embeddings of the windows on either side, so one
@@ -1218,7 +1218,14 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
         ss.semantic_segments_enabled()
         and getattr(page, "media_type", None) in ("audio", "video")
     ):
-        return chunk_text(page.title, page.search_body)
+        from . import transcript_passages
+
+        body = page.search_body
+        if transcript_passages.is_source(getattr(page, "rel_path", "")):
+            groups = transcript_passages.chunks(body)
+            if groups:
+                return [chunk for group in groups for chunk in chunk_text(page.title, group)]
+        return chunk_text(page.title, body)
     body = page.body or ""
     idx = body.find("## Extracted text")
     if idx == -1:
@@ -3038,7 +3045,7 @@ def index_incremental(
     selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
     Returns a small stats dict (also the CLI's machine-readable output).
     """
-    from . import access, semantic_index
+    from . import access, semantic_index, transcript_passages
     from . import find as find_module
 
     scope = index_paths.index_scope()
@@ -3047,6 +3054,7 @@ def index_incremental(
     unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
+    unchanged_transcripts: list[tuple[str, list[str], float]] = []
     pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
     unit_seen_on_disk: set[str] = set()
@@ -3074,9 +3082,23 @@ def index_incremental(
         scanned += 1
         seen_on_disk.add(page.rel_path)
         prior = row_mtimes.get(page.rel_path)
+        row = (page.rel_path, chunks, page.mtime)
         if prior is not None and page.mtime <= prior + 1.0:
-            continue  # sidecar already current for this file
-        pending.append((page.rel_path, chunks, page.mtime))
+            # Same-mtime Sources can still have legacy paragraph chunks.
+            if transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body):
+                unchanged_transcripts.append(row)
+            continue
+        pending.append(row)
+
+    for start in range(0, len(unchanged_transcripts), 16):
+        batch = unchanged_transcripts[start:start + 16]
+        texts = index._texts_for([(path, at) for path, chunks, _ in batch for at in range(len(chunks) + 1)])
+        pending.extend(
+            (path, chunks, stamp) for path, chunks, stamp in batch
+            if (path, len(chunks)) in texts or any(
+                texts.get((path, at)) != chunk for at, chunk in enumerate(chunks)
+            )
+        )
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.

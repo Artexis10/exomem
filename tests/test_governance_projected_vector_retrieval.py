@@ -246,3 +246,40 @@ def test_vector_dimension_and_finiteness_are_closed() -> None:
         match="finite",
     ):
         _measurement(variant, (float("nan"), 0.0))
+
+
+def test_only_the_admitted_transcript_variant_contributes_passage_vectors() -> None:
+    from dataclasses import replace
+
+    path = "Knowledge Base/Sources/Session/gate-log.md"
+    text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
+    text_start = text.index("[0:09]")
+    low = _variant(path, "1" * 64, level=2, text="A permitted constraint")
+    full = replace(
+        _variant(path, "1" * 64, level=6, text=text),
+        head=projections.ProjectionHead(0, len(text)),
+    )
+    public = _variant("summary", "2" * 64, level=6, text="Gate summary")
+    source = _item(path, "1" * 64, low, full)
+    summary = _item("summary", "2" * 64, public)
+    index = projected_retrieval.ProjectedVectorIndex(
+        _namespace(source, summary),
+        (_measurement(low, (0.0, 1.0)), _measurement(public, (0.5, 0.5)),
+         replace(_measurement(full, (0.0, 1.0)), passages=(
+             projected_retrieval.ProjectionTranscriptSample(1, 0, (0.0, 1.0)),
+             projected_retrieval.ProjectionTranscriptSample(1, text_start, (1.0, 0.0)),
+         ))),
+        extractor_version="projected-text-v1",
+        model_version="test-model-v1",
+    )
+
+    shown = index.search_vector(_map((source, full), (summary, public)), (1.0, 0.0), k=1)
+    assert shown[0].item_identity == path
+    part, passage = shown[0].transcript
+    assert part == 1
+    assert passage.start == text_start
+    assert passage.text == "[0:09] The ranger shut it."
+    restricted = index.search_vector(_map((source, low), (summary, public)), (1.0, 0.0), k=1)
+    withheld = index.search_vector(_map((source, None), (summary, public)), (1.0, 0.0), k=1)
+    assert restricted == withheld
+    assert restricted[0].item_identity == "summary"

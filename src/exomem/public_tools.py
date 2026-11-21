@@ -627,7 +627,7 @@ class SaveSource(Wire):
     tags: list[str] | None = None
     why: str | None = None
     document_form: str | None = Field(default=None, description="The form of this record of the work, as an open slug such as abstract.")
-    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only.")
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity.")
     detail: Detail | None = _DETAIL
 
 
@@ -689,6 +689,7 @@ class UploadFiles(Wire):
     lane: Literal["source", "evidence", "import"] = Field(
         description="Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).")
     expected_sha256: str | None = Field(default=None, description="SHA-256 of the file you intend to send.")
+    import_identity: str | None = Field(default=None, description="Durable external ID for a held Source upload.")
     hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
     detail: Detail | None = _DETAIL
 
@@ -698,6 +699,7 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
     held = True if wire["lane"] == "import" else wire.get("hold")
     return "transfer_artifact", {"operation": "upload", **_given({
         "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
+        "import_identity": wire.get("import_identity"),
         "response_detail": wire.get("detail")})}
 
 

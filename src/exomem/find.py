@@ -1640,6 +1640,7 @@ def find(
     updated_before: str | None = None,
     recency_days: int | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -2409,6 +2410,7 @@ def find(
             filter_key,
             _relation_key(relations, relation_of, relation_direction),
             effective_result_level,
+            prefer_source_passages,
             prefer_compiled,
             prefer_active,
             widen_outside_kb,
@@ -2799,6 +2801,7 @@ def find(
                 temporal=temporal,
                 intent=intent,
                 prefer_compiled=prefer_compiled,
+                prefer_source_passages=prefer_source_passages and mode == "hybrid" and not mixed,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
                 type_basis=type_basis,
@@ -6614,6 +6617,27 @@ def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
     return extraction_parts.listed(vault_root / page.rel_path)
 
 
+def _transcript_match(vault_root: Path, page: ParsedPage, query: str, chunk: str | None):
+    from . import extraction_parts, transcript_passages
+    from .governance import egress
+
+    if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
+        return None
+    text = transcript_passages.source_text(page.body)
+    return transcript_passages.match(
+        text, chunk=chunk, title=page.title, query=query,
+        withheld=egress.carrier_spans_for_caller(vault_root, text, owner_path=page.rel_path),
+    )
+
+
+def _cites_source(vault_root: Path, page: ParsedPage, source_path: str) -> bool:
+    from . import epistemic_graph, transcript_passages
+
+    targets = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
+    targets.extend(find_results.wikilink_targets(page.search_body))
+    return transcript_passages.cites_path(targets, source_path, kb_name=vault_module.kb_root(vault_root).name)
+
+
 def _part_match(
     vault_root: Path, page: ParsedPage, matched: ParsedPage, query_norm: str, *, chunk: str | None = None
 ) -> dict[str, object] | None:
@@ -6658,7 +6682,12 @@ def _keyword_hit(
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
         snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
-    hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
+    transcript = _transcript_match(vault_root, page, query_norm, None)
+    if transcript is not None:
+        hit.passage = transcript.passage()
+        hit.matched_part = 1
+        hit.excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
+    hit.transcript_ts = transcript.timestamp if transcript else _transcript_ts_for_hit(page, None, query_norm)
     # The persisted video handler defines this media family and its frame fallback.
     if (hit.scene_frame is None and page.media_type == "video"
             and page.media_file and hit.transcript_ts is not None):
@@ -6984,6 +7013,7 @@ def _find_semantic(
     temporal: bool = True,
     intent: str | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     config: RankingConfig = DEFAULT_RANKING,
@@ -7016,7 +7046,7 @@ def _find_semantic(
     """
     with _span(timings, "semantic.preflight"):
         # Lazy imports — keep keyword-mode users out of the torch import path.
-        from . import access, embeddings, lexstore, readiness, scene_frames
+        from . import access, embeddings, lexstore, readiness, scene_frames, transcript_passages
 
         status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
         type_basis = type_basis or note_types.Basis(vault_root)
@@ -7099,6 +7129,7 @@ def _find_semantic(
             temporal=temporal,
             intent=intent,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             status_basis=status_basis,
             type_basis=type_basis,
@@ -7329,6 +7360,7 @@ def _find_semantic(
             yield path
 
     paths = ranked_paths()
+    extra_paths: set[str] = set()
     # Collect and rank with the original limit. Only an entirely proved page
     # prefix can join units before hydration; rerank passages retain their path.
     if (
@@ -7366,17 +7398,17 @@ def _find_semantic(
         # report a walk, so it contributes nothing to the walk sentinel, and
         # `WALKER_STAGES` in the gate now says so instead of counting it.
         _mark_source(timings, "filter_hits", find_types.SOURCE_INDEX)
-        for rel_path in paths:
+        def selected_page(rel_path: str) -> tuple[str, ParsedPage, str | None] | None:
             needs_corroboration = _needs_corroboration(rel_path)
             page = _page_of(rel_path)
             if page is None:
-                continue
+                return None
             attr = frame_attribution.get(rel_path)
             if attr is not None and rel_path in bundle.frame_sources:
                 if _page_of(bundle.frame_sources[rel_path]) is None:
-                    continue
+                    return None
             if eligible_paths is not None and rel_path not in eligible_paths:
-                continue
+                return None
             if not _passes_filters(
                 page,
                 vault_root=vault_root,
@@ -7387,7 +7419,7 @@ def _find_semantic(
                 file_types=file_types,
                 exclude_file_types=exclude_file_types,
             ):
-                continue
+                return None
             keyword_excerpt = _make_excerpt(page, query_norm)
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
@@ -7398,7 +7430,7 @@ def _find_semantic(
                 # BM25's own top-ranked evidence survives interrogative
                 # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
-                    continue
+                    return None
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
             elif (
                 rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
@@ -7416,9 +7448,23 @@ def _find_semantic(
                 if keyword_excerpt is None:
                     body = page.body_stripped
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
-            selected.append((rel_path, page, keyword_excerpt))
-            if len(selected) >= target_n:
-                break
+            return rel_path, page, keyword_excerpt
+
+        for rel_path in paths:
+            if row := selected_page(rel_path):
+                selected.append(row)
+                if len(selected) >= target_n:
+                    break
+
+        selected_paths = {path for path, _page, _excerpt in selected}
+        for rel_path in bundle.neutral_prefix:
+            if (
+                rel_path not in selected_paths
+                and transcript_passages.is_source(rel_path)
+                and (row := selected_page(rel_path))
+            ):
+                selected.append(row)
+                extra_paths.add(rel_path)
 
         # Freeze the eligible prefix before proof checks. Missing selected text
         # reduces coverage; it must not pull lower fused rows into the answer.
@@ -7479,6 +7525,10 @@ def _find_semantic(
             # that collapsed into this Source, else the Source itself.
             matched_page = (chunk_page if ref is not None else frame_page) or page
             part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
+            transcript = _transcript_match(vault_root, page, query, chunk)
+            if transcript is not None:
+                part_match = {"matched_part": 1, "passage": transcript.passage()}
+                excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
             hit = Hit(
                 path=page.rel_path,
                 type=page.page_type,
@@ -7507,7 +7557,9 @@ def _find_semantic(
                 snapshot_hash=page.snapshot_hash,
                 **(part_match or {}),
             )
-            hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+            hit.transcript_ts = (
+                transcript.timestamp if transcript else _transcript_ts_for_hit(page, chunk, query_norm)
+            )
             if hit.scene_frame is None and page.media_type == "video" and page.media_file:
                 # A localized match on a video — CLIP keyframe first (existing), else a
                 # timed-transcript match — attaches the nearest PERSISTED frame so the
@@ -7736,6 +7788,31 @@ def _find_semantic(
             reason=rerank_outcome["reason"],
         )
 
+        passage_preference = None
+        if bundle.neutral_prefix:
+            passages = {
+                hit.path: hit for hit in hits
+                if hit.passage is not None and hit.transcript_ts is not None
+            }
+            hits = [hit for hit in hits if hit.path not in extra_paths]
+            for path in bundle.neutral_prefix:
+                candidate = passages.get(path)
+                if candidate is None or not transcript_passages.is_source(path):
+                    continue
+                def cites(other: str, source_path: str = path) -> bool:
+                    summary = _page_of(other)
+                    return (
+                        summary is not None
+                        and type_basis.selects(summary.page_type, note_types.ranks_as_compiled)
+                        and _cites_source(vault_root, summary, source_path)
+                    )
+
+                position = transcript_passages.preferred_position([hit.path for hit in hits], path, cites)
+                if position >= len(hits) or hits[position].path != path:
+                    hits = [hit for hit in hits if hit.path != path]
+                    hits.insert(position, candidate)
+                    passage_preference = path
+                break
         final_hits = hits[:limit]
         if retrieval_trace is not None:
             retrieval_trace.record_page_candidates(
@@ -7747,6 +7824,10 @@ def _find_semantic(
                 scorer_input_count=scorer_input_count,
                 unscored_tail_count=unscored_tail_count,
             )
+            if passage_preference in retrieval_trace.evidence_by_id:
+                retrieval_trace.evidence_by_id[passage_preference]["ordering_path"].append(
+                    {"stage": "source_passage_preference"},
+                )
         return final_hits
 
     return _SelectedHits(hits, finish) if defer_finish else finish()

@@ -1,0 +1,15 @@
+# Design
+
+## Context
+
+The normal search index already has chunks for long Sources. Paragraph splitting can flatten timed lines, page ranking can discard a competitive Source, and the hit can lose the chunk's location. File ingestion already stages and verifies exact bytes.
+
+## Decisions
+
+1. Reuse the embedding chunk path and the existing passage response. A passage is an address in authenticated Source text under the published hash. Semantic unit identity remains the authored anchor or fingerprint-bound reference defined in canonical store design D10.
+2. Use the existing lexical and vector ranks to select the highest verified transcript among the neutral top three. Apply the reorder after scoring and before the public cap. This follows the context-quality row of the agentic engineering roster. Return the smallest citable evidence that answers the question.
+3. Extend the existing staged file capture boundary. Use a scoped canonical receipt with a bounded exact lookup. Stage bytes and verify their digest before acquiring the mutation boundary. Persist the receipt under that boundary alongside creation or authorized duplicate reuse.
+
+## Risks and Trade-offs
+
+A ranking lift can crowd out a summary. Compare the same cases with and without the change, including ordinary summary queries. An old or withheld chunk can disclose words and position. Verify the winning chunk against the caller's released Source before it influences the order. A lost write reply can otherwise create another Source. Resolve it through the durable receipt.

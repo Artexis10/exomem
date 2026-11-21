@@ -480,6 +480,16 @@ _REGISTRY = (
         trees=("_sources/corrections",),
     ),
     InternalStateDescriptor(
+        "source-imports", "source_imports", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/imports",),
+    ),
+    InternalStateDescriptor(
+        "source-import-intents", "source_imports", StatePlacement.EXTERNAL_STATE,
+        rebuildable=False,
+        trees=("source-import-intents",),
+    ),
+    InternalStateDescriptor(
         "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_sources/custody",),

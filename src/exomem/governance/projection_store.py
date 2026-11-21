@@ -384,8 +384,8 @@ def _row_material(variant: projections.ProjectionVariant) -> _VariantRow:
         search_fields_jcs,
         str(variant.decision_level).encode("ascii"),
     ]
-    if variant.parts:
-        # A row without parts keeps the digest it had before parts existed. Each part and the
+    if variant.parts or variant.head is not None:
+        # A row without parts or a mapped head keeps the digest it had before parts existed. Each part and the
         # head carry their own digest, computed once, so a row frames those, not the part text.
         fields.append(b"".join(part.digest for part in variant.parts))
         fields.append(b"" if variant.head is None else variant.head.digest)

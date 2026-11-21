@@ -171,14 +171,20 @@ async def _active(root: Path, who: principal.RequestPrincipal) -> bool:
 
 def prepare_upload(
     vault_root: Path, *, lane: str, expected_sha256: str,
-    base_url: str | None = None, max_bytes: int | None = None,
+    base_url: str | None = None, max_bytes: int | None = None, import_identity: str | None = None,
 ) -> dict:
     """Issue one held-byte handoff; the caller's current session owns its result."""
     async def prepare():
+        from . import source_imports
         from .client_artifacts import fetch_budget
         from .source_capture import validate_sha256
 
         expected = validate_sha256(expected_sha256)
+        import_key = None
+        if import_identity is not None:
+            if lane != "source":
+                raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload")
+            import_key = source_imports.issuer_key(import_identity)
         if lane not in HANDOFF_LANES:
             raise ValueError(f"INVALID_MODE: upload lane must be one of {HANDOFF_LANES}")
         who = replace(principal.effective_principal(), administrative_ingress=False)
@@ -250,6 +256,7 @@ def prepare_upload(
                 "deployment": artifact_recovery.deployment(vault_root),
                 "expires": expires, "lane": lane,
                 "expected_sha256": expected, "max_bytes": limit,
+                **({"import_key": import_key} if import_key is not None else {}),
             }, temp_suffix=".part")
         return {
             "token": token, "upload_url": endpoint,

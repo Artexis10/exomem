@@ -715,3 +715,64 @@ def test_a_refused_send_says_a_retry_needs_a_new_upload(upload_env):
     retried = _post(upload_env, descriptor)
     assert retried.status_code == 401
     assert retried.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON
+
+
+def test_import_id_survives_a_new_hosted_upload_and_stays_scoped_to_the_importer(
+    upload_env, monkeypatch,
+):
+    from fastmcp import Client
+
+    from exomem import server
+
+    vault, who, authority, _, _ = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: active)
+    original = b"[0:09] Gate opened.\r\n[0:14] Gate shut.\r\n"
+    first_bytes = hashlib.sha256(original).hexdigest()
+    active = who
+    app = server.build_server(require_auth=False)
+
+    def caller(client_id):
+        _, record = asyncio.run(authority.issue(
+            client_id=client_id, scopes=["mcp"],
+            identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+        ))
+        return replace(
+            who, client_binding=principal.ClientBinding(authority.issuer, record.client_id),
+            origin_session=principal.OriginSessionBinding(record.session_id, record.generation, record.audience),
+        )
+
+    def capture(data, import_identity="meeting-42"):
+        descriptor = _prepare(
+            (vault, active, *upload_env[2:]), data, import_identity=import_identity,
+        )
+        sent = _post(upload_env, descriptor, data)
+        assert sent.status_code == 201, sent.text
+
+        async def invoke():
+            async with Client(app) as client:
+                return (await client.call_tool("save_source", {
+                    "title": "Gate log", "source_kind": "session", "files": [sent.json()["file"]],
+                    "detail": "full",
+                })).structured_content
+
+        result = asyncio.run(invoke())
+        [receipt] = result["files"]
+        return receipt
+
+    first = capture(original)
+    assert first["hash"] == first_bytes
+    assert first["outcome"] == "stored"
+    active = caller("agent")
+    repeated = capture(original)
+    assert repeated["ref"] == first["ref"] and repeated["hash"] == first_bytes
+    assert repeated["state"] == "already_stored"
+    conflict = capture(b"different file\r\n")
+    assert conflict["code"] == "IMPORT_IDENTITY_CONFLICT"
+    reused = capture(original, import_identity="same-meeting-in-a-second-feed")
+    assert reused["ref"] == first["ref"] and reused["state"] == "already_stored"
+    replayed_reuse = capture(original, import_identity="same-meeting-in-a-second-feed")
+    assert replayed_reuse["ref"] == first["ref"] and replayed_reuse["state"] == "already_stored"
+    active = caller("different-agent")
+    second = capture(b"different file\r\n")
+    assert second["outcome"] == "stored" and second["ref"] != first["ref"]

@@ -358,7 +358,13 @@ def _planned_navigation_adoptions(
 
 
 def search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
+    from .. import epistemic_graph
+
     fields = {"title": page.title}
+    sources = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
+    if sources:
+        # This field supplies precedence only. It does not add searchable tokens.
+        fields["sources"] = "\n".join(sources)
     for name, value in (
         # The OCR words a media sidecar withheld from search stay out of the projected body too.
         ("body", find_types.without_low_confidence_ocr(page.body, page.frontmatter)),
@@ -491,7 +497,7 @@ def catalog_item(
     same batch is about to write, by vault-relative path; `part_folder` is where the page's
     parts are now when the page is about to move away from them.
     """
-    from .. import extraction_parts, preserve
+    from .. import extraction_parts, preserve, transcript_passages
 
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -517,6 +523,11 @@ def catalog_item(
         parts = extraction_parts.stored_parts(
             vault_root, path, source, pending=pending, folder=part_folder
         )
+        head = preserve.extracted_text(source) if parts else ""
+        if not head and transcript_passages.is_source(path):
+            text = transcript_passages.source_text(parsed.body)
+            if transcript_passages.is_transcript(text):
+                head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
                 item_identity=path,
@@ -527,7 +538,7 @@ def catalog_item(
                 full_search_fields=search_fields(parsed),
             ),
             parts,
-            head=preserve.extracted_text(source) if parts else "",
+            head=head,
         )
         return projection_store.ProjectionItemVariants(
             item_identity=path,
@@ -730,6 +741,9 @@ def _target_vector_measurements(
             "the active vector measurement family cannot be verified"
         ) from error
     active_ids = _variant_ids(active_namespace.items)
+    active_variants = {
+        variant.projection_variant_id: variant for item in active_namespace.items for variant in item.variants
+    }
     active_by_id: dict[str, projected_retrieval.ProjectionVectorMeasurement] = {}
     for row in active_rows:
         if not isinstance(row, projected_retrieval.ProjectionVectorMeasurement):
@@ -857,6 +871,26 @@ def _target_vector_measurements(
                 "the target vector measurements cannot be rebuilt"
             ) from error
 
+    def passages_for(variant):
+        variant_id = variant.projection_variant_id
+        candidates = projected_retrieval.transcript_samples(variant)
+        if not candidates:
+            return ()
+        previous = active_by_id.get(variant_id)
+        if (
+            previous is not None and previous.passages
+            and candidates == projected_retrieval.transcript_samples(active_variants[variant_id])
+        ):
+            return previous.passages
+        try:
+            vectors = embeddings._embed_live_chunks([match.text for _, match in candidates])
+            return tuple(
+                projected_retrieval.ProjectionTranscriptSample(part, match.start, tuple(map(float, vector)))
+                for (part, match), vector in zip(candidates, vectors, strict=True)
+            )
+        except Exception as error:
+            raise CatalogPublicationError("the target transcript measurements cannot be built") from error
+
     target_rows = tuple(
         projected_retrieval.ProjectionVectorMeasurement(
             measurement_key=projections.MeasurementKey(
@@ -870,6 +904,7 @@ def _target_vector_measurements(
                 if variant.projection_variant_id in active_by_id
                 else rebuilt[variant.projection_variant_id]
             ),
+            passages=passages_for(variant),
         )
         for variant in target_variants
     )

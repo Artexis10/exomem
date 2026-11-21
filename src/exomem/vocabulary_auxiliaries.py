@@ -11,6 +11,7 @@ from typing import Any
 
 # A Source's original bytes, opaque under its page: `vocabulary_gate.begin_batch` binds their digest, never their content.
 SOURCE_ORIGINAL = "source-original"
+SOURCE_IMPORT_RECEIPT = "source-import-receipt"
 _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned roles of bound writes.
     {
         "relation-review",
@@ -22,6 +23,7 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         "registry-history",
         "compiled-history",  # The semantic writer retains its exact prior Markdown.
         SOURCE_ORIGINAL,
+        SOURCE_IMPORT_RECEIPT,
     }
 )
 # Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
@@ -259,6 +261,14 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         ):
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         roles[claim.path] = claim.role
+        if claim.role == SOURCE_IMPORT_RECEIPT:
+            from . import source_imports
+
+            if claim.before_sha256 is not None:
+                raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+            source_imports.validate_bound_receipt(
+                root, claim.path, image.after, page=manifest.primary_path, source=primary.after,
+            )
         if claim.role == "registry-history":
             from . import registry_history
 

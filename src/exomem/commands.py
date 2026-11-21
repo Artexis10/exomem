@@ -2726,6 +2726,7 @@ def op_find(
     rerank: bool | None = None,
     rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -3076,6 +3077,7 @@ def op_find(
             rerank=rerank,
             auto_rerank=auto_rerank,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             rank_config=find_module._active_ranking(),
             principal=who,
@@ -3135,6 +3137,7 @@ def op_find(
                 # true/false from the caller always wins over auto.
                 auto_rerank=auto_rerank,
                 prefer_compiled=prefer_compiled,
+                prefer_source_passages=prefer_source_passages,
                 prefer_active=prefer_active,
                 prefer_used=prefer_used,
                 widen_outside_kb=widen_outside_kb,
@@ -6947,7 +6950,7 @@ def op_ask_memory(
     graph: bool = True,
     rerank: bool | None = None,
     rerank_max_candidates: _RerankCandidateLimit | None = None,
-    prefer_compiled: bool = True,
+    prefer_compiled: bool | None = None,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -7030,7 +7033,8 @@ def op_ask_memory(
                 graph=graph,
                 rerank=rerank,
                 rerank_max_candidates=rerank_max_candidates,
-                prefer_compiled=prefer_compiled,
+                prefer_compiled=prefer_compiled is not False,
+                prefer_source_passages=prefer_compiled is None,
                 prefer_active=prefer_active,
                 prefer_used=prefer_used,
                 widen_outside_kb=widen_outside_kb,
@@ -8399,7 +8403,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     window never shows what the release withheld. The window is part of the page, not the
     page, so it carries no `content_hash` and cannot guard a write of the whole body.
     """
-    from . import extraction_parts
+    from . import extraction_parts, transcript_passages
     from .vault import content_hash, parse_frontmatter, read_guarded_text
 
     if offset is not None and type(offset) is not int:  # a bool is an int to Python, never an offset
@@ -8413,9 +8417,11 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     released = released if isinstance(released, dict) else {}
     if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
         return _refuse_unused_offset(result, offset)
+    timed = offset is not None and transcript_passages.is_transcript(transcript_passages.source_text(body))
     if (
         extraction_parts.count_of(released) == 1
         and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS
+        and not timed
     ):
         return _refuse_unused_offset(result, offset)
     path = str(result["path"])
@@ -8425,7 +8431,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
     frontmatter, stored, _ = parse_frontmatter(raw)
-    first = _preserve_module().extracted_text(stored)
+    first = transcript_passages.source_text(stored) if timed else _preserve_module().extracted_text(stored)
     # A read whose hash is not the file's served something other than the stored page (a
     # projected collection summary, or a page that changed meanwhile): it passes through whole.
     if content_hash(raw) != result["content_hash"]:
@@ -9311,6 +9317,7 @@ def op_capture_source(
     capture_reservation: capture_attempts_module.CaptureReservation | None = None,
     document_form: str | None = None,
     custody_only: bool | None = None,
+    import_identity: str | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9334,6 +9341,7 @@ def op_capture_source(
         adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Owner-only original.
         source_identity: Durable text-capture identity.
+        import_identity: Durable external ID for one file under the authenticated importer.
         expected_sha256: Original SHA-256 (UTF-8 for content).
         correction: Correct a Source; expected_hash is its page hash. With no files, content or
             passages it keeps the stored original; fields the call omits carry over.
@@ -9341,6 +9349,13 @@ def op_capture_source(
         document_form: What the document is as a record of a work; a new key registers.
         custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
     """
+    from . import source_imports
+
+    import_key = None
+    if import_identity is not None:
+        if not files or len(files) != 1 or adoption is not None or correction is not None:
+            raise ValueError("INVALID_IMPORT_IDENTITY: use one file without adoption or correction")
+        import_key = source_imports.issuer_key(import_identity)
     if custody_only is not None and type(custody_only) is not bool:
         raise ValueError("INVALID_CUSTODY_ONLY: custody_only must be true or false")
     if capture_reservation is not None:
@@ -9418,7 +9433,7 @@ def op_capture_source(
         else:
             captured = client_artifacts.capture_source_artifacts(
                 vault_root, source_schema=source_schema, title=title, files=files, adoption=adoption,
-                correction=plan, **source_fields,
+                correction=plan, import_key=import_key, **source_fields,
             )
         _note_committed_artifact_targets(captured)
         out = captured
@@ -9905,6 +9920,7 @@ def op_transfer_artifact(
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False, artifacts: list[str] | None = None,
     uploads: list[str] | None = None,
+    import_identity: str | None = None,
 ) -> dict:
     """Prepare a file transfer or cancel owned waiting uploads.
 
@@ -9918,12 +9934,19 @@ def op_transfer_artifact(
             Each gets its own handoff or its own refusal in the reply.
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
+        import_identity: Durable external ID for a held Source upload.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
         uploads: Cancellation only: held-upload references owned by this authenticated session.
     """
     from . import cloud_cell
     from .cli_ops import OpError
+
+    if import_identity is not None and (
+        operation != "upload" or lane != "source" or expected_sha256 is None
+        or artifact is not None or artifacts is not None or uploads is not None
+    ):
+        raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload with expected_sha256")
 
     if operation == "cancel":
         from . import held_uploads
@@ -10007,7 +10030,9 @@ def op_transfer_artifact(
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
         from . import upload_handoff
 
-        return upload_handoff.prepare_upload(vault_root, lane=lane, expected_sha256=expected_sha256)
+        return upload_handoff.prepare_upload(
+            vault_root, lane=lane, expected_sha256=expected_sha256, import_identity=import_identity,
+        )
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:
             raise ValueError("INVALID_MODE: original recovery needs download and artifact")

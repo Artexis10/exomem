@@ -40,6 +40,7 @@ from . import (
     schema,
     source_capture,
     source_corrections,
+    source_imports,
     source_result_attribution,
     source_taxonomy,
     tag_variants,
@@ -512,6 +513,7 @@ def add(
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
+    import_capture: source_imports.ImportCapture | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -1014,9 +1016,24 @@ def add(
             derived.extend(("index", write) for write in sub_writes)
             writes[1:1] = [write for _role, write in derived]
         # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_receipts = []
+        if import_capture is not None:
+            assert artifact_path is not None and artifact_digest == import_capture.original_sha256
+            receipt = import_capture.receipt(
+                source_path.relative_to(vault_root).as_posix(), source_reference,
+                artifact_path.relative_to(vault_root).as_posix(), content_hash(writes[0].content),
+            )
+            receipt_write = import_capture.planned_write(vault_root, receipt)
+            import_capture.prepare(vault_root, receipt)
+            writes.append(receipt_write)
+            bound_receipts.append((vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT, receipt_write))
+            from . import reserved_paths
+
+            container_stack.enter_context(reserved_paths._subsystem_authority_scope(source_imports.OWNER))
         bound_outputs = vocabulary_auxiliaries.seal(
             vault_root, primary=writes[0],
-            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+            derived=[*derived, *bound_receipts,
+                     *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
         payload_custody = container_stack.enter_context(source_payload_custody.capture(
             vault_root, reference=source_reference, primary=writes[0], writes=writes,
@@ -1093,6 +1110,9 @@ def add(
         container_stack.close()
         if artifact_stream is not None:
             artifact_stream.close()
+
+    if import_capture is not None:
+        import_capture.finish(vault_root)
 
     if defer_fanout_to_terminal:
         assert isinstance(committed, list)

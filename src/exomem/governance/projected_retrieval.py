@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from numbers import Real
 from types import MappingProxyType
 
-from .. import bm25
+from .. import bm25, transcript_passages
 from . import projection_store, projections
 
 _HEX = frozenset("0123456789abcdef")
@@ -24,6 +24,7 @@ _BM25_K1 = 1.5
 _BM25_B = 0.75
 _MAX_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 _SNIPPET_CHARS = 320
+MAX_PROJECTED_TRANSCRIPT_SAMPLES = 512
 
 
 class ProjectedRetrievalUnavailable(RuntimeError):
@@ -155,6 +156,7 @@ class ProjectedLexicalHit:
     #: The part of the variant's text that matched, when a further part did; None for the
     #: variant's own fields.
     part: projections.ProjectionPart | None = None
+    transcript: tuple[int, transcript_passages.TranscriptMatch] | None = None
 
     def __post_init__(self) -> None:
         if self.clip_frame_timestamp_ms is not None and (
@@ -254,12 +256,61 @@ def _passage_in(
     )
 
 
+def transcript_samples(
+    variant: projections.ProjectionVariant,
+) -> tuple[tuple[int, transcript_passages.TranscriptMatch], ...]:
+    """Return timed turns whose offsets map into the released Source."""
+    from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
+
+    # Members have an independent live authorization check at search time.
+    if variant.decision_level != 6 or variant.search_fields.get("parent_media"):
+        return ()
+    parts = []
+    if variant.head is not None:
+        head = variant.head
+        parts.append((1, variant.search_fields["body"][head.begin:head.end], 0, head.carrier_spans))
+    parts.extend(
+        (part.number, part.text, part.start, part.carrier_spans)
+        for part in variant.parts if part.start is not None
+    )
+    samples = []
+    for part, text, base, cuts in parts:
+        for start, end, timestamp in transcript_passages.turns(text):
+            stored_start = _stored_position(start, cuts)
+            stored_end = _stored_position(end - 1, cuts) + 1
+            if stored_end - stored_start == end - start <= MAX_PASSAGE_CHARS:
+                samples.append((part, transcript_passages.TranscriptMatch(
+                    base + stored_start, base + stored_end, text[start:end], timestamp,
+                )))
+                if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
+                    return tuple(samples)
+    return tuple(samples)
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionTranscriptSample:
+    part: int
+    offset: int
+    vector: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.part) is not int or not 1 <= self.part <= _MAX_RESULTS:
+            raise projections.ProjectionCanonicalizationError("invalid projected transcript part")
+        if type(self.offset) is not int or not 0 <= self.offset < 1 << 48:
+            raise projections.ProjectionCanonicalizationError("invalid projected transcript offset")
+        vector = _vector(self.vector, "transcript measurement")
+        if not any(vector):
+            raise projections.ProjectionCanonicalizationError("empty projected transcript vector")
+        object.__setattr__(self, "vector", vector)
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectionVectorMeasurement:
     """One principal-free vector measurement beneath a projection variant row."""
 
     measurement_key: projections.MeasurementKey
     vector: tuple[float, ...]
+    passages: tuple[ProjectionTranscriptSample, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.measurement_key, projections.MeasurementKey):
@@ -276,6 +327,16 @@ class ProjectionVectorMeasurement:
                 "projection vector must have non-zero magnitude"
             )
         object.__setattr__(self, "vector", vector)
+        if (
+            not isinstance(self.passages, tuple)
+            or len(self.passages) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
+            or any(not isinstance(row, ProjectionTranscriptSample) or len(row.vector) != len(vector)
+                   for row in self.passages)
+        ):
+            raise projections.ProjectionCanonicalizationError("invalid projected transcript measurements")
+        keys = tuple((row.part, row.offset) for row in self.passages)
+        if keys != tuple(sorted(set(keys))):
+            raise projections.ProjectionCanonicalizationError("projected transcript measurements are out of order")
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,10 +623,11 @@ def projection_text(variant: projections.ProjectionVariant) -> str:
         raise projections.ProjectionCanonicalizationError(
             "projection text requires one immutable variant"
         )
-    return " ".join(
-        variant.search_fields[key]
-        for key in sorted(variant.search_fields, key=_sort_key)
-    )
+    return searchable_text(variant.search_fields)
+
+
+def searchable_text(fields: Mapping[str, str]) -> str:
+    return " ".join(fields[key] for key in sorted(fields, key=_sort_key) if key != "sources")
 
 
 def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:
@@ -584,6 +646,7 @@ def _projected_hit(
     *,
     clip_frame_timestamp_ms: int | None = None,
     part: projections.ProjectionPart | None = None,
+    transcript: tuple[int, transcript_passages.TranscriptMatch] | None = None,
 ) -> ProjectedLexicalHit:
     # The snippet stays the head of the Source, whichever part matched.
     compact = " ".join(projection_text(variant).split())
@@ -596,6 +659,7 @@ def _projected_hit(
         snippet=compact[:_SNIPPET_CHARS].rstrip(),
         clip_frame_timestamp_ms=clip_frame_timestamp_ms,
         part=part,
+        transcript=transcript,
     )
 
 
@@ -803,12 +867,13 @@ class ProjectedVectorIndex:
             "vector model version",
             maximum=256,
         )
-        catalog_variant_ids = {
-            variant.projection_variant_id
+        catalog_variants = {
+            variant.projection_variant_id: variant
             for item in self._items.values()
             for variant in item.variants
         }
-        by_variant: dict[str, ProjectionVectorMeasurement] = {}
+        by_variant: dict[str, tuple[float, ...]] = {}
+        self._transcripts = {}
         dimension: int | None = None
         for measurement in measurements:
             if not isinstance(measurement, ProjectionVectorMeasurement):
@@ -824,7 +889,7 @@ class ProjectedVectorIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "vector measurement model version does not match index"
                 )
-            if key.projection_variant_id not in catalog_variant_ids:
+            if key.projection_variant_id not in catalog_variants:
                 raise projections.ProjectionCanonicalizationError(
                     "vector measurement variant is outside the projection catalog"
                 )
@@ -838,7 +903,21 @@ class ProjectedVectorIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "projected vector measurements have inconsistent dimensions"
                 )
-            by_variant[key.projection_variant_id] = measurement
+            if measurement.passages:
+                candidates = transcript_samples(catalog_variants[key.projection_variant_id])
+                coordinates = tuple((part, match.start) for part, match in candidates)
+                if coordinates != tuple((sample.part, sample.offset) for sample in measurement.passages):
+                    raise projections.ProjectionCanonicalizationError("transcript vectors differ from the projected Source")
+                import numpy as np
+
+                matrix = np.asarray([sample.vector for sample in measurement.passages], dtype=np.float32)
+                norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+                if not np.all(np.isfinite(norms) & (norms > 0)):
+                    raise projections.ProjectionCanonicalizationError("transcript vector magnitude is invalid")
+                matrix /= norms
+                matrix.flags.writeable = False
+                self._transcripts[key.projection_variant_id] = (candidates, matrix)
+            by_variant[key.projection_variant_id] = measurement.vector
         self._measurements = MappingProxyType(by_variant)
         self._dimension = dimension
 
@@ -872,7 +951,7 @@ class ProjectedVectorIndex:
         if query_magnitude == 0:
             raise ProjectedLaneUnavailable("query vector has zero magnitude")
 
-        scored: list[tuple[projections.ProjectionVariant, float]] = []
+        scored = []
         for variant in selected:
             measurement = self._measurements.get(variant.projection_variant_id)
             if measurement is None:
@@ -880,13 +959,20 @@ class ProjectedVectorIndex:
                     "selected projection vector measurement is unavailable"
                 )
             measurement_magnitude = math.sqrt(
-                sum(value * value for value in measurement.vector)
+                sum(value * value for value in measurement)
             )
             score = sum(
                 left * right
-                for left, right in zip(query, measurement.vector, strict=True)
+                for left, right in zip(query, measurement, strict=True)
             ) / (query_magnitude * measurement_magnitude)
-            scored.append((variant, score))
+            transcript = None
+            if passage_bank := self._transcripts.get(variant.projection_variant_id):
+                candidates, matrix = passage_bank
+                similarities = matrix @ query
+                index = int(similarities.argmax())
+                score = max(score, float(similarities[index]) / query_magnitude)
+                transcript = candidates[index]
+            scored.append((variant, score, transcript))
         scored.sort(
             key=lambda item: (
                 -item[1],
@@ -894,7 +980,10 @@ class ProjectedVectorIndex:
                 item[0].projection_variant_id,
             )
         )
-        return tuple(_projected_hit(variant, score) for variant, score in scored[:limit])
+        return tuple(
+            _projected_hit(variant, score, transcript=transcript)
+            for variant, score, transcript in scored[:limit]
+        )
 
 
 class ProjectedClipIndex:

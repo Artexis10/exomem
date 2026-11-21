@@ -7130,6 +7130,13 @@ def _validate_batch_write_access(
                 if rel in primary_bound_paths and primary_admission is not None:
                     if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
+                elif roles.get(rel) == vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT:
+                    # The sealed manifest binds this create-only receipt to its
+                    # exact Source. The caller still needs to be able to create that Source.
+                    connector_boundary.require_write(
+                        vault_root, auxiliary_manifest.primary_path,
+                        content=proposed_by_path[auxiliary_manifest.primary_path].content.encode("utf-8"),
+                    )
                 elif not (defer_registry and rel in registry_storage):
                     connector_boundary.require_write(
                         vault_root, rel,

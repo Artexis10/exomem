@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import pytest
 from governance_projection_support import verified_namespace
@@ -805,6 +806,42 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
         active_insight.item_identity,
         stale_source.item_identity,
     ]
+
+
+def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path):
+    text = "[00:03] We inspected the gate.\n[00:19] Leave it open until the truck arrives."
+    source = _variant("Knowledge Base/Sources/gate.md", "1" * 64, text, fields={"type": "source"})
+    (source,) = projections.with_parts((source,), (), head=text)
+    summary = _variant(
+        "Knowledge Base/Notes/gate.md", "2" * 64, "The truck can enter through the open gate.",
+        fields={"type": "insight", "sources": "Sources/gate"},
+    )
+    offset = text.index("[00:19]")
+    vector = replace(
+        _vector(source, (0.2, 0.8)),
+        passages=(
+            projected_retrieval.ProjectionTranscriptSample(1, 0, (0.0, 1.0)),
+            projected_retrieval.ProjectionTranscriptSample(1, offset, (1.0, 0.0)),
+        ),
+    )
+    runtime = _runtime(
+        (_item(source), _item(summary)),
+        vectors=(vector, _vector(summary, (1.0, 0.0))),
+    )
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+    kwargs = dict(
+        query="How can the truck enter?", limit=2, mode="hybrid", rerank=False, graph=False,
+        principal=principal.owner_principal(surface="mcp"), purpose=None,
+    )
+
+    compiled = projection_runtime.find_projected_hits(tmp_path, runtime, **kwargs)
+    default = projection_runtime.find_projected_hits(tmp_path, runtime, prefer_source_passages=True, **kwargs)
+
+    assert compiled.hits[0].path == summary.item_identity
+    hit = default.hits[0]
+    assert hit.path == source.item_identity
+    assert hit.transcript_ts == 19
+    assert hit.passage == {"part": 1, "offset": offset, "length": len(text) - offset, "text": text[offset:]}
 
 
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):

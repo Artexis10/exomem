@@ -28,6 +28,7 @@ _STORE_FILENAME = "rows.sqlite"
 _STORE_STATUS = "measurement-rows-ready"
 _ROW_DOMAIN = b"exomem.authorization-projection-measurement-row.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-measurements.v1"
+_TEXT_PASSAGES_PREFIX = b"exomem.projection-text-passages.v1\x00"
 _CLIP_PAYLOAD_PREFIX = b"exomem.projection-clip-samples.v1\x00"
 _LANES = frozenset({"vector", "clip", "graph"})
 _HEX = frozenset("0123456789abcdef")
@@ -265,6 +266,38 @@ def _vector_payload(vector: tuple[float, ...]) -> bytes:
     return struct.pack(f">{len(canonical)}d", *canonical)
 
 
+def _text_payload(measurement: projected_retrieval.ProjectionVectorMeasurement) -> bytes:
+    vector = _vector_payload(measurement.vector)
+    if not measurement.passages:
+        return vector
+    output = bytearray(_TEXT_PASSAGES_PREFIX + vector)
+    for row in measurement.passages:
+        output.extend(struct.pack(">IQ", row.part, row.offset))
+        output.extend(_vector_payload(row.vector))
+    return bytes(output)
+
+
+def _decode_text(payload: bytes, dimension: int):
+    size = dimension * 8
+    if len(payload) == size:
+        return _decode_vector(payload, dimension=dimension), ()
+    prefix = len(_TEXT_PASSAGES_PREFIX)
+    row_size = 12 + size
+    span_bytes = len(payload) - prefix - size
+    if (
+        not payload.startswith(_TEXT_PASSAGES_PREFIX) or span_bytes % row_size
+        or not 1 <= span_bytes // row_size <= projected_retrieval.MAX_PROJECTED_TRANSCRIPT_SAMPLES
+    ):
+        raise MeasurementStoreMismatch("transcript measurements do not verify")
+    samples = []
+    for at in range(prefix + size, len(payload), row_size):
+        part, offset = struct.unpack_from(">IQ", payload, at)
+        samples.append(projected_retrieval.ProjectionTranscriptSample(
+            part, offset, _decode_vector(payload[at + 12:at + row_size], dimension=dimension),
+        ))
+    return _decode_vector(payload[prefix:prefix + size], dimension=dimension), tuple(samples)
+
+
 def _clip_payload(
     measurement: projected_retrieval.ProjectionClipMeasurement,
 ) -> bytes:
@@ -302,7 +335,7 @@ def _graph_payload(measurement: projected_graph.ProjectionGraphMeasurement) -> b
 
 def _measurement_payload(measurement: ProjectionMeasurement) -> bytes:
     if isinstance(measurement, projected_retrieval.ProjectionVectorMeasurement):
-        return _vector_payload(measurement.vector)
+        return _text_payload(measurement)
     if isinstance(measurement, projected_retrieval.ProjectionClipMeasurement):
         return _clip_payload(measurement)
     if isinstance(measurement, projected_graph.ProjectionGraphMeasurement):
@@ -652,9 +685,9 @@ def _decode_measurement(
     try:
         if family.lane == "vector":
             assert manifest.vector_dimension is not None
+            vector, passages = _decode_text(payload, manifest.vector_dimension)
             return projected_retrieval.ProjectionVectorMeasurement(
-                measurement_key=key,
-                vector=_decode_vector(payload, dimension=manifest.vector_dimension),
+                measurement_key=key, vector=vector, passages=passages,
             )
         if family.lane == "clip":
             assert manifest.vector_dimension is not None
