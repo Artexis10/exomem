@@ -1984,16 +1984,8 @@ def read_connections(
     `defer_why`, and each connection then carries `build_why` instead, to call once
     for a connection it is about to serve.
     """
-    from . import (
-        epistemic_graph,
-        find,
-        find_corpus,
-        planning_values,
-        published_admission,
-        relation_registry,
-    )
+    from . import epistemic_graph, find, find_corpus, planning_values, relation_registry
     from .governance import egress
-    from .vault_store import read as store_read
 
     # A request never stacks the O(corpus) cold proof of an inherited sidecar (#1454), as in the find graph lane.
     index = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT)
@@ -2040,39 +2032,10 @@ def read_connections(
             best[target] = (*key, connection)
     if not ranked:
         return {}
-    # The `why` reads pages, so it is built only for the connections a seed will serve.
-    selected = {
-        seed: sorted(targets.values(), key=lambda value: value[:3])[:per_seed]
-        for seed, targets in ranked.items()
-    }
-    def _page(rel: str):
-        return find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
-
-    reason_pages = None
-    if not egress.unrestricted_source_access(vault_root, purpose=purpose):
-        reason_paths = set(selected)
-        reason_paths.update(
-            connection.target_path
-            for ordered in selected.values()
-            for _tier, _open_flag, _position, connection in ordered
-        )
-        with (
-            published_admission.deciding(reason_paths),
-            egress.release_decision_context(vault_root),
-            store_read.request_snapshot(vault_root),
-        ):
-            store_read.prefetch_pages(vault_root, reason_paths)
-            pages = {
-                rel: page for rel in reason_paths
-                if (page := _page(rel)) is not None and page.snapshot_hash
-            }
-            text_bounds = egress.page_text_bounds(
-                vault_root, pages, purpose=purpose,
-                raw_snapshot_hashes={rel: page.snapshot_hash for rel, page in pages.items()},
-            )
-        # A reason can quote from anywhere in a body. Keep only snapshots authorized in full.
-        reason_pages = {rel: page for rel, page in pages.items() if text_bounds[rel] is None}
-    resolver = find.borrow_query_resolver(Path(vault_root), visible)
+    # A reason can quote from anywhere in a body. Callers who need a page projection
+    # get a pointer and the relation, and can open the page through its release boundary.
+    quote_prose = egress.unrestricted_source_access(vault_root, purpose=purpose)
+    resolver = find.borrow_query_resolver(Path(vault_root), visible) if quote_prose else None
     seed_paths = set(seeds)
 
     def _seen(rel: str) -> bool:
@@ -2081,14 +2044,14 @@ def read_connections(
 
     def _body(rel: str) -> str | None:
         """The page's prose for this caller, egressed under the path it was read from."""
-        page = _page(rel) if reason_pages is None else reason_pages.get(rel)
+        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
         if page is None:
             return None
         return egress.prose_for_caller(Path(vault_root), str(page.body or ""), owner_path=rel)
 
     def _reason(seed: str, connection: Connection) -> str:
         bare = f"{connection.relation} ({connection.direction})"
-        if budget_exhausted("working_set.connection_why"):
+        if not quote_prose or budget_exhausted("working_set.connection_why"):
             # The connection still serves; only the context clause goes unfilled.
             return bare
         authoring_rel = seed if connection.direction == "outbound" else connection.target_path
@@ -2116,10 +2079,11 @@ def read_connections(
                 out.append(replace(connection, why=_reason(seed, connection)))
         return out
 
-    return {
-        seed: (_serve(seed, ordered), len(ranked[seed]) - len(ordered))
-        for seed, ordered in selected.items()
-    }
+    result: dict[str, tuple[list[Connection], int]] = {}
+    for seed, targets in ranked.items():
+        ordered = [value for _target, value in sorted(targets.items(), key=lambda pair: pair[1][:3])]
+        result[seed] = (_serve(seed, ordered[:per_seed]), max(0, len(ordered) - per_seed))
+    return result
 
 
 def _conclusion_pages(

@@ -23,14 +23,13 @@ from exomem import (
     context_views,
     epistemic_graph,
     find,
-    find_corpus,
     lexstore,
     served_context,
     working_set,
 )
 from exomem import vault as vault_module
 from exomem.governance import egress
-from exomem.governance.principal import request_scope
+from exomem.governance.principal import owner_principal, request_scope
 
 
 def _warm_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,11 +414,7 @@ def test_the_default_recall_budget_is_six_thousand_with_a_half_turn_slice(vault:
 
 
 def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The lede that stands in for a bare inbound relation is the other page's, so its carrier is withheld.
-
-    A source page keeps its own carriers, so judging the other page's lede as the seed's
-    served a restricted reader that page's origin carrier inside the reason.
-    """
+    """An unrestricted reader receives the inbound page's lede under that page's prose rules."""
     seed = _page(vault, "visit-capture", body=LEAD_BODY, folder="Knowledge Base/Sources/Articles")
     _page(vault, "visit-report", body=(
         "<!-- exomem-origin withheld-input-reference -->\n\nThe revised visit report.\n\n"
@@ -429,10 +424,9 @@ def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: P
     by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
     catalogue.close()
     _warm_resolver(monkeypatch)
-    # A vault with a configured audience: every caller but the owner gets withheld prose.
-    monkeypatch.setattr(egress, "projects_origin_for_caller", lambda *args, **kwargs: True)
 
-    served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+    with request_scope(owner_principal(surface="library")):
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
 
     listed, _omitted = served[seed]
     inbound = next(connection for connection in listed if connection.direction == "inbound")
@@ -441,7 +435,7 @@ def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: P
 
 
 def test_a_line_inside_an_origin_carrier_is_never_quoted_as_a_reason(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A carrier that spans lines can hold a line linking the seed; that line is withheld, not quoted."""
+    """An unrestricted reader's reason never quotes a line inside an origin carrier."""
     seed = _page(vault, "visit-capture", body=LEAD_BODY)
     _page(vault, "visit-report", body=(
         "The revised visit report.\n\n<!-- exomem-origin\n"
@@ -452,85 +446,35 @@ def test_a_line_inside_an_origin_carrier_is_never_quoted_as_a_reason(vault: Path
     by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
     catalogue.close()
     _warm_resolver(monkeypatch)
-    monkeypatch.setattr(egress, "projects_origin_for_caller", lambda *args, **kwargs: True)
 
-    served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+    with request_scope(owner_principal(surface="library")):
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
 
     listed, _omitted = served[seed]
     reasons = " ".join(connection.why for connection in listed)
     assert "confidential interview transcript" not in reasons
 
 
-def test_an_excerpt_only_page_supplies_a_connection_without_its_prose(
+def test_a_governed_caller_keeps_a_graph_pointer_without_a_quote(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = _page(vault, "visit-capture", body=LEAD_BODY)
-    report = _page(vault, "visit-report", body=(
-        "The revised visit report. " * 30 + "\n\n"
-        f"- supersedes [[{seed.removesuffix('.md')}]] after a second inspection\n"
-    ))
-    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
-    write_rule(vault, ceiling=egress.LEVEL_EXCERPT)
-    catalogue = _built(vault)
-    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
-    catalogue.close()
-    _warm_resolver(monkeypatch)
-
-    with request_scope(_external()):
-        visible = egress.restricted_release_filter(vault)
-        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=visible, per_seed=4)
-
-    listed, _omitted = served[seed]
-    inbound = next(connection for connection in listed if connection.direction == "inbound")
-    assert inbound.target_path == report
-    assert inbound.why == "supersedes (inbound)"
-
-
-def test_a_graph_reason_uses_the_declared_purpose(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even a full page release can require projection, so the pointer carries the relation alone."""
     seed = _page(vault, "visit-capture", body=LEAD_BODY)
     report = _page(vault, "visit-report", body=(
         f"The revised visit report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after review\n"
     ))
     write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
-    write_rule(vault, ceiling=egress.LEVEL_EXCERPT, extra="purpose: audit\npurpose_condition: matches\n")
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
     _built(vault).close()
     _warm_resolver(monkeypatch)
     resolved = type("Anchor", (), {"status": "resolved", "path": seed, "ref": seed})()
 
     with request_scope(_external()):
-        reader = egress.reader_view(vault, purpose="audit")
+        assert egress.release_level_for(vault, report) == egress.LEVEL_FULL
+        reader = egress.reader_view(vault)
         items, _missing = working_set.run_lanes(
             vault, anchors=[resolved], roles=[{"id": "connections"}],
-            registry=context_roles.load_roles(), visible=reader, purpose="audit",
+            registry=context_roles.load_roles(), visible=reader,
         )
 
     assert [(item.path, item.why) for item in items] == [(report, "supersedes (inbound)")]
-
-
-def test_a_graph_reason_does_not_quote_an_unmatched_page_snapshot(
-    vault: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seed = _page(vault, "visit-capture", body=LEAD_BODY)
-    report = _page(vault, "visit-report", body=(
-        f"The first report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after the first inspection\n"
-    ))
-    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
-    write_rule(vault, ceiling=egress.LEVEL_FULL)
-    catalogue = _built(vault)
-    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
-    catalogue.close()
-    _warm_resolver(monkeypatch)
-    read = find_corpus.CACHE.get
-    older = read(vault / report, vault)
-    assert older is not None
-    _page(vault, "visit-report", body=(
-        f"The revised report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after the second inspection\n"
-    ))
-    monkeypatch.setattr(find_corpus.CACHE, "get", lambda path, root: older if path == vault / report else read(path, root))
-
-    with request_scope(_external()):
-        visible = egress.restricted_release_filter(vault)
-        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=visible, per_seed=4)
-
-    listed, _omitted = served[seed]
-    assert [(connection.target_path, connection.why) for connection in listed] == [(report, "supersedes (inbound)")]

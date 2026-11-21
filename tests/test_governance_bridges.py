@@ -1012,8 +1012,6 @@ def test_release_strips_dependency_provenance_from_direct_and_search_outputs(
 
     with request_scope(_external()):
         page = commands.op_get(vault, path=BRIDGE_PATH)
-        raw_hash = hashlib.sha256((vault / BRIDGE_PATH).read_bytes()).hexdigest()
-        raw_bounds = egress.page_text_bounds(vault, [BRIDGE_PATH], raw_snapshot_hashes={BRIDGE_PATH: raw_hash})
         hits = commands.op_find(
             vault,
             query="unlimited evening capacity",
@@ -1022,7 +1020,6 @@ def test_release_strips_dependency_provenance_from_direct_and_search_outputs(
             limit=10,
         )
 
-    assert raw_bounds == {BRIDGE_PATH: 0}
     page_wire = json.dumps(page, sort_keys=True, default=str).casefold()
     hits_wire = json.dumps(hits, sort_keys=True, default=str).casefold()
     for wire in (page_wire, hits_wire):

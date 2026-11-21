@@ -2092,7 +2092,7 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
 
 def unrestricted_source_access(vault_root: Path, *, purpose: str | None) -> bool:
     """Whether the caller may use the raw source fast path."""
-    policy, _active = gate_state(vault_root)
+    policy = policy_module.load(Path(vault_root))
     who = effective_principal().with_purpose(purpose)
     return policy_empty_without_writer(vault_root, policy) and unrestricted_content_access(vault_root, who)
 
@@ -2410,7 +2410,7 @@ def _decide_path(
     except CollectionStoreError:
         # An unplaceable path or an un-upgraded marker cannot be decided: withhold.
         return Decision(DISCLOSURE_MIN)
-    if empty and expected_content_hash is None:
+    if empty:
         return Decision(DISCLOSURE_MAX)
     full_path = vault_root / rel_path
     try:
@@ -2429,8 +2429,6 @@ def _decide_path(
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-    if empty:
-        return Decision(DISCLOSURE_MAX)
     if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
                                    purpose=purpose, content=raw, artifact_copy=artifact_copy):
         return Decision(DISCLOSURE_MIN)
@@ -3734,7 +3732,7 @@ class _PacketRelease:
     declared_purpose: str | None = None
     grants_hash: str | None = None
 
-    def decide(self, rel_path: str, *, expected_content_hash: str | None = None) -> None:
+    def decide(self, rel_path: str) -> None:
         """Decide `rel_path` for this caller, record the outcome, and add it to
         `withheld` when it may not be released. Only with a file policy."""
         vault_root = self.vault_root
@@ -3748,7 +3746,6 @@ class _PacketRelease:
             grants_hash=self.grants_hash,
             authorization_session=self.who.authorization_session_id,
             authorization_context=self.who.verified_authorization_session,
-            expected_content_hash=expected_content_hash,
         )
         self.decisions[rel_path] = decision
         if decision is not None:
@@ -3992,14 +3989,11 @@ def page_text_bounds(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
-    raw_snapshot_hashes: Mapping[str, str] | None = None,
 ) -> dict[str, int | None]:
     """The most of each page's text the caller may be served (`page_text_bound`), by path.
 
     Each page is decided on the terms `classify_units` decides a unit's page, and, as there, only a refusal is
     receipted: a page is released only when the served packet names it.
-    Raw snapshot bounds require matching hashes. A release strip needs the projector,
-    so it cannot authorize text from a raw snapshot.
     """
     root = Path(vault_root)
     policy, _release_gate_active = gate_state(root)
@@ -4007,7 +4001,7 @@ def page_text_bounds(
     wanted = sorted(set(paths))
     if policy.blocked or (not policy.empty and not who.resolved):
         return dict.fromkeys(wanted, page_text_bound(LEVEL_NONE))
-    if raw_snapshot_hashes is None and _file_policy_empty(root, policy):
+    if _file_policy_empty(root, policy):
         return dict.fromkeys(wanted, page_text_bound(LEVEL_FULL))
     ctx = _PacketRelease(
         vault_root=root, policy=policy, who=who, record="withheld", policy_decides=True,
@@ -4015,16 +4009,10 @@ def page_text_bounds(
         declared_purpose=_declared_purpose(root, who, purpose), grants_hash=_grants_hash(policy),
     )
     for rel_path in wanted:
-        expected = None if raw_snapshot_hashes is None else raw_snapshot_hashes.get(rel_path)
-        if raw_snapshot_hashes is not None and not expected:
-            ctx.decisions[rel_path] = None
-        else:
-            ctx.decide(rel_path, expected_content_hash=expected)
+        ctx.decide(rel_path)
     return {
-        rel_path: page_text_bound(
-            decision.level if decision and (raw_snapshot_hashes is None or not decision.release_strip) else None
-        )
-        for rel_path, decision in ctx.decisions.items()
+        rel_path: page_text_bound(None if ctx.decisions[rel_path] is None else ctx.decisions[rel_path].level)
+        for rel_path in wanted
     }
 
 
