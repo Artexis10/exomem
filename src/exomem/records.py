@@ -4630,7 +4630,7 @@ def _issue_refusal(
                 problems: list[_Issue] = []
                 try:
                     _collect_round_trip_issues(manifest, {first.field: choice}, problems)
-                except vault.MALFORMED_FRONTMATTER_ERRORS:
+                except Exception:  # noqa: BLE001 -- a hint failure must preserve the write refusal
                     continue
                 if not problems:
                     renderable.append(choice)

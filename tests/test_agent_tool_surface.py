@@ -302,8 +302,8 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_va
         declaration = declaration[:-1] + ", " + "x" * 17_000 + "]"
         offered = declared
     else:
-        declaration = '["2026-02-30", ' + declaration[1:]
-        declared = ["2026-02-30", *declared]
+        declaration = '["!!int", "2026-02-30", ' + declaration[1:]
+        declared = ["!!int", "2026-02-30", *declared]
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    severity: {{type: enum, enum: {declaration}}}\n",
