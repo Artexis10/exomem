@@ -927,6 +927,31 @@ def test_relation_review_batch_reads_a_unit_destination_as_its_page_like_the_leg
     assert target in str(proposals(native))
 
 
+def test_dimension_selection_precedes_the_relation_queues_page_limit(tmp_path, monkeypatch):
+    from exomem import commands, file_watcher, lexstore
+
+    root = tmp_path / "vault"
+    first, member, target = f"{KB}/a-measurement.md", f"{KB}/b-question.md", f"{KB}/material.md"
+    _write(root, first, "---\ntype: insight\nstatus: active\n---\n## Claim\n\n"
+           f"A measured result names [[{target.removesuffix('.md')}]].\n")
+    _write(root, member, "---\ntype: insight\nstatus: active\n---\n## Open question\n\n"
+           f"What changes the result in [[{target.removesuffix('.md')}]]?\n")
+    _write(root, target, "---\ntype: insight\nstatus: active\n---\n# Material\n")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    file_watcher.FileWatcher(root)._reconcile_once(seed=True)
+    assert lexstore.ensure_fresh(root)
+    epistemic_graph.EpistemicGraphIndex(root).rebuild_all()
+
+    original = commands.op_review_memory(root, mode="relation-queue", limit=1)
+    assert original["groups"][0]["path"] == first
+    selected = commands.op_review_memory(
+        root, mode="relation-queue", limit=1, filters={"unit.dimension": {"$eq": "uncertainty"}},
+    )
+    assert [group["path"] for group in selected["groups"]] == [member]
+    assert all(item["from"] == member and item["dimension_status"] == "known"
+               for item in selected["groups"][0]["items"])
+
+
 def test_relation_review_batch_has_honest_caps_and_no_inverse_candidate(
     tmp_path: Path,
 ) -> None:

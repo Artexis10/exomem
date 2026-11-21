@@ -450,7 +450,11 @@ def _served_view(
     visible: Callable[[Mapping[str, Any]], bool] | None,
 ) -> dict[str, Any] | None:
     from . import review_state
-    from .vocabulary_notifications import origin_review_binding, origin_review_status, review_families
+    from .vocabulary_notifications import (
+        origin_review_binding,
+        origin_review_status,
+        review_families,
+    )
 
     dispositions = {}
     for family in review_families(str(view["family"]), str(view["signal"])):
@@ -510,6 +514,7 @@ def page(
     continuation: str | None,
     state: str = "open",
     visible: Callable[[Mapping[str, Any]], bool] | None = None,
+    select: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     if state not in {"open", "all"}:
         raise ValueError("VOCABULARY_STATE_INVALID: use open or all")
@@ -517,6 +522,17 @@ def page(
         raise ValueError("VOCABULARY_LIMIT_INVALID: use a limit from 1 to 64")
     if continuation is not None and (not isinstance(continuation, str) or not continuation.startswith("vrp1.")):
         raise PublicContinuationError("VOCABULARY_CONTINUATION_INVALID: refresh vocabulary review")
+    selection_failure = None
+
+    def selected_prefix(items):
+        nonlocal selection_failure
+        if select is None:
+            return items
+        try:
+            return select(items)
+        except (ValueError, OSError, TypeError, KeyError) as error:
+            selection_failure = error
+            raise
     before = _signature(review_state_path)
     # No canonical ledger is an authoritative empty queue.  Do not create or
     # consult a sidecar just to prove that absence, and repeat the point check
@@ -569,6 +585,7 @@ def page(
                     conn, vault_root, [tuple(pair) for pair in pairs], state=state, visible=visible
                 )
                 items = [row[0] for row in visible_rows[:limit]]
+                items = selected_prefix(items)
                 remaining = [(row[1], row[2]) for row in visible_rows[limit:]]
                 result = {"state": "current", "items": items, "continuation": None, "coverage": _coverage()}
             else:
@@ -600,6 +617,7 @@ def page(
                     if view is not None:
                         visible_rows.append((view, row[0], row[1]))
                 items = [row[0] for row in visible_rows[:limit]]
+                items = selected_prefix(items)
                 result = {"state": "current", "items": items, "continuation": None, "coverage": _coverage()}
             after = _signature(review_state_path)
             if before != after or after != _signature(review_state_path):
@@ -648,6 +666,9 @@ def page(
             TypeError,
             KeyError,
         ) as exc:
+            # Caller selection and authorization errors are not disposable-index corruption.
+            if exc is selection_failure:
+                raise
             log.debug("vocabulary review projection unavailable: %s", exc)
             return warming(unavailable=True)
     finally:

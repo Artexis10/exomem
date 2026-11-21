@@ -348,6 +348,8 @@ class AuditFinding:
     #: composer instead of forming a second opinion about what it means. Only
     #: `unreflected_outcomes` sets it; see `unreflected_component`.
     component: dict | None = None
+    #: A partition can still concern a whole page; this producer fact never enters signal identity.
+    review_scope: Literal["page", "unit"] | None = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -1093,6 +1095,7 @@ def _check_bridge_review(
         findings.append(
             AuditFinding(
                 category="bridge_review",
+                review_scope="page",
                 severity="warn",
                 path=grant.path,
                 detail=f"Bridge review required: {signal.cause}.",
@@ -4993,6 +4996,8 @@ def _check_prediction_window(
     Measurement-only at `info`: never judges whether the prediction held, never
     writes a verdict, never touches `find` ordering.
     """
+    from . import memory_refs
+
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     relations = relation_registry.load_registry(vault_root)
@@ -5015,9 +5020,11 @@ def _check_prediction_window(
         if not _CHECK_BY_PREFILTER.search(page.body):
             continue
 
+        parent_id = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
         document = semantic_units.parse_semantic_units(
             page.body,
             path=page.rel_path,
+            parent_ref=memory_refs.memory_ref(parent_id) if parent_id else None,
             validate=False,
             language_registry=language,
             relation_registry=relations,
@@ -6426,6 +6433,8 @@ def _check_question_aging(
     old as the page said it was, and a page with no parseable date is skipped
     rather than assigned an invented one.
     """
+    from . import memory_refs
+
     status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
     today = today or dt.date.today()
     relations = relation_registry.load_registry(vault_root)
@@ -6452,9 +6461,11 @@ def _check_question_aging(
         if age_days < QUESTION_AGING_DAYS:
             continue
 
+        parent_id = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD))
         document = semantic_units.parse_semantic_units(
             page.body,
             path=page.rel_path,
+            parent_ref=memory_refs.memory_ref(parent_id) if parent_id else None,
             validate=False,
             language_registry=language,
             relation_registry=relations,

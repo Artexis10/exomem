@@ -172,7 +172,7 @@ def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_va
             ("migrate", "drill")
         ]
         with sidecar(lexstore.lexical_path(vault)) as lexical:
-            for table in ("pages", "fts", "semantic_units", "unit_fts"):
+            for table in ("pages", "fts", "title_fts", "wikilink_keys", "semantic_units", "unit_row_keys", "unit_fts"):
                 assert table_rows(store, table) == table_rows(lexical, table)
             assert table_rows(lexical, "pages"), (
                 "the lexical catalogue must hold pages for this check to mean anything"

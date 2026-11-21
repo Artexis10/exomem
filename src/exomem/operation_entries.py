@@ -652,23 +652,24 @@ _REMAINING = {
     )),
     "review_item_context": (None, (_row("item-context", "read_review"),)),
     "review_memory": ("mode", (
-        _row("attention", "read_review", ("categories", "limit", "state")),
-        _row("activation", "read_review", ("categories", "limit", "state")),
+        # These are closed operation-schema field names; review listings own dimension filters.
+        _row("attention", "read_review", ("categories", "limit", "state", "filters")),
+        _row("activation", "read_review", ("categories", "limit", "state", "filters")),
         _row("item", "read_review", ("ref", "limit"), ("ref",)),
         _row("audit", "read_review", ("categories", "detail", "legacy_sample_limit")),
         _row("dispositions", "read_review", ("window_days",)),
         _row("provenance", "read_review", ("tag", "key", "value", "path", "limit")),
         _row("evolution", "read_review", ("query", "path", "limit")),
         _row("compilation", "read_review", ("sources", "suggested_title"), ("sources",)),
-        *(_row(mode, "read_review", ("categories", "limit", "state")) for mode in (
+        *(_row(mode, "read_review", ("categories", "limit", "state", "filters")) for mode in (
             "stale", "contradiction", "unprocessed-sources", "relation-debt", "relation-queue")),
-        _row("adoption", "read_review", ("ref", "state", "limit")),
-        _row("upkeep", "read_review", ("categories", "limit")),
-        _row("plan-progress", "read_review", ("path", "limit")),
+        _row("adoption", "read_review", ("ref", "state", "limit", "filters")),
+        _row("upkeep", "read_review", ("categories", "limit", "filters")),
+        _row("plan-progress", "read_review", ("path", "limit", "filters")),
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
-        _row("procedure_approvals", "read_review", ("limit",)),
+        _row("procedure_approvals", "read_review", ("limit", "filters")),
         _row(held_operation.LIST_MODE, held_operation.REVIEW_TOOL, ("limit",)),
-        _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family"),
+        _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family", "filters"),
              constraints=(_literal("path", None, True), _literal("query", "", True), _literal("family", None, True))),
         _row("vocabulary", "triage_memory", ("path", "query", "family", "ref"), ("path", "query", "family"), kind="question", verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),

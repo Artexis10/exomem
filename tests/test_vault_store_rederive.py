@@ -32,11 +32,13 @@ from test_vault_store_migration import (  # noqa: F401
 )
 from test_vault_store_read_write import stored, writer  # noqa: F401
 
-from exomem import lexstore, note_types, writer_lease
-from exomem.collection_store import connection, preview, runtime
+from exomem import commands, epistemic_graph, lexstore, note_types, semantic_index, writer_lease
+from exomem import find as find_module
+from exomem.cli_ops import OpError
+from exomem.collection_store import connection, preview, runtime, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import connector_boundary
-from exomem.vault_store import derive, mode, projection, rederive, verify, write
+from exomem.vault_store import derive, migrate, mode, projection, read, rederive, verify, write
 from exomem.vocabulary import instances
 
 POLICY = "Knowledge Base/_access.yaml"
@@ -99,6 +101,8 @@ def project(bound, root):
             # The file carries the page's own mtime, so a cold derivation of the files can equal
             # the stored rows.
             os.utime(target, ns=(mtime_ns, mtime_ns))
+        elif operation == "delete":
+            (root / rel).unlink(missing_ok=True)
         else:
             raise AssertionError(f"this suite projects writes only, not {operation}")
     with bound.handle.transaction() as tx:
@@ -631,6 +635,113 @@ def test_a_pass_over_an_unknown_state_keeps_its_target_when_a_commit_lands(
     )
 
 
+@pytest.mark.parametrize("legacy_cursor", [False, True], ids=["older-generation", "legacy-cursor"])
+def test_an_owner_upgrade_restarts_an_older_pass_and_resumes_its_own_generation(
+    stored, tmp_path, monkeypatch, legacy_cursor,  # noqa: F811
+):
+    """An old cursor must not skip pre-cursor pages in a newly empty projection or expose partial exclusions."""
+    target_generation = rederive.OWNER_SCHEMA_VERSION
+    # Version 2 shipped page admission without unit/title projections; deriving this from the target hid that collision.
+    old_generation = 2
+    assert target_generation > old_generation
+    positive = {"unit.dimension": {"$eq": "attribution"}}
+    dependent = [
+        positive,
+        {"$not": positive},
+        {"unit.dimension": {"$ne": "attribution"}},
+        {"$or": [positive, {"unit.kind": {"$eq": "decision"}}]},
+    ]
+
+    def search(filters, *, query="", result_level="unit", limit=100):
+        return commands.op_ask_memory(
+            stored, query=query, mode="keyword", scope="kb-only", result_level=result_level,
+            filters=filters, graph=False, limit=limit, detail="full",
+        )["hits"]
+
+    with store_writer(stored) as upgrading:
+        write.commit(upgrading, write.StoreChange(
+            write.Origin.GOVERNED, "notes", puts=(
+                write.PagePut(ALPHA, b"# Alpha\n\n## Claim\n- asserted_by: Survey team\n\nThe beacon is lit.\n"),
+                write.PagePut(BETA, b"# Beta\n\n## Claim\n- asserted_by: Survey team\n\nThe tide is rising.\n"),
+                write.PagePut(GAMMA, ("# Gamma\n\n" + "\n".join(
+                    f"## Claim\n- id: noise-{n}\n\nThe signal is steady {n}. See [[Alpha]].\n" for n in range(24)
+                )).encode()),
+            ),
+        ))
+        project(upgrading, stored)
+        expected = [{hit["unit_ref"] for hit in search(expression)} for expression in dependent]
+        assert len(expected[0]) == 2
+        inbound_before = commands.op_list_inbound_links(stored, target=ALPHA)["count"]
+        assert inbound_before > 0
+        with upgrading.handle.transaction() as tx:
+            tx.execute("UPDATE store_meta SET value = ? WHERE key = ?",
+                       (str(old_generation), rederive.OWNER_SCHEMA))
+            tx.execute("DELETE FROM store_meta WHERE key = ?", (rederive.REGISTRY_REVISION,))
+            prefix = tx.execute("SELECT COUNT(*) FROM store_pages WHERE path <= ?", (ALPHA,)).fetchone()[0]
+        monkeypatch.setattr(rederive, "BATCH_PAGES", prefix)
+        with monkeypatch.context() as older:
+            older.setattr(rederive, "OWNER_SCHEMA_VERSION", old_generation)
+            assert rederive.settle(stored, upgrading) == rederive.ADVANCED
+        with upgrading.handle.transaction() as tx:
+            cursor = json.loads(tx.execute("SELECT value FROM store_meta WHERE key = ?", (rederive.PASS,)).fetchone()[0])
+            assert cursor["after"] == ALPHA
+            if legacy_cursor:
+                cursor.pop("owner_schema", None)
+            else:
+                cursor["owner_schema"] = old_generation
+            tx.execute("UPDATE store_meta SET value = ? WHERE key = ?", (json.dumps(cursor), rederive.PASS))
+            tx.execute("DROP TABLE unit_row_keys")
+            tx.execute("DROP TABLE title_fts")
+            tx.execute("DROP TABLE wikilink_keys")
+            tx.execute("ALTER TABLE graph_dependencies DROP COLUMN body_link")
+        legacy_write = "Knowledge Base/Notes/Upgrade write.md"
+        write.commit(upgrading, write.StoreChange(
+            write.Origin.GOVERNED, "note", puts=(write.PagePut(
+                legacy_write, b"# Upgrade write\n\n## Claim\n\nA write during background upgrade.\n",
+            ),),
+        ))
+        write.commit(upgrading, write.StoreChange(
+            write.Origin.GOVERNED, "note", deletes=(write.PageDelete(legacy_write),),
+        ))
+        project(upgrading, stored)
+        find_module.clear_cache()  # The new build has no hot results from the old process.
+
+        assert rederive.settle(stored, upgrading) == rederive.ADVANCED
+        assert rows(stored, "SELECT DISTINCT parent_path FROM unit_row_keys") == [(ALPHA,)]
+        assert rederive.owner_schema_behind(upgrading.connection)
+        assert commands.op_list_inbound_links(stored, target=ALPHA)["count"] == inbound_before
+        for expression in dependent:
+            with pytest.raises(find_module.RetrievalIndexWarming):
+                search(expression)
+        for query in ("", "beacon"):
+            with pytest.raises(find_module.RetrievalIndexWarming):
+                search(positive, query=query, result_level="page")
+        assert search(None)
+        assert search({"unit.dimension": {"$eq": "kind"}})
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            search({"$or": [
+                {"unit.dimension": {"$eq": "currency"}}, {"unit.kind": {"$eq": "claim"}},
+            ]})
+        resumed_from = rows(stored, "SELECT value FROM store_meta WHERE key = ?", rederive.PASS)
+        first_revision = rows(stored, "SELECT revision FROM unit_revisions WHERE parent_path = ?", ALPHA)
+        original_collection_schema = schema.schema_version(upgrading.connection)
+
+    # Reopening the writer represents an interruption after the batch and its cursor committed.
+    with store_writer(stored) as restarted:
+        assert rederive.settle(stored, restarted) == rederive.ADVANCED
+        resumed = rows(stored, "SELECT value FROM store_meta WHERE key = ?", rederive.PASS)
+        assert json.loads(resumed[0][0])["after"] > json.loads(resumed_from[0][0])["after"]
+        assert rows(stored, "SELECT revision FROM unit_revisions WHERE parent_path = ?", ALPHA) == first_revision
+        monkeypatch.setattr(rederive, "BATCH_PAGES", 32)
+        settle_to_the_end(stored, restarted, limit=200)
+        assert not rederive.owner_schema_behind(restarted.connection)
+        assert schema.schema_version(restarted.connection, ceiling=original_collection_schema) == original_collection_schema
+        for expression, wanted in zip(dependent, expected, strict=True):
+            assert {hit["unit_ref"] for hit in search(expression)} == wanted
+        assert len(search(positive, limit=2)) == len(search({"$not": positive}, limit=2)) == 2
+    assert_cold_derivation(stored, tmp_path)
+
+
 def test_an_overlay_revision_that_is_not_a_number_reads_unknown_until_a_pass_settles_it(
     stored, writer  # noqa: F811
 ):
@@ -645,6 +756,102 @@ def test_an_overlay_revision_that_is_not_a_number_reads_unknown_until_a_pass_set
 
     assert mode.status(stored)["registry"] == rederive.CURRENT
     assert rederive.settle(stored, writer) == rederive.IDLE
+
+
+@pytest.mark.parametrize("legacy_cursor", [False, True], ids=["older-parser", "legacy-cursor"])
+def test_parser_upgrade_rederives_stored_units_before_reporting_current(
+    stored, tmp_path, monkeypatch, legacy_cursor,  # noqa: F811
+):
+    """A future parser upgrade must not turn valid stored units or a cached miss into an exact empty answer."""
+    previous = semantic_index.PARSER_VERSION
+    future = previous + 1
+    before_cursor = "Knowledge Base/Notes/Aardvark.md"
+    after_cursor = "Knowledge Base/Notes/Zulu.md"
+    text = b"# Alpha\n\n## Claim\n- id: first\n\nThe beacon is lit.\n\n## Claim\n\nThe tide is rising.\n"
+
+    def ask(query=""):
+        return commands.op_ask_memory(
+            stored, query=query, mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.kind": {"$eq": "claim"}}, limit=2, graph=False,
+        )
+
+    initial = mode.status(stored)
+    with store_writer(stored) as upgrading:
+        assert rederive.pending(upgrading.connection, stored) == rederive.IDLE
+        write.commit(upgrading, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+            write.PagePut(ALPHA, text), write.PagePut(BETA, b"# Beta\n\nSee [[Alpha#first]].\n"),
+        )))
+        project(upgrading, stored)
+        assert len(ask()["hits"]) == 2
+        inbound = commands.op_list_inbound_links(stored, target=ALPHA)["count"]
+        assert inbound > 0
+        with upgrading.handle.transaction() as tx:
+            tx.execute("DELETE FROM store_meta WHERE key = ?", (rederive.REGISTRY_REVISION,))
+            prefix = tx.execute("SELECT COUNT(*) FROM store_pages WHERE path <= ?", (ALPHA,)).fetchone()[0]
+        monkeypatch.setattr(rederive, "BATCH_PAGES", prefix)
+        assert rederive.settle(stored, upgrading) == rederive.ADVANCED
+        with upgrading.handle.transaction() as tx:
+            cursor = json.loads(tx.execute("SELECT value FROM store_meta WHERE key = ?", (rederive.PASS,)).fetchone()[0])
+            if legacy_cursor:
+                cursor.pop("parser_version", None)
+            else:
+                cursor["parser_version"] = previous
+            tx.execute("UPDATE store_meta SET value = ? WHERE key = ?", (json.dumps(cursor), rederive.PASS))
+        assert ask("no matching words")["hits"] == []  # Cache a legitimate miss before the upgrade.
+        monkeypatch.setattr(semantic_index, "PARSER_VERSION", future)
+
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            ask("no matching words")
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            ask()
+        assert initial["parser_version"] == initial["required_parser_version"] == previous
+        assert rederive.pending(upgrading.connection, stored) == rederive.READY
+        assert read.owned_bytes(stored, ALPHA) == text
+        assert "Alpha.md" in read.listing(stored, "Knowledge Base/Notes", True).pages
+        assert commands.op_list_inbound_links(stored, target=ALPHA)["count"] == inbound
+        assert lexstore.get_store(stored).heading_unit_counts(["claim"]) is None
+        with read.snapshot(stored) as snapshot:
+            view = epistemic_graph.GraphView(stored, snapshot.connection)
+            with pytest.raises(OpError) as refused:
+                view.indexed_units("missing-parent#missing-unit")
+            assert getattr(refused.value, "code", None) == read.DERIVED_BEHIND
+        objects = rows(stored, "SELECT name, sql FROM sqlite_master ORDER BY name")
+        assert rederive.settle(stored, upgrading) == rederive.ADVANCED
+        assert rows(stored, "SELECT name, sql FROM sqlite_master ORDER BY name") == objects
+        status = mode.status(stored)
+        assert status["owner_schema"] == "current"
+        assert status["parser_version"] == previous
+        assert status["required_parser_version"] == future
+        with pytest.raises(find_module.RetrievalIndexWarming):
+            ask()
+        first = json.loads(rows(stored, "SELECT value FROM store_meta WHERE key = ?", rederive.PASS)[0][0])
+        assert first["after"] == ALPHA
+        assert first["parser_version"] == future
+        write.commit(upgrading, write.StoreChange(write.Origin.GOVERNED, "notes", puts=(
+            write.PagePut(ALPHA, text.replace(b"lit", b"bright")),
+            write.PagePut(before_cursor, b"# Aardvark\n\n## Claim\n\nAn earlier note.\n"),
+            write.PagePut(after_cursor, b"# Zulu\n\n## Claim\n\nA later note.\n"),
+        ), deletes=(write.PageDelete(BETA),)))
+        project(upgrading, stored)
+        commit_policy(upgrading, stored, READ_ONLY_NOTES)
+        project(upgrading, stored)
+        first_revision = rows(stored, "SELECT revision FROM unit_revisions WHERE parent_path = ?", ALPHA)
+
+    with store_writer(stored) as restarted:
+        assert rederive.settle(stored, restarted) == rederive.ADVANCED
+        resumed = json.loads(rows(stored, "SELECT value FROM store_meta WHERE key = ?", rederive.PASS)[0][0])
+        assert resumed["after"] > first["after"]
+        assert resumed["target"] == first["target"]
+        assert rows(stored, "SELECT revision FROM unit_revisions WHERE parent_path = ?", ALPHA) == first_revision
+        monkeypatch.setattr(rederive, "BATCH_PAGES", 32)
+        settle_to_the_end(stored, restarted, limit=200)
+        assert mode.status(stored)["parser_version"] == future
+        assert mode.status(stored)["registry"] == rederive.REBUILDING
+        assert rederive.pending(restarted.connection, stored) == rederive.READY
+        assert ask()["hits"], "ordinary overlay lag stays a notice after parser qualification"
+        settle_to_the_end(stored, restarted, limit=200)
+    assert mode.status(stored)["registry"] == rederive.CURRENT
+    assert_cold_derivation(stored, tmp_path)
 
 
 @pytest.fixture
@@ -670,12 +877,17 @@ def served_store(tmp_path, monkeypatch):
                 "INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                 "VALUES (1, 'store', 5, 'now', 'test')"
             )
+            migrate.create_owner_schema(tx)
             for key in (rederive.OVERLAY_REVISION, rederive.REGISTRY_REVISION):
                 tx.execute("INSERT INTO store_meta(key, value) VALUES (?, '5')", (key,))
             # As this build's migration records it: the store holds this build's owner objects.
             tx.execute(
                 "INSERT INTO store_meta(key, value) VALUES (?, ?)",
                 (rederive.OWNER_SCHEMA, str(rederive.OWNER_SCHEMA_VERSION)),
+            )
+            tx.execute(
+                "INSERT INTO store_meta(key, value) VALUES (?, ?)",
+                (rederive.PARSER_VERSION, str(semantic_index.PARSER_VERSION)),
             )
             lexstore.create_catalogue_schema(tx)
             lexstore.stamp_catalogue_schema(tx)
@@ -692,6 +904,23 @@ def served_store(tmp_path, monkeypatch):
     if thread.runtime._handle is not None:
         thread.runtime._handle.close()
     manager._stop.set()
+
+
+@pytest.mark.parametrize("parser_stamp", [None, "damaged"], ids=["missing", "malformed"])
+def test_an_unqualified_parser_stamp_owes_a_full_pass_even_when_no_pages_exist(served_store, parser_stamp):
+    """An empty older store that silently declares its semantic projection current."""
+    root = served_store.root
+    with store_writer(root) as bound:
+        with bound.handle.transaction() as tx:
+            tx.execute("DELETE FROM store_meta WHERE key = ?", (rederive.PARSER_VERSION,))
+            if parser_stamp is not None:
+                tx.execute("INSERT INTO store_meta(key, value) VALUES (?, ?)",
+                           (rederive.PARSER_VERSION, parser_stamp))
+        assert rederive.pending(bound.connection, root) == rederive.READY
+        assert rederive.read(bound.connection).parser_version is None
+        assert rederive.settle(root, bound) == rederive.DONE
+        assert rederive.pending(bound.connection, root) == rederive.IDLE
+        assert rederive.read(bound.connection).parser_version == semantic_index.PARSER_VERSION
 
 
 def test_idle_registry_ticks_leave_the_commit_generation_and_the_idle_clock_alone(served_store):

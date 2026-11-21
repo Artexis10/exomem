@@ -297,6 +297,51 @@ def test_a_new_page_resolves_the_links_that_wait_for_its_title_and_a_delete_unre
     assert not store_rows(served, "SELECT 1 FROM pages WHERE path = ?", GAMMA)
 
 
+def test_store_page_writes_replace_and_delete_the_authored_row_key_projection(served, writer):  # noqa: F811
+    """Store commits must maintain the same row-key facts as a file-built catalogue."""
+    text = (
+        "---\ntype: note\n---\n# Gamma\n\n## Claim\n- asserted_by: Survey team\n"
+        "- modality: must\n\nThe beacon must remain lit.\n"
+    )
+    vault_module.batch_atomic_write(
+        [planned(served, GAMMA, text, create_only=True)], vault_root=served, post_commit_fanout=False,
+    )
+    query = "SELECT row_key FROM unit_row_keys WHERE parent_path = ? ORDER BY row_key"
+    assert store_rows(served, query, GAMMA) == [("asserted_by",), ("modality",)]
+    revision_query = "SELECT revision FROM unit_revisions WHERE parent_path = ?"
+    old_revision = store_rows(served, revision_query, GAMMA)
+    # Warm the public unit statistics before deletion, so recreation must discard the old contribution.
+    def units():
+        hits = commands.op_ask_memory(
+            served, query="", mode="keyword", scope="kb-only", result_level="unit",
+            filters={"unit.kind": {"$eq": "claim"}}, limit=50, graph=False,
+        )["hits"]
+        return [hit for hit in hits if hit["parent_path"] == GAMMA]
+
+    assert len(units()) == 1
+
+    vault_module.batch_atomic_write(
+        [planned(served, GAMMA, text.replace("- modality: must\n", ""))],
+        vault_root=served, post_commit_fanout=False,
+    )
+    assert store_rows(served, query, GAMMA) == [("asserted_by",)]
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "test", deletes=(write.PageDelete(GAMMA),),
+    ))
+    assert store_rows(served, query, GAMMA) == []
+    assert store_rows(served, revision_query, GAMMA) == []
+    assert units() == []
+    replacement = text.replace("The beacon must remain lit.", "The harbour lamp stays dark.")
+    replacement += "\n## Claim\n\nThe tide keeps rising.\n"
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "test", puts=(write.PagePut(GAMMA, replacement.encode()),),
+    ))
+    assert store_rows(served, revision_query, GAMMA) != old_revision
+    recreated = units()
+    assert len(recreated) == 2
+    assert all("The beacon must remain lit." not in hit["excerpt"] for hit in recreated)
+
+
 def test_a_batch_commits_the_pages_and_their_rows_at_one_revision(served):
     """A reader between a page and its rows: the revision moves once for the whole batch."""
     start = revision(served)

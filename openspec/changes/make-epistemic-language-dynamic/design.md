@@ -152,6 +152,217 @@ The shipped dimensions:
 
 The generic families mention, link and relation belong to no dimension.
 
+Task 5.5 first moves dimensions without family members before lane caps and the final limit.
+The lexical catalogue stores authored governed-key presence in `unit_row_keys(parent_path, occurrence_key, row_key)`.
+Its primary key covers all three columns; an index starts with `row_key`.
+The projection uses neutral occurrences, because admitted kinds can carry rows that the neutral candidate interpretation rejects.
+It stores no dimension, family or resolved meaning.
+
+Existing stores acquire the projection through owner generation 3 of the current bounded rederivation job.
+Each pass records its owner generation beside its target and cursor.
+A missing or different generation restarts from the first page; an interrupted pass in the same generation resumes its cursor.
+The final batch alone stamps the generation current.
+The collection schema stays unchanged, so this additive projection creates no newer-schema boundary for older readers.
+
+A compiled proposal that consumes `unit_row_keys` waits for that final stamp, including negation and Boolean branches.
+It returns the existing typed retrieval warming outcome until the rows are whole.
+This prevents incomplete presence facts from becoming falsely complete matches or exclusions.
+A wrong refusal temporarily costs only the dependent caller while the normal background job completes.
+Unrelated recall and simplified kind-only dimensions remain available.
+Readiness uses each projection's introduction generation from the existing owner mechanism.
+Inbound links require generation 1, so complete inbound rows stay available during the generation 3 row-key pass.
+The same job records the completed parser version separately, using `semantic_index.PARSER_VERSION` as its required value.
+Missing, malformed or different parser records require a full bounded pass without owner DDL when the owner generation is current.
+Each pass records both generations; it resumes only when both match the running build.
+Migration records both generations after fresh verification, and only the final full batch updates them thereafter.
+Ordinary page writes derive their own rows but never qualify the whole corpus.
+Generation repair preserves its pinned target across head writes; a later overlay change remains owed after completion.
+Overlay-only passes still restart when their target changes.
+The bounded path domain includes stored pages and already-published page or identity subjects, including unowned files.
+The existing source getter reads stored canonical bytes or current unowned bytes; the importer keeps ownership of unseen-file discovery.
+
+Stored semantic recall, FTS, unit filters, occurrence binding and selected graph consumers qualify parser inputs before candidate SQL or cached misses.
+Each pinned store snapshot reads the generation records once; cache identity includes the required parser version.
+An incomplete parser pass returns the existing typed warming or unavailable outcome, and semantic aggregates report unknown counts.
+This prevents old parser summaries from becoming falsely authoritative empty answers.
+A wrong refusal temporarily delays semantic readers while the existing background pass finishes.
+Raw pages, existence, path lists and complete inbound links remain available; ordinary registry lag retains its notice without a refusal.
+Status exposes the completed and required parser versions.
+The stored candidate now applies indexed proposals and exact selected membership to kinds, keys and families before lane caps.
+Family preparation uses neutral graph inputs and indexed target proofs under the same pinned snapshot.
+The file-mode family fallback retains its existing after-limit caveat until its own indexed path is delivered.
+The managed file runtime keeps its existing freshness and admission contract.
+
+The filter keeps its original expression and a separate candidate projection.
+Selected `UnitStructure` values decide carried keys before lexical ranking and the vector allow-set.
+Authored presence remains unknown in candidate SQL until selected interpretation, so `$not` and `$ne` cannot complement a superset into an under-selection.
+Registry edits need no corpus rebuild.
+File-mode dimensions with family members keep their after-limit check and notice.
+Task 5.5 remains open through independent review, production-sized latency and final delivery proof.
+
+This reuses SQLite, the structured-filter planner and selected-unit adapters.
+The gap is the missing row-key projection and the dimension check after the limit.
+The added maintenance covers sparse authored keys, neutral graph inputs and resolver keys through existing builders, store derivation and verification.
+The design follows `Effective context engineering` for request context and `Writing effective tools` for indexed operations.
+The proof uses better-ranked nonmembers, invalid rows, admitted kinds, Boolean composition and registry edits without a rebuild.
+The maintained latency instrument uses at least 6,500 pages, 45,000 chunks and 9,500 units on two CPUs.
+Its budgets are 200 ms for hybrid, 100 ms for keyword, and diagnostic budgets of 6 ms for eligibility and 12 ms for units.
+Unit tests establish correctness; the maintained before-and-after instrument establishes latency.
+
+### Material title contact
+
+The material lane retains a named page's title terms only within that resolved page's own admitted scope.
+For each resolved subject request, its residual task may identify exactly one admitted material parent by title.
+The lookup reads a separate `title_fts(stemmed)` projection with the existing tokenizer and title tokenization.
+This adds one short indexed row per page through the common lexical builders; BM25 text and statistics stay unchanged.
+The final unshipped catalogue generation 18 and owner generation 3 include this projection.
+
+Title postings narrow the existing per-request scope before candidate-local visibility, lifecycle and exclusions decide which matches count.
+Original `TokenUnit` values retain their run flags and strict-majority contact thresholds before the query's limit of two.
+The lookup discovers no full admitted corpus, computes no ranking statistics and parses no page source.
+Zero contacts add nothing, one permits expansion, and two remain ambiguous.
+Unavailable or interrupted lookup remains visible through existing lane diagnostics while body matches remain usable.
+Subject-only requests provide no residual title terms.
+
+A unique parent enters the existing wildcard semantic-unit query, selected interpretation, category exclusions and reader hydration.
+Body hits keep their order; fallback units append in source order and deduplicate by unit reference.
+The request keeps the actual title witness separately from unit facts for allocation coverage.
+The fallback manufactures no text, relations or role exemption, and keeps the normal packet and request budgets.
+
+Page writes, replay and deletion maintain the title row atomically with the page's other derivatives.
+Content custody compares exact expected title bytes through `_corpus_custody_verify` and `holds_content_identities`.
+Offline store verification joins `title_fts` to `pages` through the existing full-text inventory; background reconciliation checks missing rows and orphans.
+Copy reconciliation deliberately retains unchanged values rather than revalidating every byte.
+Recall consumes the published schema/checkpoint witness and performs no verification scan or build.
+Arbitrary SQL corruption after a valid publication is outside this transactional write guarantee.
+
+The design applies the same guidance to indexed tool contracts and minimum sufficient request context.
+The proof follows Anthropic's [Demystifying evals for AI agents (2026-01-09)](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents), keeping trials, traces and outcomes distinct.
+The load target and budgets above still apply; the programme owner runs that latency proof after the coupled source batch settles.
+
+### Stored family eligibility before ranking
+
+The canonical-store path will propose occurrences through endpoint and dependency indexes, then decide selected family membership before ranking.
+The original filter remains the exact predicate.
+Candidate SQL preserves three-valued logic, so a possible edge cannot become an unsafe exclusion under negation.
+File-mode family limits remain until this stored path has qualified inputs and delivery evidence.
+
+The graph owner adds neutral authored inputs: raw targets on resolver-dependent edges and ordinary-body-link presence on dependencies.
+The existing canonical-line exclusion distinguishes ordinary links from authored relation bullets.
+Unresolved links need dependency presence because they have no stored edge.
+The shared dependency keys include the resolver's title normalization, alongside existing path keys.
+An owner-generation pass derives these inputs; missing or partial inputs warm only dependent family filters.
+
+Explicit candidate batches prepare graph membership immediately before exact filtering.
+Ranking-statistics transport does not prepare dimensions: it can traverse every admitted parent before a request has query candidates.
+The admitted BM25 branch uses the same candidate preparation operation as other lexical and vector eligibility.
+Endpoint-first adjacency and candidate-name dependency lookups cover links revealed when a competing page is withheld.
+Neither a resolver walk nor a global family-edge list belongs on this path.
+
+Selected summaries and neutral dependencies supply authored targets without parsing an unreturned page.
+The producer and reader share target resolution, with destination existence and target summaries prefetched in batches.
+Known endpoint paths survive that operation; per-edge node or existence queries do not.
+The authoring registry decides terminal replacement and family before dimension folding, preserving private-instance meaning.
+Raw-label proposals include every supported registry spelling, including explicit core names.
+The iterator preserves selected fragments, page and unit endpoints, endpoint admission, and self-edge exclusions.
+
+One snapshot supplies registries, selected summaries and graph inputs for the request.
+Each candidate batch folds its visible edges directly into membership maps.
+Ranking workers receive immutable eligible identities, never a live graph view or connection.
+Lexical and vector lanes consume the same exact population.
+The proof includes authored-definition expectations because the existing scan fold can share an instance-meaning defect.
+Unrelated-data growth must not increase graph work for a fixed candidate batch.
+
+### Indexed target proofs for stored family eligibility
+
+Family eligibility must interpret each relation through its author's selected registry before candidate caps. It must not acquire or copy the complete resolver namespace.
+
+Reuse the existing wikilink normalizer through a pure internal selector. Keep the public tuple API, exhaustive resolver diagnostics and legacy fallbacks unchanged. The internal result distinguishes resolved, ambiguous, missing and incomplete. Prepared lookups perform no SQL, filesystem reads or global resolver acquisition.
+
+Maintain one derived `wikilink_keys` projection with physical path, normalized path key, stem key and nullable title key. Three `(key, path)` indexes support staged lookups. `pages` remains namespace and metadata authority, including admitted title-null and unparseable physical rows. Extract one pure key helper shared with the full resolver; preserve its case, extension and Unicode rules. This costs one short row and three indexes per page. Existing title FTS has different matching semantics. Expression indexes would require deterministic functions on every writer connection and matching SQL expressions ([SQLite expression indexes](https://www.sqlite.org/expridx.html)).
+
+Resolve requested targets in batches by precedence. Exact-path success must not load stem or title collision buckets. Batch metadata and admission before counting distinct physical owners. Exhaustion proves zero or one owner; two admitted witnesses prove ambiguity without claiming an exact count. Incomplete zero/one-owner searches remain unknown, including under negation. Deadline exhaustion propagates through the existing unavailable outcome. Resolve fragments from stored selected structures on the same snapshot. Consume typed outcomes before graph landing; never swallow lookup requests in broad exception handling or interpret warning prose.
+
+The family operation supplies no retired-alias fallback. A retired alias names a removed item file, while family edges require ordinarily admitted, existing endpoint nodes. An alias reached only after ordinary namespace resolution fails cannot supply such an endpoint. Preserve public alias behavior in the legacy wrapper. Keep access-policy filesystem fallbacks there too.
+
+Common page writes, deletion, replay and cold verification maintain the projection. Fold it into unshipped catalogue 18 and owner 3 readiness. Released-owner writers must tolerate its absence through explicit transaction-cached capabilities. Future key-normalization changes invalidate the existing derived generation; add no separate job or attestation.
+
+Prove full-resolver parity, lower-bound ambiguity diagnostics, hidden collision admission, incomplete negation, legacy-owner writes and cold parity. Prove author-selected private-family membership through public results before caps. Check retired aliases at the real endpoint boundary. Reuse the maintained load instrument for the recorded keyword and hybrid budgets.
+
+This applies the primary-source roster's [context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents), [tool design](https://www.anthropic.com/engineering/writing-tools-for-agents) and [outcome evaluation](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents) guidance.
+
+### Review queues by dimension
+
+Review listings expose the dimensions of the semantic unit or page each item concerns.
+One request-local adapter batches selected parent structures and stored family membership through the existing readers.
+It returns annotations and eligibility; each queue retains ranking, state, identity, coverage and surfacing.
+This adds no tables, persistent cache, resolver walk or paging framework.
+
+Each queue supplies its target explicitly.
+An explicit page-scoped reason selects the page.
+Otherwise, unanimous resolved unit reasons select that unit; conflicting or missing unit addresses remain unknown.
+A missing address on a partitioned unit finding does not silently select the page.
+Producers bind unit addresses to the same parent identity as selected structures, including stable memory references on ID-bearing pages.
+Relation suggestions concern their author page, preserving `from` and `target_ref`.
+Upkeep concerns its subject, not its evidence pages.
+Procedure approvals concern uniquely resolved procedure pages.
+Vocabulary items use an explicit semantic page when one exists.
+Import proposals, planning intents and registry overlays have no semantic subject and are not applicable.
+Queue adapters use producer fields, never category names or warning prose, to determine target scope.
+
+The public `list_review_items` tool accepts optional `filters` through its existing reader route.
+Compile the shared structured-filter grammar once and reject predicates outside `unit.dimension` and Boolean composition.
+Display may union dimensions across selected units.
+Filtering uses the existing same-unit existential rule: one target unit must satisfy the complete expression.
+It never evaluates the display union as a synthetic unit.
+A complete page without units has known-empty display membership but matches no unit predicate, including negation.
+Not-applicable items likewise match no dimension predicate.
+
+Each item reports dimension status as known, unknown or not applicable.
+Only known membership carries `dimensions`, including an authoritative empty list.
+Unknown membership omits that list and identifies the unavailable dependency in diagnostics.
+Unavailable definitions, incomplete structures, unavailable required edges and unresolved unit addresses remain unknown, including under negation.
+An unfiltered listing retains such items; optional annotation cannot make the whole queue refuse.
+Filtered output keeps known matches and reports unresolved classifications separately.
+Admission precedes target preparation and counting; withheld candidates cannot affect dimension counts.
+Filter eligibility and optional annotation completeness are separate outputs of the same adapter.
+A kind-only filter can return an exact match while unavailable edges leave full annotation unknown.
+Only dependencies consumed by the filter can make its classification unresolved; missing target addresses or selected definitions remain relevant to every dependent filter.
+Coverage reports filter matches and unresolved classifications separately from known and unknown annotations.
+Each batch reads filter-required families first through the shared deadline-aware edge reader and records exact filter truth.
+Optional annotation reads only the remaining families under the same pinned snapshot; it never repeats required-family work.
+An interrupted optional batch leaves the recorded match intact and full annotation unknown.
+
+For a positive attention limit, the existing ranked, state-eligible prefix becomes the dimension candidate window.
+Evaluate that window before final selection and surfacing; record surfacing only for returned items.
+Underfilled output is allowed, with partial coverage when eligible items remain beyond the prefix.
+Internal uncapped identity lookup does not acquire dimension annotations.
+Explicit uncapped listings prepare batches under the existing request deadline; unprepared items remain unknown and coverage remains partial.
+No new overfetch constant, recursive refill or silent positive cap is introduced.
+
+Procedure approvals retain their existing reference prefix as an upstream window, avoiding graph preparation across the entire approval ledger.
+Relation review applies eligibility before its final group/page break, preserving existing source and branch windows.
+Vocabulary review uses its original visible prefix of `limit` items as the dimension window.
+It authorizes that same prefix through the existing wrapper rule before preparing dimensions, preserving the registry-proposal exception.
+It batches dimensions inside that authorized window before returning items; underfill remains partial.
+Its continuation retains candidate order and the unfiltered tail; changing filters cannot silently change the continuation's meaning.
+Other queues preserve their existing upstream windows and apply dimension selection before their final output slice.
+
+Existing totals retain their upstream meaning.
+Dimension coverage names the evaluated window, known matches, unresolved items and unsearched remainder separately.
+An empty partial result means no known matches in that window, not no matching review work.
+Replace completeness prose whenever it would describe only a filtered prefix.
+Attach dimension annotations after identity computation, outside reasons and fingerprints.
+A registry edit can change display membership without reopening a recorded review decision.
+
+Reuse selected-parent adapters, stored family preparation and structured-filter evaluation.
+Custom code supplies queue target adaptation and availability reporting; a recursive result decorator would filter after caps and record excluded surfacing.
+The recorded 6,500-page reference and public warm-call p95 target in `request_latency_contract.json` apply to the added work.
+Measure before and after on the same instrument; report inherited producer scans separately as existing debt.
+Proof covers mixed reason scopes, same-unit Boolean expressions, unknown negation, bounded windows, disclosure, continuation and unchanged review identities.
+Real-model evidence must show the item field helps before this surface ships.
+The context, tool-design and outcome-evaluation primary sources cited above govern that proof.
+
 ### Degree of belief, owned by its holder
 
 The owner chose this shape on 2026-11-08: belief levels, plus numbers only with a source. The owner added that Exomem must not arbitrate belief.
@@ -220,7 +431,7 @@ Each item stays as named debt, with its reason in a code comment (task 2.4).
 | C4 and C5 category fallbacks; C6 category leg; C9; C11; `CONCLUSION_CATEGORIES`; `_CATEGORY_BY_LABEL` | artifact_role_review 84-92; epistemic_graph 14748; audit 6018; context_roles 796; working_set_index 291 | Category registry, out of scope per the proposal. C9 stays on category for the reason in inventory decision 5. |
 | C10 `UNITS_V1` | sensing 245-275 | Frozen instrument (proposal). |
 | C12 `RECOGNIZED_SECTIONS`; C13 `PACK_ALLOWED_PRIMITIVES` | context_pack 101; knowledge_packs 62 | Heading text (proposal). C13 is a closed manifest schema that mixes page types and kinds. |
-| Neutral sidecars and selected vocabulary | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column | These store neutral structure by contract. Selected readers interpret each admitted page with its definitions; a registry change needs no rebuild. Task 6.3 moves `observe_memory` onto that existing adapter. |
+| Neutral sidecars and selected vocabulary | semantic_index `current_parent_index_state`; lexstore `unit.verdict` column | These store neutral structure by contract. Selected readers and `observe_memory` interpret each admitted page with its definitions; a registry change needs no rebuild. |
 | A `Relations` heading that names a kind | semantic_blocks relation section; semantic_language_registry `_check_kind_labels` | A vault kind's heading alias of `Relations` turns every page's `## Relations` section into a unit of that kind, and a label on a shipped kind can now do the same. The registry check does not refuse that spelling yet. |
 | Page-type keys found on the way | vocabulary_projection 78; dreamer_families 615; artifact_role_state 207 | Note-type keys where the note-type `role` states the fact. Outside this change. |
 | Retry advice while the graph is stale | find `_resolve_relation_filter`, `_dimension_edges` (warming site `relation_graph_rebuilding`) | On the scan path, a `unit.dimension` filter that needs edges, or a `relations=` filter, raises the warming outcome while the graph rebuilds, and its remediation says to retry. After a direct file edit, only a reconcile (`maintain_memory` with mode `reconcile`) ends that state, so a retry can return the same outcome. The remediation belongs to the shared warming outcome, so this slice does not change it. |
@@ -305,3 +516,14 @@ Kinds:
 - **A partial cutover leaves one concept on mixed family and key reads.** The fixture asserts extension reach in every reader of a behaviour, not in one.
 - **A later pack drops a shipped kind.** A vault's labels-only entry under that key then reads as a malformed vault kind. That is an error finding, so every vault kind and label stops resolving until the vault removes the entry.
 - **Rollback.** A reader revert is a code revert. The pack attributes are additive, and old code ignores them. A vault overlay is not: older code reads a saved `verdicts:` section or a kind's `traits:` as `unknown_field` errors, so every vault category then resolves `registry_invalid`. Code before slice 4 does the same with a saved `belief_levels:`, `modalities:` or `inference_modes:` section, and reads the trait values `credence` and `dated_event` on a vault kind as `unknown_trait` errors. Rolling back after a vault saves any of these needs those sections or trait values removed from its registry first.
+
+
+## Current-turn subject precedence
+
+Automatic display evaluation exposed a shared resolver abstention before annotation. An unrelated weak candidate could block an exact subject name. The accepted repair changes the competition boundary for both evaluation arms. It changes no dimension membership, retrieval evidence or role selection.
+
+Use existing categorical candidate facts and the current turn's name spans. A focus alias does not prove that the current turn named a subject. Keep unrelated weak alternatives as partial leads. Preserve structurally complementary context. Check ambiguity within each group of overlapping current-turn names. A separately named topic cannot bridge competing interpretations of another name. Preserve agent identity choices and existing behavior without a current-turn name.
+
+The existing resolver supplies candidate facts, spelling spans and structural membership buckets. No external resolver fits this internal evidence contract without replacing those components. Reuse those components; the added maintenance is one categorical competition rule and its regression boundaries. This adds no catalogue query or model call.
+
+The context-engineering and tool-evaluation guidance supports this bounded boundary change: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents and https://www.anthropic.com/engineering/writing-tools-for-agents. Deterministic resolver and activation checks establish the rule. The real-model display workflow remains the release acceptance check. A passing resolver check cannot establish an annotation benefit.

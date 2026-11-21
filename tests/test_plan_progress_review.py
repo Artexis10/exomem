@@ -477,6 +477,26 @@ def test_review_presents_intent_next_to_the_observed_counts(tmp_path: Path) -> N
     assert item["divergence"]["unresolved_bindings"] == 0
 
 
+def test_dimension_filter_does_not_treat_a_plans_evidence_as_its_semantic_subject(tmp_path: Path) -> None:
+    from exomem import commands
+
+    _build_vault(tmp_path, worked=3)
+    _add_plan(tmp_path, _committed(
+        "Track the rollout", [{"collection": RECORDS_REF, "role": "progress", "view": "worked"}],
+    ))
+    unfiltered = commands.op_review_memory(tmp_path, mode="plan-progress")
+    assert unfiltered["items"][0]["dimension_status"] == "not_applicable"
+    assert "dimensions" not in unfiltered["items"][0]
+    filtered = commands.op_review_memory(
+        tmp_path, mode="plan-progress", filters={"$not": {"unit.dimension": {"$eq": "kind"}}},
+    )
+    assert filtered["items"] == []
+    assert filtered["items_matched"] == 1
+    assert filtered["bindings_executed"] == 0
+    assert filtered["dimension_coverage"]["not_applicable"] == 1
+    assert filtered["dimension_coverage"]["filter_unresolved"] == 0
+
+
 def test_review_omits_items_outside_the_reviewed_slice(tmp_path: Path) -> None:
     from exomem import plan_progress
 

@@ -2030,18 +2030,18 @@ def find(
         resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
         resolve_dimension=_resolve_dimension_name,
     )
-    # Membership lookups are registry reads; the graph read waits until a cache miss. A managed
-    # reader rewrites an indexed dimension and checks the others on its hits, so `unit.dimension`
-    # leaves its plan before the refusal below.
+    # Membership lookups are registry reads; the graph read waits until a cache miss. Indexed
+    # proposals precede exact selected membership; file-mode edge dimensions still check the hits.
     requested_plan = filter_plan
     dimension_lookups = _dimension_lookups(vault_root, filter_plan, language=language_registry)
     dimension_check: structured_filters.FilterPlan | None = None
-    if dimension_lookups is not None and managed_runtime:
+    indexed_dimension_catalogue = managed_runtime or lexstore.store_catalogue()
+    if dimension_lookups is not None and indexed_dimension_catalogue:
         filter_plan, dimension_check = _managed_dimension_plan(
-            filter_plan, dimension_lookups, result_level=result_level
+            filter_plan, dimension_lookups, result_level=result_level, stored=lexstore.store_catalogue()
         )
     filter_plan = _withhold_positions(vault_root, filter_plan)
-    if filter_plan.root is not None and managed_runtime:
+    if filter_plan.root is not None and (managed_runtime or filter_plan.index_dimensions):
         # A managed reader refuses a field no index can evaluate, and refuses it
         # HERE — before the freshness key, the hot cache, any catalogue query or
         # any lane. The alternative is to discover it at the eligibility seam
@@ -2062,6 +2062,16 @@ def find(
         result_level,
         requested_plan,
     )
+    if lexstore.store_catalogue() and (
+        effective_result_level != "page" or requested_plan.has_unit_predicate or bool(query.strip())
+    ):
+        from .vault_store import read as store_read
+
+        # Qualify semantic inputs before even a cached miss: parser changes need no page commit.
+        with store_read.snapshot(vault_root) as view:
+            registry = store_read.derived_registry(view.connection)
+            if registry.parser_behind:
+                _raise_catalog_outcome(lexstore.CatalogReadiness("stale", False, lexstore.backend()))
     # A filter that names `unit.dimension` at its top level asks for that dimension's group. The
     # groups' display behaviours read edges from the same graph read as membership.
     group_keys: tuple[str, ...] = ()
@@ -2259,7 +2269,13 @@ def find(
         # answer to `unit.dimension`, which places each unit in its groups.
         group_edges: epistemic_dimensions.DimensionEdges | None = None
         filter_dimensions: epistemic_dimensions.UnitDimensions | None = None
-        if dimension_lookups is not None and dimension_check is None:
+        if dimension_lookups is not None and dimension_check is None and lexstore.store_catalogue():
+            filter_dimensions = epistemic_dimensions.StoredUnitDimensions(
+                vault_root, dimension_lookups, keep=admit_path,
+                needs_edges=structured_filters.plan_index_eligibility(filter_plan).requires_edge_families,
+            )
+            filter_plan = filter_plan.with_dimensions(filter_dimensions)
+        elif dimension_lookups is not None and dimension_check is None:
             membership_edges = _dimension_edges(
                 vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot,
                 behaviours=group_behaviours if dimension_lookups.needs_edges else (),
@@ -2327,6 +2343,7 @@ def find(
                         unit_hits, dimension_lookups, group_keys, dimensions=filter_dimensions,
                         edges=group_edges, language=language_registry,
                         instance=filter_plan.unit_instance, status_basis=status_basis,
+                        restricted=admit_path is not None,
                     )
                 )
         def finish_units():
@@ -2538,6 +2555,11 @@ def find(
         return _QueryPreparation(unit=mixed, page=True)
     if dimension_lookups is not None and dimension_check is None:
         filter_plan = filter_plan.with_dimensions(
+            epistemic_dimensions.StoredUnitDimensions(
+                vault_root, dimension_lookups, keep=admit_path,
+                needs_edges=structured_filters.plan_index_eligibility(filter_plan).requires_edge_families,
+            )
+            if lexstore.store_catalogue() else
             _dimension_source(vault_root, dimension_lookups, keep=admit_path, snapshot=snapshot)
         )
     mixed_unit_hits: list[SemanticUnitHit] = []
@@ -3338,6 +3360,8 @@ def _unit_metadata_records(
         vault_root, paths, scope=scope, freshness_key=freshness_key, pending=pending,
         include_ranking=True, include_occurrences=True, recall_checkpoint=recall_checkpoint,
     )
+    if hasattr(plan.dimensions, "prepare"):
+        plan.dimensions.prepare(paths)
     unsupported_fields = _unsupported_filter_fields(plan)
     if unsupported_fields and any(
         metadata.view is not None and "frontmatter" not in metadata.view
@@ -3393,7 +3417,7 @@ def _unit_metadata_records(
                 evaluated = unit_view if plan.dimensions is None else {
                     **unit_view,
                     **structured_filters.membership_facts(
-                        candidate, occurrence=selected.occurrence_key
+                        selected, occurrence=selected.occurrence_key
                     ),
                 }
                 if structured_filters.evaluate_filter(plan, page=page_view, unit=evaluated):
@@ -4058,10 +4082,11 @@ def _find_semantic_units(
     released_parent_paths = (
         parents if keep is None else snapshot._published_admitted_paths(scope, keep, parents)
     )
+    indexed_dimensions = bool(plan.index_dimensions)
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    if dnf_clauses is not None:
+    if dnf_clauses is not None or indexed_dimensions:
         # Exact eligibility is normal-table metadata only. Hybrid/vector
         # content ranking consumes this finite candidate set independently,
         # so FTS absence cannot change the catalog outcome.
@@ -4075,7 +4100,8 @@ def _find_semantic_units(
             exact_checkpoint = recall_checkpoint
             exact_allow_delta = True if repair is None else repair
             bounded_filter_only = (
-                not query.strip() and limit is not None and not algebra.post_filter_required
+                not query.strip() and limit is not None
+                and (indexed_dimensions or not algebra.post_filter_required)
             )
             if bounded_filter_only:
                 # SQL and final filter-only ordering are identical. Read a
@@ -4097,6 +4123,7 @@ def _find_semantic_units(
                         query,
                         k=prefix_size,
                         clauses=dnf_clauses,
+                        filter_plan=plan if indexed_dimensions else None,
                         scope=scope,
                         freshness=exact_freshness,
                         recall_checkpoint=exact_checkpoint,
@@ -4139,6 +4166,7 @@ def _find_semantic_units(
                     query,
                     k=exact_limit,
                     clauses=dnf_clauses,
+                    filter_plan=plan if indexed_dimensions else None,
                     scope=scope,
                     freshness=exact_freshness,
                     recall_checkpoint=exact_checkpoint,
@@ -4276,7 +4304,7 @@ def _find_semantic_units(
     }
     if mode in {"hybrid", "vector"}:
         vector_allowed_refs: set[str] | None = None
-        if dnf_clauses is not None:
+        if dnf_clauses is not None or indexed_dimensions:
             # The allow-set is branch-correlated and bounded: it pushes the same
             # DNF clauses down so only rows satisfying a real `(category AND
             # kind)` branch are admitted — never the giant all-unit query under a
@@ -5129,7 +5157,26 @@ def _dimension_edges(
     A restricted caller's re-derived links resolve with the request's resolver
     (`_request_resolver`).
     """
-    from . import epistemic_graph
+    from . import call_spans, epistemic_graph, lexstore
+
+    if lexstore.store_catalogue() and pages is not None:
+        import sqlite3
+
+        from .vault_store import read as store_read
+        from .vocabulary.registry import RegistryError
+
+        conn = store_read.lend(vault_root)
+        try:
+            with call_spans.span("dimension.display", {"pages": len(pages)}):
+                return epistemic_dimensions.DimensionEdges("available", tuple(epistemic_graph.stored_family_edges(
+                    vault_root, conn, pages, lookups, keep=keep, behaviours=behaviours,
+                )))
+        except (RetrievalIndexWarming, RegistryError, sqlite3.Error, TimeoutError):
+            # Stored eligibility already checked its required edges; optional display keeps an unknown outcome.
+            return epistemic_dimensions.DimensionEdges("temporarily_unavailable")
+        finally:
+            if conn is not None:
+                conn.close()
 
     edges = epistemic_dimensions.read_edges(
         vault_root,
@@ -5161,31 +5208,31 @@ def _managed_dimension_plan(
     lookups: epistemic_dimensions.DimensionMembership,
     *,
     result_level: str,
+    stored: bool = False,
 ) -> tuple[structured_filters.FilterPlan, structured_filters.FilterPlan | None]:
     """A managed reader's `unit.dimension`: the plan its index answers, and the predicates it
     checks on its hits.
 
-    A dimension whose members the index can answer is rewritten into indexed fields, anywhere in
-    the plan. Every other dimension is checked on the hits, which needs its predicate at the top
-    level of the plan and unit results; anything else is refused by field, never scanned.
+    Stored dimensions keep indexed proposals and exact selected predicates anywhere in the plan.
+    File-mode edge dimensions retain their check on unit hits, with only top-level predicates supported.
     """
     from . import semantic_labels
 
     expressions = {}
     for key, members in lookups.members.items():
-        if members.get("families"):
+        if members.get("families") and not stored:
             continue
         kinds = members.get("kinds", ())
         expression = structured_filters.membership_expression(
             kinds=[kind for kind in kinds if kind != semantic_labels.ALL_KINDS],
             every_kind=semantic_labels.ALL_KINDS in kinds,
             keys=members.get("keys", ()),
+            families=members.get("families", ()) if stored else (),
         )
         if expression is not None:
             expressions[key] = expression
-    split = structured_filters.split_checked_dimensions(
-        structured_filters.rewrite_dimensions(plan, expressions)
-    )
+    edge_dimensions = set(lookups.members) - set(expressions)
+    split = structured_filters.split_checked_dimensions(plan, only=edge_dimensions)
     if split.nested:
         raise structured_filters.FilterError(
             "UNSUPPORTED_FILTER_FIELD",
@@ -5208,7 +5255,13 @@ def _managed_dimension_plan(
             expected='result_level "unit" or "auto"',
             remediation='Search with result_level "unit" or "auto" to filter units by this dimension.',
         )
-    return split.index, split.checked
+    selected = split.index
+    if structured_filters.named_dimensions(selected):
+        selected = selected.with_dimensions(
+            epistemic_dimensions.UnitDimensions.from_edges(lookups, ()),
+            index_expressions=expressions,
+        )
+    return selected, split.checked
 
 
 def _check_dimensions_on_hits(
@@ -5264,6 +5317,46 @@ def _unit_view_of(hit: Any) -> dict[str, Any]:
     }
 
 
+def display_unit_of(
+    hit: Any,
+    dimensions: epistemic_dimensions.UnitDimensions,
+    *,
+    instance: str,
+    status_basis: lifecycle_statuses.Basis,
+    restricted: bool = False,
+) -> tuple[dimension_display.DisplayUnit, frozenset[str]]:
+    """What a dimension's display reads of one selected unit hit, and every dimension of
+    `dimensions` that the hit belongs to.
+
+    A search's groups and a context packet's units read a selected unit here, so both mark it
+    alike. `instance` is the vocabulary instance the request reads unit values in.
+    """
+    view = _unit_view_of(hit)
+    path = hit.parent_path
+    own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
+    frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
+    status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
+    holder = getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None)
+    if restricted and holder:
+        from .governance import egress
+
+        # Optional metadata never makes unit selection depend on a linked page's existence or release.
+        holder = egress.project_holder(holder, restricted=True)
+    unit = dimension_display.DisplayUnit(
+        ref=hit.unit_ref,
+        path=path,
+        node=epistemic_dimensions.node_key(path, view),
+        kind=str(view.get("kind")) if own_kind else None,
+        verdict=view.get("verdict"),
+        historical=dimension_display.page_is_history(
+            status_basis, status, path=path, frontmatter=frontmatter
+        ),
+        holder=holder,
+        occurred_at=getattr(hit, "occurred_at", None),
+    )
+    return unit, dimensions({"path": path}, view, own_kind=own_kind)
+
+
 def _group_request(
     hits: Sequence[Any],
     lookups: epistemic_dimensions.DimensionMembership,
@@ -5274,6 +5367,7 @@ def _group_request(
     language: Any,
     instance: str,
     status_basis: lifecycle_statuses.Basis,
+    restricted: bool = False,
 ) -> dimension_display.GroupRequest:
     """What `dimension_display.group_hits` reads of a search's selected units: for each unit, by
     its ref, what its display reads and which requested `groups` it belongs to.
@@ -5286,24 +5380,10 @@ def _group_request(
     wanted = frozenset(groups)
     units: dict[str, tuple[dimension_display.DisplayUnit, frozenset[str]]] = {}
     for hit in hits:
-        view = _unit_view_of(hit)
-        path = hit.parent_path
-        own_kind = not structured_filters.foreign_entry("unit.kind", view.get("kind"), view, instance)
-        frontmatter = hit.frontmatter if isinstance(hit, _UnitCandidate) else None
-        status = frontmatter.get("status") if frontmatter is not None else hit.parent_status
-        unit = dimension_display.DisplayUnit(
-            ref=hit.unit_ref,
-            path=path,
-            node=epistemic_dimensions.node_key(path, view),
-            kind=str(view.get("kind")) if own_kind else None,
-            verdict=view.get("verdict"),
-            historical=dimension_display.page_is_history(
-                status_basis, status, path=path, frontmatter=frontmatter
-            ),
-            holder=getattr(hit, "asserted_by", None) or getattr(hit, "credence_holder", None),
-            occurred_at=getattr(hit, "occurred_at", None),
+        unit, belongs = display_unit_of(
+            hit, dimensions, instance=instance, status_basis=status_basis, restricted=restricted,
         )
-        units[hit.unit_ref] = (unit, dimensions({"path": path}, view, own_kind=own_kind) & wanted)
+        units[hit.unit_ref] = (unit, belongs & wanted)
     definitions = language.label_definitions(semantic_labels.DIMENSIONS)
 
     def label(key: str) -> str:
@@ -5590,11 +5670,13 @@ def _reusable_eligible_filter_paths(
     admission after this, so a set computed for one caller never widens another's. A reused set is
     the cached frozenset itself, so callers read it and never change it. A plan with a
     unit predicate is resolved every time, because its units follow a selected interpretation that
-    no identity in the proof names.
+    no identity in the proof names. So is a plan that carries a dimension source: the source is not
+    part of the plan's identity (`FilterPlan.to_dict`), and the values it serves follow inputs the
+    proof does not name.
     """
     # A plan gated for a caller who may not see positions answers differently from the same plan ungated, and the
     # cache key does not carry the gate, so a gated plan neither reads nor fills the cache.
-    if plan.has_unit_predicate or plan.position_withheld:
+    if plan.has_unit_predicate or plan.position_withheld or plan.dimensions is not None:
         return _managed_eligible_filter_paths(vault_root, scope=scope, plan=plan, snapshot=snapshot)
     proof = _eligibility_proof(vault_root, scope, snapshot)
     if proof is None:
@@ -5831,6 +5913,8 @@ def _metadata_eligible_filter_paths(
     `emitted_as` is the caller's `_emission_rule` over the same `metadata`, so a caller that also
     groups rows by it admits each row once.
     """
+    if hasattr(plan.dimensions, "prepare"):
+        plan.dimensions.prepare({*candidate_parent_paths, *(row.parent for row in metadata.values() if row.parent)})
     eligible: set[str] = set()
     matches: dict[str, bool] = {}
     for rel in candidate_parent_paths:

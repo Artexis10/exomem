@@ -729,7 +729,7 @@
     }
   },
   "list_review_items": {
-    "description": "List what needs the person's review: due items by default, or one queue.",
+    "description": "Review due work or one queue; categories can name upkeep families.",
     "inputSchema": {
       "properties": {
         "queue": {
@@ -747,18 +747,20 @@
             "vocabulary",
             "procedure_approvals"
           ],
-          "type": "string",
-          "description": "One queue; due items by default."
+          "type": "string"
         },
         "categories": {
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "Keep only these finding categories, or upkeep families."
+          "type": "array"
         },
         "limit": {
           "type": "integer"
+        },
+        "filters": {
+          "description": "unit.dimension operator objects ($eq/$in); Boolean composition allowed.",
+          "type": "object"
         }
       },
       "type": "object"

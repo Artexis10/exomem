@@ -17,7 +17,7 @@ from .core import EdgeRef, World
 from .loader import CATALOGUE_DIR
 from .validator import check_relation_refs
 
-GENERATOR_VERSION = "2"
+GENERATOR_VERSION = "4"
 
 
 def _plain(value: Any) -> Any:

@@ -73,7 +73,7 @@ import time
 import uuid
 from array import array
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence, Set
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -871,6 +871,19 @@ def _eligibility_sql(
         if unit_missing:
             # MISSING: `$exists false` is the only test a vanished unit passes.
             return ("1" if expr.op == "exists" and not expr.present else "0"), []
+        if axis == "unit.row_keys":
+            # Authored presence is uncertain until selected interpretation; NULL survives NOT too.
+            return (
+                "(CASE WHEN EXISTS(SELECT 1 FROM unit_row_keys r "
+                "WHERE r.parent_path = u.parent_path AND r.occurrence_key = u.unit_ref "
+                "AND r.row_key IN (SELECT value FROM json_each(?))) THEN NULL ELSE 0 END)",
+                [json.dumps(expr.values)],
+            )
+        if axis == "unit.edge_families":
+            if labels is None:
+                return "NULL", []
+            sql, bound = labels(axis, tuple(str(value) for value in expr.values))
+            return f"(CASE WHEN {sql} THEN NULL ELSE 0 END)", list(bound)
         if axis in sf.ENTRY_AXES and expr.op != "exists":
             if expr.op in {"in", "eq"} and labels is not None:
                 sql, bound = labels(axis, tuple(str(value) for value in expr.values))
@@ -928,6 +941,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
     ]
 
     def labels(axis: str, values: tuple[str, ...]) -> tuple[str, list[str]]:
+        if axis == "unit.edge_families":
+            from . import epistemic_graph
+
+            return epistemic_graph.family_proposal(vault_root, values)
         parts = [
             semantic_language_registry.unit_query_plan(
                 adapter,
@@ -961,9 +978,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 18: `pages.capture_day`, `capture_date_json`, `capture_lat` and `capture_lon` hold the capture date and
 #: position a media sidecar records, so a search filters on them from the index. A v17 catalogue is
 #: rebuilt from canonical pages, which also indexes every sidecar that already records them.
-SCHEMA_VERSION = 18
+#: 19: `unit_row_keys` projects authored governed key presence; `title_fts` indexes title contact without BM25 statistics.
+SCHEMA_VERSION = 19
 
-#: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
+#: FTS5 tokenizer for every pre-stemmed full-text column. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
 #: no diacritic removal, and letters, numbers and marks all token characters
 #: (the default drops marks, which splits Indic words at every vowel sign).
@@ -1432,6 +1450,14 @@ def _unit_hit(row: tuple, unit: Any, score: float | None) -> SemanticUnitLexical
     )
 
 
+def _require_current_parser(conn: sqlite3.Connection) -> None:
+    from .vault_store import read as store_read
+
+    registry = store_read.derived_registry(conn)
+    if registry is not None and registry.parser_behind:
+        raise CatalogUnavailable(CatalogReadiness("stale", False, backend()))
+
+
 class _SelectedUnits:
     """One lexical operation's admitted reading of the stored structural occurrences.
 
@@ -1444,11 +1470,12 @@ class _SelectedUnits:
 
     def __init__(
         self, vault_root: Path, conn: sqlite3.Connection, *, admitted: set[str] | None = None,
-        released: set[str] | None = None,
+        released: set[str] | None = None, filter_plan: Any | None = None,
     ) -> None:
         from . import semantic_index
         from .governance import egress
 
+        _require_current_parser(conn)
         # Decided on the first parent touched: a query that proposes no row
         # pays no release decision.
         keep: list[Any] = []
@@ -1463,20 +1490,32 @@ class _SelectedUnits:
             return keep[0] is None or bool(keep[0](path))
 
         self.conn = conn
+        self.filter_plan = filter_plan
+        self.page_views: dict[str, dict[str, Any]] = {}
         self.interpretations = semantic_index.Interpretations(vault_root)
         self.parents = semantic_index.AdmittedParents(
             self._summaries, allowed=allowed, interpretations=self.interpretations,
         )
 
     def _summaries(self, paths: list[str]) -> dict[str, Any]:
-        return {
-            str(path): json.loads(raw)
-            for path, raw in self.conn.execute(
-                "SELECT path, structure_json FROM pages "
+        result = {}
+        view_column = "eligibility_view_json" if self.filter_plan is not None else "NULL"
+        for path, raw, payload in self.conn.execute(
+                f"SELECT path, structure_json, {view_column} FROM pages "
                 "WHERE path IN (SELECT value FROM json_each(?)) AND structure_json IS NOT NULL",
                 (json.dumps(paths, ensure_ascii=False),),
-            )
-        }
+        ):
+            result[str(path)] = json.loads(raw)
+            if self.filter_plan is not None:
+                if payload is None:
+                    from .vocabulary.registry import RegistryError
+
+                    raise RegistryError("REGISTRY_UNAVAILABLE: selected filter page metadata is incomplete")
+                self.page_views[str(path)] = {
+                    **{key: _decode_filter_value(value) for key, value in json.loads(payload)["view"].items()},
+                    "path": str(path),
+                }
+        return result
 
     def unit(self, path: str, key: str) -> Any:
         """The unit a stored occurrence is for this reader, or None."""
@@ -1550,6 +1589,21 @@ class _SelectedUnits:
             plan.matches(unit.category, unit.kind, self.instance(path)) for plan in plans
         )
 
+    def matches_filter(self, row: tuple, unit: Any) -> bool:
+        """Decide the exact filter on the selected unit before it spends a lane slot."""
+        if self.filter_plan is None:
+            return True
+        from . import structured_filters
+
+        path = str(row[1])
+        value = structured_filters.unit_view(_unit_hit(row, unit, None), instance=self.instance(path))
+        value.update(structured_filters.membership_facts(unit, occurrence=unit.occurrence_key))
+        if unit.verdict is not None:
+            value["verdict"] = unit.verdict
+        if unit.check_by is not None:
+            value["check_by"] = date.fromisoformat(unit.check_by)
+        return structured_filters.evaluate_filter(self.filter_plan, page=self.page_views[path], unit=value)
+
     def served(self, rows: Iterable[tuple]) -> Iterator[tuple[tuple, Any]]:
         """`(row, unit)` for each occurrence row that is a referable unit here, in order.
 
@@ -1563,6 +1617,16 @@ class _SelectedUnits:
                 unit = self.unit(str(row[1]), str(row[0]))
                 if unit is not None and unit.unit_ref is not None:
                     yield row, unit
+
+    def candidates(self, rows: Iterable[tuple]) -> Iterator[tuple[tuple, Any]]:
+        """Prepare only query candidates; corpus ranking statistics use `served` directly."""
+        iterator = iter(self.served(rows))
+        while batch := list(itertools.islice(iterator, _OCCURRENCE_TRANSPORT_BATCH)):
+            source = self.filter_plan.dimensions if self.filter_plan is not None else None
+            if hasattr(source, "prepare"):
+                source.prepare({str(row[1]) for row, _unit in batch}, conn=self.conn,
+                               interpretations=self.interpretations)
+            yield from batch
 
     def contributions(
         self, column: str, parents: Sequence[str], settled: dict[str, tuple[_UnitContribution, ...]] | None = None,
@@ -4355,6 +4419,7 @@ def search_semantic_units_result(
     allow_delta: bool = True,
     registry_scope: str | None = None,
     validated: dict[tuple[str, str, str, int], bool] | None = None,
+    filter_plan: Any | None = None,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome.
 
@@ -4373,7 +4438,7 @@ def search_semantic_units_result(
         )
     category_keys = tuple(sorted({canonicalize_category(v) for v in categories or ()}))
     kind_keys = tuple(sorted({canonicalize_category(v) for v in kinds or ()}))
-    if not (category_keys or kind_keys or clauses):
+    if not (category_keys or kind_keys or clauses or filter_plan is not None):
         return CatalogQueryResult(
             None, CatalogReadiness("unsupported", False, backend())
         )
@@ -4399,6 +4464,7 @@ def search_semantic_units_result(
         admitted_parent_paths=admitted_parent_paths,
         released_parent_paths=released_parent_paths,
         registry_scope=registry_scope,
+        filter_plan=filter_plan,
     )
     if not result.readiness.complete or not _validate_current:
         return result
@@ -4461,6 +4527,7 @@ def search_semantic_units_result(
                 allow_delta=allow_delta,
                 registry_scope=registry_scope,
                 validated=validated,
+                filter_plan=filter_plan,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -4812,6 +4879,7 @@ def _eligibility_metadata_query(
     include_occurrences: bool = False,
     include_structure: bool = False,
 ) -> dict[str, EligibilityMetadata]:
+    from . import structured_filters
     from .vocabulary.registry import RegistryError
 
     view = "NULL" if parents_only else "p.eligibility_view_json"
@@ -4874,6 +4942,9 @@ def _eligibility_metadata_query(
                     context=row[11],
                     form=row[6],
                     instance=view.instance(str(path)),
+                    **structured_filters.membership_facts(
+                        served, occurrence=served.occurrence_key,
+                    ),
                 )
                 if verdict is not None:
                     unit["verdict"] = verdict
@@ -5445,9 +5516,9 @@ class _CatchUpPlan:
 
 
 #: Each full-text table holds one row per row of its parent table, under the parent's rowid. The catalogue DDL
-#: fixes these three tables, so a comparison that cannot join on rowid across databases reads them from here.
+#: fixes these tables, so a comparison that cannot join on rowid across databases reads them from here.
 # nosemgrep: ep-word-set -- Table names that the catalogue DDL fixes.
-FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "unit_fts": "semantic_units"}
+FULLTEXT_PARENT_TABLES = {"fts": "pages", "tri": "pages", "title_fts": "pages", "unit_fts": "semantic_units"}
 
 #: ``meta`` holds the sidecar's own history (freshness triples, checkpoints, revisions) and no fact derived
 #: from the files, so a comparison with a fresh derivation leaves it out.
@@ -5521,19 +5592,21 @@ class SemanticUnitRow:
 
     columns: Mapping[str, Any]
     stemmed: str
+    row_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class PageRows:
     """Every catalogue row one page derives, as plain data; `write_page_rows` writes them.
 
-    `columns` is the `pages` row keyed by column. `stemmed`, `title_lower` and `body_lower` are the
-    text that `fts` and `tri` index under that row's id. `structure_json` is the page's structural
+    `columns` is the `pages` row keyed by column. `stemmed`, `title_stemmed`, `title_lower` and `body_lower`
+    are the text that the full-text tables index under that row's id. `structure_json` is the page's structural
     summary, None when the page has no semantic state and so no unit rows.
     """
 
     columns: Mapping[str, Any]
     stemmed: str
+    title_stemmed: str
     title_lower: str
     body_lower: str
     structure_json: str | None
@@ -5615,6 +5688,12 @@ def page_rows(
     units: list[SemanticUnitRow] = []
     if page is not None and state is not None and state.candidates is not None:
         structure_json = json.dumps(structural_metadata(state), sort_keys=True)
+        authored_keys = {
+            occurrence.key: tuple(
+                key for key in semantic_units.GOVERNED_UNIT_METADATA_KEYS if key in occurrence.metadata
+            )
+            for occurrence in semantic_units.structural_occurrences(state.candidates)
+        }
         for source_order, unit in enumerate(semantic_units.candidate_units(state.candidates)):
             verdict, check_by_day, check_by_json, tags_canonical_json = (
                 _unit_eligibility_columns(unit)
@@ -5656,9 +5735,11 @@ def page_rows(
                         "tags_canonical_json": tags_canonical_json,
                     },
                     " ".join(bm25_module.tokenize(unit.content)),
+                    authored_keys[semantic_units.occurrence_key(unit.form, unit.span, unit.source_hash)],
                 )
             )
-    return PageRows(columns, stemmed, title_lower, body_lower, structure_json, tuple(units))
+    return PageRows(columns, stemmed, " ".join(bm25_module.tokenize(title or "")),
+                    title_lower, body_lower, structure_json, tuple(units))
 
 
 def _membership_of_parts(rel_parts: tuple[str, ...]) -> tuple[bool, bool]:
@@ -5744,11 +5825,18 @@ def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any])
     }
 
 
-def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
+def write_page_rows(conn: sqlite3.Connection, rows: PageRows, *, projections: frozenset[str] | None = None) -> None:
     """Insert one page's rows: page, full-text and unit rows (the caller owns the transaction)."""
     rowid = _insert_row(conn, "pages", _page_columns_of_table(conn, rows.columns))
+    if projections is None or "wikilink_keys" in projections:
+        from .vault import wikilink_keys
+
+        conn.execute("INSERT INTO wikilink_keys(path, path_key, stem_key, title_key) VALUES (?, ?, ?, ?)",
+                     (rows.columns["path"], *wikilink_keys(rows.columns["path"], rows.columns["title"])))
     if fts5_available():
         conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.stemmed))
+        if projections is None or "title_fts" in projections:
+            conn.execute("INSERT INTO title_fts(rowid, stemmed) VALUES(?, ?)", (rowid, rows.title_stemmed))
         conn.execute(
             "INSERT INTO tri(rowid, title_lower, body_lower) VALUES(?, ?, ?)",
             (rowid, rows.title_lower, rows.body_lower),
@@ -5760,13 +5848,18 @@ def write_page_rows(conn: sqlite3.Connection, rows: PageRows) -> None:
         )
     for unit in rows.units:
         unit_rowid = _insert_row(conn, "semantic_units", unit.columns)
+        if projections is None or "unit_row_keys" in projections:
+            conn.executemany(
+                "INSERT INTO unit_row_keys(parent_path, occurrence_key, row_key) VALUES(?, ?, ?)",
+                ((unit.columns["parent_path"], unit.columns["unit_ref"], key) for key in unit.row_keys),
+            )
         if fts5_available():
             conn.execute(
                 "INSERT INTO unit_fts(rowid, stemmed) VALUES(?, ?)", (unit_rowid, unit.stemmed)
             )
 
 
-def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
+def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str, *, projections: frozenset[str] | None = None) -> None:
     if fts5_available():
         rowids = conn.execute(
             "SELECT rowid FROM semantic_units WHERE parent_path = ?", (parent_path,)
@@ -5774,19 +5867,25 @@ def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
         for (rowid,) in rowids:
             conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+    if projections is None or "unit_row_keys" in projections:
+        conn.execute("DELETE FROM unit_row_keys WHERE parent_path = ?", (parent_path,))
 
 
-def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
+def _delete_page_rowid(conn: sqlite3.Connection, rowid: int, *, projections: frozenset[str] | None = None) -> None:
     row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
     if row is not None:
-        _delete_unit_rows(conn, row[0])
+        _delete_unit_rows(conn, row[0], projections=projections)
+        if projections is None or "wikilink_keys" in projections:
+            conn.execute("DELETE FROM wikilink_keys WHERE path = ?", (row[0],))
     if fts5_available():
         conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
+        if projections is None or "title_fts" in projections:
+            conn.execute("DELETE FROM title_fts WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
 
 
-def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
+def delete_page_rows(conn: sqlite3.Connection, rel: str, *, projections: frozenset[str] | None = None) -> None:
     """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
 
     The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
@@ -5794,7 +5893,7 @@ def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
     stamp a new one, and a derivation from the files makes none for a page with no rows.
     """
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
-        _delete_page_rowid(conn, rowid)
+        _delete_page_rowid(conn, rowid, projections=projections)
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
@@ -6033,6 +6132,8 @@ class LexicalStore:
                 if conn is None:
                     return None
                 return self._query_within_budget(conn, query_fn, readiness)
+        except CatalogUnavailable as error:
+            return CatalogQueryResult(None, error.readiness)
         except RegistryError:
             return CatalogQueryResult(
                 None, CatalogReadiness("definitions_unavailable", False, readiness.backend)
@@ -6048,6 +6149,92 @@ class LexicalStore:
                 failure_message, error
             )
             return CatalogQueryResult(None, verdict)
+
+    def _require_row_key_projection(self, conn: sqlite3.Connection, eligibility: Any) -> None:
+        if eligibility.requires_edge_families:
+            from . import epistemic_graph
+
+            conn.create_function(
+                "exomem_dependency_keys", 2,
+                lambda path, title: json.dumps(sorted(epistemic_graph.dependency_keys_for_page(path, title))),
+                deterministic=True,
+            )
+        if (eligibility.requires_row_keys or eligibility.requires_edge_families) and self._reads_store():
+            from .vault_store import read as store_read
+            from .vault_store import rederive
+
+            # Partial upgrade rows would make exclusions falsely complete; only dependent filters wait for the final stamp.
+            registry = store_read.derived_registry(conn)
+            if registry is not None and (
+                registry.owner_schema_version is None
+                or registry.owner_schema_version < rederive.UNIT_ROW_KEYS_OWNER_VERSION
+            ):
+                raise CatalogUnavailable(CatalogReadiness("stale", False, backend()))
+
+    def family_target_resolutions(
+        self, conn: sqlite3.Connection, targets: Collection[str], *,
+        admit: Callable[[Iterable[str]], None], allowed: Callable[[str], bool], proofs: dict,
+        check: Callable[[], None] | None = None,
+    ) -> dict:
+        """Resolve one family batch through indexed namespace keys and prepared admission proofs."""
+        from . import access, vault
+
+        _fingerprint, indexable = access.indexable_filter(self.vault_root)
+
+        def checkpoint() -> None:
+            if check is not None:
+                check()
+            request_budget.checkpoint()
+            budget = request_budget.current()
+            if budget is not None and budget.remaining() <= 0:
+                raise TimeoutError("stored family target lookup exhausted its request deadline")
+
+        while True:
+            checkpoint()
+            selected = {}
+            for target in targets:
+                checkpoint()
+                selected[target] = vault.select_wikilink(target, lambda axis, key: proofs.get((axis, key)))
+            missing = {(value.axis, value.key) for value in selected.values()
+                       if value.status == "incomplete" and (value.axis, value.key) not in proofs}
+            if not missing:
+                if any(value.status == "incomplete" for value in selected.values()):
+                    raise TimeoutError("stored family target proofs are incomplete")
+                return selected
+            # Lookup axes are the normalizer's closed protocol, never authored SQL identifiers.
+            for axis in ("path", "stem", "title"):
+                keys = sorted(key for found_axis, key in missing if found_axis == axis)
+                for start in range(0, len(keys), _OCCURRENCE_TRANSPORT_BATCH):
+                    active = {key: "" for key in keys[start:start + _OCCURRENCE_TRANSPORT_BATCH]}
+                    witnesses = {key: {} for key in active}
+                    while active:
+                        checkpoint()
+                        rows = conn.execute(
+                            "SELECT json_extract(r.value, '$[0]'), k.path, k.title_key, p.title, p.in_vault "
+                            "FROM json_each(?) r CROSS JOIN wikilink_keys k JOIN pages p ON p.path = k.path "
+                            "WHERE k.path IN (SELECT path FROM wikilink_keys "
+                            f"WHERE {axis}_key = json_extract(r.value, '$[0]') "
+                            "AND path > json_extract(r.value, '$[1]') ORDER BY path LIMIT ?) "
+                            "ORDER BY json_extract(r.value, '$[0]'), k.path",
+                            (json.dumps(list(active.items())), _OCCURRENCE_TRANSPORT_BATCH),
+                        ).fetchall()
+                        admitted = {path for _key, path, _title_key, _title, in_vault in rows
+                                    if in_vault == 1 and (indexable is None or indexable(path))}
+                        admit(admitted)
+                        grouped = {key: [] for key in active}
+                        for key, path, title_key, title, _in_vault in rows:
+                            checkpoint()
+                            grouped[key].append(path)
+                            if path in admitted and allowed(path) and len(witnesses[key]) < 2:
+                                witnesses[key][path] = vault.WikilinkCandidate(path, title_key, title)
+                        for key, paths in grouped.items():
+                            found = tuple(witnesses[key].values())
+                            exhausted = len(paths) < _OCCURRENCE_TRANSPORT_BATCH
+                            if len(found) >= 2 or exhausted:
+                                proofs[axis, key] = vault.WikilinkMatches(found, exhausted and len(found) < 2)
+                                del active[key]
+                            else:
+                                active[key] = paths[-1]
 
     @contextlib.contextmanager
     def _query_connection(self):
@@ -6869,6 +7056,10 @@ class LexicalStore:
                 row[1] for row in conn.execute("PRAGMA table_info(pages)")
             } and LexicalStore._CURRENT_UNIT_COLUMNS <= {
                 row[1] for row in conn.execute("PRAGMA table_info(semantic_units)")
+            } and {"parent_path", "occurrence_key", "row_key"} <= {
+                row[1] for row in conn.execute("PRAGMA table_info(unit_row_keys)")
+            } and {"path", "path_key", "stem_key", "title_key"} <= {
+                row[1] for row in conn.execute("PRAGMA table_info(wikilink_keys)")
             }
         except sqlite3.OperationalError:
             # Positive assessments must distinguish unreadable from legacy.
@@ -6942,6 +7133,13 @@ class LexicalStore:
             # The duplicate-handling index: derived from the page's bytes, never authority.
             " payload_hash TEXT, source_url TEXT)"
         )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS wikilink_keys("
+            "path TEXT PRIMARY KEY, path_key TEXT NOT NULL, stem_key TEXT NOT NULL, title_key TEXT)"
+        )
+        # These are the normalizer's closed lookup axes; their values remain page data.
+        for key in ("path_key", "stem_key", "title_key"):
+            conn.execute(f"CREATE INDEX IF NOT EXISTS wikilink_keys_{key} ON wikilink_keys({key}, path)")
         # Per-scope walk triples this sidecar was last VERIFIED against
         # (repr'd) — the cross-process "nothing changed while we were down"
         # attestation that lets a restart skip the exact verify.
@@ -6992,6 +7190,11 @@ class LexicalStore:
             " UNIQUE(parent_path, unit_ref))"
         )
         LexicalStore._create_frequency_revision_triggers(conn, "semantic_units")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS unit_row_keys("
+            " parent_path TEXT NOT NULL, occurrence_key TEXT NOT NULL, row_key TEXT NOT NULL,"
+            " PRIMARY KEY(parent_path, occurrence_key, row_key))"
+        )
         conn.execute(
             "CREATE TABLE IF NOT EXISTS unit_revisions("
             " parent_path TEXT PRIMARY KEY, revision TEXT NOT NULL)"
@@ -7049,6 +7252,10 @@ class LexicalStore:
 
     @staticmethod
     def _create_catalog_indexes(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS unit_row_keys_key "
+            "ON unit_row_keys(row_key, parent_path, occurrence_key)"
+        )
         # Covering indexes so the per-corpus-change count/max reconcile stays
         # index-ranged instead of scanning 100k rows.
         conn.execute("CREATE INDEX IF NOT EXISTS pages_kb ON pages(in_kb, mtime_ns)")
@@ -7112,7 +7319,7 @@ class LexicalStore:
         """Drop the disposable normal + FTS tables (never `meta`), so a legacy
         shape can be replaced by the current one without a new-column index or
         INSERT ever running against the old table."""
-        for table in ("semantic_units", "pages", "unit_revisions", "fts", "tri", "unit_fts"):
+        for table in ("wikilink_keys", "unit_row_keys", "semantic_units", "pages", "unit_revisions", "fts", "tri", "title_fts", "unit_fts"):
             conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> bool:
@@ -7139,7 +7346,7 @@ class LexicalStore:
     def _ensure_fts_schema(conn: sqlite3.Connection) -> None:
         """Create the optional FTS5/trigram virtual tables when available.
 
-        These back the BM25 (`fts`, `unit_fts`) and substring (`tri`) lanes
+        These back BM25 (`fts`, `unit_fts`), title contact (`title_fts`) and substring (`tri`) lanes
         only; the normal-table page/semantic-unit catalog does not read them.
         Creation is gated on the process FTS5 probe and additionally soft-fails,
         so an FTS5-less SQLite build (or a probe monkeypatched to fail) still
@@ -7151,6 +7358,9 @@ class LexicalStore:
                 f"CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed, {_FTS_TOKENIZE})"
             )
             LexicalStore._create_frequency_revision_triggers(conn, "fts_content")
+            conn.execute(
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS title_fts USING fts5(stemmed, {_FTS_TOKENIZE})"
+            )
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
                 "title_lower, body_lower, tokenize='trigram case_sensitive 1')"
@@ -7175,14 +7385,14 @@ class LexicalStore:
             )
 
     def _replace_stale_fts_tables(self, conn: sqlite3.Connection) -> None:
-        """Re-declare `fts`/`unit_fts` when an older tokenizer declared them.
+        """Re-declare stemmed full-text tables when an older tokenizer declared them.
 
         `CREATE ... IF NOT EXISTS` keeps an existing table's declaration, so an
         in-place rebuild of a v10 catalogue would otherwise refill tables whose
         default unicode61 folds diacritics and splits at combining marks. Both
         tables are disposable: the rebuild that calls this repopulates them.
         """
-        for table in ("fts", "unit_fts"):
+        for table in ("fts", "title_fts", "unit_fts"):
             row = conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
                 (table,),
@@ -7650,9 +7860,12 @@ class LexicalStore:
         with conn:
             conn.execute("DELETE FROM pages")
             conn.execute("DELETE FROM semantic_units")
+            conn.execute("DELETE FROM unit_row_keys")
+            conn.execute("DELETE FROM wikilink_keys")
             if fts5_available():
                 self._replace_stale_fts_tables(conn)
                 conn.execute("DELETE FROM fts")
+                conn.execute("DELETE FROM title_fts")
                 conn.execute("DELETE FROM tri")
                 conn.execute("DELETE FROM unit_fts")
             # The deletes above left a revision for every parent they removed; the inserts below give each page its own.
@@ -7827,11 +8040,19 @@ class LexicalStore:
         ).fetchall()
         for (parent_path,) in orphan_parents:
             self._delete_semantic_units(conn, str(parent_path))
+        conn.execute(
+            "DELETE FROM wikilink_keys WHERE NOT EXISTS(SELECT 1 FROM pages p WHERE p.path = wikilink_keys.path)"
+        )
+        conn.execute(
+            "DELETE FROM unit_row_keys WHERE NOT EXISTS(SELECT 1 FROM semantic_units u "
+            "WHERE u.parent_path = unit_row_keys.parent_path AND u.unit_ref = unit_row_keys.occurrence_key)"
+        )
         if fts5_available():
             conn.execute(
                 "DELETE FROM unit_fts WHERE rowid NOT IN (SELECT rowid FROM semantic_units)"
             )
             conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
+            conn.execute("DELETE FROM title_fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
             conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
     def _delete_rowid(self, conn: sqlite3.Connection, rowid: int) -> None:
@@ -9451,7 +9672,7 @@ class LexicalStore:
     def _index_rows_missing(conn: sqlite3.Connection) -> bool:
         """Whether a page or semantic unit lacks the full-text row a build writes for it.
 
-        A build writes one `fts` and one `tri` row per page and one `unit_fts`
+        A build writes one `fts`, `title_fts` and `tri` row per page and one `unit_fts`
         row per semantic unit when FTS5 is available. Without FTS5 neither the
         copy nor a fresh build has those tables, so only present tables are
         counted. Run after `_delete_orphan_rows`: a count below its owner's is
@@ -9463,7 +9684,7 @@ class LexicalStore:
         }
         # The schema's own full-text tables and their owner tables, as `_ensure_fts_schema`
         # declares them: a closed set.
-        for index, owner in (("fts", "pages"), ("tri", "pages"), ("unit_fts", "semantic_units")):
+        for index, owner in FULLTEXT_PARENT_TABLES.items():
             if index in tables and (
                 conn.execute(f"SELECT count(*) FROM {index}").fetchone()[0]
                 != conn.execute(f"SELECT count(*) FROM {owner}").fetchone()[0]
@@ -10815,6 +11036,70 @@ class LexicalStore:
             recall_checkpoint=recall_checkpoint,
         )
 
+    def title_contact_paths_result(
+        self, query_units: Sequence[Any], scope: str, freshness: tuple | None,
+        allowed_paths: Set[str], *, visible: Callable[[str], bool] | None,
+        status_basis: Any, recall_checkpoint: Any | None = None,
+    ) -> CatalogQueryResult[list[str]]:
+        """Zero, one or two admitted title contacts, without ranking or corpus statistics."""
+        if not _usable():
+            return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+        budget = request_budget.current()
+        if budget is not None and budget.remaining() <= 0:
+            return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend()))
+
+        def query(conn: sqlite3.Connection) -> list[str]:
+            from . import vault
+            from .vault_store import read as store_read
+            from .vault_store import rederive
+
+            _require_current_parser(conn)
+            registry = store_read.derived_registry(conn)
+            if registry is not None and (
+                registry.owner_schema_version is None
+                or registry.owner_schema_version < rederive.TITLE_CONTACT_OWNER_VERSION
+            ):
+                raise CatalogUnavailable(CatalogReadiness("stale", False, backend()))
+            terms = _term_units(query_units)
+            if not terms or not allowed_paths:
+                return []
+
+            def admitted(path: str, frontmatter_yaml: str) -> int:
+                if visible is not None and not visible(path):
+                    return 0
+                frontmatter = vault.yaml_safe_load(frontmatter_yaml)
+                if not isinstance(frontmatter, dict):
+                    raise ValueError("title contact lacks its lifecycle projection")
+                return int(not frontmatter.get("superseded_by") and status_basis.classify(
+                    frontmatter.get("status"), path=path, frontmatter=frontmatter,
+                ).carryable)
+
+            conn.create_function("exomem_title_admitted", 2, admitted)
+            excluded, excluded_params = _excluded_rows_clause(navigation=True, raw_material=True)
+            col = "in_vault" if scope == "vault" else "in_kb"
+            match = " OR ".join(f'"{stem}"' for stem in dict.fromkeys(term[0] for term in terms))
+            try:
+                with contextlib.closing(conn.execute(
+                    "SELECT p.path FROM title_fts CROSS JOIN pages p ON p.rowid = title_fts.rowid "
+                    f"WHERE title_fts MATCH ? AND p.{col} = 1 "
+                    "AND p.path IN (SELECT value FROM json_each(?))" + excluded + " "
+                    "AND exomem_title_admitted(p.path, json_extract(p.ranking_json, '$.frontmatter_yaml')) "
+                    "AND EXISTS(SELECT 1 FROM json_each(?) term "
+                    "WHERE instr(' ' || title_fts.stemmed || ' ', ' ' || json_extract(term.value, '$[0]') || ' ') > 0 "
+                    "GROUP BY json_extract(term.value, '$[1]') "
+                    "HAVING COUNT(*) >= MAX(json_extract(term.value, '$[2]'))) LIMIT 2",
+                    (match, json.dumps(sorted(allowed_paths)), *excluded_params, json.dumps(terms)),
+                )) as rows:
+                    return [str(row[0]) for row in rows]
+            finally:
+                conn.create_function("exomem_title_admitted", 2, None)
+
+        with stopping_at_budget():
+            return self._serve_from_ready_catalog_result(
+                scope, freshness, query, "lexical title contact unavailable (%s)",
+                recall_checkpoint=recall_checkpoint, allow_delta=False,
+            )
+
     def carry_term_statistics(
         self,
         stemmed_tokens: list[str],
@@ -10837,6 +11122,7 @@ class LexicalStore:
         """
         def query(conn: sqlite3.Connection):
             context = query_context or RequestQueryContext(self.vault_root, visible, status_basis)
+            _require_current_parser(conn)
             if context.visible is not visible or context.status_basis is not status_basis:
                 raise ValueError("query context belongs to another reader or lifecycle basis")
             admitted = self._request_admitted_paths(conn, context)
@@ -10956,6 +11242,7 @@ class LexicalStore:
         exclude_statuses: tuple[str, ...] = (),
     ) -> CatalogQueryResult[dict[str, tuple[str, ...]]]:
         def query(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+            _require_current_parser(conn)
             col = "in_vault" if scope == "vault" else "in_kb"
             clause, params = _excluded_rows_clause(
                 navigation=exclude_navigation,
@@ -11090,8 +11377,12 @@ class LexicalStore:
 
     def _snapshot_generation(self, conn: sqlite3.Connection) -> tuple:
         """The pinned snapshot's revision, recall checkpoints and catalogue identity."""
+        from . import semantic_index
+
+        _require_current_parser(conn)
         return (
             self._frequency_revision(conn),
+            ("parser_version", semantic_index.PARSER_VERSION),
             *conn.execute(
                 "SELECT key, value FROM meta WHERE key LIKE 'recall_checkpoint:%' "
                 "OR key = 'catalog_identity' ORDER BY key"
@@ -11498,6 +11789,7 @@ class LexicalStore:
         query_units: list | None = None,
         term_selection: dict[str, int] | None = None,
     ) -> list[tuple[str, float]]:
+        _require_current_parser(conn)
         if query_context is not None:
             # Configuration decides: a request whose admission can withhold
             # nothing ranks on the catalogue, and every other request filters
@@ -11936,7 +12228,7 @@ class LexicalStore:
         bytes and then serves: title, ``updated``, the emitted-parent link,
         every eligibility column with ``content_hash`` (the row
         `_catalogue_custody_verify` compares), and the trigram lane's
-        lowercased title and body. The file must hash to the expected sha256
+        lowercased title and body, plus the exact stemmed title. The file must hash to the expected sha256
         before its parse is compared, so a row built from a different
         generation cannot answer yes -- including one that differs only in a
         filter column such as ``status``, which no text column shows.
@@ -11944,9 +12236,11 @@ class LexicalStore:
         answers = dict.fromkeys(expected, False)
         if self._sidecar_unreadable():
             return answers
-        from . import find_corpus
+        from . import find_corpus, vault
 
         eligibility = ", ".join(f"p.{column}" for column in (*_ELIGIBILITY_COLUMNS, "content_hash"))
+        title_projection = "(SELECT stemmed FROM title_fts WHERE rowid = p.rowid)" if fts5_available() else "NULL"
+        key_projection = "(SELECT json_array(path_key, stem_key, title_key) FROM wikilink_keys WHERE path = p.path)"
         try:
             conn = self._connect()
         except sqlite3.Error as error:
@@ -11958,7 +12252,7 @@ class LexicalStore:
             for rel, digest in expected.items():
                 row = conn.execute(
                     "SELECT p.rowid, p.title, p.updated, p.emitted_parent_path, "  # noqa: S608 - fixed names
-                    f"{eligibility} FROM pages AS p WHERE p.path = ?",
+                    f"{eligibility}, {key_projection}, {title_projection} FROM pages AS p WHERE p.path = ?",
                     (rel,),
                 ).fetchone()
                 if digest is None:
@@ -11982,15 +12276,21 @@ class LexicalStore:
                     continue
                 expected_title = page.title
                 expected_parent = page.emitted_parent
-                stored_eligibility = tuple(None if value is None else str(value) for value in row[4:])
+                stored_eligibility = tuple(None if value is None else str(value) for value in row[4:-2])
                 if (
                     row[1] != expected_title
                     or str(row[2]) != (page.updated or "0000-00-00")
                     or row[3] != expected_parent
                     or stored_eligibility != (*_eligibility_columns(page), digest)
+                    or row[-2] is None
+                    or tuple(json.loads(row[-2])) != vault.wikilink_keys(rel, expected_title)
                 ):
                     continue
                 if fts5_available():
+                    from . import bm25 as bm25_module
+
+                    if row[-1] != " ".join(bm25_module.tokenize(expected_title or "")):
+                        continue
                     tri = conn.execute(
                         "SELECT title_lower, body_lower FROM tri WHERE rowid = ?",
                         (row[0],),
@@ -12060,9 +12360,13 @@ class LexicalStore:
         if self._reads_store():
             from .vault_store import rederive
 
-            # Old store rows stay incomplete until the owner's background pass finishes.
+            # Old store rows stay incomplete until the owner's background pass finishes. Duplicate
+            # lookup reads payload hashes only, so a store that holds them keeps answering while a
+            # later projection generation fills.
             with self._store_connection() as conn:
-                return conn is not None and not rederive.owner_schema_behind(conn)
+                return conn is not None and not rederive.owner_schema_behind(
+                    conn, required_version=rederive.PAYLOAD_HASHES_OWNER_VERSION
+                )
         from .vocabulary.registry import RegistryError
 
         if self._sidecar_unreadable():
@@ -12199,7 +12503,7 @@ class LexicalStore:
                 ]
                 view.require_complete()
                 return served
-        except RegistryError:
+        except (RegistryError, CatalogUnavailable):
             return None
         except sqlite3.Error as error:
             self._note_query_failure(error, "lexical unit probe declined (%s)")
@@ -12300,6 +12604,7 @@ class LexicalStore:
             return None
 
         def read(conn: sqlite3.Connection) -> dict[str, tuple[int, int, int]]:
+            _require_current_parser(conn)
             rows = conn.execute(
                 "SELECT r.kind, COUNT(*), COUNT(DISTINCT r.parent_path), "
                 "COALESCE(SUM((SELECT COUNT(*) FROM semantic_units c "
@@ -13037,6 +13342,7 @@ class LexicalStore:
         term_budget: QueryTermBudget | None = None,
         retained_query_units: list | None = None,
         registry_scope: str | None = None,
+        filter_plan: Any | None = None,
         parents_first: bool = False,
     ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
         """Ready-catalogue unit query, optionally ranking bounded material terms.
@@ -13048,7 +13354,7 @@ class LexicalStore:
         span the corpus; without statistics the planner reads every unit of the
         categories first.
         """
-        if not (categories or kinds or clauses or query_units):
+        if not (categories or kinds or clauses or query_units or filter_plan is not None):
             return CatalogQueryResult(
                 None, CatalogReadiness("unsupported", False, backend())
             )
@@ -13057,6 +13363,7 @@ class LexicalStore:
             tokens: list[str] = []
             view = _SelectedUnits(
                 self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
+                filter_plan=filter_plan,
             )
             statistics = None
             if query_units is not None and term_budget is not None:
@@ -13085,6 +13392,7 @@ class LexicalStore:
                 excluded_categories_by_parent=excluded_categories_by_parent,
                 registry_scope=registry_scope,
                 selected_units=view, statistics=statistics, parents_first=parents_first,
+                filter_plan=filter_plan,
             )
 
         return self._serve_from_ready_catalog_result(
@@ -13115,6 +13423,7 @@ class LexicalStore:
         registry_scope: str | None = None,
         selected_units: _SelectedUnits | None = None,
         statistics: _AdmittedStatisticsEntry | None = None,
+        filter_plan: Any | None = None,
         parents_first: bool = False,
     ) -> list[SemanticUnitLexicalHit]:
         """Units whose own selected meaning matches, ranked, then limited to `k`.
@@ -13132,6 +13441,7 @@ class LexicalStore:
         col = "in_vault" if scope == "vault" else "in_kb"
         view = selected_units or _SelectedUnits(
             self.vault_root, conn, admitted=admitted_parent_paths, released=released_parent_paths,
+            filter_plan=filter_plan,
         )
         plans = view.plans(
             categories=categories, kinds=kinds, clauses=dnf_clauses, registry_scope=registry_scope
@@ -13139,6 +13449,18 @@ class LexicalStore:
         predicate, predicate_params = view.predicate(plans)
         params = list(predicate_params)
         clauses = [f"u.{col} = 1", predicate]
+        page_join = ""
+        if filter_plan is not None:
+            from . import structured_filters
+
+            eligibility = structured_filters.plan_index_eligibility(filter_plan)
+            self._require_row_key_projection(conn, eligibility)
+            proposal, proposed_params = _eligibility_sql(
+                eligibility.expr, unit_missing=False, labels=_selected_axis_labels(self.vault_root),
+            )
+            clauses.append(f"({proposal}) IS NOT 0")
+            params.extend(proposed_params)
+            page_join = " JOIN pages p ON p.path = u.parent_path"
         for paths in (allowed_parent_paths, admitted_parent_paths):
             if paths is not None:
                 clauses.append("u.parent_path IN (SELECT value FROM json_each(?))")
@@ -13151,6 +13473,7 @@ class LexicalStore:
             path = str(row[1])
             return (
                 view.matches(plans, path, unit)
+                and view.matches_filter(row, unit)
                 and (
                     excluded_categories_by_parent is None
                     or unit.category not in excluded_categories_by_parent.get(path, ())
@@ -13171,46 +13494,41 @@ class LexicalStore:
             candidate_tokens = {}
             candidates = {}
             ambiguous = set()
-            for (representative,) in conn.execute("SELECT rowid FROM unit_fts WHERE unit_fts MATCH ?", (match,)):
-                ref = representatives.get(representative)
-                if ref is None or allowed_unit_refs is not None and ref not in allowed_unit_refs:
-                    continue
-                winner = None
-                eligible = 0
-                for rowid, path, key in occurrences[ref]:
-                    if allowed_parent_paths is not None and path not in allowed_parent_paths:
+            matching = iter(conn.execute("SELECT rowid, stemmed FROM unit_fts WHERE unit_fts MATCH ?", (match,)))
+            while batch := list(itertools.islice(matching, _OCCURRENCE_TRANSPORT_BATCH)):
+                selected = [(representative, str(stemmed), representatives.get(representative))
+                            for representative, stemmed in batch]
+                rowids = [rowid for _representative, _stemmed, ref in selected if ref is not None
+                          and (allowed_unit_refs is None or ref in allowed_unit_refs)
+                          for rowid, _path, _key in occurrences[ref]]
+                rows = conn.execute(
+                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u{page_join} "
+                    f"WHERE u.rowid IN (SELECT value FROM json_each(?)) AND {where}",
+                    [json.dumps(rowids), *params],
+                )
+                eligible_rows = {(str(row[1]), str(row[0])): (row, unit)
+                                 for row, unit in view.candidates(rows) if wanted(row, unit)}
+                for _representative, stemmed, ref in selected:
+                    if ref is None or allowed_unit_refs is not None and ref not in allowed_unit_refs:
                         continue
-                    if conn.execute(
-                        f"SELECT 1 FROM semantic_units u WHERE u.rowid = ? AND {predicate}",
-                        [rowid, *predicate_params],
-                    ).fetchone() is None:
+                    winners = [eligible_rows[path, key] for _rowid, path, key in occurrences[ref]
+                               if (path, key) in eligible_rows]
+                    if not winners:
                         continue
-                    unit = view.unit(path, key)
-                    if unit is not None and wanted((key, path), unit):
-                        winner = (rowid, unit)
-                        eligible += 1
-                if winner is None:
-                    continue
-                if eligible > 1:
-                    ambiguous.add(ref)
-                else:
-                    rowid, unit = winner
-                    row = conn.execute(
-                        f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE u.rowid = ?", (rowid,),
-                    ).fetchone()
-                    candidates[ref] = (row, unit)
-                stemmed = conn.execute("SELECT stemmed FROM unit_fts WHERE rowid = ?", (representative,)).fetchone()
-                # First-representative tokens rank the last eligible alias;
-                # neither a matching alias nor a predicate changes those tokens.
-                candidate_tokens[ref] = str(stemmed[0]).split()
+                    if len(winners) > 1:
+                        ambiguous.add(ref)
+                    else:
+                        candidates[ref] = winners[-1]
+                    # First-representative tokens rank the last eligible alias.
+                    candidate_tokens[ref] = stemmed.split()
             if ambiguous:
                 # Duplicate refs retain the original unordered SELECT authority.
                 # This compatibility fallback still scans candidate content; its bound remains unmet.
                 keys = {(path, key) for ref in ambiguous for _rowid, path, key in occurrences[ref]}
                 rows = conn.execute(
-                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u WHERE {where}", params,
+                    f"SELECT {_OCCURRENCE_COLUMNS} FROM semantic_units u{page_join} WHERE {where}", params,
                 )
-                for row, unit in view.served(row for row in rows if (str(row[1]), str(row[0])) in keys):
+                for row, unit in view.candidates(row for row in rows if (str(row[1]), str(row[0])) in keys):
                     if wanted(row, unit) and str(unit.unit_ref) in ambiguous:
                         candidates[str(unit.unit_ref)] = (row, unit)
             scored = statistics.statistics.score(
@@ -13222,7 +13540,7 @@ class LexicalStore:
                 match = " OR ".join(f'"{token}"' for token in tokens)
                 rows = conn.execute(
                     f"SELECT {_OCCURRENCE_COLUMNS}, -bm25(unit_fts) AS lexical_score "
-                    f"FROM {_UNIT_FTS_UNITS} "
+                    f"FROM {_UNIT_FTS_UNITS}{page_join} "
                     f"WHERE unit_fts MATCH ? AND {where} "
                     "ORDER BY bm25(unit_fts), u.parent_path, u.source_order",
                     [match, *params],
@@ -13230,11 +13548,11 @@ class LexicalStore:
             else:
                 driver = " INDEXED BY semantic_units_parent" if parents_first and allowed_parent_paths is not None else ""
                 rows = conn.execute(
-                    f"SELECT {_OCCURRENCE_COLUMNS}, NULL AS lexical_score FROM semantic_units u{driver} "
+                    f"SELECT {_OCCURRENCE_COLUMNS}, NULL AS lexical_score FROM semantic_units u{driver}{page_join} "
                     f"WHERE {where} ORDER BY u.updated DESC, u.parent_path DESC, u.source_order",
                     params,
                 )
-            for row, unit in view.served(rows):
+            for row, unit in view.candidates(rows):
                 if len(hits) >= k:
                     break
                 if wanted(row, unit):
@@ -13357,6 +13675,9 @@ class LexicalStore:
         candidate lanes address the child while the final hit addresses the
         emitted parent, and both identities belong to one eligibility set.
         """
+        self._require_row_key_projection(conn, eligibility)
+        if eligibility.has_unit_axis:
+            _require_current_parser(conn)
         col = "in_vault" if scope == "vault" else "in_kb"
         predicate, params = _eligibility_predicate(
             eligibility, col, _selected_axis_labels(self.vault_root)
@@ -13415,6 +13736,9 @@ class LexicalStore:
         the exact key the hit list is sorted by, rather than relying on this
         connection's collation to agree with `str.__lt__`.
         """
+        self._require_row_key_projection(conn, eligibility)
+        if eligibility.has_unit_axis:
+            _require_current_parser(conn)
         col = "in_vault" if scope == "vault" else "in_kb"
         predicate, params = _eligibility_predicate(
             eligibility, col, _selected_axis_labels(self.vault_root)

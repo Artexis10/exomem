@@ -185,6 +185,42 @@ def test_repeated_availability_proves_an_inherited_sidecar_once(
     )
 
 
+def test_a_header_only_wal_keeps_the_proved_graph_available(
+    inherited_vault: Path, tmp_path: Path,
+) -> None:
+    """A writer's frame-free WAL header must not cool an unchanged graph."""
+    seed = tmp_path / "header-seed.sqlite"
+    writer = sqlite3.connect(seed)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE sample (value TEXT)")
+        writer.commit()
+        # SQLite defines a 32-byte WAL header before the first frame.
+        header = seed.with_name(seed.name + "-wal").read_bytes()[:32]
+    finally:
+        writer.close()
+
+    graph = EpistemicGraphIndex(inherited_vault)
+    keeper = graph._connect_existing(readonly=True)
+    try:
+        keeper.execute("PRAGMA schema_version").fetchone()
+        assert graph.available()
+        wal = graph.path.with_name(graph.path.name + "-wal")
+        assert not wal.exists() or wal.stat().st_size == 0
+        wal.write_bytes(header)
+        assert graph.availability_state() == "available"
+
+        # A real changed row stays in the WAL while the reader remains attached.
+        main_before = graph.path.stat()
+        _set_stored_source_hash(inherited_vault, STALE_REL, "0" * 64)
+        assert wal.stat().st_size > 32
+        assert graph.path.stat() == main_before
+        assert graph.availability_state() == "unproven"
+        assert not graph.available()
+    finally:
+        keeper.close()
+
+
 def test_a_declined_proof_is_remembered_until_the_sidecar_moves(
     stale_inherited_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -201,6 +237,64 @@ def test_a_declined_proof_is_remembered_until_the_sidecar_moves(
     for _ in range(3):
         assert EpistemicGraphIndex(root).available() is True
     assert len(proofs) == 2
+
+
+def test_a_deadline_in_the_cold_membership_walk_does_not_poison_the_next_reader(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One request's optional deadline must not become a remembered false graph verdict."""
+    from exomem.working_set import BudgetExhausted
+
+    walking = False
+    memberships = EpistemicGraphIndex._recall_memberships
+
+    def walk(index, **kwargs):
+        nonlocal walking
+        walking = True
+        try:
+            return memberships(index, **kwargs)
+        finally:
+            walking = False
+
+    def check():
+        if walking:
+            raise BudgetExhausted("working_set.marks")
+
+    monkeypatch.setattr(EpistemicGraphIndex, "_recall_memberships", walk)
+    index = EpistemicGraphIndex(inherited_vault)
+    with pytest.raises(BudgetExhausted):
+        index.unit_edges(["links_to"], pages={f"{GENERATED}/generated-note-0000.md"}, check=check)
+
+    recovered = index.unit_edges(["links_to"], pages={f"{GENERATED}/generated-note-0000.md"})
+    assert recovered.status == "available"
+    assert index.available() is True
+
+
+def test_a_write_before_the_read_snapshot_cannot_reuse_the_previous_proof(
+    inherited_vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write after the file sample must not lend its rows an older proof."""
+    graph = EpistemicGraphIndex(inherited_vault)
+    keeper = graph._connect_existing(readonly=True)
+    try:
+        keeper.execute("PRAGMA schema_version").fetchone()
+        assert graph.available()
+        original_connect = graph._connect_existing
+        changed = False
+
+        def open_then_change(*args: object, **kwargs: object) -> sqlite3.Connection:
+            nonlocal changed
+            connection = original_connect(*args, **kwargs)
+            if kwargs.get("readonly") and not changed:
+                changed = True
+                _set_stored_source_hash(inherited_vault, STALE_REL, "0" * 64)
+            return connection
+
+        monkeypatch.setattr(graph, "_connect_existing", open_then_change)
+        assert graph.availability_state() == "unproven"
+        assert changed
+    finally:
+        keeper.close()
 
 
 def test_a_remembered_verdict_never_outlives_a_moved_freshness_identity(

@@ -382,6 +382,7 @@ def review(
     limit: int = 4,
     continuation: str | None = None,
     state: str = "open",
+    dimensions=None,
 ) -> dict[str, Any]:
     from . import vocabulary_delivery
 
@@ -394,6 +395,36 @@ def review(
         {work.fingerprint for work in topic_carrier_considerations.publish(vault_root)}
         if state == "open" else None
     )
+    dimension_coverage = None
+
+    def authorize(items):
+        if not items or any(item["signal"] != REGISTRY_PROPOSAL_SIGNAL for item in items):
+            _require_registry_observation(vault_root)
+        else:
+            for item in items:
+                _require_registry_observation(vault_root, item)
+
+    def select(items):
+        nonlocal dimension_coverage
+        from .review_dimensions import ReviewTarget
+
+        # Keep the queue's authorization over its original visible prefix, before optional narrowing.
+        authorize(items)
+        targets = []
+        for item in items:
+            if item["signal"] in (REGISTRY_PROPOSAL_SIGNAL, topic_carrier_considerations.SIGNAL):
+                # These producer signals address a registry or carrier, never a semantic page.
+                targets.append(ReviewTarget(None))
+                continue
+            try:
+                paths = {_path(vault_root, item, ref) for ref in item["target_versions"]}
+            except ValueError:
+                paths = set()
+            targets.append(ReviewTarget(next(iter(paths))) if len(paths) == 1
+                           else ReviewTarget(None, available=False))
+        selected, dimension_coverage = dimensions.select(items, targets, unsearched=None)
+        return selected
+
     result = owner.page(
         limit=limit,
         continuation=continuation,
@@ -405,12 +436,12 @@ def review(
             or item["signal"] != topic_carrier_considerations.SIGNAL
             or item["fingerprint"] in ranked
         ),
+        select=select if dimensions is not None else None,
     )
-    if not result["items"] or any(item["signal"] != REGISTRY_PROPOSAL_SIGNAL for item in result["items"]):
-        _require_registry_observation(vault_root)
-    else:
-        for item in result["items"]:
-            _require_registry_observation(vault_root, item)
+    if dimension_coverage is None:
+        authorize(result["items"])
+    if dimensions is not None and result.get("state") == "current":
+        result["dimension_coverage"] = dimension_coverage or dimensions.coverage([], unsearched=None)
     if recovery and (recovery["processed"] or recovery["state"] != "current"):
         result["recovery"] = recovery
     return result
