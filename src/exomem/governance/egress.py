@@ -4061,14 +4061,6 @@ def guard_working_set(
 
     from .. import working_set
 
-    if working_set.packet_has_graph_quotes(guarded):
-        # If source authority changed during this read, the packet's pointers and quotes
-        # were both selected under the old authority. Refuse it so a new read can compile
-        # under the current authority instead of repairing individual fields.
-        with state_paths.outside_resolution_scope(), policy_module.outside_request_policy_snapshot():
-            if not unrestricted_source_access(vault_root, purpose=purpose, principal=who):
-                return None
-
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
@@ -4125,6 +4117,17 @@ def guard_working_set(
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
+
+    task_connections = any(
+        item.get("links") or item.get("links_omitted")
+        for item in (guarded.get("task_context") or {}).get("candidates", ())
+    )
+    if task_connections or working_set.packet_has_graph_quotes(guarded):
+        # Task links and graph quotes require unrestricted source access. If it narrowed
+        # during compilation, refuse the stale packet rather than releasing old material.
+        with state_paths.outside_resolution_scope(), policy_module.outside_request_policy_snapshot():
+            if not unrestricted_source_access(vault_root, purpose=purpose, principal=who):
+                return None
 
     ctx = _packet_release(
         vault_root,

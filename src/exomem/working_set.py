@@ -1995,6 +1995,7 @@ def read_connections(
     per_seed: int,
     defer_why: bool = False,
     purpose: str | None = None,
+    quote_prose: bool | None = None,
 ) -> dict[str, tuple[list[Connection], int]] | None:
     """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
 
@@ -2060,7 +2061,8 @@ def read_connections(
         return {}
     # A reason can quote from anywhere in a body. Callers who need a page projection
     # get a pointer and the relation, and can open the page through its release boundary.
-    quote_prose = graph_quote_access(vault_root, purpose=purpose)
+    if quote_prose is None:
+        quote_prose = egress.unrestricted_source_access(vault_root, purpose=purpose)
     resolver = find.borrow_query_resolver(Path(vault_root), visible) if quote_prose else None
     seed_paths = set(seeds)
 
@@ -2972,7 +2974,8 @@ def _graph_lane(
     try:
         connections = read_connections(
             vault_root, seeds,
-            by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR, purpose=purpose,
+            by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR,
+            quote_prose=graph_quote_access(vault_root, purpose=purpose),
         )
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph connections failed", exc_info=True)
