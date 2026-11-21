@@ -161,9 +161,11 @@ def initialize(conn: sqlite3.Connection) -> None:
     # costs nothing to find again.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version) "
                  f"WHERE state <> '{QUARANTINED}'")
-    # The filings of one ciphertext, under any name, which a wrong plaintext quarantines together and a sample that
-    # decrypts it releases together (`_inherit`, `_released`).
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_digest ON media_replicas(ciphertext_sha256)")
+    # The filings of one ciphertext, under any name, that are not quarantined: the ones a wrong plaintext of it
+    # quarantines together (`_inherit`, `_quarantine_listing`). A finding that repeats reads none that it handled before,
+    # however many filings hold the ciphertext. A release finds the quarantined ones through the records (`_released`).
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_digest ON media_replicas(ciphertext_sha256) "
+                 f"WHERE state <> '{QUARANTINED}'")
     # The filings of one stored version that a plaintext finding quarantined, which a later finding of another cause on
     # the version moves to that cause (`quarantine_all`): a version has few filings, so that reads only them, however
     # many other replicas are quarantined.
@@ -275,7 +277,7 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
         conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
                                          replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED,
                                          replica.ciphertext_sha256))
-        conn.execute(_INHERIT_OF, (replica.ciphertext_sha256,))
+        conn.execute(_INHERIT_OF, {"digest": replica.ciphertext_sha256})
         changed = _quarantine_listing(conn, time.time(), replica, binary_rel=binary_rel)
     if changed:
         wake()
@@ -333,7 +335,7 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
                              (replica.store, binary_rel, PENDING, RECOPY))
                 changed = True
         if failure == PLAINTEXT_MISMATCH:
-            conn.execute(_INHERIT_OF, (replica.ciphertext_sha256,))
+            conn.execute(_INHERIT_OF, {"digest": replica.ciphertext_sha256})
             changed |= _quarantine_listing(conn, now, digest=replica.ciphertext_sha256)
         else:
             # The record now names this cause, so the filings that a wrong plaintext quarantined follow it: left as they
@@ -350,23 +352,29 @@ def _quarantine_listing(conn: sqlite3.Connection, now: float, only: originals.St
                         binary_rel: str | None = None, digest: str | None = None) -> bool:
     """Quarantine each filing that lists a damaged version and is not quarantined yet, and queue its copy again.
 
-    The version is `only`, the versions that record `digest`, or any in `media_damaged_versions`; `binary_rel` narrows
-    `only` to one filing's row, which a publication reads by its primary key. Two statements whose reads are indexed:
-    the filings of one version in `media_replicas_held` (they state the index's condition), and, for every version,
-    the damaged table. A filing that is already quarantined keeps its own request. Returns whether a filing changed.
+    The version is `only`, the filings of the ciphertext `digest`, or any version in `media_damaged_versions`;
+    `binary_rel` narrows `only` to one filing's row, which a publication reads by its primary key. Two statements whose
+    reads are indexed: the filings of one version in `media_replicas_held`, those of one ciphertext in
+    `media_replicas_digest` (each states its index's condition, so a filing that is quarantined is never read), and, for
+    every version, the damaged table. A filing that is already quarantined keeps its own request. Returns whether a
+    filing changed.
     """
-    version, parameters, row = "", (), ""
-    if only is not None:
-        version, parameters = " WHERE object = ? AND version = ? AND store = ?", (only.object, only.version, only.store)
-        if binary_rel is not None:
-            row, parameters = " AND binary_rel = ? AND store = ?", (*parameters, binary_rel, only.store)
-    elif digest is not None:
-        version, parameters = " WHERE ciphertext_sha256 = ?", (digest,)
-    damaged = f"(object, version, store) IN (SELECT object, version, store FROM media_damaged_versions{version}){row}"
+    of_version = ("FROM media_damaged_versions AS d WHERE d.object = media_replicas.object "
+                  "AND d.version = media_replicas.version AND d.store = media_replicas.store")
 
     def found(column: str) -> str:
-        return (f"(SELECT d.{column} FROM media_damaged_versions AS d WHERE d.object = media_replicas.object "
-                "AND d.version = media_replicas.version AND d.store = media_replicas.store)")
+        return f"(SELECT d.{column} {of_version})"
+
+    parameters: tuple[str, ...] = ()
+    if digest is not None:
+        damaged, parameters = f"ciphertext_sha256 = ? AND EXISTS (SELECT 1 {of_version})", (digest,)
+    else:
+        version, row = "", ""
+        if only is not None:
+            version, parameters = " WHERE object = ? AND version = ? AND store = ?", (only.object, only.version, only.store)
+            if binary_rel is not None:
+                row, parameters = " AND binary_rel = ? AND store = ?", (*parameters, binary_rel, only.store)
+        damaged = f"(object, version, store) IN (SELECT object, version, store FROM media_damaged_versions{version}){row}"
 
     conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
                  f"SELECT store, binary_rel, ?, ?, random() FROM media_replicas WHERE state <> '{QUARANTINED}' "
@@ -408,7 +416,8 @@ def _inherit(recorded: str) -> str:
 
     A filing of such bytes is damaged under its own name, whatever it is called: `_quarantine_listing` then quarantines
     it, so its row says so and the status, the findings and the recoverability read the row. `recorded` selects the
-    digests, from the table that holds them; a version the table already holds keeps its record.
+    digests, from the table that holds them; a version the table already holds keeps its record. A filing that is
+    quarantined is never read (`media_replicas_digest`), so a repeated finding costs what it costs for one filing.
     """
     return ("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, generation) "
             f"SELECT filing.store, filing.object, filing.version, '{DECRYPTED}', '{PLAINTEXT_MISMATCH}', "
@@ -417,7 +426,8 @@ def _inherit(recorded: str) -> str:
             "ON CONFLICT(store, object, version) DO NOTHING")
 
 
-_INHERIT_OF = _inherit("SELECT DISTINCT ciphertext_sha256 AS digest FROM media_damaged_versions WHERE ciphertext_sha256 = ?")
+_INHERIT_OF = _inherit(
+    "SELECT :digest AS digest WHERE EXISTS (SELECT 1 FROM media_damaged_versions WHERE ciphertext_sha256 = :digest)")
 _INHERIT_ALL = _inherit("SELECT DISTINCT ciphertext_sha256 AS digest FROM media_damaged_versions "
                         "WHERE ciphertext_sha256 IS NOT NULL")
 _DAMAGED = f"SELECT 1 {_RECORDED} LIMIT 1"
@@ -1586,7 +1596,9 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         # quarantined, under this version or another, and the copies they queued, go, or each would upload a copy of
         # bytes just proven good. A record of another cause on such a version stays and only loses the digest.
         digest = replica.ciphertext_sha256
-        same = f"WHERE ciphertext_sha256 = ? AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'"
+        same = (f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (object, version, store) IN "
+                "(SELECT object, version, store FROM media_damaged_versions "
+                f"WHERE ciphertext_sha256 = ? AND failure = '{PLAINTEXT_MISMATCH}')")
         conn.execute("DELETE FROM media_replica_queue WHERE kind = ? AND (store, binary_rel) IN "
                      f"(SELECT store, binary_rel FROM media_replicas {same})", (RECOPY, digest))
         conn.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, "

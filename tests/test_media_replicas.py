@@ -1102,16 +1102,26 @@ def test_the_eviction_gate_asks_the_table_once_however_many_pointers_a_pooled_ob
     assert len([sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]) == 2
 
 
-def _vm_steps_of_a_repeated_finding(vault: Path, holders: int, monkeypatch: pytest.MonkeyPatch) -> int:
-    """Quarantine one version that `holders` filings already hold quarantined, and count what SQLite runs for it."""
-    pointer = originals.StoredObject(1, MIRROR, "1", f"{holders:064x}", "version", 10, "0" * 64)
+def _vm_steps_of_a_repeated_finding(vault: Path, holders: int, monkeypatch: pytest.MonkeyPatch, wrong: str | None) -> int:
+    """Quarantine `holders` filings that a finding already holds quarantined, find it again, and count what SQLite runs.
+
+    The filings share one version found damaged (`wrong` is None), share one found to decrypt wrong ("shared"), or are
+    copies of one ciphertext under names of their own, each version found to decrypt wrong ("copies").
+    """
+    level, failure = (media_replicas.DECRYPTED, media_replicas.PLAINTEXT_MISMATCH) if wrong else (
+        media_replicas.CONTENT, "digest_mismatch")
+    digest = "d" * 64 if wrong else None
+    versions = [f"{holders:032x}{number:032x}" for number in range(holders if wrong == "copies" else 1)]
+    pointer = originals.StoredObject(1, MIRROR, "1", versions[0], "version", 10, digest or "0" * 64)
     with closing(media_jobs.MediaJobStore(vault)._connect()) as ledger, ledger:
         ledger.executemany(
             "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, level, "
-            "failure, seen) VALUES (?, ?, ?, ?, '1', 10, 0, 'quarantined', 'content', 'digest_mismatch', 1)",
-            [(f"Originals/{holders}/{number}.bin", MIRROR, pointer.object, pointer.version) for number in range(holders)])
-        ledger.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure, generation) "
-                       "VALUES (?, ?, ?, 'content', 'digest_mismatch', 1)", (MIRROR, pointer.object, pointer.version))
+            "failure, seen, ciphertext_sha256) VALUES (?, ?, ?, 'version', '1', 10, 0, 'quarantined', ?, ?, 1, ?)",
+            [(f"Originals/{holders}/{number}.bin", MIRROR, versions[number % len(versions)], level, failure, digest)
+             for number in range(holders)])
+        ledger.executemany(
+            "INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, generation) "
+            "VALUES (?, ?, 'version', ?, ?, ?, 1)", [(MIRROR, name, level, failure, digest) for name in versions])
     steps = [0]
     connect = media_jobs.MediaJobStore._connect
 
@@ -1121,16 +1131,16 @@ def _vm_steps_of_a_repeated_finding(vault: Path, holders: int, monkeypatch: pyte
         return conn
 
     monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", counting)
-    media_replicas.quarantine(vault, f"Originals/{holders}/0.bin", pointer, level=media_replicas.CONTENT,
-                              failure="digest_mismatch")
+    media_replicas.quarantine(vault, f"Originals/{holders}/0.bin", pointer, level=level, failure=failure)
     return steps[0]
 
 
+@pytest.mark.parametrize("wrong", [None, "shared", "copies"], ids=["found-damaged", "found-wrong", "copies-found-wrong"])
 def test_a_finding_that_repeats_over_many_quarantined_filings_costs_what_it_costs_over_few(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, wrong: str | None) -> None:
     """Every filing's attempt can record the finding again: a rescan of the group would make n attempts cost n squared."""
-    few = _vm_steps_of_a_repeated_finding(vault, 50, monkeypatch)
-    many = _vm_steps_of_a_repeated_finding(vault, 5000, monkeypatch)
+    few = _vm_steps_of_a_repeated_finding(vault, 50, monkeypatch, wrong)
+    many = _vm_steps_of_a_repeated_finding(vault, 5000, monkeypatch, wrong)
 
     assert many < few * 2 + 500
 
