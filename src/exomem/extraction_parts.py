@@ -34,13 +34,16 @@ from .governance import raw_protection
 from .kbdir import managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
+    PathGuard,
     PathGuardError,
+    PathIdentity,
     PlannedWrite,
     content_hash,
     markdown_lf,
     parse_frontmatter,
     read_frontmatter_header,
     read_guarded_text,
+    read_guarded_text_for_cache,
     with_newline,
     yaml_scalar,
 )
@@ -475,9 +478,9 @@ def text_with_gaps(vault_root: Path, page: Path, content: str) -> str:
     return "".join(texts)
 
 
-#: The length of each part page's text and the part count of each Source page read so far,
-#: keyed by the file's stat, so a reader measures a page again only after it changed.
-_LENGTHS: dict[Path, tuple[tuple[int, int, int], int]] = {}
+#: Cache part lengths only while the file generation or canonical stored hash verifies the bytes.
+_LENGTHS: dict[Path, tuple[PathGuard, int]] = {}
+#: Part counts used for ordinary search candidate folding, keyed by the Source file's stat.
 _COUNTS: dict[Path, tuple[tuple[int, int, int], int]] = {}
 #: Each memo is emptied once it holds this many pages.
 _MEMO_MAX = 4096
@@ -502,15 +505,41 @@ def _part_text(vault_root: Path, page: Path, number: int) -> str:
         raw, _guard = read_guarded_text(vault_root, part_path(page, number))
     except (PathGuardError, UnicodeError) as error:
         raise OSError("a declared extraction part is unreadable") from error
+    return _require_part_text(raw)
+
+
+def _require_part_text(raw: str) -> str:
     part = part_document(raw)
     if part is None:
         raise FileNotFoundError("a declared extraction part has no Source binding")
     return part[1]
 
 
-def _part_length(vault_root: Path, page: Path, number: int) -> int:
-    """The length of the text of part `number` as it is now. Raises `OSError` when it is missing."""
-    return _by_stat(_LENGTHS, part_path(page, number), lambda: len(_part_text(vault_root, page, number)))
+def _part_length(vault_root: Path, path: Path, ancestors: set[PathIdentity]) -> int:
+    """Measure the part or recheck the guard that authenticated its cached length."""
+    from .vault_store import read
+
+    cached = _LENGTHS.get(path)
+    if cached is not None:
+        guard, length = cached
+        if read.serves(vault_root, guard.target) == (guard.leaf_policy == "store"):
+            try:
+                guard.recheck(vault_root, ancestors)
+            except PathGuardError:
+                pass  # A new guarded read decides whether the replacement is a valid part.
+            else:
+                return length
+        _LENGTHS.pop(path, None)
+    try:
+        raw, guard = read_guarded_text_for_cache(vault_root, path)
+    except (PathGuardError, UnicodeError) as error:
+        raise OSError("a declared extraction part is unreadable") from error
+    length = len(_require_part_text(raw))
+    if guard is not None:
+        if len(_LENGTHS) >= _MEMO_MAX:
+            _LENGTHS.clear()
+        _LENGTHS[path] = (guard, length)
+    return length
 
 
 def listed(part: Path) -> bool:
@@ -542,16 +571,27 @@ def bounds_of(first_length: int, lengths: Iterable[int]) -> list[int]:
 
 def _bounds(vault_root: Path, page: Path, first: str, count: int, *, prefix: bool = False) -> list[int]:
     """Where each part starts in the whole text as it is now, then where the text ends."""
-    def lengths() -> Iterator[int]:
-        for number in range(2, count + 1):
-            try:
-                yield _part_length(vault_root, page, number)
-            except OSError:
-                if not prefix:
-                    raise
-                return
+    if count == 1:
+        return bounds_of(len(first), ())
+    from .vault_store import read
 
-    return bounds_of(len(first), lengths())
+    root = vault_root.resolve()
+    ancestors: set[PathIdentity] = set()
+
+    def lengths() -> Iterator[int]:
+        for start in range(2, count + 1, read.KEYS_PER_QUERY):
+            numbers = range(start, min(start + read.KEYS_PER_QUERY, count + 1))
+            read.prime_page_metadata(root, (part_path(page, n).relative_to(vault_root).as_posix() for n in numbers))
+            for number in numbers:
+                try:
+                    yield _part_length(root, root / part_path(page, number).relative_to(vault_root), ancestors)
+                except OSError:
+                    if not prefix:
+                        raise
+                    return
+
+    with read.request_snapshot(root):
+        return bounds_of(len(first), lengths())
 
 
 def stored_parts(

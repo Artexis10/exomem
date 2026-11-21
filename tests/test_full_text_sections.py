@@ -507,6 +507,43 @@ def test_a_multipart_read_opens_a_verified_prefix_without_releasing_an_unrelated
         commands.op_read_memory(vault, path=path, offset=next_offset)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses content reads rather than generation guards")
+@pytest.mark.parametrize("link_kind", ["hardlink", "symlink"])
+def test_a_warm_multipart_window_stops_when_an_earlier_part_becomes_linked(vault, monkeypatch, link_kind) -> None:
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    first, second, third = "Part one.", "Part two.", "Part three."
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        f"---\ntype: source\nextraction_parts: 3\n---\n\n## Extracted text\n\n{first}\n",
+        encoding="utf-8",
+    )
+    for number, text in ((2, second), (3, third)):
+        part = extraction_parts.part_path(source, number)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_text(f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{text}\n", encoding="utf-8")
+    warm = commands.op_read_memory(vault, path=path, offset=0)
+    assert warm["window"]["total_chars"] == len(first + second + third)
+    linked = extraction_parts.part_path(source, 2)
+    other = vault / "other.md"
+    if link_kind == "hardlink":
+        os.link(linked, other)
+    else:
+        linked.rename(other)
+        linked.symlink_to(other)
+
+    before_gap = commands.op_read_memory(vault, path=path, offset=0)
+
+    assert before_gap["body"] == first
+    assert before_gap["window"]["incomplete"] is True and before_gap["window"]["total_chars"] is None
+    assert before_gap["window"]["next_offset"] == len(first)
+    with pytest.raises(ValueError, match="PART_MISSING"):
+        commands.op_read_memory(vault, path=path, offset=len(first + second))
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path
