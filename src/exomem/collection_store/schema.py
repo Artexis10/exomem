@@ -17,7 +17,8 @@ Contract held here, not in the writers:
   item version has exactly one identity, and ``item_sources`` references it.
   A JSON payload mints its identity in the same statement; a typed-v1 identity
   requires its typed payload (``typed_storage``);
-- ``items`` rows are never deleted (Records and Planning have no delete);
+- ``item_rows`` rows are never deleted (schema 19): a retracted row keeps its row and its history, and
+  only the ``items`` view, which every current-state read uses, stops showing it;
 - a natural key is unique per collection when complete (a partial unique
   index), and a view path is unique across the store;
 - ``txns.commit_seq`` is the store-wide sequence (A3): unique, contiguous from
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The first schema that the vault state manifest guards with an ID. Every release since the
@@ -101,7 +102,7 @@ TABLES = (
     "collection_type_versions",
     "collection_manifests",
     "collections",
-    "items",
+    "item_rows",
     "item_versions",
     "item_sources",
     "version_source_bindings",
@@ -318,8 +319,12 @@ _TABLES_V1 = (
 )
 
 
+_ITEM_KEYS = (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key"))
+
 # Every primary/unique key that replacement conflict handling could delete.
 _CONFLICT_KEYS = {
+    # Before schema 19 the row table is named `items`.
+    "items": _ITEM_KEYS,
     "txns": (("txn_id",), ("transition_id",), ("request_id",), ("commit_seq",), ("store_head_hash",)),
     "audit_effects": (("txn_id", "ordinal"),),
     "item_versions": (("row_id", "row_version"),),
@@ -327,7 +332,7 @@ _CONFLICT_KEYS = {
     "version_source_bindings": (("row_id", "row_version", "canonical_ref"),),
     "collection_manifests": (("collection_id", "manifest_version"),),
     "collection_type_versions": (("name", "version"),),
-    "items": (("row_id",), ("collection_id", "item_key"), ("view_path",), ("collection_id", "natural_key")),
+    "item_rows": _ITEM_KEYS,
     "version_identity": (("row_id", "row_version"),),
     "store_audit": (("seq",),),
     "import_members": (("collection_id", "seq"),),
@@ -367,25 +372,31 @@ def _append_only_triggers(table: str) -> tuple[str, str, str]:
     )
 
 
+def _item_triggers(table: str) -> tuple[str, ...]:
+    """The row table's protections; its name is ``items`` before schema 19 and ``item_rows`` from it."""
+    return (
+        f"""
+        CREATE TRIGGER IF NOT EXISTS items_never_deleted BEFORE DELETE ON {table}
+        BEGIN SELECT RAISE(ABORT, 'items rows are never deleted'); END
+        """,
+        _conflicting_insert_trigger(
+            table, "items_never_replaced",
+            "items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict",
+        ),
+        f"""
+        CREATE TRIGGER IF NOT EXISTS items_never_replaced_update BEFORE UPDATE ON {table}
+        WHEN EXISTS (
+          SELECT 1 FROM {table}
+          WHERE row_id != OLD.row_id AND ({_conflicting_key_predicate(table)})
+        )
+        BEGIN SELECT RAISE(ABORT,
+          'items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict'); END
+        """,
+    )
+
+
 _TRIGGERS_V1 = (
     *(statement for table in _V1_APPEND_ONLY_TABLES for statement in _append_only_triggers(table)),
-    """
-    CREATE TRIGGER IF NOT EXISTS items_never_deleted BEFORE DELETE ON items
-    BEGIN SELECT RAISE(ABORT, 'items rows are never deleted'); END
-    """,
-    _conflicting_insert_trigger(
-        "items", "items_never_replaced",
-        "items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict",
-    ),
-    f"""
-    CREATE TRIGGER IF NOT EXISTS items_never_replaced_update BEFORE UPDATE ON items
-    WHEN EXISTS (
-      SELECT 1 FROM items
-      WHERE row_id != OLD.row_id AND ({_conflicting_key_predicate("items")})
-    )
-    BEGIN SELECT RAISE(ABORT,
-      'items rows cannot be replaced: row_id, item_key, view_path, natural_key conflict'); END
-    """,
     # The store-wide sequence is contiguous from 1 and follows the recorded head.
     """
     CREATE TRIGGER IF NOT EXISTS txns_commit_seq_contiguous BEFORE INSERT ON txns
@@ -410,7 +421,7 @@ def _utc_now() -> str:
 
 def _migrate_to_1(conn: sqlite3.Connection) -> None:
     """Create the version-1 schema and mint this store's identity."""
-    for statement in (*_TABLES_V1, *_TRIGGERS_V1):
+    for statement in (*_TABLES_V1, *_TRIGGERS_V1, *_item_triggers("items")):
         conn.execute(statement)
     instance_id = str(uuid.uuid4())
     identity = {
@@ -539,52 +550,54 @@ _ITEMS_V5 = """
 _ITEM_COLUMNS_V4 = ("row_id,collection_id,item_key,natural_key,row_version,schema_version,values_json,"
                     "body,payload_hash,view_path,created_txn,updated_txn,governance_json")
 
-_TRIGGERS_V5 = (
-    *_append_only_triggers("version_identity"),
-    # A JSON payload mints its identity; a JSON identity needs its payload.
-    """
-    CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
-    BEGIN
-      INSERT INTO version_identity VALUES (NEW.row_id, NEW.row_version, 'json-v1', NEW.payload_hash,
-        NEW.txn_id, (SELECT schema_version FROM items WHERE row_id = NEW.row_id));
-    END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
-    WHEN NEW.encoding = 'json-v1' AND NOT EXISTS (
-      SELECT 1 FROM item_versions WHERE row_id = NEW.row_id AND row_version = NEW.row_version)
-    BEGIN SELECT RAISE(ABORT, 'version_identity requires its JSON payload'); END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
-    WHEN NEW.encoding = 'typed-v1' AND NOT EXISTS (
-      SELECT 1 FROM items i JOIN collections c ON c.collection_id = i.collection_id
-      WHERE i.row_id = NEW.row_id AND i.encoding = 'typed-v1' AND c.encoding = 'typed-v1')
-    BEGIN SELECT RAISE(ABORT, 'version_identity requires its typed payload in a typed-v1 collection'); END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
-    WHEN EXISTS (SELECT 1 FROM items WHERE row_id = NEW.row_id AND encoding <> 'json-v1')
-    BEGIN SELECT RAISE(ABORT, 'typed-v1 rows take typed versions, not JSON payloads'); END
-    """,
-    # One collection, one encoding authority; typed-v1 has no in-place reverse.
-    """
-    CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON items
-    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
-    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection
-    BEFORE UPDATE OF encoding, collection_id ON items
-    WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
-    BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
-    """,
-    """
-    CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
-    WHEN OLD.encoding = 'typed-v1' AND NEW.encoding <> 'typed-v1'
-    BEGIN SELECT RAISE(ABORT, 'collection encoding typed-v1 has no in-place reverse'); END
-    """,
-)
+def _triggers_v5(items: str) -> tuple[str, ...]:
+    """The v5 encoding triggers; ``items`` names the item table (``item_rows`` once schema 19 renames it)."""
+    return (
+        *_append_only_triggers("version_identity"),
+        # A JSON payload mints its identity; a JSON identity needs its payload.
+        f"""
+        CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
+        BEGIN
+          INSERT INTO version_identity VALUES (NEW.row_id, NEW.row_version, 'json-v1', NEW.payload_hash,
+            NEW.txn_id, (SELECT schema_version FROM {items} WHERE row_id = NEW.row_id));
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
+        WHEN NEW.encoding = 'json-v1' AND NOT EXISTS (
+          SELECT 1 FROM item_versions WHERE row_id = NEW.row_id AND row_version = NEW.row_version)
+        BEGIN SELECT RAISE(ABORT, 'version_identity requires its JSON payload'); END
+        """,
+        f"""
+        CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
+        WHEN NEW.encoding = 'typed-v1' AND NOT EXISTS (
+          SELECT 1 FROM {items} i JOIN collections c ON c.collection_id = i.collection_id
+          WHERE i.row_id = NEW.row_id AND i.encoding = 'typed-v1' AND c.encoding = 'typed-v1')
+        BEGIN SELECT RAISE(ABORT, 'version_identity requires its typed payload in a typed-v1 collection'); END
+        """,
+        f"""
+        CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
+        WHEN EXISTS (SELECT 1 FROM {items} WHERE row_id = NEW.row_id AND encoding <> 'json-v1')
+        BEGIN SELECT RAISE(ABORT, 'typed-v1 rows take typed versions, not JSON payloads'); END
+        """,
+        # One collection, one encoding authority; typed-v1 has no in-place reverse.
+        f"""
+        CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON {items}
+        WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+        BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+        """,
+        f"""
+        CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection
+        BEFORE UPDATE OF encoding, collection_id ON {items}
+        WHEN EXISTS (SELECT 1 FROM collections WHERE collection_id = NEW.collection_id AND encoding <> NEW.encoding)
+        BEGIN SELECT RAISE(ABORT, 'item encoding must match its collection encoding'); END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
+        WHEN OLD.encoding = 'typed-v1' AND NEW.encoding <> 'typed-v1'
+        BEGIN SELECT RAISE(ABORT, 'collection encoding typed-v1 has no in-place reverse'); END
+        """,
+    )
 
 
 def _migrate_to_5(conn: sqlite3.Connection) -> None:
@@ -894,54 +907,56 @@ _MAPPINGS_V11 = """CREATE TABLE typed_encoding_mappings_v11(
   PRIMARY KEY(collection_id,generation)
 ) STRICT, WITHOUT ROWID"""
 
-_TRIGGERS_V11 = (
-    *_append_only_triggers("version_identity"),
-    """CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
-    BEGIN INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version,payload_generation)
-      VALUES(NEW.row_id,NEW.row_version,'json-v1',NEW.payload_hash,NEW.txn_id,
-             (SELECT schema_version FROM items WHERE row_id=NEW.row_id),NULL); END""",
-    """CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
-    WHEN NEW.encoding='json-v1' AND NOT EXISTS(
-      SELECT 1 FROM item_versions WHERE row_id=NEW.row_id AND row_version=NEW.row_version)
-    BEGIN SELECT RAISE(ABORT,'version_identity requires its JSON payload'); END""",
-    """CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
-    WHEN NEW.encoding<>'json-v1' AND NOT EXISTS(
-      SELECT 1 FROM items i JOIN collections c ON c.collection_id=i.collection_id
-      JOIN typed_encoding_mappings m ON m.collection_id=i.collection_id AND m.generation=NEW.payload_generation
-      WHERE i.row_id=NEW.row_id AND i.encoding=NEW.encoding AND c.encoding=NEW.encoding AND m.state='ready'
-      AND ((NEW.encoding='typed-v1' AND json_extract(m.layout_json,'$.version')=1) OR
-           (NEW.encoding='typed-v2' AND json_extract(m.layout_json,'$.version')=2)))
-    BEGIN SELECT RAISE(ABORT,'version_identity requires its typed payload in the ready generation'); END""",
-    """CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
-    WHEN EXISTS(SELECT 1 FROM items WHERE row_id=NEW.row_id AND encoding<>'json-v1')
-    BEGIN SELECT RAISE(ABORT,'typed rows take typed versions, not JSON payloads'); END""",
-    """CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON items
-    WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
-    BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
-    """CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection BEFORE UPDATE OF encoding ON items
-    WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
-    BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
-    """CREATE TRIGGER IF NOT EXISTS items_collection_fixed BEFORE UPDATE OF collection_id ON items
-    WHEN NEW.collection_id IS NOT OLD.collection_id
-    BEGIN SELECT RAISE(ABORT,'item collection owns its immutable version bindings'); END""",
-    """CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
-    WHEN (OLD.encoding='typed-v2' AND NEW.encoding<>'typed-v2') OR
-         (OLD.encoding='typed-v1' AND NEW.encoding='json-v1')
-    BEGIN SELECT RAISE(ABORT,'typed collection encoding has no in-place reverse'); END""",
-    """CREATE TRIGGER IF NOT EXISTS typed_encoding_descriptor_fixed BEFORE UPDATE ON typed_encoding_mappings
-    WHEN NEW.collection_id IS NOT OLD.collection_id OR NEW.generation IS NOT OLD.generation OR
-         NEW.layout_json IS NOT OLD.layout_json OR NEW.layout_hash IS NOT OLD.layout_hash
-    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
-    """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_replace BEFORE INSERT ON typed_encoding_mappings
-    WHEN EXISTS(SELECT 1 FROM typed_encoding_mappings WHERE collection_id=NEW.collection_id AND generation=NEW.generation)
-    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
-    """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_delete BEFORE DELETE ON typed_encoding_mappings
-    BEGIN SELECT RAISE(ABORT,'typed payload descriptor is retained'); END""",
-    """CREATE TRIGGER IF NOT EXISTS typed_encoding_state_forward BEFORE UPDATE OF state ON typed_encoding_mappings
-    WHEN NEW.state<>OLD.state AND NOT((OLD.state='building' AND NEW.state IN ('ready','failed')) OR
-                                     (OLD.state='ready' AND NEW.state='retired'))
-    BEGIN SELECT RAISE(ABORT,'typed payload state has no reverse transition'); END""",
-)
+def _triggers_v11(items: str) -> tuple[str, ...]:
+    """The v11 encoding triggers; ``items`` names the item table (``item_rows`` once schema 19 renames it)."""
+    return (
+        *_append_only_triggers("version_identity"),
+        f"""CREATE TRIGGER IF NOT EXISTS item_versions_mint_identity AFTER INSERT ON item_versions
+        BEGIN INSERT INTO version_identity(row_id,row_version,encoding,payload_hash,txn_id,schema_version,payload_generation)
+          VALUES(NEW.row_id,NEW.row_version,'json-v1',NEW.payload_hash,NEW.txn_id,
+                 (SELECT schema_version FROM {items} WHERE row_id=NEW.row_id),NULL); END""",
+        """CREATE TRIGGER IF NOT EXISTS version_identity_json_payload BEFORE INSERT ON version_identity
+        WHEN NEW.encoding='json-v1' AND NOT EXISTS(
+          SELECT 1 FROM item_versions WHERE row_id=NEW.row_id AND row_version=NEW.row_version)
+        BEGIN SELECT RAISE(ABORT,'version_identity requires its JSON payload'); END""",
+        f"""CREATE TRIGGER IF NOT EXISTS version_identity_typed_collection BEFORE INSERT ON version_identity
+        WHEN NEW.encoding<>'json-v1' AND NOT EXISTS(
+          SELECT 1 FROM {items} i JOIN collections c ON c.collection_id=i.collection_id
+          JOIN typed_encoding_mappings m ON m.collection_id=i.collection_id AND m.generation=NEW.payload_generation
+          WHERE i.row_id=NEW.row_id AND i.encoding=NEW.encoding AND c.encoding=NEW.encoding AND m.state='ready'
+          AND ((NEW.encoding='typed-v1' AND json_extract(m.layout_json,'$.version')=1) OR
+               (NEW.encoding='typed-v2' AND json_extract(m.layout_json,'$.version')=2)))
+        BEGIN SELECT RAISE(ABORT,'version_identity requires its typed payload in the ready generation'); END""",
+        f"""CREATE TRIGGER IF NOT EXISTS item_versions_json_rows_only BEFORE INSERT ON item_versions
+        WHEN EXISTS(SELECT 1 FROM {items} WHERE row_id=NEW.row_id AND encoding<>'json-v1')
+        BEGIN SELECT RAISE(ABORT,'typed rows take typed versions, not JSON payloads'); END""",
+        f"""CREATE TRIGGER IF NOT EXISTS items_encoding_matches_collection BEFORE INSERT ON {items}
+        WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
+        BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
+        f"""CREATE TRIGGER IF NOT EXISTS items_encoding_update_matches_collection BEFORE UPDATE OF encoding ON {items}
+        WHEN EXISTS(SELECT 1 FROM collections WHERE collection_id=NEW.collection_id AND encoding<>NEW.encoding)
+        BEGIN SELECT RAISE(ABORT,'item encoding must match its collection encoding'); END""",
+        f"""CREATE TRIGGER IF NOT EXISTS items_collection_fixed BEFORE UPDATE OF collection_id ON {items}
+        WHEN NEW.collection_id IS NOT OLD.collection_id
+        BEGIN SELECT RAISE(ABORT,'item collection owns its immutable version bindings'); END""",
+        """CREATE TRIGGER IF NOT EXISTS collections_encoding_forward_only BEFORE UPDATE OF encoding ON collections
+        WHEN (OLD.encoding='typed-v2' AND NEW.encoding<>'typed-v2') OR
+             (OLD.encoding='typed-v1' AND NEW.encoding='json-v1')
+        BEGIN SELECT RAISE(ABORT,'typed collection encoding has no in-place reverse'); END""",
+        """CREATE TRIGGER IF NOT EXISTS typed_encoding_descriptor_fixed BEFORE UPDATE ON typed_encoding_mappings
+        WHEN NEW.collection_id IS NOT OLD.collection_id OR NEW.generation IS NOT OLD.generation OR
+             NEW.layout_json IS NOT OLD.layout_json OR NEW.layout_hash IS NOT OLD.layout_hash
+        BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_replace BEFORE INSERT ON typed_encoding_mappings
+        WHEN EXISTS(SELECT 1 FROM typed_encoding_mappings WHERE collection_id=NEW.collection_id AND generation=NEW.generation)
+        BEGIN SELECT RAISE(ABORT,'typed payload descriptor is immutable'); END""",
+        """CREATE TRIGGER IF NOT EXISTS typed_encoding_no_delete BEFORE DELETE ON typed_encoding_mappings
+        BEGIN SELECT RAISE(ABORT,'typed payload descriptor is retained'); END""",
+        """CREATE TRIGGER IF NOT EXISTS typed_encoding_state_forward BEFORE UPDATE OF state ON typed_encoding_mappings
+        WHEN NEW.state<>OLD.state AND NOT((OLD.state='building' AND NEW.state IN ('ready','failed')) OR
+                                         (OLD.state='ready' AND NEW.state='retired'))
+        BEGIN SELECT RAISE(ABORT,'typed payload state has no reverse transition'); END""",
+    )
 
 
 def _migrate_to_14(conn: sqlite3.Connection) -> None:
@@ -1220,6 +1235,51 @@ def _migrate_to_18(conn: sqlite3.Connection) -> None:
 _TRIGGERS_V18 = _append_only_triggers("version_source_bindings")
 
 
+def _migrate_to_19(conn: sqlite3.Connection) -> None:
+    """Make a Records row retractable without losing it: ``items`` becomes the view of current rows.
+
+    The table that held every row is renamed ``item_rows`` and gains ``retracted_txn`` (``NULL`` while
+    the row is current). SQLite carries the rename into every child foreign key, index and trigger
+    body, so the typed, native and projection tables follow without a rewrite. ``items`` becomes a
+    view with the exact column list of schema 18 over the current rows, so every read of current state
+    stays as written, and ``item_rows_current`` keeps a current-row count index-only. The history
+    readers that must see a retracted row read ``item_rows``.
+
+    ``audit_effects`` is rebuilt, because SQLite cannot widen a CHECK in place: its ``effect`` admits
+    ``retract``. The rebuild keeps every column, the dependency completeness columns of schema 18 and
+    the foreign key from ``version_source_bindings``. That key names the table, not its row ids, so it
+    holds across the drop and the rename. ``ensure_schema`` restores its append-only triggers afterwards,
+    as it does for every rebuilt table.
+    """
+    conn.execute("ALTER TABLE items RENAME TO item_rows")
+    current = [row[1] for row in conn.execute("PRAGMA table_info(item_rows)")]
+    conn.execute("ALTER TABLE item_rows ADD COLUMN retracted_txn INTEGER")
+    conn.execute(f"CREATE VIEW items AS SELECT {', '.join(current)} FROM item_rows WHERE retracted_txn IS NULL")
+    conn.execute("CREATE INDEX item_rows_current ON item_rows(collection_id, row_id) WHERE retracted_txn IS NULL")
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(audit_effects)")]
+    conn.execute("""CREATE TABLE audit_effects_v19(
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED,
+      ordinal INTEGER NOT NULL,
+      row_id INTEGER REFERENCES item_rows(row_id),
+      item_key TEXT,
+      effect TEXT NOT NULL CHECK (effect IN ('insert', 'update', 'held', 'resume', 'retract')),
+      effect_label TEXT,
+      version_before INTEGER,
+      version_after INTEGER,
+      hash_before TEXT,
+      hash_after TEXT,
+      source_ref TEXT,
+      dependency_current_complete INTEGER CHECK(dependency_current_complete IN (0,1)),
+      dependency_prior_complete INTEGER CHECK(dependency_prior_complete IN (0,1)),
+      PRIMARY KEY (txn_id, ordinal)
+    ) STRICT, WITHOUT ROWID""")
+    listed = ", ".join(columns)
+    conn.execute(f"INSERT INTO audit_effects_v19({listed}) SELECT {listed} FROM audit_effects")
+    conn.execute("DROP TABLE audit_effects")
+    conn.execute("ALTER TABLE audit_effects_v19 RENAME TO audit_effects")
+    conn.execute("CREATE INDEX audit_effects_by_row ON audit_effects(row_id, txn_id)")
+
+
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
     """The state compatibility ids that a store at ``version`` requires of a release that opens it.
 
@@ -1304,8 +1364,9 @@ def ensure_schema(conn: Connection) -> int:
                 if not raw.execute("SELECT 1 FROM alembic_version").fetchone() and current:
                     command.stamp(config, str(current))
                 command.upgrade(config, str(target))
-            encoding_triggers = _TRIGGERS_V11 if target >= 11 else _TRIGGERS_V5 if target >= 5 else ()
-            for statement in (*_TRIGGERS_V1, *encoding_triggers,
+            items = "item_rows" if target >= 19 else "items"
+            encoding_triggers = _triggers_v11(items) if target >= 11 else _triggers_v5(items) if target >= 5 else ()
+            for statement in (*_TRIGGERS_V1, *_item_triggers(items), *encoding_triggers,
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
                               *(_TRIGGERS_V14 if target >= 14 else ()),
                               *(_TRIGGERS_V15 if target >= 15 else ()),

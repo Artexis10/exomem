@@ -302,7 +302,7 @@ def test_one_immediate_transaction_txns_last_and_atomic_rollback(store, monkeypa
     assert sum(sql == "COMMIT" for sql in statements) == 1
     tables = [sql.split()[2].split("(")[0] for sql in statements if sql.startswith("INSERT INTO ")]
     assert tables[-1] == "txns"
-    assert {"items", "item_versions", "audit_effects", "projection_state"} <= set(tables)
+    assert {"item_rows", "item_versions", "audit_effects", "projection_state"} <= set(tables)
     before = chain.recorded_head(store.connection)
 
     def fail(*_args, **_kwargs):

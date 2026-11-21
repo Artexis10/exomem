@@ -851,6 +851,8 @@ def dispatch(
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "rebaseline":
         return True, _mutate(vault_root, writer.rebaseline_collection, collection, **args)
+    if action == "retract" and profile == "records":
+        return True, _mutate(vault_root, writer.retract_record, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
     if action == "history":
