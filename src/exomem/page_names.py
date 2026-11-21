@@ -550,52 +550,6 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _released_item_title(root: Path, path: str, version: str) -> str | None:
-    from . import request_budget
-    from .record_formats import _MAX_ITEM_BYTES
-
-    try:
-        raw, guard = vault.read_bounded_guarded_bytes(root, path, limit=_MAX_ITEM_BYTES)
-        # A queued store projection can still contain the previous version.
-        if guard.expected_content_hash != version:
-            return None
-        front, body, _ = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
-        page = egress.annotate_page(root, {
-            "path": path, "frontmatter": front, "body": body, "content_hash": version,
-        }, snapshot_content=raw)
-    except (OSError, UnicodeError, request_budget.ReadBudgetExhausted, vault.FrontmatterError, vault.PathGuardError):
-        return None
-    if page is None or page.get("content_hash") != version or not isinstance(page.get("frontmatter"), Mapping):
-        return None
-    title = page["frontmatter"].get("title")
-    return title if isinstance(title, str) and title.strip() else None
-
-
-def name_released_write_summary(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
-    """Name the released committed item in prose while retaining receipt references."""
-    from .governance import scrubber
-
-    summary = reply.get("user_summary")
-    if not isinstance(summary, str):
-        return reply
-    source = reply.get("source")
-    if isinstance(source, Mapping) and isinstance(source.get("title"), str):
-        # An episode already carries its released title as part of the committed source.
-        path, title = source.get("path"), source["title"]
-    else:
-        paths, version = reply.get("paths"), reply.get("after_item_hash")
-        if not isinstance(paths, list) or len(paths) != 1 or not isinstance(version, str):
-            return reply
-        path = paths[0]
-        if not isinstance(path, str) or not path.endswith(".md") or path not in summary:
-            return reply
-        title = _released_item_title(Path(root), path, version)
-    if isinstance(path, str) and path and path in summary and title:
-        summary, _ = scrubber.scrub_value(summary.replace(path, title))
-        return {**reply, "user_summary": summary}
-    return reply
-
-
 def name_released_reply(
     root: Path, reply: dict[str, Any], *, keep_paths: bool = False
 ) -> dict[str, Any]:

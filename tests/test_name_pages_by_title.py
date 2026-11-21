@@ -17,6 +17,7 @@ import pytest
 from _public_call import public_call
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from fastmcp import Client
+from test_collection_store_migration import env as store_env  # noqa: F401
 from test_derived_identifier_egress import (
     _WITHHELD_TARGET,
     _WRITE_SCOPE,
@@ -182,8 +183,15 @@ def test_planning_receipt_names_the_item(build) -> None:
                 "why": "Track the installation",
             })
 
+            item = (await _tool(client, "query_plan_items", {"collection": PLANNING_PATH}))["rows"][0]
+            edited = await _tool(client, "edit_plan_item", {
+                "collection": PLANNING_PATH, "plan_item": item["id"], "why": "Record the mounting points",
+                "body": "Use the lower frame anchors.",
+            })
+
             assert saved["user_summary"].startswith("Saved -> Install the panel (")
-            assert saved["paths"] and saved["paths"][0].endswith(".md")
+            assert edited["user_summary"].startswith("Updated -> Install the panel (")
+            assert saved["paths"] == edited["paths"]
 
     asyncio.run(run())
 
@@ -202,28 +210,110 @@ def test_episode_receipt_names_the_saved_source(build) -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("current_version", [False, True], ids=["stale-item", "unreleased-title"])
-def test_receipt_title_requires_the_committed_version_and_release(tmp_path, monkeypatch, current_version) -> None:
+def test_committed_crlf_title_uses_the_logical_markdown_under_policy(vault) -> None:
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/Records/item.md"
+    page = vault / path
+    page.parent.mkdir(exist_ok=True)
+    raw = b"---\r\ntitle: Panel shipment\r\n---\r\n\r\nFirst line\r\nSecond line\r\n"
+    page.write_bytes(raw)
+    write_scope(vault, paths="Records/**")
+    write_rule(vault, ceiling=0)
+    version = vault_module.content_hash(raw.decode())
+    with request_scope(_external()):
+        assert egress._committed_file_item_title(vault, path, version, _external()) is None
+    with request_scope(owner_principal()):
+        assert egress._committed_file_item_title(vault, path, version, owner_principal()) == "Panel shipment"
+        page.write_bytes(raw.replace(b"Panel shipment", b"Moved on"))
+        assert egress._committed_file_item_title(vault, path, version, owner_principal()) is None
+
+
+def test_optional_item_title_failure_keeps_the_mcp_receipt(build, monkeypatch) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    from exomem.collection_store.connection import busy
     from exomem.governance import egress
 
-    path = "An item.md"
-    raw = "---\ntitle: Panel shipment\n---\n"
-    (tmp_path / path).write_text(raw, encoding="utf-8")
-    checks = []
+    attempted = False
 
-    def withheld(_root, page, *, snapshot_content):
-        checks.append((page["path"], snapshot_content))
-        return {"path": page["path"], "content_hash": page["content_hash"]}
+    def unavailable(*args):
+        nonlocal attempted
+        attempted = True
+        raise busy("the optional title reader is busy")
 
-    monkeypatch.setattr(egress, "annotate_page", withheld)
-    receipt = {
-        "user_summary": f"Updated -> {path} (personal Exomem)",
-        "paths": [path],
-        "after_item_hash": vault_module.content_hash(raw if current_version else raw + "\n"),
-    }
+    monkeypatch.setattr(egress, "_committed_file_item_title", unavailable)
 
-    assert page_names.name_released_write_summary(tmp_path, receipt) == receipt
-    assert checks == ([(path, raw.encode("utf-8"))] if current_version else [])
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": records_manifest(join=False),
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            result = await _tool(client, "add_record", {"collection": RECORDS_PATH,
+                "item": {"occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch"},
+                "why": "Track dispatch",
+            })
+            assert attempted
+            assert result["outcome"] == "committed"
+            assert result["user_summary"].startswith(f"Saved -> {result['paths'][0]} (")
+            assert result["item_key"] and result["after_item_hash"]
+
+    asyncio.run(run())
+
+
+def test_sqlite_receipts_name_current_rows_while_views_are_stale(store_env, capsys, monkeypatch) -> None:  # noqa: F811
+    from conftest import _drain_background_threads
+    from test_collection_store_migration import PLANNING, WORK, legacy_vault, migrate, printed
+
+    from exomem.collection_store import preview, runtime
+
+    root = legacy_vault(store_env)
+    assert migrate(root, "prepare", operator=False) == 0
+    printed(capsys)
+    assert migrate(root, "apply") == 0
+    printed(capsys)
+    _drain_background_threads()
+    monkeypatch.setattr(runtime.StoreServer, "_views_tick", lambda self: 60.0)
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+
+    async def run() -> None:
+        async with Client(server_module.build_server(require_auth=False)) as client:
+            serving = runtime._server(root)
+
+            def publish_initial_view():
+                writer = preview.bound_writer(root)
+                return serving._write(writer.reconcile_views, pending_only=True)
+
+            for collection, add, query, edit, selector in (
+                (WORK, "add_record", "query_records", "edit_record", "record"),
+                (PLANNING, "add_plan_item", "query_plan_items", "edit_plan_item", "plan_item"),
+            ):
+                common = {"collection": collection, "why": "Track dispatch"}
+                saved = await _tool(client, add, {**common, "item": {"title": "Initial title"}})
+                assert saved["user_summary"].startswith("Saved -> Initial title (")
+                listed = await _tool(client, query, {"collection": collection})
+                row = next(item for item in listed["rows"] if item["title"] == "Initial title")
+                view = root / saved["paths"][0]
+                serving.call(publish_initial_view, wake_maintenance=False)
+                before = view.read_bytes()
+                assert b"Initial title" in before
+                updated = await _tool(client, edit, {**common, selector: row["id"],
+                                                       "changes": {"title": "Current title"}})
+                assert updated["user_summary"].startswith("Updated -> Current title (")
+                assert updated["collection_id"] == saved["collection_id"]
+                assert updated["outcome"] == "committed"
+                assert updated["after_item_hash"] != saved["after_item_hash"]
+                assert view.read_bytes() == before
+
+    try:
+        asyncio.run(run())
+    finally:
+        writer_lease.reset_managers_for_tests()
 
 
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(

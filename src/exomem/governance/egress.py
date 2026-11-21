@@ -6235,6 +6235,91 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 
+def _committed_file_item_title(root: Path, path: str, version: str, who: RequestPrincipal) -> str | None:
+    from .. import document_containers, record_formats
+    from ..collection_store import authority, connection, ownership, replica
+    from ..vault_store import read as vault_store_read
+
+    # The release helper can route to the collection store. Only run it when local
+    # placement rules out an authority lookup or replica verification.
+    if (connection.store_path(root).exists() or replica.replica_path(root).exists()
+            or authority.marker_path(root).exists() or ownership.enrollment(root)[1]
+            or vault_store_read.serves(root, path)):
+        return None
+    if (reserved_paths.classify_logical(path).disposition != reserved_paths.PathDisposition.ORDINARY
+            or raw_protection.marked(path) or document_containers.in_payload_tree(path)):
+        return None
+    raw, guard = vault._read_bounded_guarded_snapshot(root, path, record_formats._MAX_ITEM_BYTES)
+    if guard.expected_content_hash != version:
+        return None
+    page = find_corpus.parse_page(root / path, 0, root, content=raw, resolved_relative=path)
+    if page is None or not page.frontmatter_valid or "container_member" in page.frontmatter:
+        return None
+    if any(bridges.parse_bridge_frontmatter(page.frontmatter)):
+        return None
+    if _release_level_for_markdown_snapshot(
+        root, path, raw, principal=who, purpose=None, policy=policy_module.load(root),
+    ) < LEVEL_FULL:
+        return None
+    guard.recheck(root)
+    return page.title
+
+
+def _name_committed_receipt(root: Path, result: dict[str, Any], command_name: str) -> dict[str, Any]:
+    """Name the released write target in prose and keep the structured receipt intact."""
+    from ..mutation_terminal import _lead
+
+    text = result.get("user_summary")
+    if not isinstance(text, str):
+        return result
+    if command_name == "episode_memory":
+        source = result.get("source")
+        if not isinstance(source, Mapping) or not isinstance(source.get("path"), str):
+            return result
+        paths, title = [source["path"]], source.get("title")
+    else:
+        # The receipt protocol fixes these two successful item-write outcomes.
+        if result.get("outcome") not in ("committed", "replayed"):
+            return result
+        paths = result.get("paths")
+        if not isinstance(paths, list) or not paths or not all(isinstance(path, str) for path in paths):
+            return result
+
+    # One row may affect several generated files. The summary names the row.
+    head, separator, tail = text.partition(_lead("", paths))
+    if not separator:
+        return result
+    if command_name != "episode_memory":
+        version, cid = result.get("after_item_hash"), result.get("collection_id")
+        key = result.get("item_key" if command_name == "record_memory" else "plan_id")
+        if not all(isinstance(value, str) for value in (version, cid, key)):
+            return result
+        who = effective_principal()
+        # Session-scoped authorization can open a separate blocking authority store.
+        if not who.resolved or who.verified_authorization_session is not None:
+            return result
+        # Allow a small point read without spending the delivery reserve of this write.
+        budget = request_budget.current()
+        delay = min(0.1, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS) if budget else 0.1
+        check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=delay))
+        try:
+            with request_budget.checking(check):
+                check()
+                writer = bound_writer(root)
+                if writer is None:
+                    path = paths[0]
+                    title = (_committed_file_item_title(root, path, version, who)
+                             if len(paths) == 1 and _is_markdown_path(path) else None)
+                else:
+                    title = writer.committed_item_title(cid, key, version, check)
+                check()
+        except (Exception, request_budget.ReadBudgetExhausted):  # noqa: BLE001 - optional prose cannot refuse a commit
+            return result
+    if isinstance(title, str) and title.strip():
+        return {**result, "user_summary": f"{head} -> {title}{tail}"}
+    return result
+
+
 @_at_release_boundary
 def postfilter(
     command_name: str,
@@ -6342,6 +6427,13 @@ def _postfilter(
         if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
             view_purpose = (request_kwargs or {}).get("purpose")
             result = guard_view_response(vault_root, result, purpose=view_purpose)
+    from ..capabilities import current_active_surface
+
+    surface = current_active_surface()
+    mcp = surface is not None and surface.surface == "mcp"
+    if mcp and isinstance(result, dict) and command_name in {"record_memory", "plan_memory"}:
+        # The path filter can discard a stale materialized view before the canonical row is named.
+        result = _name_committed_receipt(vault_root, result, command_name)
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
@@ -6367,6 +6459,9 @@ def _postfilter(
         if blocked:
             _record_credential_block()
         return cleaned
+    if mcp and command_name == "episode_memory" and isinstance(result, dict):
+        # Episodes reuse the already released Source.
+        result = _name_committed_receipt(vault_root, result, command_name)
     with call_spans.span("egress.scrub"):
         cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
