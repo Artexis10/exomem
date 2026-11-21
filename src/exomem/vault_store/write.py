@@ -348,7 +348,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             _delete_binary(tx, binary, audit)
         for move in change.binary_moves:
             _move_binary(tx, move, revision, audit)
-        delta = derive.apply(tx, writer.root, change, existing)
+        delta = derive.apply(tx, writer.root, change, existing, before=before)
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
@@ -360,7 +360,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
         after = read.vault_triple(tx, revision)
     # After the transaction: a reader that meets the advanced resolver must see this revision.
-    find.on_store_commit(writer.root, before, after, delta.entries, delta.deleted)
+    derive.remember_catalogue(writer.root, after, delta)
+    find.on_store_commit(writer.root, before, after, delta.entries, delta.deleted, change.paths)
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 
