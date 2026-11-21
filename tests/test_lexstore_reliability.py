@@ -18,14 +18,16 @@ retiring the store, and ordinary reads no longer negotiate journal mode.
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from exomem import find as find_module
-from exomem import lexstore
+from exomem import lexstore, request_budget
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -89,6 +91,156 @@ def test_other_operational_errors_are_not_fatal() -> None:
     assert (
         lexstore.classify_sqlite_error(sqlite3.OperationalError("no such column: x")) != "fatal"
     )
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_budgeted_sqlite_contention_fails_promptly_and_restores_the_reader(
+    tmp_path: Path, expired: bool
+) -> None:
+    path = tmp_path / "catalogue.sqlite"
+    with closing(sqlite3.connect(path)) as writer, closing(sqlite3.connect(path)) as reader:
+        writer.execute("CREATE TABLE pages (title TEXT)")
+        writer.execute("INSERT INTO pages VALUES ('example')")
+        writer.commit()
+        reader.execute("PRAGMA busy_timeout=2300")
+        readiness = lexstore.CatalogReadiness("available", True, "fts5")
+        budget = request_budget.RequestBudget(seconds=30)
+
+        def read(conn: sqlite3.Connection):
+            conn.execute("SELECT 1").fetchone()
+            writer.execute("BEGIN EXCLUSIVE")
+            if expired:
+                budget.deadline = time.monotonic()
+            return conn.execute("SELECT title FROM pages").fetchall()
+
+        token = request_budget.set_current(budget)
+        started = time.monotonic()
+        try:
+            with lexstore.stopping_at_budget() as stop:
+                if expired:
+                    result = lexstore.LexicalStore._query_within_budget(reader, read, readiness)
+                    assert result.readiness == lexstore.CatalogReadiness(lexstore.DEADLINE_STATUS, False, "fts5")
+                    assert result.value is None
+                else:
+                    with pytest.raises(sqlite3.OperationalError) as raised:
+                        lexstore.LexicalStore._query_within_budget(reader, read, readiness)
+                    assert raised.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
+            assert stop.hit == expired
+        finally:
+            request_budget.reset_current(token)
+            writer.rollback()
+
+        assert time.monotonic() - started < 1.0
+        assert reader.execute("PRAGMA busy_timeout").fetchone() == (2300,)
+        assert reader.execute("SELECT title FROM pages").fetchall() == [("example",)]
+
+
+@needs_fts5
+def test_catalogue_budget_preserves_the_admitted_bm25_answer(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/budget-marker.md"
+    _write_page(vault, rel, "budgetmarker")
+    warm_managed_cell(vault)
+    store = lexstore.get_store(vault)
+
+    def read():
+        return lexstore.search_bm25_result(vault, "budgetmarker", 5, allow_delta=False)
+
+    with lexstore.admitted_catalog_scope(vault), lexstore.catalog_selection_scope(vault) as admitted:
+        assert admitted is not None
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "_connect", lambda: pytest.fail("query must reuse the admitted reader"))
+            expected = read()
+            assert expected.readiness.complete and [path for path, _ in expected.value] == [rel]
+            budget = request_budget.RequestBudget(seconds=30)
+            token = request_budget.set_current(budget)
+            try:
+                with lexstore.stopping_at_budget() as stop:
+                    assert read() == expected
+                assert not stop.hit
+                budget.deadline = time.monotonic()
+                with patch.context() as expired:
+                    expired.setattr(store, "_bm25_query", lambda *a, **kw: pytest.fail("expired query ran"))
+                    with lexstore.stopping_at_budget() as stop:
+                        result = read()
+                assert result.readiness.status == lexstore.DEADLINE_STATUS
+                assert result.value is None and stop.hit
+                assert read() == expected
+            finally:
+                request_budget.reset_current(token)
+
+
+def test_catalogue_read_discards_a_result_built_past_its_deadline() -> None:
+    readiness = lexstore.CatalogReadiness("available", True, "fts5")
+    budget = request_budget.RequestBudget(seconds=30)
+
+    def query(conn: sqlite3.Connection):
+        value = conn.execute("SELECT 1").fetchone()
+        budget.deadline = time.monotonic()
+        return value
+
+    with closing(sqlite3.connect(":memory:")) as reader:
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget() as stop:
+                result = lexstore.LexicalStore._query_within_budget(reader, query, readiness)
+        finally:
+            request_budget.reset_current(token)
+    assert result.readiness == lexstore.CatalogReadiness(lexstore.DEADLINE_STATUS, False, "fts5")
+    assert result.value is None and stop.hit
+
+
+def test_nested_catalogue_read_restores_the_outer_interrupt() -> None:
+    readiness = lexstore.CatalogReadiness("available", True, "fts5")
+    budget = request_budget.RequestBudget(seconds=30)
+    finished = False
+
+    def read_outer(conn: sqlite3.Connection):
+        nonlocal finished
+        with request_budget.capped(5), lexstore.stopping_at_budget():
+            inner = lexstore.LexicalStore._query_within_budget(
+                conn, lambda reader: reader.execute("SELECT 1").fetchone(), readiness
+            )
+        assert inner.value == (1,)
+        budget.deadline = time.monotonic()
+        result = conn.execute(
+            "WITH RECURSIVE x(n) AS (VALUES(1) UNION ALL SELECT n + 1 FROM x WHERE n < 1000000) "
+            "SELECT count(*) FROM x"
+        ).fetchone()
+        finished = True
+        return result
+
+    with closing(sqlite3.connect(":memory:")) as reader:
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget() as stop:
+                result = lexstore.LexicalStore._query_within_budget(reader, read_outer, readiness)
+                assert stop.hit
+        finally:
+            request_budget.reset_current(token)
+    assert result.readiness.status == lexstore.DEADLINE_STATUS
+    assert result.value is None
+    assert not finished
+
+
+def test_unrelated_sqlite_error_keeps_its_meaning_at_the_deadline() -> None:
+    readiness = lexstore.CatalogReadiness("available", True, "fts5")
+    budget = request_budget.RequestBudget(seconds=30)
+
+    def query(conn: sqlite3.Connection):
+        budget.deadline = time.monotonic()
+        return conn.execute("SELECT missing_column")
+
+    with closing(sqlite3.connect(":memory:")) as reader:
+        token = request_budget.set_current(budget)
+        try:
+            with lexstore.stopping_at_budget() as stop, pytest.raises(sqlite3.OperationalError) as raised:
+                lexstore.LexicalStore._query_within_budget(reader, query, readiness)
+            assert raised.value.sqlite_errorcode == sqlite3.SQLITE_ERROR
+            assert not stop.hit
+        finally:
+            request_budget.reset_current(token)
 
 
 # --------------------------------------------------------------------------- #
