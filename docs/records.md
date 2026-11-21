@@ -60,7 +60,6 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | `query` | Read a bounded current view, filters, aggregation, saved view, continuation, or optional bounded agent history. Derived JSON, Markdown, and CSV output is not persisted. |
 | `append` | Safely add a new item with a concise reason and current container guard. |
 | `update` | Target one item with its item key, current container and item-version guards, and a concise reason. |
-| `retract` | Take one row of a store-backed summary or log collection out of current state, with a reason and the current container and item-version guards. The row keeps its history. |
 | `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. |
 | `revise` | Change a collection declaration with current manifest and container guards. |
 | `rebaseline` | Acknowledge an exact, positively established imported audit gap. |
@@ -108,16 +107,6 @@ from retained content. Import keeps the original audit assessment. Rebaseline
 can acknowledge an imported positive gap; it preserves the discontinuity after
 later writes. Native history and unknown imported history cannot be rebaselined.
 Store mutations leave existing activity-log history untouched.
-
-`retract` removes one row from current state without deleting it. The row leaves
-queries, counts, exports, id binding and the rendered summary or log, and
-`history` still lists every retained version and the retraction with its reason.
-A retracted row does not hold its natural key. Appending that key again, or
-importing it from a source, brings back the same row as its next version, with
-the same item key and the same item id. A retracted row and an absent row refuse
-alike, so a refusal never confirms that the row once existed. A collection that
-renders one view file per row, and a collection that keeps file authority,
-refuse with `RETRACT_UNAVAILABLE`, because the file would remain.
 
 One service holds the writer lease. Two independent writers against the same
 store are unsupported. Backups use the collection backup command.

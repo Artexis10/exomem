@@ -25,8 +25,7 @@ Successful product mutations return a compact decisive terminal by default. Its
 first key, `user_summary`, is one plain sentence for the user that names each page by its
 title: `Saved -> <title>`,
 `Updated -> <title>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
-`Replaced -> <new title>, was <old title>`, `Discarded -> <path>`, `Restored -> <path>` or
-`Retracted -> <path>`. A Records retraction names the collection page, which stays.
+`Replaced -> <new title>, was <old title>`, `Discarded -> <path>` or `Restored -> <path>`.
 A tool whose subject is a file names the file by its path instead.
 A move that repointed links in append-only pages adds
 `. Repointed the links to it in <n> append-only pages`, and `pointer_repointed`

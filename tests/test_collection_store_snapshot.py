@@ -82,7 +82,7 @@ def _commit(writer: connection.WriterConnection, *, initial: bool = False) -> st
                 (COLLECTION_ID,),
             )
             conn.executemany(
-                "INSERT INTO item_rows(collection_id,item_key,row_version,schema_version,values_json,"
+                "INSERT INTO items(collection_id,item_key,row_version,schema_version,values_json,"
                 "payload_hash,view_path,created_txn,updated_txn) VALUES (?,?,1,1,?,?,?,1,1)",
                 (
                     (COLLECTION_ID, str(i), json.dumps({"value": "x" * 200}), H, f"items/{i}.md")
@@ -90,7 +90,7 @@ def _commit(writer: connection.WriterConnection, *, initial: bool = False) -> st
                 ),
             )
         else:
-            conn.execute("UPDATE item_rows SET row_version=2,updated_txn=?", (seq,))
+            conn.execute("UPDATE items SET row_version=2,updated_txn=?", (seq,))
     return head
 
 

@@ -104,7 +104,7 @@ def test_a_commit_from_another_connection_ends_the_proof_though_the_cache_restam
             if not committed and not elsewhere:
                 other = sqlite3.connect(store.handle.path, timeout=5, isolation_level=None)
                 try:
-                    other.execute("UPDATE item_rows SET body=? WHERE view_path=?", ("Edited elsewhere", path))
+                    other.execute("UPDATE items SET body=? WHERE view_path=?", ("Edited elsewhere", path))
                 finally:
                     other.close()
                 elsewhere.append(path)
