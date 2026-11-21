@@ -51,6 +51,7 @@ from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
+from .vocabulary import registry as vocabulary_registry
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -2355,7 +2356,7 @@ def borrow_capture_inventory(vault_root: Path):
         return None
     entry, _caption = resident
     inventory = entry[1].capture_inventory
-    if (inventory is None or inventory.type_dependency is None or inventory.type_dependency[0] == "unavailable"
+    if (inventory is None or inventory.type_dependency is None or vocabulary_registry.dependency_unavailable(inventory.type_dependency)
             or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
         return None
     if inventory.store_identity is not None:
@@ -3882,12 +3883,11 @@ def build_corpus_context_with_census(
     decision. A restricted caller's admissions are collected in their own
     disclosure boundary: they shape this context, not the caller's receipt.
 
-    The enrichment memo holds the enrichment of every page. Only a build that
-    enriches every page writes it, and only when no caller lacks an admission that
-    the build had (a dependency of "unavailable" is never written). A restricted
-    caller never writes it and never enriches a page it may not see. It reads the
-    memo when it can validate it, with each such page at its raw state. When it
-    cannot, it enriches the pages it may see and keeps nothing.
+    The enrichment memo holds the enrichment of every page. A build that withholds
+    any page, or whose type or status dependency is unavailable, never writes it. A
+    restricted caller never enriches a page it may not see. It reads the memo when
+    it can validate it, with each such page at its raw state. When it cannot, it
+    enriches the pages it may see and keeps nothing.
     """
     from .governance import egress
 
@@ -4031,7 +4031,7 @@ def build_corpus_context_with_census(
         dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
         # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
         # match it, so it is no enrichment to share, and it must not replace one that others can.
-        if "unavailable" not in (dependency[0][0], dependency[1][0]):
+        if not any(vocabulary_registry.dependency_unavailable(each) for each in dependency[:2]):
             with _CORPUS_CONTEXT_CACHE_LOCK:
                 cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
                 if cached is not None and cached[1] is context:

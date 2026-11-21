@@ -34,7 +34,7 @@ import os
 import re
 import stat
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cache
 from importlib.resources import files
@@ -82,6 +82,16 @@ _STATUSES = frozenset({"active", "deprecated"})
 MAX_OVERLAY_BYTES = 256 * 1024
 # Collision comparison normalizes registry token spelling, never the meaning of prose.
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+#: The kind that a basis's dependency (``Basis.dependency``) names when its reader could not admit or read the
+#: overlay. No other reader can match such a dependency, so no cache may share a result that carries it.
+UNAVAILABLE = "unavailable"
+
+
+def dependency_unavailable(dependency: Sequence[str]) -> bool:
+    """Whether a ``Basis.dependency`` (kind, digest) records an overlay that its reader could not admit or read."""
+    return dependency[0] == UNAVAILABLE
 
 
 class RegistryError(ValueError):
