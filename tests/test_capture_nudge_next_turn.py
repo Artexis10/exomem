@@ -60,7 +60,7 @@ def _run(script: str, event: dict, env: dict[str, str], *args: str) -> str:
     return done.stdout.strip()
 
 
-def _stop(tmp_path: Path, env: dict[str, str], *args: str, reply: str = "Pushed.") -> str:
+def _stop(tmp_path: Path, env: dict[str, str], *args: str, reply: str = "Pushed.", session: str = SESSION) -> str:
     """A Stop event whose turn pushed successfully: below `maximal` only a landing is nudged."""
     rows = [
         {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "q"}]}},
@@ -77,20 +77,21 @@ def _stop(tmp_path: Path, env: dict[str, str], *args: str, reply: str = "Pushed.
     transcript = tmp_path / "turn.jsonl"
     transcript.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
     event = {
-        "session_id": SESSION,
+        "session_id": session,
         "transcript_path": str(transcript),
         "last_assistant_message": reply,
     }
     return _run("exomem_capture_nudge.py", event, env, *args)
 
 
-def _prompt(env: dict[str, str], prompt: str, *args: str) -> str:
-    out = _run("exomem_retrieve_nudge.py", {"session_id": SESSION, "prompt": prompt}, env, *args)
+def _prompt(env: dict[str, str], prompt: str, *args: str, session: str = SESSION) -> str:
+    out = _run("exomem_retrieve_nudge.py", {"session_id": session, "prompt": prompt}, env, *args)
     return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
 
 
-def _pending(tmp_path: Path) -> Path:
-    return tmp_path / "state" / ".cache" / "exomem-nudge" / f"pending_{SESSION}"
+def _pending(tmp_path: Path) -> list[Path]:
+    """The reminders waiting in the state home; their names are a digest, so the test lists them."""
+    return sorted((tmp_path / "state" / ".cache" / "exomem-nudge").glob("pending_*"))
 
 
 def _log(tmp_path: Path) -> str:
@@ -114,11 +115,11 @@ def test_a_deferred_reminder_arrives_once_on_the_next_prompt(tmp_path, source):
     env = _env(tmp_path, **extra)
 
     assert _stop(tmp_path, env) == ""  # the Stop is not blocked
-    assert _pending(tmp_path).exists()
+    assert _pending(tmp_path)
 
     assert MARKER in _prompt(env, "yes")
     assert _prompt(env, "yes") == ""
-    assert not _pending(tmp_path).exists()
+    assert not _pending(tmp_path)
     assert [row.split(" ", 2)[2] for row in _log(tmp_path).splitlines()] == [
         "nudge deferred",
         "nudge delivered",
@@ -153,7 +154,7 @@ def test_the_native_activation_path_delivers_the_deferred_reminder(tmp_path):
     )
 
     assert MARKER in json.loads(out)["hookSpecificOutput"]["additionalContext"]
-    assert not _pending(tmp_path).exists()
+    assert not _pending(tmp_path)
 
 
 def test_a_pending_reminder_older_than_six_hours_is_dropped_unread(tmp_path):
@@ -161,10 +162,11 @@ def test_a_pending_reminder_older_than_six_hours_is_dropped_unread(tmp_path):
     env = _env(tmp_path, EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
     _stop(tmp_path, env)
     stale = time.time() - SIX_HOURS - 60
-    os.utime(_pending(tmp_path), (stale, stale))
+    [marker] = _pending(tmp_path)
+    os.utime(marker, (stale, stale))
 
     assert _prompt(env, "yes") == ""
-    assert not _pending(tmp_path).exists()
+    assert not _pending(tmp_path)
 
 
 def test_the_episode_ask_still_blocks_in_next_turn_mode(tmp_path):
@@ -180,7 +182,7 @@ def test_the_episode_ask_still_blocks_in_next_turn_mode(tmp_path):
 
     assert reply["decision"] == "block"
     assert EPISODE_MARKER in reply["reason"]
-    assert not _pending(tmp_path).exists()
+    assert not _pending(tmp_path)
 
 
 def test_an_unknown_delivery_value_keeps_the_stop_blocking(tmp_path):
@@ -194,13 +196,15 @@ def test_an_unknown_delivery_value_keeps_the_stop_blocking(tmp_path):
 
     assert reply["decision"] == "block"
     assert MARKER in reply["reason"]
-    assert not _pending(tmp_path).exists()
+    assert not _pending(tmp_path)
 
 
 def test_a_reminder_that_cannot_be_deferred_blocks_the_stop(tmp_path):
     """The failure: an unwritable state file drops the reminder without a word."""
     env = _env(tmp_path, EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
-    _pending(tmp_path).mkdir(parents=True)  # a directory where the marker file must go
+    nudge_cache = tmp_path / "state" / ".cache" / "exomem-nudge"
+    nudge_cache.parent.mkdir(parents=True)
+    nudge_cache.write_text("", encoding="utf-8")  # a file where the marker's directory must go
 
     reply = json.loads(_stop(tmp_path, env))
 
@@ -222,6 +226,15 @@ def test_codex_defers_and_delivers_under_its_own_home(tmp_path):
     stop = {"session_id": SESSION, "last_assistant_message": "Done. " + "x" * 200}
 
     assert _run("exomem_capture_nudge.py", stop, env, "--client", "codex") == ""
-    assert (codex_home / ".cache" / "exomem-nudge" / f"pending_{SESSION}").exists()
+    assert list((codex_home / ".cache" / "exomem-nudge").glob("pending_*"))
 
     assert MARKER in _prompt(env, "yes", "--client", "codex")
+
+
+def test_sessions_whose_ids_sanitise_alike_keep_their_own_reminders(tmp_path):
+    """The failure: a sanitised or truncated id joins two sessions, and one takes the other's reminder."""
+    env = _env(tmp_path, EXOMEM_CAPTURE_NUDGE_DELIVERY="next-turn")
+    _stop(tmp_path, env, session="session/alpha")
+
+    assert _prompt(env, "yes", session="session_alpha") == ""
+    assert MARKER in _prompt(env, "yes", session="session/alpha")

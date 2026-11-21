@@ -1218,12 +1218,16 @@ def _touch(stamp: Path) -> None:
 def _pending_reminder_path(session_id: str) -> Path:
     """Where next-turn delivery leaves the session's reminder, beside its cooldown stamps.
 
-    `exomem_retrieve_nudge.py` mirrors this name (a standalone script cannot import it);
-    `tests/test_capture_nudge_next_turn.py` runs both hooks against one state home.
+    The name is a digest of the full `client\0session_id`, as the continuation token's is: a
+    sanitised or truncated id maps distinct sessions onto one file, and one session would then
+    take another's reminder. `exomem_retrieve_nudge.py` derives the same name itself, so a
+    prompt with nothing waiting loads no sibling script; `tests/test_capture_nudge_next_turn.py`
+    runs both hooks against one state home and checks that colliding ids stay apart.
     """
-    # Makes the id a safe file name, as the stamps do: a shape rule, not a reading of meaning.
-    key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
-    return _hook_home() / ".cache" / "exomem-nudge" / f"pending_{key}"
+    digest = hashlib.sha256(
+        f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
 
 
 def _defer_reminder(session_id: str) -> bool:

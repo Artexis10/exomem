@@ -612,8 +612,9 @@ _DEFERRED_REMINDER_MAX_AGE_SEC = 6 * 3600
 def _deferred_capture_reminder(data: object) -> str:
     """The capture reminder the Stop hook left for this session's next prompt, or `""`.
 
-    The marker is `_pending_reminder_path` in `exomem_capture_nudge.py`, mirrored here because a
-    standalone script cannot import it. It is consumed once, and a stale one is dropped unread.
+    The marker is `_pending_reminder_path` in `exomem_capture_nudge.py`, derived here too so a
+    prompt with nothing waiting loads no sibling script; the test that runs both hooks keeps the
+    two in step. It is consumed once, and a stale one is dropped unread.
     A prompt with nothing waiting pays one `stat`: no sibling script is loaded. Never raises, so
     a state or load failure cannot break prompt submission.
     """
@@ -621,9 +622,11 @@ def _deferred_capture_reminder(data: object) -> str:
         if not isinstance(data, dict):
             return ""
         session_id = str(data.get("session_id") or data.get("sessionId") or "")
-        # Makes the id a safe file name, as the stamps do: a shape rule, not a reading of meaning.
-        key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
-        marker = _hook_home() / ".cache" / "exomem-nudge" / f"pending_{key}"
+        # The full client and session identity, digested: a sanitised id would join distinct sessions.
+        digest = hashlib.sha256(
+            f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+        ).hexdigest()[:32]
+        marker = _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
         try:
             age = time.time() - marker.stat().st_mtime
         except OSError:
