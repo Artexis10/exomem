@@ -289,6 +289,12 @@ class _CatalogueDeadline(Exception):
         scope.hit = True
 
 
+class _CatalogueOpenUnavailable(Exception):
+    def __init__(self, status: Literal["stale", "transient_failure"]) -> None:
+        super().__init__(status)
+        self.status = status
+
+
 def _catalogue_budget() -> request_budget.RequestBudget | None:
     return request_budget.current() if _STOP_AT_BUDGET.get() is not None else None
 
@@ -6136,17 +6142,23 @@ class LexicalStore:
 
     @contextlib.contextmanager
     def _catalogue_read_connection(self) -> Iterator[sqlite3.Connection]:
-        """Own a fresh sidecar handle under the opt-in catalogue read deadline."""
+        """Own a sidecar handle. A budgeted read can only open an existing file."""
         from .cli_ops import OpError
 
         budget = _catalogue_budget()
         _check_catalogue_budget()
         try:
             conn = self._connect() if budget is None else self._connect(read_deadline=budget.deadline)
+        except FileNotFoundError as error:
+            if budget is None:
+                raise
+            _check_catalogue_budget()
+            raise _CatalogueOpenUnavailable("stale") from error
         except OpError as error:
-            if error.code == "MUTATION_BUSY":
-                _check_catalogue_budget()
-            raise
+            if budget is None or error.code != "MUTATION_BUSY":
+                raise
+            _check_catalogue_budget()
+            raise _CatalogueOpenUnavailable("transient_failure") from error
         with contextlib.closing(conn):
             _check_catalogue_budget()
             yield conn
@@ -6166,6 +6178,8 @@ class LexicalStore:
         descriptor_id = reserved_paths.state_target_descriptor_id(
             self.vault_root, target
         )
+        if read_deadline is not None and descriptor_id != "lexical-store":
+            raise RuntimeError("budgeted catalogue read target is not owner-bound")
         descriptor_ids = (
             (descriptor_id,)
             if descriptor_id
@@ -6179,7 +6193,7 @@ class LexicalStore:
                 if descriptor_id == "lexical-store":
                     # An open of the live store that is already there changes no identity, so
                     # it skips the identity gate and the generation bump: a read must not
-                    # queue behind a writer. A missing store is created under the full guard.
+                    # queue behind a writer. Only ordinary opens may create a missing store.
                     try:
                         with call_spans.entered(
                             "lexical.connect.guard",
@@ -6192,19 +6206,19 @@ class LexicalStore:
                         ):
                             return self._connect_owned(path, create=False, read_deadline=read_deadline)
                     except FileNotFoundError:
-                        pass
+                        if read_deadline is not None:
+                            raise
                 # The guard span above already covered a missing live store's connect; only a
                 # connect that has not been spanned yet gets one here.
                 fallback = reserved_paths._identity_coordination_scope(
                     self.vault_root,
                     descriptor_ids=descriptor_ids,
-                    deadline=read_deadline,
                 )
                 if descriptor_id == "lexical-store":
                     with fallback:
-                        return self._connect_owned(path, read_deadline=read_deadline)
+                        return self._connect_owned(path)
                 with call_spans.entered("lexical.connect.guard", fallback):
-                    return self._connect_owned(path, read_deadline=read_deadline)
+                    return self._connect_owned(path)
 
     def _connect_owned(
         self,
@@ -6243,9 +6257,23 @@ class LexicalStore:
         publish: bool,
         read_deadline: float | None = None,
     ) -> sqlite3.Connection:
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if read_deadline is None:
+            target.parent.mkdir(parents=True, exist_ok=True)
         with call_spans.span("lexical.connect.sqlite"):
-            conn = _sqlite_connect_owned(target)
+            if read_deadline is None:
+                conn = _sqlite_connect_owned(target)
+            else:
+                _check_catalogue_budget()
+                try:
+                    # SQLite must also refuse creation between the held-path check and open.
+                    conn = _sqlite_connect_owned(f"{target.as_uri()}?mode=rw", uri=True)
+                except sqlite3.OperationalError as error:
+                    if (
+                        getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_CANTOPEN
+                        and not target.exists()
+                    ):
+                        raise FileNotFoundError(target) from error
+                    raise
             try:
                 conn.execute("PRAGMA busy_timeout=5000")
                 if read_deadline is None:
@@ -12011,6 +12039,10 @@ class LexicalStore:
                         )
             # The worker's catch-up must prove the lagging catalogue current, or the full pass runs.
             return defer("stale", lag_only=True)
+        except _CatalogueOpenUnavailable as error:
+            if error.status == "stale":
+                return defer("stale")
+            return CatalogReadiness(error.status, False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
                 e,
@@ -12968,6 +13000,11 @@ class LexicalStore:
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
                 return self._query_within_budget(conn, query_fn, readiness)
+        except _CatalogueOpenUnavailable as error:
+            if error.status == "stale":
+                _check_catalogue_budget()
+                _schedule_runtime_catalog_repair(self.vault_root)
+            return CatalogQueryResult(None, CatalogReadiness(error.status, False, readiness.backend))
         except RegistryError:
             return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, readiness.backend))
         except sqlite3.Error as e:

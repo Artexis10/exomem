@@ -30,7 +30,8 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore, request_budget, reserved_paths
+from exomem import freshness, lexstore, request_budget, reserved_paths, writer_lease
+from exomem.cli_ops import OpError
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -251,7 +252,7 @@ def test_unrelated_sqlite_error_keeps_its_meaning_at_the_deadline() -> None:
 
 
 @needs_fts5
-@pytest.mark.parametrize("lock", ["sqlite_setup", "sqlite_schema", "identity"])
+@pytest.mark.parametrize("lock", ["sqlite_setup", "sqlite_schema", "identity", "identity_manager"])
 def test_request_budget_bounds_catalogue_read_before_the_query(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lock: str
 ) -> None:
@@ -306,7 +307,12 @@ def test_request_budget_bounds_catalogue_read_before_the_query(
                 release.set()
                 holder.result()
 
-    with hold_identity() if lock == "identity" else hold_sqlite():
+    with hold_identity() if lock in {"identity", "identity_manager"} else hold_sqlite():
+        if lock == "identity_manager":
+            monkeypatch.setattr(writer_lease.active_manager(), "_mutation_timeout_seconds", 0.05)
+            with pytest.raises(OpError) as raised:
+                read()
+            assert raised.value.code == "MUTATION_BUSY"
         token = request_budget.set_current(
             request_budget.RequestBudget(seconds=0.05 if lock == "identity" else 30)
         )
@@ -323,6 +329,55 @@ def test_request_budget_bounds_catalogue_read_before_the_query(
 
     assert not repair_requests
     assert read() == expected
+
+
+@needs_fts5
+@pytest.mark.parametrize(
+    ("open_to_interrupt", "expired"),
+    [(1, False), (1, True), (2, False)],
+    ids=["readiness", "expired", "proof"],
+)
+def test_budgeted_catalogue_open_never_recreates_a_disappearing_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, open_to_interrupt: int, expired: bool
+) -> None:
+    _write_page(tmp_path, "Knowledge Base/a.md", "searchable payload")
+    assert lexstore.search_bm25(tmp_path, "searchable", 5)
+    path = lexstore.lexical_path(tmp_path)
+    manager = writer_lease.active_manager()
+    generation = writer_lease._reserved_identity_generation_path(manager.config.state_dir, tmp_path)
+    original_generation = generation.read_bytes()
+    guard = reserved_paths._identity_coordination_scope
+    budget = request_budget.RequestBudget(seconds=30)
+    repairs = []
+    read_opens = 0
+
+    @contextmanager
+    def remove_at_admission(*args, **kwargs):
+        nonlocal read_opens
+        with guard(*args, **kwargs) as held:
+            if not kwargs.get("identity_may_change", True):
+                read_opens += 1
+                if read_opens == open_to_interrupt:
+                    path.unlink()
+                    if expired:
+                        budget.deadline = time.monotonic()
+            yield held
+
+    monkeypatch.setattr(reserved_paths, "_identity_coordination_scope", remove_at_admission)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", lambda *a, **k: repairs.append(a[0]))
+    token = request_budget.set_current(budget)
+    try:
+        with lexstore.stopping_at_budget() as stop:
+            result = lexstore.search_bm25_result(tmp_path, "searchable", 5, allow_delta=False)
+    finally:
+        request_budget.reset_current(token)
+
+    assert not path.exists()
+    assert generation.read_bytes() == original_generation
+    assert result.readiness.status == (lexstore.DEADLINE_STATUS if expired else "stale")
+    assert result.value is None and not result.readiness.complete
+    assert stop.hit == expired
+    assert repairs == ([] if expired else [tmp_path])
 
 
 @needs_fts5
