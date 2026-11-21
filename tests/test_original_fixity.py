@@ -451,9 +451,22 @@ def test_the_sweep_of_kept_copies_asks_a_table_of_many_originals_through_an_inde
             [(f"file-{number}", hashlib.sha256(str(number).encode()).hexdigest(),
               original_fixity.CORRUPT_NO_COPY if number % 100 == 0 else original_fixity.VERIFIED) for number in range(20_000)])
         plan = " | ".join(step[3] for step in connection.execute(
-            "EXPLAIN QUERY PLAN " + original_fixity._KEPT_NEEDED.format(marks="?, ?"), ("a" * 64, "b" * 64)))
+            "EXPLAIN QUERY PLAN " + original_fixity._KEPT_NEEDED.format(values="(?), (?)"), ("a" * 64, "b" * 64)))
 
-    assert "INDEX originals_unresolved" in plan and "SCAN" not in plan
+    assert "INDEX originals_unresolved" in plan and "SCAN originals" not in plan
+
+
+def test_the_sweep_of_kept_copies_gets_one_row_for_a_digest_that_many_unresolved_originals_share(vault: Path) -> None:
+    """Aliases of one file share a digest: the answer must not grow with them, or a pass would read a row for each."""
+    shared, other = hashlib.sha256(b"shared").hexdigest(), hashlib.sha256(b"other").hexdigest()
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.executemany(
+            "INSERT INTO originals(path, sha256, kind, binding, state) VALUES (?, ?, 'file', 'binding', ?)",
+            [(f"alias-{number}", shared, original_fixity.CORRUPT_NO_COPY) for number in range(5_000)])
+
+        answered = connection.execute(original_fixity._KEPT_NEEDED.format(values="(?), (?)"), (shared, other)).fetchall()
+
+    assert [row[0] for row in answered] == [shared]
 
 
 def test_a_kept_copy_goes_when_the_original_is_whole_again(vault: Path, selected_store) -> None:

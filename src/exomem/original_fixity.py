@@ -929,8 +929,10 @@ def _keep(vault: Path, row: Row, staged: Path) -> None:
 
 #: The kept digests that one lookup of `_KEPT_NEEDED` carries: far under SQLite's limit on bound values.
 _KEPT_BATCH = 200
-#: The unresolved rows among some digests: a lookup of `originals_unresolved` per digest, whatever the table holds.
-_KEPT_NEEDED = f"SELECT sha256 FROM originals WHERE state = '{CORRUPT_NO_COPY}' AND sha256 IN ({{marks}})"
+#: The kept digests that an unresolved row needs: at most one row for each digest asked about, however many rows share
+#: it, because each digest is one probe of `originals_unresolved` and not a scan of its matches.
+_KEPT_NEEDED = ("WITH kept(sha256) AS (VALUES {values}) SELECT sha256 FROM kept WHERE EXISTS "
+                f"(SELECT 1 FROM originals WHERE originals.state = '{CORRUPT_NO_COPY}' AND originals.sha256 = kept.sha256)")
 
 
 def _drop_unneeded_kept_copies(vault: Path, connection: sqlite3.Connection) -> None:
@@ -943,7 +945,7 @@ def _drop_unneeded_kept_copies(vault: Path, connection: sqlite3.Connection) -> N
     for start in range(0, len(kept_copies), _KEPT_BATCH):  # almost every pass has none: the table is not queried at all
         batch = {kept.name.removesuffix(_KEPT_SUFFIX): kept for kept in kept_copies[start:start + _KEPT_BATCH]}
         needed = {sha256 for (sha256,) in connection.execute(
-            _KEPT_NEEDED.format(marks=", ".join("?" for _ in batch)), list(batch))}
+            _KEPT_NEEDED.format(values=", ".join("(?)" for _ in batch)), list(batch))}
         for sha256, kept in batch.items():
             if sha256 not in needed:
                 kept.unlink(missing_ok=True)

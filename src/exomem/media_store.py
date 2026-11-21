@@ -2933,20 +2933,22 @@ _ALIAS_SECONDS = 2.0
 
 
 def _quarantine_shared(vault: Path, ledger: MediaJobStore, key: str, reference: StoredObject,
-                       mismatch: ReplicaMismatch, evicting: str) -> None:
-    """Quarantine `reference` for the filings of the pooled object `key` whose pointer it is: the evicting one, then a bounded few.
+                       mismatch: ReplicaMismatch, owner: str) -> None:
+    """Quarantine `reference` for `owner`, a filing of the pooled object `key` that holds it, then for a bounded few more.
 
-    One quarantined filing already stops the object's eviction (the gate reads the version), so what the bounds leave
-    for later costs nothing: the next attempt finds the same damage once the first filings have been replaced, and a
-    filing's own check finds it as well. The filings are read in path order from the index of `object_key`.
+    The owner comes with the reference from the object's facts, so the damaged pointer is recorded whatever the bounds
+    leave: the filing under eviction may hold another, healthy pointer of the same object. One quarantined filing
+    already stops the object's eviction (the gate reads the version), so what the bounds leave costs nothing: the next
+    attempt finds the same damage once the owners have been replaced. The filings are read in path order from the
+    index of `object_key`.
     """
-    _quarantine_found(vault, [evicting], reference, mismatch)
+    _quarantine_found(vault, [owner], reference, mismatch)
     deadline, after = time.monotonic() + _ALIAS_SECONDS, ""
     for _page in range(_ALIAS_ROWS // _ALIAS_PAGE):
         with closing(ledger._connect(readonly=True)) as conn:
             filings = conn.execute("SELECT binary_rel, reference FROM media_bindings WHERE object_key = ? "
                                    "AND binary_rel > ? ORDER BY binary_rel LIMIT ?", (key, after, _ALIAS_PAGE)).fetchall()
-        sharing = [row["binary_rel"] for row in filings if row["binary_rel"] != evicting and row["reference"] is not None
+        sharing = [row["binary_rel"] for row in filings if row["binary_rel"] != owner and row["reference"] is not None
                    and originals.stored_reference(json.loads(row["reference"])) == reference]
         if sharing:
             _quarantine_found(vault, sharing, reference, mismatch)
@@ -2975,12 +2977,12 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
         version = source.version
     try:
         backend = store_for(vault)
-        for reference in facts.references:
+        for reference, owner in zip(facts.references, facts.owners, strict=True):
             try:
                 if not _confirmed(backend, reference):
                     return KEPT
             except ReplicaMismatch as mismatch:
-                _quarantine_shared(vault, ledger, key, reference, mismatch, ledger._relative(snapshot.path))
+                _quarantine_shared(vault, ledger, key, reference, mismatch, owner)
                 return KEPT
     except MediaStoreError as error:
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT

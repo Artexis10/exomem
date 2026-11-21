@@ -1164,6 +1164,37 @@ def test_a_damaged_pointer_of_an_object_with_many_filings_stops_at_the_time_boun
     assert 1 < _quarantined_rows(vault) <= 1 + media_store._ALIAS_PAGE
 
 
+def test_a_damaged_pointer_held_only_by_a_filing_past_the_bound_is_still_recorded_in_one_attempt(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An object's filings may hold several pointers: the bound on the filings looked at must never hide a damaged one."""
+    values, _config = selected_store
+    path = _preserved(vault)
+    healthy = _offload(vault, path)
+    digest = _pooled(vault, path, monkeypatch)
+    relative = path.relative_to(vault).as_posix()
+    stored = Path(values["root"]) / healthy.object / healthy.version
+    other = healthy.version + "-other"
+    damaged = bytearray(stored.read_bytes())
+    damaged[len(damaged) // 2] ^= 0xFF
+    (stored.parent / other).write_bytes(damaged)  # a second version of the object, whose bytes are not the recorded ones
+    pointer = json.dumps({**healthy.fields(), "version": other})
+    filings = media_store._ALIAS_ROWS + 1  # more than the bound looks at, on the healthy pointer; the damaged one sorts last
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        copy = ("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
+                "resident_only, {} FROM media_bindings WHERE binary_rel = ?")
+        for number in range(filings):
+            conn.execute(copy.format("reference"), (f"Aliases/{number:05d}.txt", relative))
+        conn.execute(copy.format("?"), ("Zzz/owner-of-the-other-pointer.txt", pointer, relative))
+
+    assert not media_store.evict(vault, path)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        found = ledger.execute("SELECT binary_rel, version, failure FROM media_replicas WHERE state = ?",
+                               (media_replicas.QUARANTINED,)).fetchall()
+    assert ("Zzz/owner-of-the-other-pointer.txt", other, "digest_mismatch") in found
+    assert original_pool.object_path(vault, digest).exists()
+
+
 def _quarantined_while_the_store_answers(vault: Path, relative: str, reference: originals.StoredObject,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """A check finds the pointer damaged at the moment eviction asks the store about it: the finding lands during the HEAD."""
