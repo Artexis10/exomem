@@ -6374,11 +6374,11 @@ def _postfilter(
         if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
             view_purpose = (request_kwargs or {}).get("purpose")
             result = guard_view_response(vault_root, result, purpose=view_purpose)
-    record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
+        record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
         result = _withheld_cross_check(
             vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding,
