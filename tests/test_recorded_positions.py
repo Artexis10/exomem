@@ -458,6 +458,10 @@ def test_the_block_that_is_served_asks_for_the_position_first_and_never_for_agre
     assert about == positions.ABOUT
     assert "open your first answer with it" in about
     assert "state the recorded position before you answer yes or no" in about
+    # Replies softened a plain contradiction into "weakens" and kept the position alive; the passage must ask for the contradiction.
+    assert "whether it supports the position, leaves it open or contradicts it" in about
+    assert "When it contradicts the position, say that it does" in about
+    assert "do not keep the position alive with a possibility the evidence gives no reason for" in about
     assert "agree" not in about.lower()
 
 

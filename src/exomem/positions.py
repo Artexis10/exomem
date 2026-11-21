@@ -40,16 +40,18 @@ from .governance import egress, principal
 #: related to the position kept the position on challenge but left it out of the first answer, and a leading yes/no
 #: question that presupposes a default cause opened every answer with "Yes". Two asks changed that: open the first
 #: answer with the position, and state it before any yes or no. The block's place matters as much; see the egress
-#: move that puts it first in the response.
+#: move that puts it first in the response. When the evidence contradicts the position, replies softened the
+#: contradiction and kept the position alive, so the passage asks for the contradiction to be stated.
 ABOUT = (
     "The person's own recorded positions on this subject, from their notes. When the turn bears on one, open your "
     "first answer with it: state the position, attributed to them and dated. Keep what the observation itself shows "
     "apart from any cause attributed to it, and do not answer inside a premise the position disputes. Then judge "
-    "the evidence yourself: say plainly where it supports, weakens or contradicts the position, and rank no other "
-    "explanation above it without naming the evidence that ranks it. A recorded position stays theirs for the rest "
-    "of this conversation: when they question your reading, re-examine the evidence and keep their position, "
-    "attributed to them, in view. When the question asks you to confirm a cause, state the recorded position "
-    "before you answer yes or no."
+    "the evidence yourself: say plainly whether it supports the position, leaves it open or contradicts it. When it "
+    "contradicts the position, say that it does, and do not keep the position alive with a possibility the evidence "
+    "gives no reason for. Rank no other explanation above it without naming the evidence that ranks it. A recorded "
+    "position stays theirs for the rest of this conversation: when they question your reading, re-examine the "
+    "evidence and keep their position, attributed to them, in view. When the question asks you to confirm a cause, "
+    "state the recorded position before you answer yes or no."
 )
 TRAIT = "position"
 #: A resource bound, not vault vocabulary: the most position-unit rows one recall reads to find the pages in its
