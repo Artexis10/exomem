@@ -122,6 +122,7 @@ _CONNECTION_LAST_TIER_BEHAVIOURS: frozenset[str] = frozenset(
 _CONNECTION_INBOUND_REPLACES_BEHAVIOUR = "replaces"  # nosemgrep: ep-word-literal -- closed registry behaviour value
 #: The most characters a connection's `why` may occupy, cut on a word boundary.
 CONNECTION_WHY_MAX_CHARS = 140
+_CONNECTION_WHY_SEPARATOR = ": "
 
 #: Entries the working-continuity block may carry, and the characters they may
 #: spend. Both are hard: the block leads every packet, including an abstained
@@ -1952,12 +1953,23 @@ def _connection_why(
                 context = ""
     if not context:
         return f"{relation} ({direction})"
-    prefix = f"{relation} ({direction}): "
+    # The release guard uses this protocol separator to recognize quoted reasons.
+    prefix = f"{relation} ({direction}){_CONNECTION_WHY_SEPARATOR}"
     room = CONNECTION_WHY_MAX_CHARS - len(prefix)
     if len(context) > room:
         cut = context[: room + 1].rpartition(" ")[0]
         context = cut or context[:room]
     return prefix + context
+
+
+def packet_has_graph_quotes(packet: Mapping[str, Any]) -> bool:
+    """Whether the compiled packet includes prose from a graph pointer's page body."""
+    roles = {role["id"] for role in packet.get("roles", ()) if role.get("lane") == "graph"}
+    return bool(roles) and any(
+        pointer.get("role") in roles
+        and _CONNECTION_WHY_SEPARATOR in str(pointer.get("why") or "")
+        for pointer in packet.get("pointers") or ()
+    )
 
 
 def read_connections(

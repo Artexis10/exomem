@@ -26,6 +26,7 @@ from exomem import (
     lexstore,
     served_context,
     working_set,
+    working_set_runtime,
 )
 from exomem import vault as vault_module
 from exomem.governance import egress
@@ -478,3 +479,36 @@ def test_a_governed_caller_keeps_a_graph_pointer_without_a_quote(
         )
 
     assert [(item.path, item.why) for item in items] == [(report, "supersedes (inbound)")]
+
+
+def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = "Knowledge Base/Entities/People/Calibration Coordinator.md"
+    _write(
+        vault, seed,
+        "---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# Calibration Coordinator\n\n" + LEAD_BODY,
+    )
+    report = _page(vault, "visit-report", body=(
+        f"The revised visit report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after review\n"
+    ))
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _warm_resolver(monkeypatch)
+    turn = "Tell me about the Calibration Coordinator"
+
+    def quote(packet):
+        return next(pointer["why"] for pointer in packet["pointers"] if pointer["ref"] == report)
+
+    with request_scope(owner_principal(surface="library")):
+        cold = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        assert quote(cold) == "supersedes (inbound): supersedes Calibration Coordinator after review"
+        with egress.policy_module.request_policy_snapshot():
+            assert egress.unrestricted_source_access(vault, purpose=None)
+            write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+            write_rule(vault, audience="owner", ceiling=egress.LEVEL_FULL)
+            guarded = egress.guard_working_set(vault, cold, egress.AnnotatedHits(hits=[]))
+        assert guarded is None
+        governed = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        assert quote(governed) == "supersedes (inbound)"

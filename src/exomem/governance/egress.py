@@ -2090,10 +2090,12 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
-def unrestricted_source_access(vault_root: Path, *, purpose: str | None) -> bool:
+def unrestricted_source_access(
+    vault_root: Path, *, purpose: str | None, principal: RequestPrincipal | None = None,
+) -> bool:
     """Whether the caller may use the raw source fast path."""
     policy = policy_module.load(Path(vault_root))
-    who = effective_principal().with_purpose(purpose)
+    who = (principal if principal is not None else effective_principal()).with_purpose(purpose)
     return policy_empty_without_writer(vault_root, policy) and unrestricted_content_access(vault_root, who)
 
 
@@ -4056,6 +4058,16 @@ def guard_working_set(
     if policy.blocked or (not policy.empty and not who.resolved):
         _record_blocked_outcome(who.audience_id)
         return None
+
+    from .. import working_set
+
+    if working_set.packet_has_graph_quotes(guarded):
+        # If source authority changed during this read, the packet's pointers and quotes
+        # were both selected under the old authority. Refuse it so a new read can compile
+        # under the current authority instead of repairing individual fields.
+        with state_paths.outside_resolution_scope(), policy_module.outside_request_policy_snapshot():
+            if not unrestricted_source_access(vault_root, purpose=purpose, principal=who):
+                return None
 
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
