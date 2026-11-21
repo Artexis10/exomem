@@ -9,6 +9,7 @@ the files that it does not own. The cost gate is ``test_vault_store_write_cost``
 from __future__ import annotations
 
 import os
+import shutil
 import types
 from contextlib import closing
 
@@ -242,20 +243,39 @@ def add_page(beside, mode):
     return added
 
 
+def swap_for_a_link_to_a_copy(path):
+    """Replace a file with a symbolic link to a copy that has the same size, mtime and mode."""
+    copy = path.with_suffix(".bin")
+    shutil.copy2(path, copy)
+    path.unlink()
+    path.symlink_to(copy)
+
+
+def swap_the_folder_for_a_link_to_a_copy(path):
+    """Replace a page's folder with a symbolic link to a copy that the walks never enter, with the same file stats."""
+    copy = path.parents[2] / ".obsidian" / path.parent.name
+    shutil.copytree(path.parent, copy)
+    shutil.rmtree(path.parent)
+    path.parent.symlink_to(copy, target_is_directory=True)
+
+
 @pytest.mark.parametrize(("rel", "mode_before", "change"), [
     pytest.param("Reference/Readable.md", 0o644, lambda path: path.chmod(0), id="a-page-the-process-can-no-longer-read"),
     pytest.param("Reference/Locked.md", 0, lambda path: path.chmod(0o644), id="a-page-the-process-can-read-again"),
     pytest.param("Reference/Manual.md", 0o644, lambda path: os.link(path, path.with_suffix(".bin")), id="a-page-that-gains-a-second-link"),
     pytest.param("Reference/Template.bin", 0o644, lambda path: os.link(path, path.with_name("Added.md")), id="a-new-page-that-is-a-second-link"),
     pytest.param("Reference/Seed.md", 0o644, lambda path: add_page(path, mode=0), id="a-new-page-the-process-cannot-read"),
+    pytest.param("Reference/Manual.md", 0o644, swap_for_a_link_to_a_copy, id="a-page-replaced-by-a-link-to-a-copy"),
+    pytest.param("Reference/Folder/Manual.md", 0o644, swap_the_folder_for_a_link_to_a_copy, id="a-folder-replaced-by-a-link-to-a-copy"),
 ])
 def test_a_change_to_a_files_mode_or_links_reaches_the_writers_resolver(warm, rel, mode_before, change):  # noqa: F811
     """Defect that this guards: a resident proof that compares the size and mtime of the files and so misses a
-    change that neither moves (a page's permissions, or a second hard link) but that decides whether a build
-    over the disk reads its title or indexes it at all, and the same for a new path that the walk leaves out (a
-    second link) or reads as a title-less path (one the process cannot read), which the corpus's page delta must
-    judge as the walk does. After each change, with no commit and no event, the writer's resolver equals a build
-    over the disk, before and after the next build of the corpus."""
+    change that neither moves (a page's permissions, a second hard link, or a symbolic link to a copy with the
+    same stats, for the page or its folder) but that decides whether a build over the disk reads its title or
+    indexes it at all, and the same for a new path that the walk leaves out (a second link) or reads as a
+    title-less path (one the process cannot read), which the corpus's page delta must judge as the walk does.
+    After each change, with no commit and no event, the writer's resolver equals a build over the disk, before
+    and after the next build of the corpus."""
     path = keep_file(warm, rel, "---\ntitle: Distinctive Manual\n---\n# Manual\n")
     path.chmod(mode_before)
     try:
@@ -399,6 +419,23 @@ def test_a_patched_census_entry_equals_the_walks_for_the_same_file(warm, monkeyp
     )
     assert patched == (walked,)
     assert walked[5] == 2, "the entry holds the link count that the vault walk's rule reads"
+
+
+def test_a_patched_census_leaves_out_a_link_as_the_walk_does(warm):  # noqa: F811
+    """Defect that this guards: a census that the patch of a save and the walk build differently for a page that
+    became a symbolic link (the patch following it, as ``stat`` does, where the walk reads ``lstat`` and leaves the
+    link out), so that the next census read sees a changed census and builds the corpus from nothing. After the
+    swap, the patch of the pre-swap census is the census that the walk takes."""
+    page = keep_file(warm, "Reference/Linked.md", "---\ntitle: Linked\n---\n")
+    before = tuple(sorted(semantic_contract._disk_page_census(warm)))
+    assert "Reference/Linked.md" in {entry[0] for entry in before}
+    swap_for_a_link_to_a_copy(page)
+    patched = semantic_contract._patch_markdown_census(
+        warm, before, changed_paths=("Reference/Linked.md",), deleted_paths=()
+    )
+    walked = tuple(sorted(semantic_contract._disk_page_census(warm)))
+    assert "Reference/Linked.md" not in {entry[0] for entry in walked}, "the census leaves out the link, as the vault walk does"
+    assert patched == walked
 
 
 def test_an_alias_below_the_knowledge_base_still_refuses_the_census(warm):  # noqa: F811

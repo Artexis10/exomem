@@ -2669,10 +2669,8 @@ def _markdown_name(name: str) -> bool:
 _FileEntry = tuple[str, str, int, int, int, int, int, int]
 
 
-def _file_entry(
-    rel: str, info: os.stat_result, path: str | os.PathLike[str], *, follow_symlinks: bool = True
-) -> _FileEntry:
-    """The census entry of a Markdown file, from the one stat that the walk takes of it.
+def _file_entry(rel: str, info: os.stat_result, path: str | os.PathLike[str]) -> _FileEntry:
+    """The census entry of a Markdown file, from the one ``lstat`` that the walk takes of it.
 
     Size and mtime say that its bytes may have changed. The mode (type and permission bits), the link
     count and the owner say what a build makes of it: the vault walk leaves out a file that has another
@@ -2686,8 +2684,18 @@ def _file_entry(
     entry for the same file on every platform.
     """
     if not info.st_nlink:
-        info = os.stat(path, follow_symlinks=follow_symlinks)
+        info = os.stat(path, follow_symlinks=False)
     return (rel, "f", info.st_size, info.st_mtime_ns, info.st_mode, info.st_nlink, info.st_uid, info.st_gid)
+
+
+def _lstat_is_page_file(info: os.stat_result) -> bool:
+    """Whether an ``lstat`` result is a file that the vault walk can yield: regular, and no link or reparse point.
+
+    The walk (``vault._walk_vault_md_entry``) judges each entry by ``lstat`` and leaves out a link, whatever it
+    points to. A census that followed links would hold the stats of the target and miss the swap of a file for a
+    link to a copy with the same stats, which a build over the disk then leaves out.
+    """
+    return stat.S_ISREG(info.st_mode) and not vault._is_reparse(info)
 
 
 def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
@@ -2748,33 +2756,30 @@ def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add(_file_entry(rel, info, child.path, follow_symlinks=False))
+            entries.add(_file_entry(rel, info, child.path))
 
     def loose_walk(directory: Path, directory_rel: str) -> None:
-        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
-        # with the same is_dir()/is_file() semantics (which traverse links).
+        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies, and leave out every link, a
+        # folder or a page, as its `lstat` rule does. The listing says a link is one with no stat on POSIX.
         for child in os.scandir(directory):
             request_budget.checkpoint()
             rel = f"{directory_rel}/{child.name}" if directory_rel else child.name
             if owned is not None and owned(rel):
                 continue
-            if child.is_dir():
+            if child.is_dir(follow_symlinks=False):
                 if vault.in_excluded_scan_dir(rel):
                     continue
                 loose_walk(Path(child.path), rel)
-            elif (
-                child.is_file()
-                and _markdown_name(child.name)
-                and ".sync-conflict-" not in child.name
-            ):
+            elif _markdown_name(child.name) and ".sync-conflict-" not in child.name:
                 try:
-                    info = child.stat()
+                    info = child.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     # Same race, same answer as the strict walk above: a page
                     # that vanished between the listing and the stat is not in
                     # this snapshot.
                     continue
-                entries.add(_file_entry(rel, info, child.path))
+                if _lstat_is_page_file(info):
+                    entries.add(_file_entry(rel, info, child.path))
 
     try:
         try:
@@ -3153,11 +3158,15 @@ def _patch_markdown_census(
             continue
         path = root / rel_path
         try:
-            info = path.stat()
+            info = path.lstat()
         except FileNotFoundError:
             entries.pop(rel_path, None)
         else:
-            entries[rel_path] = _file_entry(rel_path, info, path)
+            # What the walk does with the path: a link, a folder or another file type has no entry.
+            if _lstat_is_page_file(info):
+                entries[rel_path] = _file_entry(rel_path, info, path)
+            else:
+                entries.pop(rel_path, None)
     return tuple(sorted(entries.values()))
 
 
