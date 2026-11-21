@@ -779,20 +779,21 @@ def _probe(vault_root: Path, relative: str) -> str:
         return "unknown"
 
 
-def direct_paths(vault_root: Path, token: str) -> tuple[str, ...]:
+def direct_paths(vault_root: Path, token: str, *, publish_discovery: bool = True) -> tuple[str, ...]:
     """The vault paths that a path-shaped token names on disk, by one no-follow check each.
 
     The token is vault-relative, or relative to the knowledge base folder. A
     path that cannot be ruled out, such as an unreadable one, counts as
-    present, because a gate that misses a withheld name leaks it. A file that
-    the check finds joins the overlay, so the next request resolves it.
+    present, because a gate that misses a withheld name leaks it. Ordinary
+    checks add found files to the overlay. Optional checks can observe only.
     """
     candidates = tuple(dict.fromkeys((token, managed_join(token))))
     outcomes = {relative: _probe(vault_root, relative) for relative in candidates}
     present = tuple(relative for relative, outcome in outcomes.items() if outcome != "absent")
-    note_created(
-        vault_root, [relative for relative, outcome in outcomes.items() if outcome == "file"]
-    )
+    if publish_discovery:
+        note_created(
+            vault_root, [relative for relative, outcome in outcomes.items() if outcome == "file"]
+        )
     return present
 
 

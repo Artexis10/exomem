@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from shutil import copytree
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 import record_fixtures
@@ -21,9 +22,9 @@ from test_collection_store_service import service  # noqa: F401 - the SQLite wor
 from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
 from test_governance_postfilter import AWS_KEY, HIGH_ENTROPY
 
-from exomem import call_ledger, memory_refs, page_ids, semantic_contract, state_migration, writer_lease
+from exomem import call_ledger, memory_refs, page_ids, semantic_contract, state_migration, structured_collections, writer_lease
 from exomem import server as server_module
-from exomem.governance import artifact_census
+from exomem.governance import artifact_census, egress
 
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
@@ -359,9 +360,13 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     host["capture_paths"].append(manifest.parent.relative_to(vault).as_posix())
     config.write_text(json.dumps(host), encoding="utf-8")
     protected_field = f"Follow [[{Path(PRIVATE).stem}]]"
-    unproved_identity = memory_refs.memory_ref("f338e51e-a1cf-4512-96be-e5cb56286d08")
-    short_id = page_ids.page_id(memory_refs.parse_memory_ref(unproved_identity), PRIVATE, "0" * 64)
-    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, f"See {unproved_identity}", True])
+    identity = "11111111-1111-4111-8111-111111111111"
+    unproved_identity = memory_refs.memory_ref(identity)
+    short_id = page_ids.page_id(identity, PRIVATE, "0" * 64)
+    row_refs = (structured_collections.record_ref(identity, "row"), structured_collections.plan_ref(identity, "row"))
+    encoded_link = f"[Read more]({quote(PRIVATE)})"
+    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, f"See `{unproved_identity}`",
+                           *row_refs, encoded_link, True])
     manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    release_hash: {{type: enum, enum: {declared}}}\n"
@@ -383,6 +388,13 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
             cold.setattr(artifact_census, "published_view", lambda root, **kwargs: None)
             with monkeypatch.context() as read_only:
                 read_only.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum scan walked the vault"))
+                path_candidates = egress._entry_candidate_paths
+
+                def reject_enum_probe(entry, *args, **kwargs):
+                    assert entry != encoded_link, "generic cross-check probed optional enum material"
+                    return path_candidates(entry, *args, **kwargs)
+
+                read_only.setattr(egress, "_entry_candidate_paths", reject_enum_probe)
                 cold_inspected = await _call(client, "inspect_memory", operation)
             cold_refused = await _call(client, "add_record", {
                 **target, "why": "Log a cold entry", "item": {**item, "slug": "cold-entry"}})
@@ -422,7 +434,7 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
 
     inspected, refused, blocked, rows = _session(build(), scenario)
     assert all(target not in json.dumps([inspected, refused, blocked])
-               for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY, unproved_identity, short_id))
+               for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY, unproved_identity, short_id, *row_refs, encoded_link))
     assert [row["release_hash"] for row in rows["rows"]] == [True]
 
 

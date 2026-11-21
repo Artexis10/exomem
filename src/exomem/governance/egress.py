@@ -6122,6 +6122,10 @@ def _strip_page_provenance(
 class _ArtifactScanDemand:
     required: bool = False
     complete: bool = False
+    defer_record_enums: bool = False
+
+    def defers(self, location: tuple[str | int, ...]) -> bool:
+        return self.defer_record_enums and location == ("contract", "declared_enums")
 
 
 def _artifact_text_key(key: Any) -> bool:
@@ -6379,6 +6383,7 @@ def _postfilter(
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
+        artifact_scan_demand.defer_record_enums = record_enums is not None
         result = _withheld_cross_check(
             vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding,
@@ -7691,7 +7696,7 @@ class _ArtifactReferenceGate:
         self.tombstone_paths: Mapping[str, tuple[str, ...]] = {}
         self.tombstone_literals = artifact_census.LiteralAliases()
         # Path-shaped tokens that the census lacked, checked on disk once each.
-        self._directly: dict[str, tuple[str, ...]] = {}
+        self._directly: dict[tuple[str, bool], tuple[str, ...]] = {}
         # Originals that the census lists no file for, each judged once on what its page binds; see `_filing`.
         self._filed: dict[str, tuple[str, ...] | None] = {}
         # One gate pass shares one lifecycle view, as the release walk does.
@@ -7738,18 +7743,29 @@ class _ArtifactReferenceGate:
         return True
 
     def scan_optional_text(self, values: list[Any]) -> list[Any]:
+        from .. import markdown_regions, structured_collections
+
         def scan(value: Any) -> Any:
             if not isinstance(value, str):
                 return value
-            # Check URI tokens even inside a wikilink label or an open vault's text.
-            text = value.replace("[", " ").replace("]", " ").replace("|", " ")
-            if any(memory_refs.parse_memory_ref(self._unwrap(match[0])[0])
-                   for match in _WRAPPED_ARTIFACT_REFERENCE.finditer(text)):
-                return WITHHELD_REFERENCE
+            # CommonMark resolves and decodes destinations. Enum hints do not
+            # carry the document context needed to authorize those links.
+            if "[" in value:
+                try:
+                    if markdown_regions.local_links(value):
+                        return WITHHELD_REFERENCE
+                except ValueError:
+                    return WITHHELD_REFERENCE
+            # Markdown delimiters separate URI tokens in wikilinks and inline code.
+            text = value.replace("[", " ").replace("]", " ").replace("|", " ").replace("`", " ")
+            for match in _WRAPPED_ARTIFACT_REFERENCE.finditer(text):
+                token, _ = self._unwrap(match[0])
+                if memory_refs.parse_memory_ref(token) or structured_collections.parse_row_ref(token):
+                    return WITHHELD_REFERENCE
             # The split supplies prose token boundaries. page_ids owns the short-ID format.
             if any(page_ids.is_page_id(token.strip(".")) for token in re.split(r"[^\w.]+", value)):
                 return WITHHELD_REFERENCE
-            return self.gate_text(value, _omit_identities=True)
+            return self.gate_text(value, _optional_text=True)
 
         return [scan(value) for value in values]
 
@@ -7758,10 +7774,12 @@ class _ArtifactReferenceGate:
         found = (*self.census.paths(key), *self.tombstone_paths.get(key, ()))
         return self._with_filings(found, self.filings.paths(key))
 
-    def _directly_named(self, token: str) -> tuple[str, ...]:
-        found = self._directly.get(token)
+    def _directly_named(self, token: str, *, publish_discovery: bool) -> tuple[str, ...]:
+        key = (token, publish_discovery)
+        found = self._directly.get(key)
         if found is None:
-            found = self._directly[token] = artifact_census.direct_paths(self.vault_root, token)
+            found = artifact_census.direct_paths(self.vault_root, token, publish_discovery=publish_discovery)
+            self._directly[key] = found
         return found
 
     def _filing(self, logical: str) -> tuple[str, ...] | None:
@@ -7809,7 +7827,7 @@ class _ArtifactReferenceGate:
         return token, wikilink
 
     def resolve(
-        self, value: str, *, directory: str | None = None, _omit_identities: bool = False,
+        self, value: str, *, directory: str | None = None, _optional_text: bool = False,
     ) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
@@ -7820,7 +7838,7 @@ class _ArtifactReferenceGate:
             memory_id = memory_refs.parse_memory_ref(token)
             if memory_id is None:
                 return ()
-            if _omit_identities:
+            if _optional_text:
                 return None
             # Redaction keeps raw hidden-owner evidence after pending withdrawal.
             # Potentially visible uncertainty omits the token, not admitted material.
@@ -7866,7 +7884,7 @@ class _ArtifactReferenceGate:
             # names its file exactly, so one check on disk settles it.
             for shaped in (token, sibling):
                 if shaped is not None and "/" in shaped:
-                    named = self._directly_named(shaped)
+                    named = self._directly_named(shaped, publish_discovery=not _optional_text)
                     if named:
                         return tuple(sorted(named))
         return ()
@@ -7908,7 +7926,7 @@ class _ArtifactReferenceGate:
         self.verdicts[rel_path] = allowed
         return allowed
 
-    def gate_text(self, text: str, *, _omit_identities: bool = False) -> str:
+    def gate_text(self, text: str, *, _optional_text: bool = False) -> str:
         request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
@@ -7934,7 +7952,7 @@ class _ArtifactReferenceGate:
                     # The caller sent this. Echoing it back tells them nothing;
                     # replacing it tells them the item exists.
                     return token
-            candidates = self.resolve(token, _omit_identities=_omit_identities)
+            candidates = self.resolve(token, _optional_text=_optional_text)
             if candidates is None or (
                 candidates and not all(self._permits(rel) for rel in candidates)
             ):
@@ -9673,6 +9691,8 @@ def filter_withheld_entries(
 
     def _walk(node: Any, *, directory: str | None = None, location=(), candidates=None) -> Any:
         request_budget.checkpoint()
+        if _artifact_scan_demand is not None and _artifact_scan_demand.defers(location):
+            return node
         if isinstance(node, Mapping) and any(
             not _independent_content_permits(vault_root, path, who)
             for path in _entry_candidate_paths(
@@ -9761,6 +9781,8 @@ def filter_withheld_entries(
         a drift between the two costs requests and never a verdict.
         """
         request_budget.checkpoint()
+        if _artifact_scan_demand is not None and _artifact_scan_demand.defers(location):
+            return
         if isinstance(node, Mapping):
             here = _directory_of(node)
             here = directory if here is None else here

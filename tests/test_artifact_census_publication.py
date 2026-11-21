@@ -149,9 +149,19 @@ def test_a_path_shaped_reference_to_an_unindexed_file_is_checked_on_disk(
     _withhold_from_external(vault, "Notes/Patterns/**")
     _publish(vault)
     walks.clear()
-    _write(vault, f"{WITHHELD_DIR}/orchid-direct-memo.txt")  # no event reached the watcher
+    relative = f"{WITHHELD_DIR}/orchid-direct-memo.txt"
+    _write(vault, relative)  # no event reached the watcher
 
-    by_path = _gate(vault, f"See {WITHHELD_DIR}/orchid-direct-memo.txt for the memo.")
+    enums = {"values": {"severity": [f"See {relative} for the memo.", True]}, "truncated": False}
+    with request_scope(RequestPrincipal(audience_id="external", surface="mcp")):
+        optional = egress.gate_artifact_references(
+            vault, {"contract": {"declared_enums": enums}}, _scan_record_enums=True,
+        )
+    assert optional["contract"]["declared_enums"] == {"values": {"severity": [True]}, "truncated": True}
+    observed = artifact_census.published_view(vault, observe_only=True)
+    assert observed is not None and observed.paths(relative.casefold()) == ()
+
+    by_path = _gate(vault, f"See {relative} for the memo.")
     by_folder_path = _gate(vault, "See Notes/Patterns/orchid-direct-memo.txt for the memo.")
     assert egress.WITHHELD_REFERENCE in by_path
     assert egress.WITHHELD_REFERENCE in by_folder_path
