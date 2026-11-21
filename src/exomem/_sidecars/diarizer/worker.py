@@ -13,18 +13,20 @@ incompatible with the pyannote/torchaudio ecosystem. This sidecar pins a proven 
 (pyannote 4 package loading the 3.1 model, torch 2.9.1+cu130 → sm_120) where pyannote runs on the
 GPU. ``KB_MCP_DIARIZE_DEVICE`` = ``cpu`` | ``cuda`` | ``auto`` (default auto → cuda if available).
 
-The result channel is the OUT-FILE (plus the exit code), never stdout: pyannote/lightning/tqdm/
-torchcodec print to stdout/stderr during load; ``main`` redirects stdout to stderr and writes JSON
-to the out-file. torchcodec's libtorchcodec load failure on Windows is a harmless warning — we
+The result channel is the output file, with completion signaled by an exit code or an acknowledgment
+on a private socket. ``main`` redirects stdout to stderr so library output cannot mix with results.
+torchcodec's libtorchcodec load failure on Windows is a harmless warning. We
 pre-decode and hand pyannote a waveform dict, so its decoder is never used.
 """
 from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import time
 import warnings
+from functools import lru_cache
 
 # Quiet HF/torchcodec/lightning chatter before the heavy imports. (The parent also sets these in
 # the child env; setdefault keeps the worker robust when run directly.)
@@ -118,10 +120,9 @@ def _annotation(output):
     return output
 
 
-def _diarize(audio_path: str) -> list[dict]:
+def _load_device_pipeline():
     import torch
 
-    waveform = _decode(audio_path)
     pipeline = _load_pipeline()
     if pipeline is None:
         # pyannote returns None (not raises) for an unloadable gated checkpoint — usually a missing
@@ -134,6 +135,12 @@ def _diarize(audio_path: str) -> list[dict]:
     if dev in ("cuda", "mps"):
         pipeline.to(torch.device(dev))
     print(f"[worker] device={dev}", file=sys.stderr)
+    return pipeline, dev
+
+
+def _diarize(audio_path: str, load_pipeline=_load_device_pipeline) -> list[dict]:
+    waveform = _decode(audio_path)
+    pipeline, _ = load_pipeline()
     annotation = _annotation(pipeline({"waveform": waveform, "sample_rate": 16000}))
     return [
         {"start": float(t.start), "end": float(t.end), "label": str(label)}
@@ -141,19 +148,54 @@ def _diarize(audio_path: str) -> list[dict]:
     ]
 
 
+def _write_turns(out_path: str, turns: list[dict]) -> None:
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump({"turns": turns}, fh)
+
+
+def _serve(fd: int, parent_pid: int) -> None:
+    import ctypes
+    import signal
+
+    # WSL2 uses Linux prctl. Kill the sidecar even if its owner dies during inference.
+    pr_set_pdeathsig = 1
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+    if libc.prctl(pr_set_pdeathsig, signal.SIGKILL, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+    if os.getppid() != parent_pid:
+        return  # The owner died before prctl was armed.
+
+    import torch
+
+    load_pipeline = lru_cache(maxsize=1)(_load_device_pipeline)
+    with socket.socket(fileno=fd) as channel, channel.makefile("rb") as requests:
+        for request in requests:
+            audio_path, out_path = json.loads(request)
+            _write_turns(out_path, _diarize(audio_path, load_pipeline))
+            _, device = load_pipeline()
+            if device != "cuda":
+                channel.sendall(b"\0")  # Report success and exit when CUDA fell back to CPU.
+                return
+            # Whisper uses the same GPU for the next job. Return free allocator blocks before it starts.
+            torch.cuda.empty_cache()
+            channel.sendall(b"\n")
+
+
 def main(argv: list[str]) -> int:
+    sys.stdout = sys.stderr
+    if len(argv) == 4 and argv[1] == "--serve":
+        _serve(int(argv[2]), int(argv[3]))
+        return 0
     if len(argv) < 3:
         print("usage: worker.py <audio_path> <out_json_path>", file=sys.stderr)
         return 2
     audio_path, out_path = argv[1], argv[2]
-    # Redirect stdout → stderr so any pyannote/lightning/tqdm/torchcodec print can't corrupt the
-    # result; the contract is the out-file (+ exit code), never stdout.
-    sys.stdout = sys.stderr
-    t0 = time.time()
+    t0 = time.monotonic()
     turns = _diarize(audio_path)
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump({"turns": turns}, fh)
-    print(f"[worker] {len(turns)} turns in {time.time() - t0:.1f}s", file=sys.stderr)
+    _write_turns(out_path, turns)
+    print(f"[worker] {len(turns)} turns in {time.monotonic() - t0:.1f}s", file=sys.stderr)
     return 0
 
 
