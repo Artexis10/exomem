@@ -199,7 +199,7 @@ def test_late_temporal_metadata_rollback_and_attached_file_use_the_payload_gener
 def test_integer_widening_and_exact_overflow_share_one_native_operand_family(tmp_path):
     """Widening an index without rebuilding must admit fractions and order exact overflow values."""
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, {"amount": FieldSpec("integer")}, identity="uuid16")
         legacy = build_projection_plan(CID, {"amount": {"type": "integer"}}, (IndexSpec("amount", (IndexKey("amount"),)),))
@@ -210,7 +210,7 @@ def test_integer_widening_and_exact_overflow_share_one_native_operand_family(tmp
         values = [-(2**90), -9223372036854775808, -1.25, -0.0, 0, 0.5, 2**63 - 1, 2**80, float(2**80), 2**80 + 1]
         conn.execute("BEGIN")
         for ordinal, value in enumerate(values, 1):
-            conn.execute("INSERT INTO item_rows VALUES(?)", (ordinal,))
+            conn.execute("INSERT INTO items VALUES(?)", (ordinal,))
             write(conn, widened, ordinal, {"amount": value})
         conn.commit()
         actual = conn.execute(f"SELECT row_id FROM {widened.read_relation('main')} ORDER BY k0_rank,k0_tag,k0_band,k0_key,item_key").fetchall()
@@ -225,7 +225,7 @@ def test_integer_widening_and_exact_overflow_share_one_native_operand_family(tmp
 def test_revised_escaped_and_residual_paths_keep_large_integer_queries_exact(tmp_path):
     """Adding an index after a legal revision cannot narrow an escaped or residual integer through JSON1."""
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, {"evolving": FieldSpec("string")}, identity="utf8")
         fields = {"evolving.value": {"type": "number"}, "later.value": {"type": "number"}}
@@ -238,11 +238,11 @@ def test_revised_escaped_and_residual_paths_keep_large_integer_queries_exact(tmp
         values = {"evolving": {"value": 2**100 + 1, "excluded": "unselected"},
                   "later": [{"value": -(2**100) - 1}, {"value": 0}]}
         conn.execute("BEGIN")
-        conn.execute("INSERT INTO item_rows VALUES(1)")
+        conn.execute("INSERT INTO items VALUES(1)")
         write(conn, plan, 1, values)
-        conn.execute("INSERT INTO item_rows VALUES(2)")
+        conn.execute("INSERT INTO items VALUES(2)")
         write(conn, plan, 2, {"evolving": "accepted before revision", "later": {"value": 3}})
-        conn.execute("INSERT INTO item_rows VALUES(3)")
+        conn.execute("INSERT INTO items VALUES(3)")
         write(conn, plan, 3, {"evolving": {"other": []}, "later": [None, {"value": 3}]})
         conn.commit()
         assert conn.execute(f"SELECT k0_tag,k0_band,k0_key,k1_tag,k1_band,k1_key FROM {plan.read_relation('main')} WHERE row_id=1").fetchone() == (
@@ -270,7 +270,7 @@ def test_admitted_temp_relation_retains_only_released_operands_and_identity(tmp_
 def test_nested_index_and_selected_read_reject_a_damaged_escape_without_hydrating_siblings(tmp_path):
     """Malformed escape bytes must not become indexed facts or selected values after reopen."""
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, {"evolving": FieldSpec("string")}, identity="uuid16")
         legacy = build_projection_plan(CID, {"nested": {"type": "number"}}, (IndexSpec("nested", (IndexKey("nested"),)),),
@@ -279,7 +279,7 @@ def test_nested_index_and_selected_read_reject_a_damaged_escape_without_hydratin
         for statement in plan.ddl:
             conn.execute(statement)
         conn.execute("BEGIN")
-        conn.execute("INSERT INTO item_rows VALUES(1)")
+        conn.execute("INSERT INTO items VALUES(1)")
         write(conn, plan, 1, {"evolving": {"value": 7}})
         conn.commit()
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
@@ -307,19 +307,19 @@ def test_small_selected_field_in_a_large_native_container_survives_the_reader_li
     if representation != "residual":
         fields["meta"] = FieldSpec("object" if representation == "json" else "string")
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, fields, identity="uuid16")
         plan = build_projection_plan(CID, {"title": {"type": "string"}}, (), generation=13, payload_layout=layout)
         for sql in plan.ddl:
             conn.execute(sql)
         conn.execute("BEGIN")
-        conn.execute("INSERT INTO item_rows VALUES(1,?,1)", (CID,))
+        conn.execute("INSERT INTO items VALUES(1,?,1)", (CID,))
         write(conn, plan, 1, values)
         conn.commit()
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
         conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
-        current = replace(layout, items="item_rows", current=plan.table_name)
+        current = replace(layout, current=plan.table_name)
         assert native_rows.selected_current_values(conn, current, 1, {"meta": {"small": True}},
                                                    max_bytes=64, check=lambda: None) == {"meta": {"small": 7}}
         # A large unrelated container must not prevent a scalar dense-read fallback either.
@@ -333,7 +333,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
     budget = len(canonical_json(values).encode("utf-8"))
     fields = {"label": FieldSpec("string"), "other": FieldSpec("string"), "when": FieldSpec("datetime")}
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, fields, identity="uuid16")
         plan = build_projection_plan(CID, {name: {"type": spec.type} for name, spec in fields.items()},
@@ -341,14 +341,14 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         for sql in plan.ddl:
             conn.execute(sql)
         conn.execute("BEGIN")
-        conn.execute("INSERT INTO item_rows VALUES(1,?,1)", (CID,))
+        conn.execute("INSERT INTO items VALUES(1,?,1)", (CID,))
         write(conn, plan, 1, values)
         conn.commit()
-        current = replace(layout, items="item_rows", current=plan.table_name)
+        current = replace(layout, current=plan.table_name)
         selected = dict.fromkeys(values, True)
         columns, decode = native_rows.prepare_dense_selection(conn, current, selected, max_bytes=budget,
                                                               check=lambda: None, semantic_fields={"when"})
-        row = conn.execute(f"SELECT {','.join(columns)} FROM item_rows i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+        row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
         actual = decode(row)
         assert set(actual) == set(values)
         assert actual["label"] == values["label"] and actual["other"] == values["other"]
@@ -356,7 +356,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         conn.execute(f"UPDATE {plan.table_name} SET values_bytes=?", (budget - 1,))
         columns, decode = native_rows.prepare_dense_selection(conn, current, selected, max_bytes=budget - 1,
                                                               check=lambda: None, semantic_fields={"when"})
-        row = conn.execute(f"SELECT {','.join(columns)} FROM item_rows i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+        row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
         with pytest.raises(TypedStorageError, match="budget"):
             decode(row)
         # A compact frame must not use the larger caller budget to amplify a corrupt recorded extent.
@@ -370,7 +370,7 @@ def test_dense_selected_budget_counts_unicode_escapes_and_full_temporal_spelling
         for semantic in (frozenset(), {"when"}):
             columns, decode = native_rows.prepare_dense_selection(conn, current, {"when": True}, max_bytes=256 * 1024,
                                                                   check=lambda: None, semantic_fields=semantic)
-            row = conn.execute(f"SELECT {','.join(columns)} FROM item_rows i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
+            row = conn.execute(f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id").fetchone()
             with pytest.raises(TypedStorageError, match="budget"):
                 decode(row)
         with pytest.raises(TypedStorageError, match="budget"):
@@ -394,7 +394,7 @@ def test_a_warm_dense_scan_returns_and_refuses_exactly_what_the_shared_decoders_
         {"amount": 3},
     ]
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY,collection_id TEXT,row_version INTEGER) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, fields, identity="uuid16")
         plan = build_projection_plan(CID, {name: {"type": spec.type} for name, spec in fields.items()},
@@ -403,16 +403,16 @@ def test_a_warm_dense_scan_returns_and_refuses_exactly_what_the_shared_decoders_
             conn.execute(sql)
         conn.execute("BEGIN")
         for row_id, values in enumerate(sources, 1):
-            conn.execute("INSERT INTO item_rows VALUES(?,?,1)", (row_id, CID))
+            conn.execute("INSERT INTO items VALUES(?,?,1)", (row_id, CID))
             write(conn, plan, row_id, values)
         conn.commit()
-        current = replace(layout, items="item_rows", current=plan.table_name)
+        current = replace(layout, current=plan.table_name)
         stored = f"SELECT {','.join((*current.value_columns, 'r'))} FROM {plan.table_name} WHERE row_id=?"
 
         def scan():
             columns, decode = native_rows.prepare_dense_selection(conn, current, dict.fromkeys(fields, True), max_bytes=4096,
                                                                   check=lambda: None, semantic_fields={"when"})
-            return decode, f"SELECT {','.join(columns)} FROM item_rows i JOIN {plan.table_name} t ON t.row_id=i.row_id WHERE i.row_id=?"
+            return decode, f"SELECT {','.join(columns)} FROM items i JOIN {plan.table_name} t ON t.row_id=i.row_id WHERE i.row_id=?"
 
         def shared(row_id):
             return native_rows.decode_row(conn, current, conn.execute(stored, (row_id,)).fetchone())

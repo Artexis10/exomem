@@ -988,7 +988,7 @@ def test_refresh_reproves_ineligible_donors_instead_of_reusing_their_proof(env, 
         elif alteration == "format":
             basis["collections"][LEDGER_ID]["material_version"] = 999
         elif alteration == "material":
-            donor.execute("UPDATE item_rows SET governance_json='[]' WHERE collection_id=?", (LEDGER_ID,))
+            donor.execute("UPDATE items SET governance_json='[]' WHERE collection_id=?", (LEDGER_ID,))
         else:
             donor.execute("UPDATE projection_state SET stat_identity='changed' WHERE collection_id=?", (LEDGER_ID,))
         donor.execute("UPDATE store_meta SET value=? WHERE key='migration_basis'", (json.dumps(basis),))
@@ -1032,7 +1032,7 @@ def test_seal_rejects_changed_staging_without_publishing_or_removing_evidence(en
             inode = path.stat().st_ino
             with closing(sqlite3.connect(path, isolation_level=None)) as stage:
                 if replacement == "body":
-                    stage.execute("UPDATE item_rows SET body='late material change' WHERE collection_id=?", (CID,))
+                    stage.execute("UPDATE items SET body='late material change' WHERE collection_id=?", (CID,))
                 else:
                     stage.execute("UPDATE collections SET legacy_audit_status='ok' WHERE collection_id=?", (CID,))
             assert path.stat().st_ino == inode
@@ -1207,7 +1207,7 @@ def test_seal_keeps_sqlite_writer_exclusion_until_the_committed_version_is_captu
         def external_write(self):
             with closing(connect(path, isolation_level=None, timeout=0)) as external:
                 try:
-                    external.execute("UPDATE item_rows SET body='write after seal commit' WHERE collection_id=?", (CID,))
+                    external.execute("UPDATE items SET body='write after seal commit' WHERE collection_id=?", (CID,))
                 except sqlite3.OperationalError as error:
                     assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
                     blocked.append(True)
@@ -1346,7 +1346,7 @@ def test_installation_rejects_a_replaced_sealed_source_before_moving_the_live_st
         else:
             inode = path.stat().st_ino
             with closing(sqlite3.connect(path, isolation_level=None)) as stage:
-                stage.execute("UPDATE item_rows SET body='post-seal material change' WHERE collection_id=?", (CID,))
+                stage.execute("UPDATE items SET body='post-seal material change' WHERE collection_id=?", (CID,))
             assert path.stat().st_ino == inode
         evidence.append(path)
         return install(session, leaf, check, **kwargs)

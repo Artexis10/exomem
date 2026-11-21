@@ -977,7 +977,7 @@ def test_ten_thousand_subjects_use_one_real_authority_catalog_read(store, monkey
     encoded = json.dumps({"title": "Row"})
     with store.handle.transaction() as conn:
         conn.executemany(
-            "INSERT INTO item_rows(collection_id,item_key,row_version,schema_version,values_json,body,"
+            "INSERT INTO items(collection_id,item_key,row_version,schema_version,values_json,body,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json) VALUES(?,?,1,1,?,'',?,?,1,1,?)",
             ((CID, str(uuid.UUID(int=index + 1)), encoded,
               tokens.payload_hash(1, str(uuid.UUID(int=index + 1)), {"title": "Row"}, ""),
@@ -1015,7 +1015,7 @@ def test_missing_or_corrupt_identity_metadata_never_defaults_open(store, metadat
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE item_rows SET governance_json=?", (metadata,))
+        conn.execute("UPDATE items SET governance_json=?", (metadata,))
     before = tuple(store.connection.iterdump())
     with pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
         store.inspect_collection(CID)

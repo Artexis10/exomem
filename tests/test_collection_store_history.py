@@ -767,7 +767,7 @@ def test_external_sql_rechecks_history_release_without_local_total_changes(store
     assert KEY in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
     changes = store.connection.total_changes
     with sqlite3.connect(store.handle.path) as external:
-        external.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
+        external.execute("UPDATE items SET governance_json=? WHERE item_key=?",
                          ('{"classes":[],"projects":[],"tags":["restricted"]}', KEY))
     assert store.connection.total_changes == changes
     assert KEY not in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]

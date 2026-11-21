@@ -477,7 +477,7 @@ def test_external_sql_during_publication_invalidates_warm_data_without_a_head_ch
         try:
             assert copying.wait(5), "publication did not reach its outside copy"
             with closing(sqlite3.connect(runtime.path)) as external:
-                external.execute("UPDATE item_rows SET values_json=? WHERE item_key=?",
+                external.execute("UPDATE items SET values_json=? WHERE item_key=?",
                                  ('{"title":"Changed elsewhere"}', KEY))
                 external.commit()
             assert runtime.sample_head() == head
