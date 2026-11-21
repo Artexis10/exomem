@@ -161,6 +161,7 @@ def _resolve_date_iso(
         raise EditError(error.code, [], error.reason) from error
 
 
+@semantic_contract.share_writer_disk_census()
 def edit(
     vault_root: Path,
     *,

@@ -3,18 +3,31 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import PurePosixPath
 
 import pytest
+import test_vault_store_read_write as read_write
+import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_graph_readers import record_store_reads, write_pages
+from test_vault_store_lifecycle_writers import store_folder
 from test_vault_store_migration import build_indexes, migrate_apply, vault  # noqa: F401
 from test_vault_store_readers import damage_every_owned_projection
 
-from exomem import indexes, writer_lease
+from exomem import (
+    commands,
+    delete_directory,
+    delete_file,
+    indexes,
+    move_file,
+    recover_from_trash,
+    writer_lease,
+)
 from exomem import vault as vaults
 from exomem.vault_store import read
 
 pytestmark = pytest.mark.timeout(900)
+stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
 
 @pytest.mark.parametrize("damage", ["deleted", "poisoned"])
@@ -26,6 +39,7 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
         for rel in (
             "Research/Navigation/one.md", "Research/Navigation/_nested/two.md",
             "Research/Navigation/section.md/inside.md",
+            "Research/Navigation/.loose/outside.md",
             "Research/_ignored/three.md", "Research/top.md",
             "Insights/one.md", "Insights/_nested/two.md",
         )
@@ -39,7 +53,7 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     })
     build_indexes(vault)
     counts = indexes._count_notes_by_subfolder(vault / prefix)
-    assert counts["Research"] == {"Navigation": 4, "Empty": 0, "": 1}
+    assert counts["Research"] == {"Navigation": 5, "Empty": 0, "": 1}
     assert counts["Insights"] == {"": 2}
     assert counts["Empty"] == {"": 0}
 
@@ -61,6 +75,8 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     assert "Knowledge Base/Notes/index.md" in expected[1]
     assert "Knowledge Base/log.md" in expected[1]
     assert migrate_apply(vault) == 0
+    with read.snapshot(vault) as view:
+        assert view.page(prefix + "Research/Navigation/.loose/outside.md") is None
     damage_every_owned_projection(vault, damage)
 
     with record_store_reads(vault, monkeypatch) as events, read.request_snapshot(vault):
@@ -72,6 +88,60 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     assert events["sidecars"] == []
     assert events["machinery"] == []
     assert events["snapshots"] == [1]
+
+
+def test_index_counts_follow_a_store_only_create_edit_move_and_delete(served):
+    """A projected or previously counted page must never keep a stale count after a write."""
+    notes = served / "Knowledge Base/Notes"
+    initial = indexes._count_notes_by_subfolder(notes)
+    created = commands.op_remember(
+        served,
+        title="A count that follows its page",
+        content="## Observations\n\n- [finding] The lamp is lit.\n",
+        summary="The lamp is lit.",
+        relation_disposition="reviewed_none",
+        relation_review_reason="The note stands on its own.",
+    )["path"]
+    original_parent = PurePosixPath(created).parent.name
+    assert not (served / created).exists()
+    after_create = indexes._count_notes_by_subfolder(notes)
+    assert after_create == initial | {original_parent: {"": 1}}
+
+    commands.op_edit_memory(
+        served,
+        path=created,
+        why="Record the corrected reading.",
+        operation={
+            "kind": "replace_string",
+            "old_string": "lit",
+            "new_string": "dim",
+            "relation_disposition": "reviewed_none",
+            "relation_review_reason": "The correction leaves the note self-contained.",
+        },
+    )
+    assert indexes._count_notes_by_subfolder(notes) == after_create
+
+    new_path = f"Knowledge Base/Notes/Navigation/Dock/{PurePosixPath(created).name}"
+    move_file.move_file(served, old_path=created, new_path=new_path)
+    assert indexes._count_notes_by_subfolder(notes) == initial | {"Navigation": {"Dock": 1}}
+
+    delete_file.delete_file(served, path=new_path, confirm=True)
+    assert indexes._count_notes_by_subfolder(notes) == initial
+
+
+def test_index_counts_drop_a_trashed_folder_and_return_after_recovery(served):
+    """A folder still in the store's trash must count only after its recovery."""
+    notes = served / "Knowledge Base/Notes"
+    initial = indexes._count_notes_by_subfolder(notes)
+    folder = "Knowledge Base/Notes/Navigation/Dock"
+    store_folder(served, 2, folder=folder)
+    assert indexes._count_notes_by_subfolder(notes) == initial | {"Navigation": {"Dock": 2}}
+
+    trashed = delete_directory.delete_directory(served, path=folder, confirm=True, recursive=True)
+    assert indexes._count_notes_by_subfolder(notes) == initial
+
+    recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
+    assert indexes._count_notes_by_subfolder(notes) == initial | {"Navigation": {"Dock": 2}}
 
 
 def test_a_source_capture_plans_its_index_and_log_writes_from_pages_with_no_projection(vault):  # noqa: F811

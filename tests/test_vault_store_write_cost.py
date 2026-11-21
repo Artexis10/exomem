@@ -319,7 +319,7 @@ class SaveCounts:
     LARGE = 64
     NAMES = (
         "enrichments", "whole_derives", "census_walks", "resolver_builds", "large_resolvers",
-        "frontmatter_parses", "body_reads",
+        "frontmatter_parses", "body_reads", "disk_listings", "index_listings",
     )
 
     def __init__(self, monkeypatch):
@@ -328,6 +328,7 @@ class SaveCounts:
             ("enrichments", semantic_contract, "enrich_page_state"),
             ("whole_derives", semantic_contract, "_context_from_state_map"),
             ("census_walks", semantic_contract, "_corpus_census"),
+            ("disk_listings", semantic_contract, "_disk_page_census"),
             ("resolver_builds", vault_module.WikilinkResolver, "__init__"),
             ("frontmatter_parses", vault_module, "parse_frontmatter"),
         ):
@@ -359,6 +360,15 @@ class SaveCounts:
         monkeypatch.setattr(read.StoreSnapshot, "page", counted_page)
         monkeypatch.setattr(read.StoreSnapshot, "bodies", counted_bodies)
         monkeypatch.setattr(read.StoreSnapshot, "page_sources", counted_sources)
+        pages = read.StoreSnapshot.pages
+
+        def counted_pages(view, prefix=""):
+            # The index areas are fixed folder names in the navigation layout.
+            if prefix.rstrip("/").rsplit("/", 1)[-1] in {"Sources", "Notes", "Entities"}:
+                self.seen["index_listings"] += 1
+            return pages(view, prefix)
+
+        monkeypatch.setattr(read.StoreSnapshot, "pages", counted_pages)
         from_entries = vault_module.WikilinkResolver.from_entries
 
         def counted_from_entries(vault_root, entries):
@@ -466,3 +476,37 @@ def test_a_store_save_after_a_save_walks_no_page_and_builds_no_resolver_over_the
             if at_2n[name] - at_n[name] > 2:
                 broken.append((write_name, name, at_n[name], at_2n[name]))
     assert not broken, f"(save, count, at N={pages_n} pages, at 2N={pages_2n}): {broken}"
+
+
+@pytest.mark.timeout(300)
+def test_warm_store_saves_share_the_disk_census_and_count_indexes_without_listing_pages(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """A warm save must not relist the disk for both preflight and link resolution, or
+    fetch every stored page's metadata just to count its folder in the index.
+    """
+    grow(writer, 1, 70, on_disk=served)
+    edit(served, create(served, "Warm-up"))
+    counts = SaveCounts(monkeypatch)
+    measured = {}
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        edit(served, path)
+        measured[pages] = (created, counts.take())
+
+    pages_n, pages_2n = measured
+    assert pages_n > SaveCounts.LARGE and pages_2n - pages_n >= 70, measured
+    excessive = [
+        (pages, operation, name, save[name], limit)
+        for pages, saves in measured.items()
+        for operation, save, disk_limit in zip(("create", "edit"), saves, (2, 1), strict=True)
+        for name, limit in (("disk_listings", disk_limit), ("index_listings", 0))
+        if save[name] > limit
+    ]
+    assert not excessive, f"(pages, save, count, observed, limit): {excessive}"
