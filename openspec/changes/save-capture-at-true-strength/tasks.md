@@ -17,7 +17,7 @@
 - [x] 3.1 Test that every non-`off` block carries `rules`, that the hook renders `say` and `rules` within their caps, and that an over-cap `rules` is dropped while `say` is kept.
 - [x] 3.2 Test that the first request's map does not shrink with the `rules` text, and that the hook shows the whole working set beside `rules`.
 - [x] 3.3 Change the tentative-affiliation fixture case to a compiled observation and keep its mutation checks.
-- [ ] 3.4 Run the real-model probe on the unsure-report, held-view, open-question and settled-value cases and on a trivia control. Record the per-case result against the base text.
+- [x] 3.4 Run the real-model probe on the unsure-report, held-view, open-question and settled-value cases and on a trivia control. Record the per-case result against the base text. Done on 12 unseen blind cases, 2 repeats, with and without a hook. Right saves rose from 13 of 32 to 26 of 32, and no write was stronger than its source. Session recaps named incidental material in 4 of 16 control runs against 1 of 16 on the base text; the maintainer chose to ship on that result.
 
 ## 4. Release
 

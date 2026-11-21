@@ -27,4 +27,5 @@ The stance, skills and positions blocks have their own bounds, so they neither r
 ## Risks
 
 - A model may read "true strength" as licence to save every uncertain remark. The trivia clause and the reuse test limit it. The real-model run covers a trivia control.
+- Session recaps name incidental material more often: 4 of 16 control runs, against 1 of 16 on the base text. A recap line such as "answered a brief question about an aside" is accurate, and no note is written about the aside. The next capture change keeps incidental material out of recaps too.
 - The core headroom stays small. The change adds no core text.
