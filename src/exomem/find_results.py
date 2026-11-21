@@ -11,6 +11,9 @@ from .semantic_units import SemanticUnit
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
+#: A matched chunk with less prose than this tells an agent nothing about the page. A recorded evaluation
+#: found headings and stubs under this length as 51% of the excerpts that agents had to choose pages by.
+MIN_CHUNK_EXCERPT_CHARS = 40
 
 
 def prose_units(
@@ -160,6 +163,14 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
     return collapse(snippet)
 
 
+def _chunk_carries_prose(chunk: str) -> bool:
+    """Whether a chunk holds enough text outside its Markdown heading lines to say what its page holds."""
+    prose = " ".join(
+        line.strip() for line in chunk.splitlines() if line.strip() and not line.lstrip().startswith("#")
+    )
+    return len(prose) >= MIN_CHUNK_EXCERPT_CHARS
+
+
 def semantic_excerpt(
     page: ParsedPage,
     query_norm: str,
@@ -175,6 +186,8 @@ def semantic_excerpt(
         title_prefix = (page.title or "").strip()
         if title_prefix and body.startswith(title_prefix + "\n\n"):
             body = body[len(title_prefix) + 2:]
+        if keyword_excerpt and not _chunk_carries_prose(body):
+            return keyword_excerpt
         snippet = body.strip()[:EXCERPT_MAX_LEN].strip()
         if len(body) > EXCERPT_MAX_LEN:
             snippet = snippet.rstrip() + "…"

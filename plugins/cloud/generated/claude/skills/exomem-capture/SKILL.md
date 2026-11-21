@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 551fcc2db1f20e48a6faf497749a0c773dc61cd8e2311d46021bb20148b539e2
+  skill_contract: cd835ee022b570c09f89b365d23f47f197f8eb07e31c5db4c54728d8c419d5ad
   version: "0.1.0"
 ---
 
@@ -25,8 +25,9 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
-read-only. Before a compiled write: reuse current relevant search/read results,
+moves and pointer corrections. Vault content outside the managed Knowledge Base is
+read-only; ordinary workspace files are not the vault, so write them with your own
+file tools. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.

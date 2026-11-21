@@ -455,7 +455,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + " "
             + _BASELINE_CAPTURE
             + " A concise observation or "
-            "narrow Entity facet follows proactive_capture. Route stated intent to "
+            "a declared Entity facet follows proactive_capture. Route stated intent to "
             "Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
             "unchanged or, under the resolved posture, propose a bounded review."
@@ -487,7 +487,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + " "
             + _BASELINE_CAPTURE
             + " A concise observation "
-            "or narrow Entity facet follows proactive_capture. When torn between "
+            "or a declared Entity facet follows proactive_capture. When torn between "
             "capturing and letting it pass, capture. "
             "Route stated intent to Planning and observed outcome to Records. "
             "Transition only on explicit user intent; otherwise leave Planning "
