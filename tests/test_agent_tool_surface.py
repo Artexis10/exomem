@@ -17,8 +17,10 @@ from conftest import FIXTURE_VAULT
 from fastmcp import Client
 from lifecycle_fixtures import PLANNING_PATH, planning_manifest
 from test_collection_store_service import service  # noqa: F401 - the SQLite workflow uses this fixture
+from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
+from test_governance_postfilter import AWS_KEY
 
-from exomem import call_ledger, writer_lease
+from exomem import call_ledger, state_migration, writer_lease
 from exomem import server as server_module
 
 LISTED = {
@@ -338,6 +340,55 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_va
     rows = _session(build(), scenario)["rows"]
     assert [row["severity"] for row in rows] == [True]
     assert type(rows[0]["severity"]) is bool
+
+
+def test_restricted_enum_hints_follow_terminal_filtering(build, configured_boundary, vault) -> None:
+    config, authenticate = configured_boundary
+    scopes = vault / "Knowledge Base/_Governance/scopes"
+    (scopes / "inbox.yaml").write_text(
+        f'governance_version: 1\nid: {INBOX}\npaths: ["Capture/**", "Records/**", "log.md"]\n', encoding="utf-8",
+    )
+    (scopes / "private.yaml").write_text(
+        f'governance_version: 1\nid: {SCOPE}\npaths: ["Notes/private.md"]\n', encoding="utf-8",
+    )
+    manifest = record_fixtures.setup_ledger_collection(vault)
+    host = json.loads(config.read_text(encoding="utf-8"))
+    host["capture_paths"].append(manifest.parent.relative_to(vault).as_posix())
+    config.write_text(json.dumps(host), encoding="utf-8")
+    declared = json.dumps([PRIVATE, AWS_KEY, True])
+    manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
+        "    word_count:\n      type: integer\n",
+        f"    word_count: {{type: enum, enum: {declared}}}\n"
+        f"    group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n",
+    ), encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="restricted enum fixture")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    authenticate("limited")
+
+    async def scenario(client):
+        target = {"collection": record_fixtures.LEDGER_COLLECTION_PATH}
+        inspected = await _call(client, "inspect_memory", {
+            "operation": "records.inspect", "arguments": target})
+        assert "contract" in inspected, inspected
+        refused = await _call(client, "add_record", {
+            **target, "why": "Log an entry", "item": record_fixtures.ledger_item(word_count="invalid")})
+        assert refused.get("error", {}).get("code") == "SCHEMA_ENUM", refused
+        choices = refused["error"]["candidates"]
+        assert choices == [True] and type(choices[0]) is bool
+        retry = refused["error"]["retry"]["arguments"]
+        saved = await _call(client, "add_record", {
+            **target, "why": "Correct the entry", "held": retry["held"], "item": {"word_count": choices[0]}})
+        assert "error" not in saved, saved
+        rows = await _call(client, "query_records", target)
+        return inspected, refused, rows
+
+    inspected, refused, rows = _session(build(), scenario)
+    projection = inspected["contract"]["declared_enums"]
+    assert projection["truncated"] is True
+    assert projection["values"] == {"word_count": [True]}
+    assert type(projection["values"]["word_count"][0]) is bool
+    assert all(target not in json.dumps([inspected, refused]) for target in (PRIVATE, AWS_KEY))
+    assert [row["word_count"] for row in rows["rows"]] == [True]
 
 
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:

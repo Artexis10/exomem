@@ -39,7 +39,7 @@ import sqlite3
 import textwrap
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -6261,6 +6261,38 @@ def postfilter(
         return value
 
 
+def _record_enum_declarations(response: Any) -> dict[str, Any] | None:
+    contract = response.get("contract") if isinstance(response, Mapping) else None
+    enums = contract.get("declared_enums") if isinstance(contract, Mapping) else None
+    return enums if isinstance(enums, dict) else None
+
+
+def _released_enum_choices(before: Any, after: Any) -> list[Any]:
+    """Keep only offered scalars that survive both terminal filters exactly."""
+    if not isinstance(before, list) or not isinstance(after, list):
+        return []
+    # Record enums carry bounded JSON scalars. Counts keep a replacement
+    # that coincides with an original value from adding a duplicate.
+    available = Counter((type(choice), choice) for choice in before)
+    kept = []
+    for choice in after:
+        identity = (type(choice), choice)
+        if available[identity]:
+            kept.append(choice)
+            available[identity] -= 1
+    return kept
+
+
+def _reconcile_record_enum_declarations(before: dict[str, Any], after: dict[str, Any]) -> None:
+    declared, released = before.get("values"), after.get("values")
+    delivered = {}
+    if isinstance(declared, Mapping) and isinstance(released, Mapping):
+        for field, choices in released.items():
+            if kept := _released_enum_choices(declared.get(field), choices):
+                delivered[field] = kept
+    after.update(values=delivered, truncated=True)
+
+
 def _postfilter(
     command_name: str,
     result: Any,
@@ -6342,6 +6374,7 @@ def _postfilter(
         if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
             view_purpose = (request_kwargs or {}).get("purpose")
             result = guard_view_response(vault_root, result, purpose=view_purpose)
+    record_enums = _record_enum_declarations(result) if command_name == "record_memory" else None
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
@@ -6371,6 +6404,10 @@ def _postfilter(
         cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
         _record_credential_block()
+    if record_enums is not None:
+        released_enums = _record_enum_declarations(cleaned)
+        if released_enums is not None and released_enums != record_enums:
+            _reconcile_record_enum_declarations(record_enums, released_enums)
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
         from .. import due_state
 
@@ -6550,6 +6587,13 @@ def postfilter_error(
         if value is None or value == code:
             continue
         cleaned = _clean(value)
+        if (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
+                and isinstance(value, Mapping) and isinstance(cleaned, dict)):
+            choices = _released_enum_choices(value.get("allowed"), cleaned.get("allowed"))
+            if choices:
+                cleaned["allowed"] = choices
+            else:
+                cleaned.pop("allowed", None)
         if cleaned != value:
             _rewrite_error_attribute(error, name, cleaned)
     if blocked:
