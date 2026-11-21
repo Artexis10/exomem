@@ -43,9 +43,19 @@ A block served on many turns must not draw on `max_chars`. An earlier block did,
 
 A careful causal attribution runs far past the working set's per-unit cap, and in the replays exactly those positions became references the agent never read. The block's own bound is therefore the only size test: a unit is served whole when its line fits, and otherwise becomes a reference, never a cut unit. The shipped bound leaves room for one long position and a short one.
 
-### Read last, framing first
+### Read first, framing first
 
-In the replays the agent used the block far more often when the block was the last field of the maps response and its framing came before its items. Mid-packet, with the framing after the items, the block was mostly passed over. So terminal egress moves the block to the end once every other field, including the served-context fields, is in place, and the block opens with `about`. A test pins that order because it is the measured mechanism, not markup.
+An earlier round of replays found the block used more often when it was the last field of the maps response than mid-packet, where it was mostly passed over. A later round on the installed service showed that last is not enough: the block was served and the first answer still led with a default explanation.
+
+Dev replays of two incident conversations, with the served packet varied, then measured placement and wording separately.
+- With a leading yes/no question that presupposes a default cause, and the earlier framing, every answer opened "Yes" and half left the position out.
+- Placement moved the result. With the block first in the response, every first answer led with the position, at offset 0 in 4 of 4 replays, with no "Yes" before it. With the block last, 1 of 8 did.
+- The framing's wording completed it: open the first answer with the position, attributed and dated; keep the observation apart from the cause attributed to it; do not answer inside a premise the position disputes; rank no other explanation above it without naming the evidence; state the position before any yes or no.
+- A control with no recorded position showed no invented position.
+
+So terminal egress moves the block to the front once every other field, including the served-context fields, is in place, and the hook renders it before the map and the task leads. The block still opens with `about`. A test pins the order because it is the measured mechanism, not markup, and a comment at the move records both results so that nobody moves it back. `budget.serialized_chars` is the length of the response as sent, and key order does not change it.
+
+These are dev replays on one model and two conversations, not a held-out result. A task keeps the held-out real-model round open.
 
 ### Framing is the mechanism
 
@@ -53,7 +63,7 @@ The replays separated surfacing from presentation.
 Raw units appended to the recall result changed nothing.
 The same units, framed as the person's recorded positions, did change the replies, and no reply simply agreed with the position. The framing says to carry each position with attribution, to judge the evidence independently, and that each position stays theirs for the conversation.
 The framing passage is therefore part of the contract, not decoration. It never asks for agreement, because agreement on command would turn a qualified hypothesis into an asserted fact.
-Under a framing that asked the agent to attribute each line as its text does, the replies, in these replays, did not carry the person's positions. The framing therefore names the units as the person's own, and capture keeps the agent's own analysis out of position categories.
+Under a framing that asked the agent to attribute each line as its text does, the replies, in these replays, did not carry the person's positions. The framing therefore names the units as the person's own, and capture keeps the agent's own analysis out of position categories. The framing asks for engagement, never agreement: it asks the agent to state the position and then to judge the evidence, and it says to rank no other explanation above the position without naming the evidence that ranks it.
 
 ## Measured
 
@@ -69,7 +79,7 @@ One blind held-out run measured the change. It held 9 unseen cases: 6 positive c
 - **Few position units.** A vault with few declared categories serves an empty block. The capture guidance and the agent-proposed declarations address that, and an empty block costs nothing.
 - **Agreement drift.** Framing could push the agent toward the person's view. The held-out set includes controls in which the saved position is wrong, withdrawn or contradicted by an outside fact. The decision run fails the change if those controls regress.
 - **Self-echo.** This stays a residual risk. An agent's own conclusion misfiled under a position category would be presented as the person's view, and the agent would then agree with itself. Three things mitigate it: the capture step records the agent's own analysis under a category without the trait, the owner chooses which categories carry the trait and avoids ones that agents mostly write, and the held-out controls for agreement drift catch a regression.
-- **Excerpt-level callers.** A caller served a page only as an excerpt gets a longer unit of that page as a reference, using the excerpt bound that page reads use. The stance and domain profile blocks still serve such a caller a whole long unit; they remain as old debt.
+- **Excerpt-level callers.** A caller served a page only as an excerpt gets that page's units up to the excerpt bound that page reads use, in total. That caller cannot read a unit by reference, so the units left out are counted, never named, and a unit on a page whose text bound is 0 is dropped. Terminal egress decides the bounds again, so a policy that tightens mid-request yields an unavailable block. The stance and domain profile blocks still serve such a caller a whole long unit; they remain as old debt.
 - **Latency.** The change adds one query. The latency task proves its cost before release.
 
 ## Alternatives considered
