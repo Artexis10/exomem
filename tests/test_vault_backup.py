@@ -705,6 +705,23 @@ def test_staging_keeps_the_locks_on_a_live_database_whose_header_is_damaged(vaul
         service.close()
 
 
+def test_a_stop_ends_staging_between_the_files_that_are_copied_whole(vault: Path, tmp_path: Path) -> None:
+    # Files that SQLite refuses are copied by a child process; a stop request must still end staging between them.
+    state = _state_dir(vault)
+    (state / ".media-jobs.json").write_text('{"jobs": []}')
+    (state / ".voice_profiles.json").write_text('{"profiles": []}')
+    stage = tmp_path / "stage"
+
+    class StopOnceTheFirstIsCopied(threading.Event):
+        def is_set(self) -> bool:
+            return (stage / ".media-jobs.json").exists()
+
+    with pytest.raises(vault_backup.BackupError):
+        vault_backup.stage_state(vault, stage, StopOnceTheFirstIsCopied())
+
+    assert not (stage / ".voice_profiles.json").exists()
+
+
 def test_staging_copies_a_one_byte_file_as_it_is(vault: Path, tmp_path: Path) -> None:
     # SQLite reads a 1-byte file as an empty database, so a staging that asked SQLite first would back up the
     # media worker's lock file, or any 1-byte state file, as a new 4 KB database and report nothing.

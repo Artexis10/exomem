@@ -13,12 +13,14 @@ subprocess environment, so none shows in a process list, the record, the status 
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import logging
 import math
 import os
+import queue
 import random
 import re
 import shutil
@@ -401,63 +403,112 @@ def _write_record(vault: Path, record: dict[str, Any]) -> None:
 #: Copies the files that SQLite refused, in a child process. Closing any descriptor of a file drops every POSIX lock
 #: the process that opened it holds on that file, and the service's own connections lock their databases: a
 #: database whose header is damaged reads as no database while a connection here still holds it. A child process
-#: holds no lock, so its reads and copies cannot drop one. It takes SQLite's header as hex in its argument, reads
-#: JSON `[[source, target], ...]` on stdin and writes one result token per pair: `ok`, `gone`, `sqlite_header`
-#: (left uncopied) or `error`.
+#: holds no lock, so its reads and copies cannot drop one. It takes SQLite's header as hex in its argument, then
+#: reads one JSON `[source, target]` line at a time and answers each with one result line: `ok`, `gone`,
+#: `sqlite_header` (left uncopied) or `error`.
 _PLAIN_COPIER = r"""
 import json, os, shutil, sys
 magic = bytes.fromhex(sys.argv[1])
-results = []
-for source, target in json.load(sys.stdin):
+for line in sys.stdin:
+    source, target = json.loads(line)
     try:
         with open(source, "rb") as origin:
             if origin.read(len(magic)) == magic:
-                results.append("sqlite_header")
-                continue
-            origin.seek(0)
-            try:
-                with open(target, "xb") as copy:
-                    shutil.copyfileobj(origin, copy, 1 << 20)
-                os.chmod(target, 0o600)
-            except OSError:
+                result = "sqlite_header"
+            else:
+                origin.seek(0)
                 try:
-                    os.unlink(target)  # a part copy must not reach the snapshot
+                    with open(target, "xb") as copy:
+                        shutil.copyfileobj(origin, copy, 1 << 20)
+                    os.chmod(target, 0o600)
                 except OSError:
-                    pass
-                raise
-        results.append("ok")
+                    try:
+                        os.unlink(target)  # a part copy must not reach the snapshot
+                    except OSError:
+                        pass
+                    raise
+                result = "ok"
     except FileNotFoundError:
-        results.append("gone")
+        result = "gone"
     except OSError:
-        results.append("error")
-json.dump(results, sys.stdout)
+        result = "error"
+    sys.stdout.write(result + "\n")
+    sys.stdout.flush()
 """
 #: The longest the child may take for one backup's plain files.
 _PLAIN_COPY_TIMEOUT = 3600.0
+#: How often a wait for the child looks at the stop request.
+_PLAIN_COPY_POLL = 1.0
 
 
-def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, str]]) -> int:
-    """Copy each `(source, target, name)` in one child process; the count copied. A failure becomes a finding."""
+def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, str]], stop: threading.Event) -> int:
+    """Copy each `(source, target, name)` through one child process, one file at a time; the count copied.
+
+    A failure becomes a finding. A stop request ends it between files or during a copy, and a stopped copy is
+    removed. A child that stops answering, or runs past the timeout, leaves every file not yet copied as a finding.
+    """
     if not pending:
         return 0
     try:
-        completed = subprocess.run([sys.executable, "-I", "-c", _PLAIN_COPIER, _SQLITE_MAGIC.hex()], check=True,
-                                   capture_output=True, timeout=_PLAIN_COPY_TIMEOUT,
-                                   input=json.dumps([[str(source), str(target)] for source, target, _ in pending]).encode())
-        results = json.loads(completed.stdout)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        results = None
-    if not isinstance(results, list) or len(results) != len(pending):
-        # The child stopped or answered wrongly: no copy it made is trusted, and each file is a finding.
-        for _, target, _ in pending:
-            target.unlink(missing_ok=True)
-        results = ["error"] * len(pending)
+        helper = subprocess.Popen([sys.executable, "-I", "-c", _PLAIN_COPIER, _SQLITE_MAGIC.hex()], text=True,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        findings.extend({"kind": "state", "path": name, "code": "state_copy_failed"} for _, _, name in pending)
+        return 0
+    answers: queue.Queue[str] = queue.Queue()
+
+    def read_answers() -> None:
+        # A thread reads the answers, so a wait can look at the stop request on every platform. An empty answer
+        # means the child stopped answering.
+        for line in helper.stdout:
+            answers.put(line.strip())
+        answers.put("")
+
+    threading.Thread(target=read_answers, daemon=True).start()
+    deadline = time.monotonic() + _PLAIN_COPY_TIMEOUT
     copied = 0
-    for (_, _, name), result in zip(pending, results, strict=True):
-        if result == "ok":
-            copied += 1
-        elif result != "gone":  # a removal after the listing; the next backup sees the new file
-            findings.append({"kind": "state", "path": name, "code": "state_copy_failed"})
+    try:
+        for index, (source, target, name) in enumerate(pending):
+            if stop.is_set():
+                raise BackupError("stopped", "staging")
+            try:
+                helper.stdin.write(json.dumps([str(source), str(target)]) + "\n")
+                helper.stdin.flush()
+            except OSError:
+                result = ""
+            else:
+                result = None
+            while result is None:
+                if stop.is_set():
+                    helper.kill()
+                    target.unlink(missing_ok=True)
+                    raise BackupError("stopped", "staging")
+                if time.monotonic() > deadline:
+                    result = ""
+                    break
+                try:
+                    result = answers.get(timeout=_PLAIN_COPY_POLL)
+                except queue.Empty:
+                    pass
+            if result == "ok":
+                copied += 1
+            elif result == "":
+                # The child stopped answering: this copy is not trusted, and nothing after it was copied.
+                target.unlink(missing_ok=True)
+                findings.extend({"kind": "state", "path": rest, "code": "state_copy_failed"}
+                                for _, _, rest in pending[index:])
+                break
+            elif result != "gone":  # a removal after the listing; the next backup sees the new file
+                findings.append({"kind": "state", "path": name, "code": "state_copy_failed"})
+    finally:
+        if helper.poll() is None:
+            with contextlib.suppress(OSError):
+                helper.stdin.close()
+            try:
+                helper.wait(timeout=_PLAIN_COPY_POLL)
+            except subprocess.TimeoutExpired:
+                helper.kill()
+                helper.wait()
     return copied
 
 
@@ -483,8 +534,9 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop
     """Stage one state file or tree; the count of databases and empty files staged. A file that SQLite refuses goes
     to `plain`, for `_copy_plain`. A file it cannot stage becomes a finding. A stop ends it between files.
 
-    This process opens a state file only through SQLite, which shares one descriptor per file among its connections,
-    so staging never drops a lock that the service's connections hold (see `_PLAIN_COPIER`).
+    This process opens a state file only through SQLite, which defers closing a file's descriptors while any of its
+    connections holds a lock on that file, so staging never drops a lock that the service's connections hold (see
+    `_PLAIN_COPIER`).
     """
     if stop.is_set():
         raise BackupError("stopped", "staging")
@@ -550,7 +602,7 @@ def stage_state(vault: Path, stage: Path, stop: threading.Event | None = None) -
         if reserved_paths.classify_logical(name).descriptor_id in kept:
             staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings,
                                   stop or threading.Event(), plain)
-    return staged + _copy_plain(plain, findings), findings
+    return staged + _copy_plain(plain, findings, stop or threading.Event()), findings
 
 
 # --- originals --------------------------------------------------------------------------------
