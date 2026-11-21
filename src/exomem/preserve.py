@@ -1666,13 +1666,35 @@ def _low_confidence_start(content: str, start: int, end: int) -> int | None:
     return None if found == -1 else found + 1
 
 
+def _extracted_heading(content: str) -> int:
+    """Locate the first top-level extraction heading in the Markdown body."""
+    from .markdown_relations import iter_headings
+    from .vault import _FM_PATTERN
+
+    last = content.rfind(_EXTRACTED_HEADING)
+    if last < 0:
+        return -1
+    frontmatter = _FM_PATTERN.match(content)
+    body_start = frontmatter.start(2) if frontmatter is not None else 0
+    if last < body_start:
+        return -1
+    # Parse through the last possible marker once. The extraction usually follows it.
+    line_end = content.find("\n", last)
+    prefix_end = len(content) if line_end < 0 else line_end + 1
+    lines = content[body_start:prefix_end].splitlines(keepends=True)
+    for line, level, _title in iter_headings(lines):
+        if level == 2 and lines[line].rstrip() == _EXTRACTED_HEADING:
+            return body_start + sum(map(len, lines[:line]))
+    return -1
+
+
 def extracted_text(content: str) -> str:
     """The text under `## Extracted text`, up to the sidecar's machine-owned boundary.
 
     The low-confidence OCR section is not part of it: it is the words the extraction withheld.
     """
     content = with_newline(content, "\n")
-    heading = content.find(_EXTRACTED_HEADING)
+    heading = _extracted_heading(content)
     if heading == -1:
         return ""
     start = heading + len(_EXTRACTED_HEADING)
@@ -1684,7 +1706,7 @@ def extracted_text(content: str) -> str:
 def low_confidence_text(content: str) -> str:
     """The words under `## Low-confidence OCR`, or an empty string when the sidecar has none."""
     content = with_newline(content, "\n")
-    heading = content.find(_EXTRACTED_HEADING)
+    heading = _extracted_heading(content)
     if heading == -1:
         return ""
     start = heading + len(_EXTRACTED_HEADING)
@@ -1706,7 +1728,7 @@ def without_low_confidence_ocr(content: str) -> str:
     if SIDECAR_LOW_CONFIDENCE_SENTINEL not in content:
         return content
     text = with_newline(content, "\n")
-    heading = text.find(_EXTRACTED_HEADING)
+    heading = _extracted_heading(text)
     if heading == -1:
         return content
     start = heading + len(_EXTRACTED_HEADING)
@@ -1719,7 +1741,7 @@ def without_low_confidence_ocr(content: str) -> str:
 
 def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
     """Whether a nonempty legacy notes block lacks an ownership boundary."""
-    heading = content.find(_EXTRACTED_HEADING)
+    heading = _extracted_heading(content)
     if heading == -1:
         return False
     start = heading + len(_EXTRACTED_HEADING)
@@ -2366,7 +2388,7 @@ def _set_extracted_text(content: str, text: str, low_confidence: str = "") -> st
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
     if low_confidence:
         block += "\n" + low_confidence_block(low_confidence)
-    idx = content.find(_EXTRACTED_HEADING)
+    idx = _extracted_heading(content)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block
     start = idx + len(_EXTRACTED_HEADING)

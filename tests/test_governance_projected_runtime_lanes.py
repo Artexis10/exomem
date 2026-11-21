@@ -901,11 +901,16 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
 
 
-@pytest.mark.parametrize("ambiguous", [False, True], ids=["empty-first-part", "ambiguous-first-part"])
-def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, ambiguous):
+@pytest.mark.parametrize("layout", ["inline-heading", "fenced-heading", "ambiguous-first-part"])
+def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, layout):
     path = "Knowledge Base/Sources/gate.md"
     turn = "[00:19] Leave the gate open until the truck arrives."
-    opening = "" if ambiguous else turn + "\n\n"
+    ambiguous = layout == "ambiguous-first-part"
+    example = {
+        "inline-heading": "A label example is `## Extracted text`.\n\n",
+        "fenced-heading": "```markdown\n## Extracted text\n```\n\n",
+    }
+    opening = "" if ambiguous else example[layout] + turn + "\n\n"
     extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else ""
     policy = Policy(fingerprint="f" * 64)
     item = catalog_publication.catalog_item(
@@ -935,6 +940,31 @@ def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(m
     (hit,) = result.hits
     assert hit.path == path and hit.transcript_ts is None and hit.passage is None
     assert result.incomplete_source_passages is ambiguous
+
+
+@pytest.mark.parametrize("visible", [False, True], ids=["withheld-body", "interrupted-position"])
+def test_projected_search_checks_coverage_only_for_visible_text(monkeypatch, tmp_path, visible):
+    path = "Knowledge Base/Sources/gate.md"
+    text = "[00:19] Leave the gate open until the truck arrives."
+    fields = {"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: projected_retrieval.TIMED_SOURCE_HEAD}
+    source = _variant(path, "1" * 64, text, fields=fields)
+    if visible:
+        source = replace(source, head=projections.ProjectionHead(0, len(text), ((8, 12),)))
+    else:
+        released = {key: value for key, value in source.search_fields.items() if key != "body"}
+        source = replace(source, search_fields=released)
+    runtime = _runtime((_item(source),), vectors=(_vector(source, (1.0, 0.0)),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts is None and hit.passage is None
+    assert result.incomplete_source_passages is visible
 
 
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):

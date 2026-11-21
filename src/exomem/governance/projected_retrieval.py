@@ -966,10 +966,15 @@ class ProjectedVectorIndex:
         candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
         multipart = variant.search_fields.get(TIMED_SOURCE_FIELD) == TIMED_SOURCE_HEAD
         if not candidates:
-            # A released first part can contain timed text but lack a unique stored position.
-            if variant.head is not None or not _admitted_transcript(variant):
+            # A released turn can lack a unique or contiguous stored position.
+            if not _admitted_transcript(variant):
                 return None, False
-            text = transcript_passages.source_text(variant.search_fields["body"], multipart=multipart)
+            body = variant.search_fields.get("body", "")
+            head = variant.head
+            text = (
+                body[head.begin:head.end] if head is not None
+                else transcript_passages.source_text(body, multipart=multipart)
+            )
             return None, timed_source_coverage(text, multipart=multipart) is not None
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:

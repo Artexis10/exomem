@@ -8420,13 +8420,15 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     released = released if isinstance(released, dict) else {}
     if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
         return _refuse_unused_offset(result, offset)
-    timed = offset is not None and transcript_passages.is_transcript(transcript_passages.source_text(body))
-    if (
-        extraction_parts.count_of(released) == 1
-        and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS
-        and not timed
-    ):
-        return _refuse_unused_offset(result, offset)
+    timed = False
+    if extraction_parts.count_of(released) == 1:
+        extracted = _preserve_module().extracted_text(body)
+        if len(extracted) <= extraction_parts.WINDOW_CHARS:
+            timed = offset is not None and transcript_passages.is_transcript(
+                extracted or transcript_passages.source_text(body),
+            )
+            if not timed:
+                return _refuse_unused_offset(result, offset)
     path = str(result["path"])
     page = Path(vault_root) / path
     try:
