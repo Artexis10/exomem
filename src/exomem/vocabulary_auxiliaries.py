@@ -36,8 +36,12 @@ def _hash(content: str) -> str:
 
 
 def _relative(root: Path, path: Path) -> str:
+    candidate = Path(path).absolute()
+    # Callers pass a resolved root; Windows can spell the same folder with an 8.3 short name,
+    # so the parent is resolved the same way. The leaf stays unresolved so a symlink is not followed.
+    candidate = candidate.parent.resolve() / candidate.name
     try:
-        return Path(path).absolute().relative_to(Path(root).absolute()).as_posix()
+        return candidate.relative_to(Path(root).resolve()).as_posix()
     except ValueError as exc:
         raise ValueError("VOCABULARY_AUXILIARY_PATH_INVALID") from exc
 
