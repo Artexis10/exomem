@@ -114,3 +114,15 @@ def test_exact_phrase_near_the_end_of_a_long_turn_keeps_its_timestamp():
     assert match is not None and match.timestamp == 3
     assert len(match.text) <= 4000 and match.text.endswith(quote)
     assert text[match.start:match.end] == match.text
+
+
+def test_long_turn_prefers_the_repeat_in_the_winning_chunk():
+    quote = "Wait by the gate."
+    winning = f"Bring the blue clipboard. {quote}"
+    text = f"[0:03] {quote} {'We reviewed the schedule. ' * 185}{winning}\n[0:19] The truck arrived."
+
+    match = transcript_passages.match(text, chunk=f"Meeting\n\n{winning}", title="Meeting", query=quote)
+
+    assert match is not None and match.timestamp == 3
+    assert match.text.endswith(winning)
+    assert text[match.start:match.end] == match.text

@@ -120,10 +120,11 @@ def match(
         if dense is not None else None
     )
     exact = None
-    if query and dense_turn is not None:
-        start, end, _ = dense_turn
-        if inside := _locate(text[start:end], query, ignore_case=True):
-            exact = start + inside[0], start + inside[1]
+    if query and dense is not None and dense_turn is not None:
+        for start, end in (dense, dense_turn[:2]):
+            if inside := _locate(text[start:end], query, ignore_case=True):
+                exact = start + inside[0], start + inside[1]
+                break
     if query and exact is None:
         exact = _locate(text, query, ignore_case=True, unique=True)
 
