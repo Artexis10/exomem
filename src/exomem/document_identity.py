@@ -211,6 +211,8 @@ def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | 
     is a `conflict` whose document shows exactly one DOI (`_shown_dois`), the call names that DOI and asks for
     the correction when the opening text shows the document is that work. A document that shows two DOIs,
     such as a stale template DOI in its metadata and its own DOI on its first page, gets the comparison instead.
+    The comparison names `url ""` for a document with no url of its own, because a correction keeps every field
+    it omits (`add.correction_carry`), the wrong url included.
     """
     guard = f'"{page_hash}"' if page_hash else "<the page's content hash from read_page>"
     tail = (
@@ -227,7 +229,8 @@ def correction_call(ref: str, page_hash: str | None, check: Mapping[str, Any] | 
         )
     return (
         "Compare the Source's opening text with its url. If the url is wrong, call save_source again with no "
-        f"files, the document's own title, the right url and {tail}"
+        "files, the document's own title, the right url (url \"\" when you know none for this document: a "
+        f"correction keeps every field it leaves out) and {tail}"
     )
 
 

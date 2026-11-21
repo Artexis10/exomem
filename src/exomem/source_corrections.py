@@ -30,8 +30,15 @@ _CORRECTION = TypeAdapter(SourceCorrection)
 
 
 class SourceCorrectionUnavailable(ValueError):
-    def __init__(self) -> None:
-        super().__init__("SOURCE_UNAVAILABLE: source is unavailable")
+    def __init__(self, message: str = "SOURCE_UNAVAILABLE: source is unavailable") -> None:
+        super().__init__(message)
+
+
+# The same words whether the page is missing, withheld or no Source, so the refusal reveals none of them.
+_NAMES_NO_SOURCE = (
+    "SOURCE_UNAVAILABLE: supersedes names no Source this connection can correct; "
+    "pass the ref, path or id that read_page gives for it"
+)
 
 
 def validate_correction(value: object) -> SourceCorrection:
@@ -42,7 +49,8 @@ def validate_correction(value: object) -> SourceCorrection:
             raise ValueError
     except (ValidationError, ValueError):
         raise ValueError(
-            "INVALID_SOURCE_CORRECTION: supply supersedes, its historical page expected_hash, and a nonempty reason"
+            "INVALID_SOURCE_CORRECTION: supply supersedes, expected_hash (the Source page's content_hash from "
+            "read_page, not the file's SHA-256) and a nonempty reason"
         ) from None
     return correction
 
@@ -79,6 +87,53 @@ def _receipt_path(root: Path, reference: str) -> Path:
     if identity is None or memory_refs.memory_ref(identity) != reference:
         raise SourceCorrectionUnavailable
     return receipt_root(root) / f"{identity}.json"
+
+
+def correction_route(root: Path, rel_path: str) -> str | None:
+    """The sentence an in-place edit's refusal adds for the captured Source at `rel_path`, or None for any other page.
+
+    Sources are append-only, so an edit of one is refused; this names the governed correction, or says that this
+    connection cannot record one, as the capture reply does (`can_record`). A page the caller may not read gets None,
+    so the refusal never names its ref.
+    """
+    try:
+        if not _authorizer(root)(rel_path):
+            return None
+        text = (root / rel_path).read_text(encoding="utf-8")
+        metadata, _body, _marker = vault.parse_frontmatter(text)
+        if not note_types.Basis(root).selects(metadata.get("type"), note_types.captured_source):
+            return None
+    except (OSError, UnicodeError, ValueError):
+        return None
+    reference = memory_refs.ref_from_markdown(text)
+    if reference is not None and not can_record(root, reference):
+        sentence = _NOT_PERMITTED.split(": ", 1)[1]
+        return sentence[0].upper() + sentence[1:] + "."
+    return (
+        "To correct this Source, call save_source with no files (a text Source passes its text as content again), "
+        f'the corrected title, kind and url, and options.correction = {{"supersedes": '
+        f'"{reference or "<the Source ref from read_page>"}", "expected_hash": "<its content_hash from read_page>", '
+        '"reason": "<what was wrong>"}. A correction keeps every field it leaves out (url "" removes the url) and '
+        "keeps the stored original."
+    )
+
+
+def _named_path(root: Path, value: str) -> str:
+    """The page `supersedes` names, by any name read_page takes: a ref, a path, a short id or a title.
+
+    `expected_hash` binds the correction to that page's exact content, so a title cannot land it on another page.
+    """
+    from . import page_names
+
+    try:
+        # A Source often shares its title with the note compiled from it; the Source is the one a correction means.
+        named = page_names.resolve_page(
+            root, value, prefer=lambda path: vault.in_append_only_tree(path) is not None, field="supersedes",
+        )
+    except ValueError:
+        # A name that matches several pages raises `AmbiguousTitle`, an OpError, and keeps its candidate list.
+        raise SourceCorrectionUnavailable from None
+    return _path(root, named)
 
 
 def _path(root: Path, value: str) -> str:
@@ -299,10 +354,12 @@ class CorrectionPlan:
     def require_authority(self, root: Path) -> None:
         from .governance import connector_boundary, egress
 
-        if (not _authorizer(root)(self.old_path)
-                or access.writable_reason(root, self.old_path) is not None
-                or egress.write_target_withheld(root, self.old_path)):
+        # A withheld write target answers as if absent, as every write door does.
+        if not _authorizer(root)(self.old_path) or egress.write_target_withheld(root, self.old_path):
             raise SourceCorrectionUnavailable
+        # The caller has read this Source, so saying it cannot be corrected from here reveals nothing new.
+        if access.writable_reason(root, self.old_path) is not None:
+            raise ValueError(_NOT_PERMITTED)
         connector_boundary.require_write(root, self.old_path, content=self.old_source.encode("utf-8"))
         if not can_record(root, self.old_ref):
             raise ValueError(_NOT_PERMITTED)
@@ -325,7 +382,7 @@ class CorrectionPlan:
 def prepare_correction(root: Path, value: SourceCorrection) -> CorrectionPlan:
     correction = validate_correction(value)
     try:
-        path = _path(root, correction["supersedes"])
+        path = _named_path(root, correction["supersedes"])
         text, guard, metadata, marker = _read_page(root, path, _authorizer(root))
         if marker is None or not note_types.Basis(root).selects(metadata.get("type"), note_types.captured_source):
             raise SourceCorrectionUnavailable
@@ -335,12 +392,16 @@ def prepare_correction(root: Path, value: SourceCorrection) -> CorrectionPlan:
             preview, apply = cli_ops.backfill_ids_route()
             raise ValueError(f"SOURCE_CORRECTION_ID_REQUIRED: preview {preview}, start it with {apply}, dry_run=false, the preview's plan_id and a why (the local CLI needs no plan_id), then read the Source again and retry")
         if vault.content_hash(text) != correction["expected_hash"]:
-            raise ValueError("SOURCE_CORRECTION_STALE: historical Source page changed; read it again and retry")
+            raise ValueError(
+                "SOURCE_CORRECTION_STALE: expected_hash is not the Source page's current content_hash; "
+                "read_page it again and pass that content_hash, not the file's SHA-256"
+            )
         entry, receipt_guard = _receipt(root, reference)
         if entry is not None:
             raise ValueError("SOURCE_ALREADY_CORRECTED: correct the current Source instead")
         plan = CorrectionPlan(correction, path, reference, text, (guard, receipt_guard))
         plan.require_authority(root)
         return plan
-    except (OSError, memory_refs.ReferenceError, vault.PathGuardError, reserved_paths.ReservedPathLeafError, source_capture.SourceCaptureError):
-        raise SourceCorrectionUnavailable from None
+    except (SourceCorrectionUnavailable, OSError, memory_refs.ReferenceError, vault.PathGuardError,
+            reserved_paths.ReservedPathLeafError, source_capture.SourceCaptureError):
+        raise SourceCorrectionUnavailable(_NAMES_NO_SOURCE) from None

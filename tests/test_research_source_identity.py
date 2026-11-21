@@ -264,6 +264,95 @@ def test_a_correction_that_names_only_the_url_keeps_every_other_field_of_the_sou
     assert "> Cited in the harbour survey." in (vault / successor["page"]).read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("name", ["id", "title"])
+def test_a_correction_names_the_source_by_any_name_read_page_takes(vault, source_schema, saved, name) -> None:
+    # Agents passed the short id or the title that search and read_page showed, and were refused.
+    from exomem import page_names
+
+    identity = page_names.read_identity(vault, saved["page"])
+    successor = _save_pdf(
+        vault, source_schema, upload=False, title="A study of harbour lanterns", url="https://doi.org/10.5555/aaa",
+        correction=_correction(vault, saved, supersedes=identity.id if name == "id" else identity.title),
+    )["files"][0]
+
+    assert _frontmatter(vault, successor["page"])["supersedes"]
+
+
+def _edit_in_place(vault: Path, page: str, door: str) -> str:
+    """The refusal an in-place edit of a Source gets, through the frontmatter door or the body door."""
+    from exomem import edit as edit_module
+    from exomem import set_frontmatter_field
+
+    if door == "frontmatter":
+        with pytest.raises(set_frontmatter_field.SetFrontmatterError) as caught:
+            set_frontmatter_field.set_frontmatter_field(
+                vault, path=page, field="title", value="A study of harbour lanterns", why="Fix the title.",
+            )
+        assert caught.value.code == "APPEND_ONLY"
+    else:
+        with pytest.raises(edit_module.EditError) as caught:
+            edit_module.edit(vault, path=page, why="Fix the title.", old_string="Harbour lanterns", new_string="A study")
+    return caught.value.reason
+
+
+@pytest.mark.parametrize("door", ["frontmatter", "body"])
+def test_editing_a_source_in_place_is_refused_with_the_correction_that_does_it(vault, source_schema, saved, door) -> None:
+    reason = _edit_in_place(vault, saved["page"], door)
+
+    assert "options.correction" in reason and saved["ref"] in reason
+
+
+def test_a_writer_who_cannot_record_a_correction_is_not_sent_to_one(vault, source_schema, saved, tmp_path, monkeypatch) -> None:
+    # Told to correct the Source, a restricted writer would only meet the receipt refusal.
+    from conftest import initialize_vault_state_offline
+    from granted_writer import grant_writer
+
+    from exomem.governance import principal
+
+    initialize_vault_state_offline(vault, source="restricted correction route")
+    writer = grant_writer(vault, tmp_path, monkeypatch, writable_paths=["Sources/Inbox/writer/**"],
+                          capture_paths=["Knowledge Base/Sources/Inbox/writer"])("external")
+    can_record = source_corrections.can_record
+
+    def as_writer(root, ref):
+        with principal.request_scope(writer):
+            return can_record(root, ref)
+
+    monkeypatch.setattr(source_corrections, "can_record", as_writer)
+
+    reason = _edit_in_place(vault, saved["page"], "frontmatter")
+
+    assert "options.correction" not in reason and "cannot record a Source correction" in reason
+
+
+def test_a_source_in_a_readonly_tree_is_refused_as_not_correctable_here(vault, source_schema, saved) -> None:
+    # The caller named the right Source; telling it to pass another name sent agents in circles.
+    folder = saved["page"].removeprefix("Knowledge Base/").rsplit("/", 1)[0]
+    (vault / "Knowledge Base/_access.yaml").write_text(f"readonly:\n  - {folder}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SOURCE_CORRECTION_NOT_PERMITTED"):
+        _save_pdf(vault, source_schema, upload=False, url="https://doi.org/10.5555/aaa", correction=_correction(vault, saved))
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_a_correction_with_an_empty_url_drops_a_doi_the_document_never_shows(
+    vault: Path, source_schema: schema_module.SourceSchema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stage(monkeypatch, tmp_path, make_pdf(tmp_path / "summary.pdf", ["A thesis summary that cites a harbour lantern study."]))
+    row = _save_pdf(vault, source_schema, url=CLAIM, tags=["lanterns"])["files"][0]
+
+    # What `next_action` asks for when the document has no url of its own: the right kind and url "".
+    successor = _save_pdf(
+        vault, source_schema, upload=False, title="Thesis summary on harbour lanterns", source_kind="research-report",
+        url="", correction=_correction(vault, row, reason="The file is a thesis summary that cites the study."),
+    )["files"][0]
+
+    kept = _frontmatter(vault, successor["page"])
+    assert not kept.get("url")
+    assert not kept["identity_check"].get("claimed_dois")
+    assert kept["tags"] == ["lanterns"]
+
+
 def test_a_metadata_only_correction_scans_the_canonical_sources_once(vault, source_schema, saved, monkeypatch) -> None:
     # Each scan reads every canonical Source page: seconds at the load target of 20,000 pages.
     scans = []
