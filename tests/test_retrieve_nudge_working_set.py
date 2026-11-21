@@ -888,7 +888,7 @@ def test_a_capture_policy_is_rendered_when_the_turn_resolved_nothing(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{hook.REMINDER}"
+    assert context == f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{policy['rules']}\n{hook.REMINDER}"
 
 
 def test_a_transport_failure_requests_native_activation(
