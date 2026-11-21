@@ -6617,11 +6617,16 @@ def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
     return extraction_parts.listed(vault_root / page.rel_path)
 
 
-def _transcript_match(vault_root: Path, page: ParsedPage, query: str, chunk: str | None):
+def _transcript_match(
+    vault_root: Path, page: ParsedPage, query: str, chunk: str | None,
+    *, type_basis: note_types.Basis | None = None,
+):
     from . import extraction_parts, transcript_passages
     from .governance import egress
 
     if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
+        return None
+    if not transcript_passages.allows_window(page.frontmatter.get("type"), type_basis or note_types.Basis(vault_root)):
         return None
     text = transcript_passages.source_text(page.body, media_sidecar=bool(page.frontmatter.get("media_type")))
     return transcript_passages.match(
@@ -7362,6 +7367,7 @@ def _find_semantic(
 
     paths = ranked_paths()
     extra_paths: set[str] = set()
+    verified_transcripts: set[str] = set()
     # Collect and rank with the original limit. Only an entirely proved page
     # prefix can join units before hydration; rerank passages retain their path.
     if (
@@ -7526,8 +7532,9 @@ def _find_semantic(
             # that collapsed into this Source, else the Source itself.
             matched_page = (chunk_page if ref is not None else frame_page) or page
             part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
-            transcript = _transcript_match(vault_root, page, query, chunk)
+            transcript = _transcript_match(vault_root, page, query, chunk, type_basis=type_basis)
             if transcript is not None:
+                verified_transcripts.add(page.rel_path)
                 part_match = {"matched_part": 1, "passage": transcript.passage()}
                 excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
             hit = Hit(
@@ -7793,7 +7800,7 @@ def _find_semantic(
         if bundle.neutral_prefix:
             passages = {
                 hit.path: hit for hit in hits
-                if hit.passage is not None and hit.transcript_ts is not None
+                if hit.path in verified_transcripts and hit.passage is not None and hit.transcript_ts is not None
             }
             hits = [hit for hit in hits if hit.path not in extra_paths]
             for path in bundle.neutral_prefix:

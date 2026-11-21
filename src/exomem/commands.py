@@ -8407,7 +8407,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     page, so it carries no `content_hash` and cannot guard a write of the whole body.
     """
     from . import extraction_parts, transcript_passages
-    from .vault import content_hash, parse_frontmatter, read_guarded_text
+    from .vault import content_hash, markdown_lf, parse_frontmatter, read_guarded_text
 
     if offset is not None and type(offset) is not int:  # a bool is an int to Python, never an offset
         raise ValueError("INVALID_OFFSET: offset must be a whole number of characters")
@@ -8418,25 +8418,23 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     # takes exactly the one guarded read it took before parts existed.
     released = result.get("frontmatter")
     released = released if isinstance(released, dict) else {}
-    if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
+    if not transcript_passages.allows_window(released.get("type"), note_types.Basis(vault_root)):
         return _refuse_unused_offset(result, offset)
     media_sidecar = bool(released.get("media_type"))
     timed = False
     if extraction_parts.count_of(released) == 1:
-        extracted = _preserve_module().extracted_text(body)
-        if len(extracted) <= extraction_parts.WINDOW_CHARS:
-            timed = offset is not None and transcript_passages.is_transcript(
-                transcript_passages.source_text(body, media_sidecar=media_sidecar),
-            )
-            if not timed:
-                return _refuse_unused_offset(result, offset)
+        timed = offset is not None and transcript_passages.is_transcript(
+            transcript_passages.source_text(body, media_sidecar=media_sidecar),
+        )
+        if not timed and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS:
+            return _refuse_unused_offset(result, offset)
     path = str(result["path"])
     page = Path(vault_root) / path
     try:
         raw, _guard = read_guarded_text(vault_root, page)
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
-    frontmatter, stored, _ = parse_frontmatter(raw)
+    frontmatter, stored, _ = parse_frontmatter(markdown_lf(raw) if timed else raw)
     first = (
         transcript_passages.source_text(stored, media_sidecar=bool(frontmatter.get("media_type")))
         if timed else _preserve_module().extracted_text(stored)

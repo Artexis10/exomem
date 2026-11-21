@@ -27,6 +27,7 @@ _SNIPPET_CHARS = 320
 MAX_PROJECTED_TRANSCRIPT_SAMPLES = 512
 TIMED_SOURCE_FIELD = "timed_source"
 TIMED_SOURCE_HEAD = "head"
+TIMED_SOURCE_GAP = "part"
 
 
 class ProjectedRetrievalUnavailable(RuntimeError):
@@ -284,13 +285,16 @@ def transcript_samples(
 
     if not _admitted_transcript(variant):
         return (), False
-    multipart = variant.search_fields[TIMED_SOURCE_FIELD] == TIMED_SOURCE_HEAD
+    coverage = variant.search_fields[TIMED_SOURCE_FIELD]
+    multipart = coverage in (TIMED_SOURCE_HEAD, TIMED_SOURCE_GAP)
     body = variant.search_fields.get("body", "")
     # Other parts use a shared catalog budget. Sampling them would expose its occupancy.
     head = variant.head
-    if head is None:
-        text = transcript_passages.source_text(
-            body, multipart=multipart, media_sidecar=bool(variant.search_fields.get("media_type")),
+    if head is None or coverage == TIMED_SOURCE_GAP:
+        text = (
+            body[head.begin:head.end] if head is not None else transcript_passages.source_text(
+                body, multipart=multipart, media_sidecar=bool(variant.search_fields.get("media_type")),
+            )
         )
         return (), timed_source_coverage(text, multipart=multipart) is not None
 

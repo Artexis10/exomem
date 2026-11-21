@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import find as find_mod
 from exomem import scene_frames
 from exomem.embeddings import Scene
@@ -121,7 +123,8 @@ def test_non_media_page_never_localizes(vault: Path) -> None:
     assert "transcript_match_at" not in hits[0].as_dict()
 
 
-def test_read_at_a_transcript_offset_opens_the_whole_reported_passage(vault: Path) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+def test_read_at_a_transcript_offset_opens_the_whole_reported_passage(vault: Path, newline: str) -> None:
     from exomem import commands
 
     path = "Knowledge Base/Sources/workshop.md"
@@ -129,7 +132,8 @@ def test_read_at_a_transcript_offset_opens_the_whole_reported_passage(vault: Pat
     source.parent.mkdir(parents=True, exist_ok=True)
     quote = "Inspect the hinge on the west door."
     body = f"[0:01] We arrived at the shop.\n[0:19] We began the review.\n{quote} {'The discussion continued. ' * 1500}"
-    source.write_text(f"---\ntitle: Workshop\ntype: source\n---\n\n## Capture\n\n{body}\n", encoding="utf-8")
+    content = f"---\ntitle: Workshop\ntype: source\n---\n\n## Capture\n\n{body}\n"
+    source.write_bytes(content.replace("\n", newline).encode())
 
     hit = next(hit.as_dict() for hit in find(vault, query=quote, mode="keyword") if hit.path == path)
     passage = hit["passage"]
@@ -138,3 +142,45 @@ def test_read_at_a_transcript_offset_opens_the_whole_reported_passage(vault: Pat
     assert quote in passage["text"]
     assert opened["window"]["offset"] == passage["offset"]
     assert opened["body"].startswith(passage["text"])
+
+
+def test_untyped_source_stays_searchable_without_a_timed_citation(vault: Path) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    quote = "Inspect the hinge on the west door."
+    source.write_text(
+        f"## Extracted text\n\n[0:01] We arrived at the shop.\n[0:19] {quote}\n",
+        encoding="utf-8",
+    )
+
+    hit = next(hit.as_dict() for hit in find(vault, query=quote, mode="keyword") if hit.path == path)
+
+    assert quote in hit["excerpt"] and "transcript_match_at" not in hit
+
+
+def test_a_fenced_extraction_example_does_not_override_summary_rank(vault: Path) -> None:
+    source_path = "Knowledge Base/Sources/workshop.md"
+    source = vault / source_path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntitle: Workshop\ntype: source\nmedia_type: audio\n---\n\n"
+        "```markdown\n## Extracted text\n```\n\n"
+        "[0:03] We inspected the gate.\n[0:19] Leave the gate open for the cerulean forklift.\n",
+        encoding="utf-8",
+    )
+    summary_path = "Knowledge Base/Notes/forklift.md"
+    summary = vault / summary_path
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    summary.write_text(
+        "---\ntitle: Cerulean forklift\ntype: insight\nstatus: active\nsources:\n  - '[[Sources/workshop]]'\n---\n\n"
+        "The cerulean forklift can enter. The cerulean forklift can exit.\n",
+        encoding="utf-8",
+    )
+
+    hits = find(
+        vault, query="cerulean forklift", mode="hybrid", scope="kb-only",
+        graph=False, rerank=False, prefer_source_passages=True, limit=3,
+    )
+
+    assert [hit.path for hit in hits[:2]] == [summary_path, source_path]

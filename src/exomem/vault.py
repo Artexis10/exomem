@@ -956,7 +956,7 @@ def display_title_from_bytes(raw: bytes, path: Path | str) -> str | None:
     except UnicodeDecodeError:
         return None
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
-    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    fm, body, _ = parse_frontmatter(markdown_lf(text))
     return resolve_display_title(fm, body, path) or None
 
 
@@ -10559,6 +10559,11 @@ def document_newline(text: str) -> str:
 def with_newline(text: str, newline: str) -> str:
     """Rewrite `text`'s LF and CRLF line endings to `newline`."""
     return text.replace("\r\n", "\n").replace("\n", newline)
+
+
+def markdown_lf(text: str) -> str:
+    """Use CommonMark's physical line breaks for parsed text and character positions."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def render_frontmatter_document(

@@ -526,7 +526,8 @@ def catalog_item(
         head = preserve.extracted_text(source) if parts else ""
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
-            multipart = extraction_parts.count_of(parsed.frontmatter) > 1
+            part_count = extraction_parts.count_of(parsed.frontmatter)
+            multipart = part_count > 1
             text = transcript_passages.source_text(
                 parsed.body, multipart=multipart, media_sidecar=bool(parsed.frontmatter.get("media_type")),
             )
@@ -537,6 +538,9 @@ def catalog_item(
                     # The existing Source eraser cannot account for this bank.
                     fields["source_erasure"] = "managed"
                 else:
+                    if len(parts) < part_count - 1:
+                        # The read window needs all stored part lengths. Test this before catalog fitting.
+                        coverage = projected_retrieval.TIMED_SOURCE_GAP
                     fields[projected_retrieval.TIMED_SOURCE_FIELD] = coverage
                     head = text
         variants = projections.with_parts(

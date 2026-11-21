@@ -1956,11 +1956,15 @@ def _find_projected_hits_pinned(
         )
         neutral_prefix = tuple(identity for identity, _ in candidates)
         for identity in neutral_prefix:
-            if identity not in scores:
+            variant = selected_variants[identity]
+            if (
+                identity not in scores or projected_retrieval.TIMED_SOURCE_FIELD not in variant.search_fields
+                or not transcript_passages.allows_window(variant.search_fields.get("type"), type_basis)
+            ):
                 continue
             try:
                 hit, partial = vector_index.match_transcript(
-                    Path(vault_root), selected_variants[identity], query_vector, scores[identity],
+                    Path(vault_root), variant, query_vector, scores[identity],
                 )
             except transcript_banks.TranscriptBankUnavailable:
                 incomplete_passages = True

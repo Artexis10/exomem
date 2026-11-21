@@ -901,18 +901,21 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
 
 
-@pytest.mark.parametrize("layout", ["inline-heading", "fenced-heading", "unicode-separator", "ambiguous-first-part"])
+@pytest.mark.parametrize("layout", [
+    "inline-heading", "fenced-heading", "unicode-separator", "ambiguous-first-part", "missing-later-part",
+])
 def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, layout):
     path = "Knowledge Base/Sources/gate.md"
     turn = "[00:19] Leave the gate open until the truck arrives."
     ambiguous = layout == "ambiguous-first-part"
+    missing = layout == "missing-later-part"
     example = {
         "inline-heading": "A label example is `## Extracted text`.\n\n",
         "fenced-heading": "```markdown\n## Extracted text\n```\n\n",
         "unicode-separator": "A label example is\u2028## Extracted text\n\n",
     }
-    opening = "" if ambiguous else example[layout] + turn + "\n\n"
-    extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else ""
+    opening = example[layout] + turn + "\n\n" if layout in example else ""
+    extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else turn if missing else ""
     policy = Policy(fingerprint="f" * 64)
     item = catalog_publication.catalog_item(
         vault_root=tmp_path, path=path,
@@ -922,7 +925,7 @@ def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(m
         ),
         policy=policy,
         target_key=projections.ProjectionNamespaceKey(policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1),
-        pending={
+        pending={} if missing else {
             extraction_parts.part_path(Path(path), 2).as_posix():
                 "---\npart_of: gate.md\n---\n\n## Extracted text\n\n[00:50] The meeting closed.\n",
         },
@@ -939,7 +942,7 @@ def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(m
 
     (hit,) = result.hits
     assert hit.path == path and hit.transcript_ts is None and hit.passage is None
-    assert result.incomplete_source_passages is ambiguous
+    assert result.incomplete_source_passages is (ambiguous or missing)
 
 
 @pytest.mark.parametrize("visible", [False, True], ids=["withheld-body", "interrupted-position"])

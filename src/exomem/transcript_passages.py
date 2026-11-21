@@ -6,12 +6,17 @@ import re
 from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
 
-from . import semantic_segments
-from .vault import in_append_only_tree
+from . import note_types, semantic_segments
+from .vault import in_append_only_tree, markdown_lf
 
 
 def is_source(path: str) -> bool:
     return in_append_only_tree(path) == "Sources"  # the vault layout fixes this lane name
+
+
+def allows_window(note_type: object, basis: note_types.Basis) -> bool:
+    """Apply the read endpoint's raw-page eligibility to citations."""
+    return basis.selects(str(note_type or "").casefold(), note_types.raw)
 
 
 class TranscriptMatch(NamedTuple):
@@ -29,7 +34,7 @@ def source_text(body: str, *, multipart: bool = False, media_sidecar: bool = Fal
     from . import preserve
     from .source_coverage import CAPTURE_HEADING, fenced_capture
 
-    body = body.replace("\r\n", "\n")
+    body = markdown_lf(body)
     marker = preserve._EXTRACTED_HEADING
     start = body.find(marker)
     if start >= 0:
@@ -37,15 +42,14 @@ def source_text(body: str, *, multipart: bool = False, media_sidecar: bool = Fal
         # Check its first literal marker against Markdown before trusting that extent.
         from .markdown_relations import iter_headings
 
-        markdown = body.replace("\r", "\n")
-        if start and markdown[start - 1] != "\n":
+        if start and body[start - 1] != "\n":
             return ""
-        end = markdown.find("\n", start)
+        end = body.find("\n", start)
         if end < 0:
-            end = len(markdown)
-        if markdown[start:end].rstrip(" \t") != marker:
+            end = len(body)
+        if body[start:end].rstrip(" \t") != marker:
             return ""
-        lines = markdown[:end].split("\n")
+        lines = body[:end].split("\n")
         if any(line == len(lines) - 1 and level == 2 for line, level, _title in iter_headings(lines)):
             text = preserve.extracted_text(body)
             # An earlier OCR block would make this extent unsuitable for public citations.
