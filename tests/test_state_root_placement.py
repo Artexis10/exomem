@@ -120,6 +120,7 @@ def _constructor_map():
 #: automatically and follows content into the vault necessarily.
 _FOLLOWS_ITS_TARGET = {
     "batch-workspace": "stages a note install; atomic rename requires the note's volume",
+    "upload-stage": "an upload's bytes, renamed into a batch workspace and its destination on the vault's volume",
     "held-publication": "temp leaf under the retained parent of the published file",
     "held-probe": "capability probe scratch in the root it tests, only while the probe runs",
     "collection-publication": "staged and displaced view leaves under the retained target parent",
@@ -168,6 +169,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
 
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
     "batch-workspace",
+    "upload-stage",
     "held-publication",
     "held-probe",
     "collection-publication",

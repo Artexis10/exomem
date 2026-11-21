@@ -25,7 +25,23 @@ Planning a reprocess path reads the whole file for its hash, and for an evicted 
 
 The zero-advance claim holds in a file-mode vault. In a store-mode vault the sidecar step of a path runs on the store thread, whose bookkeeping hold takes its own advancing guard (`projector._holding_boundary`), so a path advances the generation once there, where it advanced twice before.
 
+### An upload commit moves its bytes before it takes the boundary
+
+On 2026-11-21 an evidence-lane upload commit (`upload_preserve`) held the boundary 59 times in six and a half hours, 2,838 s in all (p50 43 s, longest 165 s), about 86% of every hold in that window, while keyed saves were refused `MUTATION_BUSY`. The door wrapped the whole `preserve_stream` in the boundary, so a file of about 900 MB was copied and hashed into a spool, copied and fsynced again into the batch workspace (or into the original pool), and then fanned out, all inside one hold. On a disposable vault, idle, a 150 MB upload held for 6 s (copy 2.5 s, stage copy 2.3 s, fan-out 0.4 s, rest 0.9 s); the first two grow with size and the other two do not.
+
+Each upload door now copies, hashes and fsyncs the bytes once, before the boundary, into a private stage on the vault's own filesystem. A pooled vault stages into the pool with `original_pool.prepare`, which already stages every byte and publishes by rename. An ordinary vault stages into one reserved directory under the managed root, held by an owner lock. Inside the boundary the commit re-plans against current state, adopts the stage into its batch workspace by rename, rechecks the stage's identity on the held descriptor and rebinds the generation witness (the rename moves the file's change time, and an unbound witness would hash the file again), installs, and writes pages and indexes. Nothing inside the boundary scales with the payload.
+
+What stays inside the boundary because it reads current state: destination spelling and admission, destination taken (including a pooled filing), companion absent, raw-protection naming, the format state, the index and log `expected_hash` guards, and the create-only checks. What moves out because it reads bytes: the spool copy, the workspace copy, pool staging and confirmation, the artifact identity hash and the provenance hash that follows an upload. A container whose plan reads the whole archive (`document_containers.plan`) stays inside for now and is a named residual.
+
+A stage is not canonical. A crash after staging leaves only a stage; a sweep at serving activation removes a stage only when its owner is proven gone, never by age alone, and leaves in doubt what it cannot prove. A stage whose bytes change before adoption fails the batch's identity check and publishes nothing; the session stays retryable. A rename install needs the stage on the vault's filesystem; when it is not (`EXDEV`), or the stage's metadata moved, or the platform cannot witness a change, the commit falls back to today's copy under the boundary, checks the digest and logs that fallback. A rename is used, not a hardlink, because provenance reads refuse a file with more than one link.
+
+`upload_reconcile` hashes the whole binary under the boundary; it now passes `commit_guard`, as startup reconcile does, so the hash runs outside it.
+
+Not in this slice: routing evidence commits through `invoke_command` so the fast durable acknowledgement defers the fan-out (0.4 s warm, 1.5 s cold). It is its own slice and its own risk surface (the replay store).
+
 ## Risks
 
 - A media result can become visible a few minutes later than before under continuous foreground writes. The progress floor bounds the delay, and the status field shows it.
 - A publication hold lasts up to `BATCH_HOLD_SECONDS` plus the staging of one result, because the time cap is checked between results, plus the batch commit itself. The commit grows with the number of results staged, which the read size `BATCH_RESULT_LIMIT` bounds. A reprocess queueing hold covers one job row, with no planning inside it. A foreground write that waits for either is inside its latency budget.
+- A stage on a pooled vault holds the pool pin for as long as the upload takes to stage, where the pin used to be held only inside the hold. The media custody owner agrees the pin lifetime.
+- A stage that a crash leaves is bytes that no page names. The sweep bounds the listing and reports what it cannot prove orphaned, rather than deleting it.

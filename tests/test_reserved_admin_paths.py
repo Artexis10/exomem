@@ -404,6 +404,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "source-corrections",
         "source-custody",
         "served-context",
+        "upload-stage",
         "voice-profile-store",
     }
 
