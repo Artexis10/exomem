@@ -406,7 +406,7 @@ def test_old_stored_scalar_containers_are_unavailable_without_affecting_metrics(
         ordinal = layout.fields.index("mixed")
         store.connection.execute(f"UPDATE {layout.current_table} SET v{ordinal}=?", (json.dumps(old),))
     else:
-        store.connection.execute("UPDATE items SET values_json=json_set(values_json,'$.mixed',json(?))", (json.dumps(old),))
+        store.connection.execute("UPDATE item_rows SET values_json=json_set(values_json,'$.mixed',json(?))", (json.dumps(old),))
     assert tool(store, "record_memory", who=GUEST, action="query", collection=CID,
                 query={"version": 1, "select": ["count"]})["rows"] == [{"count": 7}]
     with pytest.raises(OpError) as error:

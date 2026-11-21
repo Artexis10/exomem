@@ -251,16 +251,19 @@ class Upkeep:
         self.added.clear()
 
     def move(self, rollup_id, rollup, row_id, key, values, previous) -> tuple[int, tuple]:
-        """Move one row's contribution: the change in flagged rows and the buckets touched."""
+        """Move one row's contribution: the change in flagged rows and the buckets touched.
+
+        ``values`` None retracts the row: its old contribution leaves and nothing replaces it.
+        """
         old = None if previous is None else _place(rollup, previous, key)
-        new = _place(rollup, values, key)
-        if old is not None and _same(old, new):
+        new = None if values is None else _place(rollup, values, key)
+        if old is not None and new is not None and _same(old, new):
             return 0, ()
         touched = []
         if old is not None and old is not _FLAGGED:
             self._remove(rollup_id, rollup, old, row_id, key)
             touched.append(old[:2])
-        if new is not _FLAGGED:
+        if new is not None and new is not _FLAGGED:
             self._add(rollup_id, rollup, new, row_id, key)
             touched.append(new[:2])
         return (new is _FLAGGED) - (old is _FLAGGED), tuple(touched)
@@ -322,6 +325,11 @@ def maintain(conn, collection_id: str, row_id: int, key: str, values: Mapping, *
     backfill reads later rows' current values when it reaches them.
     """
     _maintain(conn, collection_id, [(row_id, key, values, previous)])
+
+
+def forget(conn, collection_id: str, row_id: int, key: str, previous: Mapping) -> None:
+    """Take a retracted row's contribution out of every declared rollup, in the retraction's transaction."""
+    _maintain(conn, collection_id, [(row_id, key, None, previous)])
 
 
 def maintain_new_items(conn, collection_id: str, rows) -> None:

@@ -216,7 +216,7 @@ class DependencyPlan:
             "SELECT b.canonical_ref,t.transition_id,t.event_hash,b.auth_effect_ordinal,i.item_key,b.row_version,"
             "v.payload_hash,creation.transition_id "
             # CROSS JOIN keeps the request driving: stores keep no planner statistics, which would scan the collection.
-            "FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.item_key=r.item_key "
+            "FROM requested r CROSS JOIN item_rows i ON i.collection_id=? AND i.item_key=r.item_key "
             "JOIN version_source_bindings b ON b.row_id=i.row_id AND b.row_version=r.row_version AND b.canonical_ref=r.canonical_ref "
             "JOIN txns t ON t.txn_id=b.auth_txn_id "
             "JOIN version_identity v ON v.row_id=b.row_id AND v.row_version=b.row_version "

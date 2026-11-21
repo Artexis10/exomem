@@ -109,7 +109,7 @@ class ProjectionPlan:
 @lru_cache(maxsize=64)
 def _declaration(plan: ProjectionPlan, temporary: bool) -> Table:
     metadata = MetaData()
-    items = tables.items.to_metadata(metadata)
+    items = tables.item_rows.to_metadata(metadata)
     row_id = Column("row_id", Integer, *(() if temporary else (ForeignKey(items.c.row_id),)), primary_key=True)
     keys_json = Column("keys_json", Text, nullable=False)
     columns = [row_id, Column("item_key", Text, nullable=False, unique=True),

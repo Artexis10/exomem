@@ -62,7 +62,7 @@ def _refuse_unbound_effects(conn, txn):
         "WHEN e.version_before IS NULL THEN 1 ELSE e.version_before + 1 END "
         "OR (NOT :moved AND v.txn_id IS NOT :txn) THEN 'effect version binding differs' "
         "WHEN p.payload_hash IS NOT e.hash_before THEN 'effect predecessor payload differs' END AS reason "
-        "FROM audit_effects e LEFT JOIN items i ON i.row_id=e.row_id "
+        "FROM audit_effects e LEFT JOIN item_rows i ON i.row_id=e.row_id "
         "LEFT JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
         "LEFT JOIN version_identity p ON p.row_id=e.row_id AND p.row_version=e.version_before "
         "WHERE e.txn_id=:txn) WHERE reason IS NOT NULL ORDER BY ordinal LIMIT 1",
@@ -80,7 +80,7 @@ def _effect_material(conn, txn):
     groups = conn.execute(
         "SELECT v.encoding, v.payload_generation, i.collection_id FROM audit_effects e "
         "JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
-        "JOIN items i ON i.row_id=e.row_id WHERE e.txn_id=? "
+        "JOIN item_rows i ON i.row_id=e.row_id WHERE e.txn_id=? "
         "GROUP BY v.encoding, v.payload_generation, i.collection_id ORDER BY MIN(e.ordinal)",
         (txn["txn_id"],)).fetchall()
     material = {}
@@ -100,7 +100,7 @@ def _effect_material(conn, txn):
             "(SELECT json_group_array(json_array(s.ordinal,s.source_ref)) FROM item_sources s "
             f"WHERE s.row_id=e.row_id AND s.row_version=e.version_after),{columns} "
             "FROM audit_effects e JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
-            f"JOIN items i ON i.row_id=e.row_id {payload} "
+            f"JOIN item_rows i ON i.row_id=e.row_id {payload} "
             "WHERE e.txn_id=? AND v.encoding=? AND v.payload_generation IS ? AND i.collection_id=? "
             "ORDER BY e.ordinal", (txn["txn_id"], encoding, generation, collection_id))
         for ordinal, key, hash_after, payload_hash, schema_version, sources, *stored in cursor.fetchall():
@@ -118,9 +118,31 @@ def _effect_material(conn, txn):
     return [material[ordinal] for ordinal in sorted(material)]
 
 
+def _retract_material(conn, txn):
+    """A retraction's key, retracted version and payload hash, proven against that immutable version.
+
+    The row is read from ``item_rows``, since a later re-admission makes it current again.
+    """
+    found = conn.execute(
+        "SELECT e.item_key,e.version_before,e.hash_before,e.effect,e.version_after,e.hash_after,"
+        "i.collection_id,i.item_key,p.payload_hash FROM audit_effects e "
+        "LEFT JOIN item_rows i ON i.row_id=e.row_id "
+        "LEFT JOIN version_identity p ON p.row_id=e.row_id AND p.row_version=e.version_before "
+        "WHERE e.txn_id=? ORDER BY e.ordinal", (txn["txn_id"],)).fetchall()
+    if len(found) != 1:
+        _fail(txn, "a retraction has exactly one effect")
+    key, version, digest, effect, after, hash_after, collection, row_key, predecessor = found[0]
+    if (effect != "retract" or version is None or after is not None or hash_after is not None
+            or collection != txn["collection_id"] or row_key != key or predecessor != digest):
+        _fail(txn, "retraction effect differs from its immutable predecessor")
+    return {"key": key, "retracted_version": version, "payload_hash": digest}
+
+
 def effects(conn, txn):
     """Reconstruct precisely the native v1 event's effect material."""
     receipt = json.loads(txn["receipt_json"])
+    if txn["operation"] == "retract":
+        return _retract_material(conn, txn)
     if txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
         return {name: receipt[name] for name in ("counts", "ids")}
     if txn["operation"] == "rebaseline":
@@ -164,7 +186,7 @@ def verify_event(conn, txn):
             if original is None:
                 for row_id, key, version, payload, schema_version in conn.execute(
                     "SELECT v.row_id,i.item_key,v.row_version,v.payload_hash,v.schema_version FROM version_identity v "
-                    "JOIN items i ON i.row_id=v.row_id WHERE v.txn_id=?", (txn["txn_id"],)):
+                    "JOIN item_rows i ON i.row_id=v.row_id WHERE v.txn_id=?", (txn["txn_id"],)):
                     values, body = typed_storage.version_values(conn, row_id, version)
                     if tokens.payload_hash(schema_version, key, values, body) != payload:
                         _fail(txn, "imported version payload differs")
@@ -352,12 +374,12 @@ def agent_history(writer, manifest):
         return {"status": "history_incomplete", "complete": False, "truncated": False, "events": []}
 
     def released(row_id):
-        item = writer.connection.execute("SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
+        item = writer.connection.execute("SELECT item_key FROM item_rows WHERE row_id=? AND collection_id=?",
                                         (row_id, manifest.collection_id)).fetchone()
         if item is None:
             return False
         subject = next(iter(governance.iter_subjects(writer.connection, manifest.collection_id,
-            writer._operation.logical_vault_id, row_key=item[0])), None)
+            writer._operation.logical_vault_id, row_key=item[0], retained=True)), None)
         return subject is not None and writer._operation.decision(subject).level >= 6
 
     for txn in transactions(writer.connection, manifest.collection_id):
@@ -390,7 +412,7 @@ def agent_history(writer, manifest):
             legacy_event = json.loads(txn["legacy_event_json"])
             key = legacy_event.get("item_key")
             if key is not None:
-                current = writer.connection.execute("SELECT row_id FROM items WHERE collection_id=? AND item_key=?",
+                current = writer.connection.execute("SELECT row_id FROM item_rows WHERE collection_id=? AND item_key=?",
                                                      (manifest.collection_id, key)).fetchone()
                 if current is None:
                     # Only unrestricted readers can release an imported event with no current row metadata.
@@ -429,10 +451,16 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
     manifest = writer._collection_manifest(writer._collection_row(manifest))[0]
     from . import governance
 
-    subject = next(iter(governance.iter_subjects(conn, cid, writer._operation.logical_vault_id, row_key=item_key)), None)
+    subject = next(iter(governance.iter_subjects(
+        conn, cid, writer._operation.logical_vault_id, row_key=item_key, retained=True)), None)
     if not writer._operation.reads_whole_row(cid, subject):
         raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-    item = writer._item(cid, item_key)
+    # A retracted row keeps its history, so this lookup reads the table of every row.
+    item = conn.execute("SELECT row_id FROM item_rows WHERE collection_id=? AND item_key=?",
+                        (cid, item_key)).fetchone()
+    if item is None:
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    item = {"row_id": item[0]}
     assessment = audit(writer, writer._collection_row(manifest))
     relative = record_history.history_dir(cid, item_key)
     names = registry_history.kept_names(writer.root, relative, suffix=record_history._SUFFIX) or []
@@ -455,9 +483,10 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
                 continue
             legacy[event["transition_id"]] = event
             continue
-        effect = conn.execute("SELECT version_before,version_after,hash_before,hash_after FROM audit_effects "
+        effect = conn.execute("SELECT version_before,version_after,hash_before,hash_after,effect FROM audit_effects "
                               "WHERE txn_id=? AND row_id=?", (txn["txn_id"], item["row_id"])).fetchone()
-        if effect is None or effect[0] is None or effect[2] == effect[3]:
+        # A re-admission with unchanged content is still an event of its own, so only an update is skipped.
+        if effect is None or effect[0] is None or (effect[2] == effect[3] and effect[4] != "insert"):
             continue
         if any(not writer._operation.allows_history_path(path) for path in event_paths(txn)):
             withheld = True
@@ -697,7 +726,7 @@ class PageContext:
             key = original.get("item_key")
             if key is not None:
                 row = self.conn.execute("SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-                    "FROM items WHERE collection_id=? AND item_key=?", (self.manifest.collection_id, key)).fetchone()
+                    "FROM item_rows WHERE collection_id=? AND item_key=?", (self.manifest.collection_id, key)).fetchone()
                 if row is None:
                     self.unresolved = True
                     return None
@@ -726,7 +755,7 @@ class PageContext:
             effects = {}
             for row in self.conn.execute(
                 "SELECT e.txn_id,i.row_id,i.item_key,i.row_version,i.payload_hash,i.view_path,i.governance_json "
-                "FROM audit_effects e LEFT JOIN items i ON i.row_id=e.row_id "
+                "FROM audit_effects e LEFT JOIN item_rows i ON i.row_id=e.row_id "
                 "WHERE e.txn_id IN (SELECT value FROM json_each(?)) ORDER BY e.txn_id,e.ordinal",
                 (json.dumps([txn["txn_id"] for txn in batch]),),
             ):
