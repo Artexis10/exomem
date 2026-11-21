@@ -4,13 +4,16 @@
 Activation SHALL read a page's connections through one batched read of the graph owner's
 neighbour API in both directions, under the caller's view, and SHALL serve each connection with
 its relation key, its direction relative to the page, the target's canonical ref and title, and a
-`why`. The `why` SHALL state the relation and direction followed by the sentence or bullet of the
-authoring page that carries the link, or the target's opening clause when that line holds no
-prose beyond the link. It SHALL contain no wikilink: a link in that line or clause is shown by its
-display name only when it resolves to a page the caller sees, and otherwise the bare relation and
-direction stand. It SHALL pass the egress rules that govern unit text, and SHALL NOT exceed 140
-characters. Connections SHALL be ranked only by closed relation
-attributes, in this order: a relation carrying `replaces`, `corrects`, `opposes` or `settles`;
+`why`. The `why` SHALL state the relation and direction. It SHALL quote the prose that
+accompanies the link in the authoring sentence or bullet when egress permits that quote.
+Otherwise it SHALL use the target's opening clause when egress permits that quote.
+If neither supplies releasable prose, the relation and direction stand alone. Each quote
+requires full release of its page without a release strip and SHALL pass the egress rules
+that govern unit text. A quote SHALL show a wikilink by its display name only when the
+link resolves to a page the caller can see. If any link fails that check, the quote is
+unavailable. The `why` SHALL contain no wikilink and SHALL NOT exceed 140 characters.
+Connections SHALL be ranked only by closed relation attributes, in this order: a relation
+carrying `replaces`, `corrects`, `opposes` or `settles`;
 then one carrying `sources`; then any other relation that is neither `generic` nor `associative`;
 then generic and associative relations. An inbound connection whose relation carries `replaces`
 SHALL rank first. Within a tier, a target whose planning status class is `open` SHALL rank first,
@@ -22,6 +25,7 @@ missing reasons.
 #### Scenario: A replaced page names its replacement first
 - **WHEN** a served page is the target of a `supersedes` edge from a newer page and also links
   three other pages with `links_to`
+- **AND** the newer page links to the replaced page in prose the caller can quote
 - **THEN** its first connection is the inbound `supersedes` edge to the newer page
 - **AND** its `why` names the relation, the inbound direction and the newer page's sentence that
   carries the link
