@@ -36,6 +36,14 @@ it for a dense script like Japanese, which packs more meaning per char),
 EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
+Delivery. By default the per-turn capture reminder blocks the Stop, which forces one
+extra model turn. With `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` (or the config key
+`capture_nudge_delivery`; anything else means `stop`) the same reminder, after the same
+gates and cooldown, is left as a pending marker for the session instead, the Stop is not
+blocked, and the UserPromptSubmit hook (`exomem_retrieve_nudge.py`) adds the reminder to
+that session's next prompt, once, if it is under 6 hours old. The episode ask below
+blocks in both modes.
+
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
 `_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
 override), and only once work has LANDED since the last ask or record
@@ -286,6 +294,29 @@ def _prominence() -> str:
     except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
         from_config = None
     return from_config or "balanced"
+
+
+#: The reminder's delivery modes. A closed pair this hook implements, so the setting is not a vocabulary.
+_DELIVERY_NEXT_TURN = "next-turn"
+
+
+def _delivery() -> str:
+    """How the per-turn capture reminder is delivered: `stop` (block the Stop) or `next-turn`.
+
+    `EXOMEM_CAPTURE_NUDGE_DELIVERY` env -> `capture_nudge_delivery` in the config file -> `stop`.
+    The first layer that sets a value decides, and any value but `next-turn` means `stop`, so a
+    typo keeps today's behaviour instead of silently changing it.
+    """
+    value = os.environ.get("EXOMEM_CAPTURE_NUDGE_DELIVERY")
+    if not value or not value.strip():
+        try:
+            data = json.loads(_config_path().read_text("utf-8"))
+            value = data.get("capture_nudge_delivery") if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
+            value = None
+    if isinstance(value, str) and value.strip().lower() == _DELIVERY_NEXT_TURN:
+        return _DELIVERY_NEXT_TURN
+    return "stop"
 
 
 def _hook_client() -> str:
@@ -1183,10 +1214,37 @@ def _touch(stamp: Path) -> None:
         pass
 
 
-def _log(text: str) -> None:
+def _pending_reminder_path(session_id: str) -> Path:
+    """Where next-turn delivery leaves the session's reminder, beside its cooldown stamps.
+
+    The name is a digest of the full `client\0session_id`, as the continuation token's is: a
+    sanitised or truncated id maps distinct sessions onto one file, and one session would then
+    take another's reminder. `exomem_retrieve_nudge.py` derives the same name itself, so a
+    prompt with nothing waiting loads no sibling script; `tests/test_capture_nudge_next_turn.py`
+    runs both hooks against one state home and checks that colliding ids stay apart.
+    """
+    digest = hashlib.sha256(
+        f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+
+
+def _defer_reminder(session_id: str) -> bool:
+    """Leave the reminder for the session's next prompt; False if the marker cannot be written."""
+    try:
+        _state_core().write_nudge_file(
+            _pending_reminder_path(session_id), str(time.time()).encode("utf-8")
+        )
+    except Exception:  # noqa: BLE001 — the caller blocks the stop instead
+        return False
+    return True
+
+
+def _log(text: str, outcome: str = "fired") -> None:
+    """One metadata row per nudge: `fired` (the Stop blocked), `deferred` or `delivered` (next-turn mode)."""
     try:
         logp = _hook_home() / "exomem-capture-nudge.log"
-        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired\n"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge {outcome}\n"
         _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 — logging must never break a stop hook
         pass
@@ -1196,6 +1254,16 @@ def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
         return "Skip if Exomem is not connected or cannot capture; read_instructions first if no contract.\n" + reason
     return reason
+
+
+def deferred_reminder() -> str:
+    """The reminder text the prompt hook adds for a deferred reminder, logged as delivered.
+
+    Public because `exomem_retrieve_nudge.py` loads this module for it: the wording and
+    its log row live here, once.
+    """
+    _log("", "delivered")
+    return _capture_reason(REMINDER_SHORT)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1288,6 +1356,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     _touch(stamp)
+    # Next-turn delivery: the prompt hook adds the reminder to this session's next prompt. If the
+    # marker cannot be left, the reminder blocks the Stop as usual rather than vanish.
+    if _delivery() == _DELIVERY_NEXT_TURN and _defer_reminder(session_id):
+        _log(assistant_text, "deferred")
+        return 0
     _log(assistant_text)
     print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
     return 0

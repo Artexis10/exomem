@@ -595,6 +595,11 @@ Lower the `MIN_CHARS` values — those scripts pack more meaning per character, 
 the defaults (tuned for English) can under-fire. (These tunables were renamed from
 `KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
+By default the capture reminder blocks the stop, which costs one extra model turn. To
+deliver it on the session's next prompt instead, set `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn`
+or add `"capture_nudge_delivery": "next-turn"` to `~/.exomem/config.json`. The episode ask
+still blocks the stop, and any other value means `stop`.
+
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `search_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
