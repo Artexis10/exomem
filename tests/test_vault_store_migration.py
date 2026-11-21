@@ -146,6 +146,23 @@ def store_objects(root):
         return {name for (name,) in reader.execute("SELECT name FROM sqlite_master")}
 
 
+@pytest.mark.parametrize("arguments", [("--dry-run",), ("--apply", "--why", "drill")])
+def test_windows_migration_refuses_and_leaves_the_vault_in_file_mode(
+    vault, capsys, monkeypatch, arguments,
+):
+    """A Windows owner can trigger an unqualified migration or gets a generic preflight refusal."""
+    monkeypatch.setattr(migrate, "platform", "win32")
+    before = vault_bytes(vault)
+
+    assert store_mode(vault, "migrate", *arguments) == 1
+
+    refusal = capsys.readouterr().err
+    assert "VAULT_STORE_WINDOWS_UNSUPPORTED" in refusal
+    assert "not yet supported on Windows" in refusal
+    assert mode.state(vault) == mode.FILE_MODE
+    assert vault_bytes(vault) == before
+
+
 def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_vault_byte_changes(
     vault, capsys
 ):
@@ -318,7 +335,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
 
 
 def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_before_the_migration(
-    vault, tmp_path
+    vault, tmp_path, monkeypatch
 ):
     """A rollback that loses a page or leaves an index that answers differently than before store mode, or a vault
     that cannot enter store mode again afterwards."""
@@ -339,7 +356,10 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         "the graph answer must carry the link for this drill to mean anything"
     )
     assert migrate_apply(vault) == 0
-    assert rollback_apply(vault, tmp_path / "export") == 0
+    with monkeypatch.context() as windows:
+        windows.setattr(migrate, "platform", "win32")
+        assert answers() == before
+        assert rollback_apply(vault, tmp_path / "export") == 0
     assert not mode.store_mode_active(vault)
     assert (
         state_migration.VAULT_STORE_COMPATIBILITY_ID

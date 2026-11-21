@@ -1,4 +1,4 @@
-"""What a vault in store mode refuses while nothing can serve its pages (OpenSpec make-vault-store-canonical, task 1.6).
+"""Protect the pages of a vault in store mode (OpenSpec make-vault-store-canonical, task 1.6).
 
 A store-mode vault keeps its pages in the collection store, so each path that would serve stale
 Markdown, copy pages to another host, or swap the live store for a copy without pages must refuse.
@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .. import state_migration
-from ..collection_store import connection, schema
+from ..collection_store import capability, connection, schema
 from . import mode
 
 log = logging.getLogger(__name__)
@@ -88,14 +88,11 @@ def require_supported_lease(config) -> None:
 
 
 def require_servable(vault_root: Path) -> None:
-    """Refuse to start a service on a store-mode vault: no build serves its pages from the store yet.
+    """Admit a store-mode vault on a supported build with a single-host writer lease.
 
-    It prevents a service from answering reads out of Markdown that the store has replaced. A false
-    refusal needs a store-mode vault on a build that cannot serve it, and the owner's way out is the
-    rollback this message names. A file-mode vault starts, and the crash state that
-    ``marker_inconsistency`` names is logged on the way: it is reachable after a crash, so it warns
-    and never refuses. The one refusal of a file-mode vault is ``require_no_store_elsewhere``: its
-    replica says another state root holds the store.
+    The release check protects the store's pages from builds that cannot serve them.
+    The owner can switch builds or roll back if this build refuses. File mode warns
+    about an interrupted mode change and checks whether another root holds the store.
     """
     if not mode.store_mode_active(vault_root):
         inconsistency = marker_inconsistency(vault_root)
@@ -106,10 +103,11 @@ def require_servable(vault_root: Path) -> None:
     from .. import writer_lease
 
     require_supported_lease(writer_lease.LeaseConfig.from_env())
-    raise connection.CollectionStoreError(
-        NOT_SERVED,
-        f"this vault's pages live in the collection store and this build cannot serve them yet: run {ROLLBACK} "
-        "to return them to files, or start a build that serves store mode")
+    if not capability.vault_store_enabled():
+        raise connection.CollectionStoreError(
+            NOT_SERVED,
+            f"this vault's pages live in the collection store and this build cannot serve them: run {ROLLBACK} "
+            "to return them to files, or start a build that serves store mode")
 
 
 def require_no_store_elsewhere(vault_root: Path) -> None:

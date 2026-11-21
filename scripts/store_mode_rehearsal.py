@@ -45,8 +45,7 @@ unset ``EXOMEM_STATE_ROOT`` falls back to the live state root. So the run refuse
 
 The driver runs on Linux only: it finds and stops its processes through /proc.
 
-The two rollout guards of store mode (``VAULT_STORE_NOT_RELEASED``, ``VAULT_STORE_NOT_SERVED``)
-are lifted only in the children, by the same ``sitecustomize`` as the installed-wheel journey.
+Use an installed build that supports store mode. The driver runs its migration and serving checks as shipped.
 
 The JSON report may hold page paths of the vault it ran on; it goes only where ``--out`` says.
 The Markdown summary opens with counts only, safe to quote.
@@ -215,10 +214,6 @@ class Layout:
         return self.scratch / "work"
 
     @property
-    def rollout(self) -> Path:
-        return self.scratch / "rollout"
-
-    @property
     def coordinator_db(self) -> Path:
         return self.scratch / "coordinator" / "leases.sqlite"
 
@@ -285,8 +280,6 @@ def child_env(layout: Layout, settings: Settings, *, file_watcher: bool = True) 
             "EXOMEM_DISABLE_QUERY_LOG": "1",
             "EXOMEM_DISABLE_RANKING_CONFIG": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
-            # The store-mode release guards, lifted in the children only.
-            "PYTHONPATH": str(layout.rollout),
         }
     )
     if not file_watcher:
@@ -408,11 +401,9 @@ def preflight(
         layout.lease,
         layout.tmp,
         layout.work,
-        layout.rollout,
         layout.coordinator_db.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    (layout.rollout / "sitecustomize.py").write_text(loop._ROLLOUT_OVERRIDE, encoding="utf-8")
     seen = check_interpreter(python, child_env(layout, settings), layout, settings)
     return {"interpreter": seen, "never_paths": len(never)}
 

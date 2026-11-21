@@ -245,6 +245,7 @@
   - Progress (2026-11-16): the store arm passed 84 of its 85 steps. The failing step found a profile that omitted a page saved earlier in the session while it reported itself current: the activation index and the context catalogue listed pages from their projected files, which lag a commit. They now list a store-mode vault's pages from the store. A rerun on a wheel with that fix is pending.
 - [ ] 7.3 Run the outcome evaluation's planted-error, canonicity and graph on/off cases against the store-mode build before the switch, and again before stage 2 ships, comparing case by case with the file-mode build.
 - [ ] 7.4 Owner decision on switch timing; then migrate the owner's vault, then Cloud cells.
+  - Done (gate lift): the release enables explicit migration and serving. A generated vault migrated, served a write, and rolled back on an installed wheel.
   - Note: the CLI fence refuses the `PAGES` entries on store mode itself (`VAULT_STORE_CLI_REFUSED`), not through `availability.require_servable`, so opening the rollout gate does not open it. An entry opens only when its own code serves a store-mode vault and its declaration in `cli_fence.ACCESS` changes.
 
 ## 8. Retire file-mode sync machinery

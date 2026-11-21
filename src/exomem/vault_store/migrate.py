@@ -18,6 +18,7 @@ from contextlib import closing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from sys import platform
 
 from .. import (
     __version__,
@@ -254,11 +255,17 @@ def verify_staged(
 def preflight(vault_root: Path) -> dict:
     """Refuse a vault that cannot enter store mode; otherwise count what a migration would take. It takes no lease.
 
-    Each refusal costs the owner one command to fix: the release gate, the lease topology, the collection store,
-    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong
-    footing would fail on late.
+    Check platform support, the release capability, the lease, the store, the current
+    mode, the vault marker and the sidecars before staging any changes.
     """
     admission.require_owner(vault_root, "store-mode migrate")
+    # Python defines win32 for native Windows, where migration awaits NTFS acceptance.
+    if platform == "win32":
+        raise OpError(
+            "VAULT_STORE_WINDOWS_UNSUPPORTED",
+            "store-mode migration is not yet supported on Windows. A file-mode vault stays in file mode.",
+            "Run `exomem store-mode status` to check the vault's mode.",
+        )
     if not capability.vault_store_enabled():
         raise OpError(
             "VAULT_STORE_NOT_RELEASED",

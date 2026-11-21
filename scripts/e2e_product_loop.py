@@ -2236,19 +2236,10 @@ def _prepare_store_mode(
     shipped = {name: value for name, value in env.items() if name != "PYTHONPATH"}
     vault_args = ("--vault", str(vault))
     slow = max(120.0, timeout * 6)
-    # The fences answer with these product error codes, a closed set the CLI documents.
     with _step("as shipped: store-mode status"):
         done = _owner_cli(executable, shipped, work, "store-mode", "status", *vault_args,
                           timeout=timeout)
         _note(f"{_owner_json(done, 'store-mode status')}")
-    with _step("as shipped: store-mode migrate --dry-run meets the release fence or passes"):
-        done = _owner_cli(executable, shipped, work, "store-mode", "migrate", "--dry-run",
-                          *vault_args, timeout=timeout)
-        if done.returncode != 0 and "VAULT_STORE_NOT_RELEASED" not in done.stderr:
-            raise RuntimeError(
-                f"preflight refused for another reason ({done.returncode}): {done.stderr[-2000:]}"
-            )
-        _note(f"exit {done.returncode}: {(done.stderr or done.stdout).strip()[-600:]}")
     with _step("owner enrols the collection store: exomem collections create"):
         manifest = work / "store-enrolment.md"
         manifest.write_text(_STORE_ENROLMENT_MANIFEST, encoding="utf-8")
@@ -2268,6 +2259,14 @@ def _prepare_store_mode(
         result = _owner_json(done, "maintain --reconcile")
         if not result.get("success"):
             raise RuntimeError(f"maintain --reconcile did not succeed: {result!r}")
+    with _step("as shipped: store-mode migrate --dry-run meets the release fence or passes"):
+        done = _owner_cli(executable, shipped, work, "store-mode", "migrate", "--dry-run",
+                          *vault_args, timeout=timeout)
+        if done.returncode != 0 and "VAULT_STORE_NOT_RELEASED" not in done.stderr:
+            raise RuntimeError(
+                f"preflight refused for another reason ({done.returncode}): {done.stderr[-2000:]}"
+            )
+        _note(f"exit {done.returncode}: {(done.stderr or done.stdout).strip()[-600:]}")
     with _step("store-mode migrate --dry-run passes the preflight"):
         done = _owner_cli(executable, env, work, "store-mode", "migrate", "--dry-run",
                           *vault_args, timeout=slow)

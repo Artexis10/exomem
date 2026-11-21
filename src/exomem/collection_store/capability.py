@@ -21,12 +21,10 @@ held correction, and publishing pending views without a summary release. The P2.
 added it to ``RELEASED``; the per-vault rollback narrows it too.
 
 ``vault-store-v1`` fences store mode: a vault whose pages, lexical rows and graph rows live in
-the collection store (OpenSpec make-vault-store-canonical). It stays outside ``RELEASED``, and
-``vault_store_enabled()`` is the one place that answers it. Unlike ``collections-migrate-v1`` it
-is not in ``offline_migrations()``: the managed migrator never switches a vault; only the
-owner's explicit ``store-mode`` command will. The same id is the state compatibility id
-that a store-mode vault records; every build supports that id, so a build that keeps the
-capability off can still roll such a vault back.
+the collection store (OpenSpec make-vault-store-canonical). The capability allows a build
+to migrate and serve store-mode vaults. Only the owner's explicit ``store-mode migrate``
+command switches a vault. Builds that support the matching state compatibility id can
+roll a vault back with the capability off.
 """
 
 from __future__ import annotations
@@ -42,9 +40,10 @@ MIGRATION_UNAVAILABLE = "COLLECTION_STORE_MIGRATION_UNAVAILABLE"
 COLLECTION_VIEWS_V1 = "collection-views-v1"
 VAULT_STORE_V1 = state_migration.VAULT_STORE_COMPATIBILITY_ID
 
-#: The release capabilities this release enables: S1.8 added RECORDS_SUMMARY_V1, P2.8
-#: COLLECTION_VIEWS_V1 and the P3.6 GA gate COLLECTIONS_MIGRATE_V1. VAULT_STORE_V1 stays out.
-RELEASED: frozenset[str] = frozenset({RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1, COLLECTIONS_MIGRATE_V1})
+#: The store capabilities this build enables.
+RELEASED: frozenset[str] = frozenset(
+    {RECORDS_SUMMARY_V1, COLLECTION_VIEWS_V1, COLLECTIONS_MIGRATE_V1, VAULT_STORE_V1}
+)
 # S1.8 defines one release capability and a one-way rollback, not a user vocabulary.
 DISABLED_KEY = "records_summary_disabled"
 DISABLED = "COLLECTION_STORE_DISABLED"
@@ -140,12 +139,7 @@ def require_records_summary_route(vault_root, writer, action, values, *, prove=N
 
 
 def vault_store_enabled() -> bool:
-    """Whether this release lets a vault enter store mode; the one place that answers it.
-
-    It prevents an unreleased store mode from taking a vault's pages out of Markdown. Firing
-    wrongly costs nothing: it is a release constant, the same on every host, and file mode
-    keeps working. It gates entering store mode only; a vault already in it can still roll back.
-    """
+    """Whether this build supports activating and serving store mode. Rollback stays available."""
     return VAULT_STORE_V1 in RELEASED
 
 
