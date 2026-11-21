@@ -2098,6 +2098,15 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
+def unrestricted_source_access(
+    vault_root: Path, *, purpose: str | None, principal: RequestPrincipal | None = None,
+) -> bool:
+    """Whether the caller may use the raw source fast path."""
+    policy = policy_module.load(Path(vault_root))
+    who = (principal if principal is not None else effective_principal()).with_purpose(purpose)
+    return policy_empty_without_writer(vault_root, policy) and unrestricted_content_access(vault_root, who)
+
+
 def _independent_content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                                  snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
@@ -4128,6 +4137,8 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    from .. import working_set
+
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
@@ -4184,6 +4195,17 @@ def guard_working_set(
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
+
+    task_connections = any(
+        item.get("links") or item.get("links_omitted")
+        for item in (guarded.get("task_context") or {}).get("candidates", ())
+    )
+    if task_connections or working_set.packet_has_graph_quotes(guarded):
+        # Task links and graph quotes require unrestricted source access. If it narrowed
+        # during compilation, refuse the stale packet rather than releasing old material.
+        with state_paths.outside_resolution_scope(), policy_module.outside_request_policy_snapshot():
+            if not unrestricted_source_access(vault_root, purpose=purpose, principal=who):
+                return None
 
     ctx = _packet_release(
         vault_root,
@@ -6394,9 +6416,11 @@ def _postfilter(
                 purpose=(request_kwargs or {}).get("purpose"),
             )
         if "positions" in cleaned:
-            # Every other field is in place, so the block can end the response: real-model replays used the
-            # positions when they were read last and mostly passed over them mid-packet.
-            cleaned["positions"] = cleaned.pop("positions")
+            # The block leads the response. Real-model replays of two incident conversations, on a leading yes/no
+            # question that presupposes a default cause: mid-packet, the block was passed over, and last it opened
+            # the first answer in 1 of 8 replays. First, every first answer opened with the person's position
+            # (4 of 4), with no "Yes" before it. Do not move it back to the end or the middle.
+            cleaned = {"positions": cleaned.pop("positions"), **cleaned}
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):
@@ -6867,7 +6891,6 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "append": "mutation",
         "bulk_upsert": "mutation",
         "update": "mutation",
-        "retract": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",

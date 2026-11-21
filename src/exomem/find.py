@@ -9223,6 +9223,11 @@ def _writer_resolver_snapshot(
                 if cached and cached[0] == current_freshness:
                     measured["forked"] = 1
                     return cached[1].fork()
+            if find_corpus.store_serves(root):
+                resident = semantic_contract.current_store_writer_resolver(root)
+                if resident is not None:
+                    measured["store_resident"] = 1
+                    return resident
             declined: dict[str, int] = {}
             entries = semantic_contract.current_writer_resolver_entries(
                 root,
@@ -9486,19 +9491,30 @@ def on_store_commit(
     after: tuple[int, int, str],
     entries: Iterable[tuple[str, str | None]],
     deleted: Iterable[str],
+    paths: Iterable[str] = (),
 ) -> None:
-    """Advance the resident recall resolver across one store commit, else leave it for a rebuild.
+    """Advance the resident recall resolver and corpus context across one store commit, else leave
+    each for its next reader.
 
-    ``before`` and ``after`` are the store's vault triples around the commit, and ``entries`` and
-    ``deleted`` the resolver delta that its derivation applied. A store reader builds the resolver
-    from the store's page rows that the live access policy indexes, so a resident resolver at
-    ``before`` with this policy, patched by the indexed part of the delta, holds the maps of a build
-    at ``after``. Any other resident resolver stays as it is, and the next reader rebuilds it.
+    ``before`` and ``after`` are the store's vault triples around the commit, ``entries`` and
+    ``deleted`` the resolver delta that its derivation applied, and ``paths`` every path that the
+    commit names. A store reader builds the resolver from the store's page rows that the live access
+    policy indexes, so a resident resolver at ``before`` with this policy, patched by the indexed
+    part of the delta, holds the maps of a build at ``after``. The corpus context moves the same way,
+    by the pages that the commit names (``semantic_contract.advance_corpus_for_store_commit``). Any
+    other resident state stays as it is, and its next reader rebuilds or reconciles it.
     """
+    root = Path(vault_root)
     try:
-        _advance_recall_resolver(Path(vault_root), before, after, list(entries), list(deleted))
+        _advance_recall_resolver(root, before, after, list(entries), list(deleted))
     except Exception:  # noqa: BLE001 - the commit has landed; a resolver left behind is rebuilt by its next reader.
-        return
+        log.debug("recall resolver left behind by a store commit", exc_info=True)
+    try:
+        from . import semantic_contract
+
+        semantic_contract.advance_corpus_for_store_commit(root, before[1], after[1], list(paths))
+    except Exception:  # noqa: BLE001 - the commit has landed; a context left behind is reconciled by its next reader.
+        log.debug("corpus context left behind by a store commit", exc_info=True)
 
 
 def _advance_recall_resolver(
@@ -9606,6 +9622,10 @@ def unload_ram_caches(
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
+        from .vault_store import resident_catalogue
+
+        resident_catalogue.forget()
     if not keep_recall_resolver:
         from . import epistemic_graph, graph_read_publication
 

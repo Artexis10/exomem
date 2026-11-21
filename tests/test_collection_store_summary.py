@@ -143,7 +143,7 @@ def _seed(store, cid, count):
     seeded = [(f"00000000-0000-4000-8000-{number:012x}", {"title": f"Seed {number}"}) for number in range(count)]
     with store.handle.transaction() as tx:
         tx.executemany(
-            "INSERT INTO item_rows(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
+            "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json,encoding) VALUES (?,?,?,1,1,?,?,?,?,?,?,?)",
             ((cid, key, collections.manifest_natural_key(manifest, values),
               None if typed else json.dumps(values), tokens.payload_hash(1, key, values, ""),

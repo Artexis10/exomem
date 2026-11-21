@@ -605,8 +605,7 @@ def audit(
     projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY} | set(DUPLICATE_CATEGORIES)
     sense_scope = None
     release = _AUDIT_RELEASE_DEFAULT
-    # An explicit entity-recurrence sweep reads only the pages that changed since the
-    # last one. Every other composition keeps the full parse.
+    # An explicit entity-recurrence sweep reads only the pages that changed since the last one.
     from_store = selected == {"entity_recurrence"}
     corpus_complete = True
     pages = []
@@ -614,7 +613,9 @@ def audit(
         request_budget.checkpoint()
         if "corpus_contradictions" in selected:
             sense_scope, release = _capture_audit_scope(vault_root)
-        if not from_store and not selected <= projection_checks:
+        if selected == {"source_pointer_drift"}:
+            pages = _parse_all(kb, vault_root, append_only=True)
+        elif not from_store and not selected <= projection_checks:
             pages = _parse_all(kb, vault_root, keep=release)
         request_budget.checkpoint()
     except request_budget.ReadBudgetExhausted:
@@ -2496,7 +2497,7 @@ _AUDIT_RELEASE_DEFAULT = object()
 
 @call_spans.timed("audit.parse_corpus")
 def _parse_all(
-    kb: Path, vault_root: Path, *, keep: Any = _AUDIT_RELEASE_DEFAULT
+    kb: Path, vault_root: Path, *, keep: Any = _AUDIT_RELEASE_DEFAULT, append_only: bool = False,
 ) -> list[find_module.ParsedPage]:
     """Parse the admitted Markdown pages in the knowledge base."""
     from .governance import egress
@@ -2512,7 +2513,8 @@ def _parse_all(
     for page in find_corpus.corpus_pages(
         vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
         lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
-        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content)
+        keep=lambda rel, content: (not append_only or in_append_only_tree(rel) is not None)
+        and egress.content_permits(vault_root, rel, who, snapshot=content)
         and (admitted is None or admitted(rel)),
     ):
         # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
