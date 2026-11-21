@@ -64,6 +64,8 @@ A final short comparison must bind its negative evidence before suspension.
 Only stable incoherence observed with the boundary free can take that branch.
 The drain uses a strict result for its own epoch admission without changing the shared full-rebuild sampler's compatibility behavior.
 Its current attempt supersedes stale scheduling observations only when durable receipts cover the scoped debt and no full marker stands.
+The contention check copies at most one drain batch of scoped observations and checks each by receipt key.
+Larger scoped sets with queued repair defer immediate barrier escalation and remain subject to the ordinary stall limit.
 Cold, unscoped, uncovered, incompatible and genuinely stalled work retains its recovery path.
 
 ### D3: The drain retires only committed, exact repair
@@ -126,7 +128,9 @@ Untrusted generation guards, offline movement and unreadable external observatio
 Grace and queue-age probes use indexed bounded lookups.
 Exact path retirement preserves a conservative root observation interval while debt remains, without rescanning every pending mark.
 After commit, the same canonical hold retires only proved `(path, epoch)` observations.
-Durable receipts keep their existing revision compare-and-swap.
+The durable queue clock assigns a fresh receipt revision on each enqueue, including after retirement.
+The migration reserves existing receipt and failure revisions without changing them.
+Settlement matches the path, revision and nullable graph generation before clearing receipts and their failure state together.
 A failed transaction clears neither observations nor receipts.
 A crash before retirement leaves replayable work and the required fence.
 The scheduler attempts bounded completion for covered debt before whole-vault barrier recovery.

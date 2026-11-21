@@ -113,8 +113,8 @@ _PER_PATH_LOCK = threading.Lock()
 #: commits won the race for it: a commit landed after the drain sampled its
 #: checkpoint, or the mutation boundary stayed busy behind one. Not a fault of
 #: the queue, so it neither ages out into a whole-vault pass nor counts as a
-#: stall. Held beside `_per_path_blocked` and with the same key and lock.
-_per_path_raced: set[Path] = set()
+#: stall. None records contention with an observation set too large to prove.
+_per_path_raced: dict[Path, bool | None] = {}
 
 #: The external change the availability arm last saw standing, per vault, as
 #: (latest pending epoch, monotonic time first seen). Scheduling state only.
@@ -169,7 +169,7 @@ def note_graph_progress(vault_root: Path) -> None:
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
         _per_path_blocked.discard(key)
-        _per_path_raced.discard(key)
+        _per_path_raced.pop(key, None)
     _PROGRESS.set()
     _DEBT.set()
 
@@ -184,35 +184,38 @@ def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
             _per_path_blocked.add(key)
 
 
-def note_covered_contention(vault_root: Path) -> bool:
-    """A busy retry supersedes an older block only for durable scoped work."""
+def note_covered_contention(vault_root: Path) -> bool | None:
+    """Prove a busy pass has durable scoped work, or defer an oversized scope."""
     from . import deferred_index, freshness
 
+    stamp = freshness.external_pending_epoch(vault_root)
     if freshness.external_pending_unscoped(vault_root):
         return False
-    if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+    observed = freshness.bounded_external_pending_paths(vault_root, limit=DRAIN_LIMIT)
+    paths: list[str] = []
+    for path in observed or ():
+        rel = freshness.registry_rel(vault_root, path)
+        if rel is None:
+            return False
+        paths.append(rel)
+    if not deferred_index.graph_receipts_cover(vault_root, paths):
         return False
-    observed = freshness.external_pending_paths(vault_root)
-    paths = {freshness.registry_rel(vault_root, path) for path in observed}
-    if None in paths:
+    if freshness.external_pending_unscoped(vault_root) or freshness.external_pending_epoch(vault_root) != stamp:
         return False
-    receipts = deferred_index.snapshot_graph(
-        vault_root, paths=set(paths) if paths else None, limit=None if paths else 1,
-    )
-    if not receipts or not paths <= {receipt.rel_path for receipt in receipts}:
-        return False
+    if observed is None:
+        return None
     note_per_path_repair(vault_root, admissible=True)
     return True
 
 
-def note_per_path_race(vault_root: Path, *, raced: bool) -> None:
-    """Record whether this vault's latest per-path drain only lost races to commits."""
+def note_per_path_race(vault_root: Path, *, raced: bool | None) -> None:
+    """Record proved or inconclusive contention on the latest per-path drain."""
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        if raced:
-            _per_path_raced.add(key)
+        if raced is False:
+            _per_path_raced.pop(key, None)
         else:
-            _per_path_raced.discard(key)
+            _per_path_raced[key] = raced
 
 
 def per_path_repair_raced(vault_root: Path) -> bool:
@@ -224,7 +227,14 @@ def per_path_repair_raced(vault_root: Path) -> bool:
     """
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        return key in _per_path_raced
+        return _per_path_raced.get(key, False) is True
+
+
+def per_path_repair_race_uncertain(vault_root: Path) -> bool:
+    """Whether contention exceeded the latest pass's proof budget."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        return _per_path_raced.get(key, False) is None
 
 
 def per_path_repair_blocked(vault_root: Path) -> bool:
@@ -363,11 +373,9 @@ def _queue_pending(vault_root: Path) -> bool:
     from . import deferred_index
 
     try:
-        if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
-            return True
-        return int(deferred_index.graph_status(vault_root).get("count") or 0) > 0
+        return deferred_index.graph_queue_pending(vault_root)
     except Exception:  # noqa: BLE001 - an unreadable queue must not kill the worker
-        log.debug("graph drain: queue depth unreadable", exc_info=True)
+        log.debug("graph drain: queue unreadable", exc_info=True)
         return False
 
 
@@ -616,18 +624,20 @@ def _work_once(vault_root: Path) -> int:
     for it (`per_path_repair_raced`): a whole-vault pass would lose to the same
     commits.
     """
-    from . import epistemic_graph
+    from . import epistemic_graph, freshness
 
     processed = 0
     attempted = False
-    if _queue_pending(vault_root):
+    queued_before = _queue_pending(vault_root)
+    if queued_before:
         with epistemic_graph.observe_full_marker_dispatches() as dispatches:
             processed = _drain_once(vault_root)
         attempted = any(result.whole_vault_attempted for result in dispatches)
     if attempted:
         return processed
+    queued_after = _queue_pending(vault_root)
     if _barrier_pending(vault_root):
-        if not _queue_pending(vault_root) and _cover_unacknowledged_checkpoint(vault_root):
+        if not queued_after and _cover_unacknowledged_checkpoint(vault_root):
             processed += 1
         elif _recover_once(vault_root):
             processed += 1
@@ -641,10 +651,16 @@ def _work_once(vault_root: Path) -> int:
             epistemic_graph.recovery_decline_reason(vault_root)
             == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
             and not epistemic_graph.publication_refusal_active(vault_root)
+            # A busy pass with more scoped observations than it can check leaves
+            # the queue eligible for ordinary stall recovery.
+            and not (
+                queued_before and queued_after and per_path_repair_race_uncertain(vault_root)
+                and not freshness.external_pending_unscoped(vault_root)
+            )
             and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
         ):
             processed += 1
-    elif not _queue_pending(vault_root) and _availability_pending(vault_root):
+    elif not queued_after and _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
         # decline. Only with an empty queue: receipts still queued mean the

@@ -1230,13 +1230,12 @@ def _drain_graph_work(
 
 def _drain_graph_receipts(
     vault_root: Path, index, receipts: list
-) -> tuple[int, bool]:
-    """Repair these receipts per path; return what cleared and whether commits won the pass.
+) -> tuple[int, bool | None]:
+    """Return the number cleared and whether contention blocked covered repair.
 
-    The second value is True only when the pass cleared nothing and every
-    failure was a live commit, or a busy mutation boundary, beating it to the
-    lock. That says nothing about the receipts, and a whole-vault pass would
-    lose to the same commits at far greater cost. Any other failure makes it False.
+    True requires a wholly busy pass and durable coverage of its observations.
+    None records the same contention when checking coverage would exceed the
+    drain's cap. Other outcomes return False.
     """
     from . import epistemic_graph, graph_drain
 
@@ -1267,7 +1266,9 @@ def _drain_graph_receipts(
             # any other refusal that persists releases it through the oldest
             # receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
-            return 0, refusal == _BUSY_BOUNDARY_CODE and graph_drain.note_covered_contention(vault_root)
+            if refusal == _BUSY_BOUNDARY_CODE:
+                return 0, graph_drain.note_covered_contention(vault_root)
+            return 0, False
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
     if report.get("startup_pending"):
@@ -1283,10 +1284,6 @@ def _drain_graph_receipts(
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
         graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0, False
-    if report:
-        # The pass ran per path. A failed batch, isolated below, says nothing
-        # about readiness either way.
-        graph_drain.note_per_path_repair(vault_root, admissible=True)
     if report.get("commit_race"):
         # A live commit beat the batch to the lock: no page's fault, so there is
         # nothing to isolate. A replay per receipt would hold the boundary once
@@ -1295,6 +1292,10 @@ def _drain_graph_receipts(
         # receipts stay queued and the next tick runs one batch again.
         log.info("deferred graph batch lost to a commit; work remains queued")
         return 0, graph_drain.note_covered_contention(vault_root)
+    if report:
+        # The pass ran per path. A failed batch, isolated below, says nothing
+        # about readiness either way.
+        graph_drain.note_per_path_repair(vault_root, admissible=True)
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]
@@ -1367,9 +1368,10 @@ def _drain_graph_receipts(
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
             continue
-        attempts, first_failed_at = deferred_index.note_graph_failure(
-            vault_root, receipt.rel_path, revision=receipt.revision, cause=cause,
-        )
+        failure = deferred_index.note_graph_failure(vault_root, receipt, cause=cause)
+        if failure is None:
+            continue
+        attempts, first_failed_at = failure
         if attempts < epistemic_graph.GRAPH_POISON_ATTEMPTS or (
             cause == "unreadable"
             and time.time() - first_failed_at < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
@@ -1395,7 +1397,9 @@ def _drain_graph_receipts(
         # whatever withdrew while it ran.
         index.drain_paths([])
         _republish_graph_availability(index)
-    return processed, lost_to_commits and not failed_on_its_own and processed == 0
+    if lost_to_commits and not failed_on_its_own and processed == 0:
+        return 0, graph_drain.note_covered_contention(vault_root)
+    return processed, False
 
 
 def _graph_stat_token(path: Path) -> str:

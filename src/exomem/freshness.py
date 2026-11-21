@@ -1035,6 +1035,16 @@ def external_pending_paths(vault_root: Path) -> frozenset[str]:
         return frozenset(_external_pending_paths.get(_canon(vault_root), {}))
 
 
+def bounded_external_pending_paths(vault_root: Path, *, limit: int) -> tuple[str, ...] | None:
+    """Copy bounded scoped marks. None means the scoped set exceeds the limit."""
+    root = _canon(vault_root)
+    with _lock:
+        if root in _external_pending_unscoped:
+            return ()  # No scoped proof is available while the unscoped mark stands.
+        marked = _external_pending_paths.get(root, {})
+        return None if len(marked) > limit else tuple(marked)
+
+
 def external_pending_path_epochs(
     vault_root: Path, paths: Iterable[Path | str]
 ) -> dict[str, int]:

@@ -285,7 +285,7 @@ if silent_edit:
     assert "first unrelated write" in unrelated.read_text(encoding="utf-8")
     assert graph_sync.acknowledged_generation(root) == before_first_write
     assert not EpistemicGraphIndex(root).available()
-    if fallback:
+    if fallback or arm == "silent":
         os.environ.pop("EXOMEM_DISABLE_FILE_WATCHER", None)
         activation._start_file_watcher(root)
         assert activation.file_watcher.wait_until_seeded(30)
@@ -340,18 +340,27 @@ if advanced:
 from exomem import deferred_index  # noqa: E402
 from test_graph_handoff_convergence import _drain_to_empty  # noqa: E402
 
+if arm == "noseed":
+    # Keep all ten writes ahead of watcher seeding, then complete startup on
+    # the observer that protected them during promotion.
+    activation._start_file_watcher(root)
+    assert activation.file_watcher.wait_until_seeded(30)
+    activation._finish_file_watcher_startup(root)
+
 # Governed writes may leave per-path repair to the worker's drain daemon.
 if arm == "seed":
     deadline = time.monotonic() + 20
     while deferred_index.list_graph_paths(root) or not EpistemicGraphIndex(root).available():
         assert time.monotonic() < deadline, "the runtime graph drain did not converge"
         time.sleep(0.05)
-    activation._stop_background_workers()
 else:
     _drain_to_empty(root)
 graph_sync.drain_active_rebuilds(timeout=60.0)
 queued_after_drain = len(deferred_index.list_graph_paths(root))
-if arm != "seed" and activation.file_watcher is not None:
+available = EpistemicGraphIndex(root).available()
+if arm == "seed":
+    activation._stop_background_workers()
+elif activation.file_watcher is not None:
     activation.file_watcher.stop()
 print(
     json.dumps(
@@ -364,7 +373,7 @@ print(
             "acknowledgements": acknowledgements,
             "refusals": refusals,
             "queued_after_drain": queued_after_drain,
-            "available": EpistemicGraphIndex(root).available(),
+            "available": available,
         }}
     )
 )

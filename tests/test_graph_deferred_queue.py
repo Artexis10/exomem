@@ -2721,7 +2721,7 @@ def test_cold_resume_requires_byte_binding_for_an_unreadable_held_page(
 
 def test_a_legacy_requeue_cannot_inherit_the_previous_receipts_read_grace(vault: Path) -> None:
     (original,) = deferred_index.add_graph_receipts(vault, [PAGE_A], generation=1)
-    deferred_index.note_graph_failure(vault, PAGE_A, revision=original.revision, cause="unreadable")
+    deferred_index.note_graph_failure(vault, original, cause="unreadable")
     assert deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
 
     # An older client bumps the queue revision without changing the failure row.
@@ -2731,7 +2731,7 @@ def test_a_legacy_requeue_cannot_inherit_the_previous_receipts_read_grace(vault:
     assert deferred_index.clear_graph_receipts(vault, [original]) == 0
 
     (requeued,) = deferred_index.snapshot_graph(vault)
-    deferred_index.note_graph_failure(vault, PAGE_A, revision=requeued.revision, cause="unreadable")
+    deferred_index.note_graph_failure(vault, requeued, cause="unreadable")
     assert deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
     assert not deferred_index.graph_receipts_in_read_grace(vault, seconds=0)
     assert deferred_index.quarantine_graph_receipt(vault, requeued, signature=None)
@@ -2932,3 +2932,89 @@ def test_a_full_rebuild_that_derives_a_quarantined_page_clears_its_record(
     check = doctor._check_graph_sync_state(vault)
     assert not (check.details or {}).get("quarantined_paths"), check.message
     assert "could not be read" not in check.message
+
+
+def test_observer_loss_at_governed_publication_queues_the_write(vault, monkeypatch):
+    import time
+
+    from test_graph_post_handoff_writes import _governed_write
+
+    from exomem import epistemic_graph, file_watcher
+
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    watcher = file_watcher.FileWatcher(vault)
+    deadline = time.monotonic() + 6
+    try:
+        assert watcher.arm_promotion_observation(deadline=deadline)
+        observe = watcher.promotion_observation_stamp
+        initial = graph.promotion_proof_stamp(observe)
+        assert initial is not None
+        proof = graph.adopt_published_snapshot(apply_residue=False, prime_resolver=False, deadline=deadline)
+        carried, reason = graph.seal_promoted_snapshot(initial, proof, observe=observe, deadline=deadline)
+        assert carried is not None, reason
+        carried.bind(vault)
+        watcher.carry_startup_graph(carried)
+        original = type(graph)._publish_available_marker_in_transaction
+        stopped = []
+
+        def stop_before_marker(self, conn, *args, **kwargs):
+            if not stopped:
+                observer = watcher._observer
+                assert observer is not None
+                observer.stop()
+                observer.join(2)
+                assert not observer.is_alive()
+                (vault / PAGE_A).write_text(_page("A", "Edited during governed publication."), encoding="utf-8")
+                stopped.append(True)
+            return original(self, conn, *args, **kwargs)
+
+        monkeypatch.setattr(type(graph), "_publish_available_marker_in_transaction", stop_before_marker)
+        _governed_write(vault, vault / PAGE_B, "Unrelated governed write.")
+        assert stopped, "the incremental publication seam was not reached"
+        assert "Unrelated governed write." in (vault / PAGE_B).read_text(encoding="utf-8")
+        committed = graph_sync.read_checkpoint(vault)
+        assert committed is not None
+        assert _acknowledged(vault) < committed.generation, (
+            "the writer acknowledged under a stopped observation owner",
+            _acknowledged(vault), committed.generation,
+        )
+        assert PAGE_B in deferred_index.list_graph_paths(vault)
+        assert deferred_index.graph_full_rebuild_pending(vault) is None
+        assert not graph.available()
+    finally:
+        watcher.stop()
+
+
+def test_edit_after_availability_marker_sql_prevents_stale_ack(vault, monkeypatch):
+    _seed_live_freshness(vault)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    generation = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "Committed revision.")},
+    )
+    before = _acknowledged(vault)
+    path = vault / PAGE_A
+    real_publish = type(graph)._publish_available_marker_in_transaction
+    edited = []
+
+    def publish_then_edit(self, conn, *args, **kwargs):
+        real_publish(self, conn, *args, **kwargs)
+        if kwargs.get("graph_checkpoint") is not None and not edited:
+            path.write_text(_page("A", "Independent outside edit."), encoding="utf-8")
+            edited.append(True)
+
+    monkeypatch.setattr(type(graph), "_publish_available_marker_in_transaction", publish_then_edit)
+    processed = index_sync.drain_graph_work(vault)
+    assert edited
+    with sqlite3.connect(graph.path) as conn:
+        stored = conn.execute(
+            "SELECT source_hash FROM graph_nodes WHERE kind='file' AND path=?", (PAGE_A,)
+        ).fetchone()[0]
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    ack = _acknowledged(vault)
+    assert ack == before or stored == actual, (
+        "stale acknowledgement", before, ack, generation, stored, actual, processed,
+        deferred_index.list_graph_paths(vault),
+    )
+
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]

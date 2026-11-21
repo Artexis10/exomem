@@ -2584,7 +2584,7 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
     )
 
 
-@pytest.mark.parametrize("damage", ["missing_metadata", "not_a_database"])
+@pytest.mark.parametrize("damage", ["missing_metadata", "not_a_database", "corrupt_metadata", "malformed_checkpoint"])
 def test_startup_finishes_with_a_stably_damaged_graph(
     vault: Path, damage: str,
 ) -> None:
@@ -2614,9 +2614,29 @@ def test_startup_finishes_with_a_stably_damaged_graph(
         if damage == "missing_metadata":
             conn.execute("DROP TABLE graph_meta")
             conn.commit()
+        elif damage == "malformed_checkpoint":
+            assert conn.execute(
+                "UPDATE graph_meta SET value = 'invalid-json' WHERE key = 'recall_projection_checkpoint'"
+            ).rowcount == 1
+            conn.commit()
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if damage == "corrupt_metadata":
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            metadata_page = conn.execute(
+                "SELECT rootpage FROM sqlite_schema WHERE name = 'graph_meta'"
+            ).fetchone()[0]
     if damage == "not_a_database":
         graph.path.write_bytes(b"unreadable graph sidecar\n")
+    elif damage == "corrupt_metadata":
+        assert metadata_page > 1
+        with graph.path.open("r+b") as sidecar:
+            sidecar.seek((metadata_page - 1) * page_size)
+            sidecar.write(b"\xff")  # Corrupt the metadata B-tree, keeping the schema readable.
+        with closing(sqlite3.connect(graph.path)) as conn:
+            assert conn.execute("PRAGMA table_info(graph_meta)").fetchall()
+            with pytest.raises(sqlite3.DatabaseError) as corrupt:
+                conn.execute("SELECT value FROM graph_meta WHERE key = 'instance'").fetchone()
+            assert corrupt.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_CORRUPT
     damaged_family = {
         path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")
     }
@@ -2635,11 +2655,12 @@ def test_startup_finishes_with_a_stably_damaged_graph(
         startup.join(12)
         assert not startup.is_alive(), "settled damage kept startup waiting"
         assert all(path.read_bytes() == content for path, content in canonical.items())
-        assert [result.code for result in dispatches] == [
-            "graph_rebuild_completed" if damage == "missing_metadata"
-            else "graph_sidecar_requires_replacement"
-        ]
-        if damage == "missing_metadata":
+        if damage != "malformed_checkpoint":
+            assert [result.code for result in dispatches] == [
+                "graph_rebuild_completed" if damage == "missing_metadata"
+                else "graph_sidecar_requires_replacement"
+            ]
+        if damage in {"missing_metadata", "malformed_checkpoint"}:
             assert not epistemic_graph.startup_source_proof_pending(vault)
             assert graph.available()
             assert any(row.get("title") == "Canonical title" for row in graph.nodes(path=rel))
@@ -2651,7 +2672,12 @@ def test_startup_finishes_with_a_stably_damaged_graph(
             assert not dispatches[0].whole_vault_attempted
             assert deferred_index.graph_full_rebuild_pending(vault) is not None
             after = {path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")}
-            assert after == damaged_family
+            if damage == "corrupt_metadata":
+                # Read-only SQLite may create WAL bookkeeping; it must preserve the damaged bytes.
+                assert all(after[path] == raw for path, raw in damaged_family.items())
+                assert after.get(graph.path.with_name(graph.path.name + "-wal"), b"") == b""
+            else:
+                assert after == damaged_family
     finally:
         watcher.stop()
         startup.join(2)

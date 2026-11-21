@@ -190,9 +190,12 @@ async def _acorn_candidate(client):
 
 
 def test_an_agent_accepts_a_suggested_relation_by_review_item_id(build, vault) -> None:
+    from exomem import epistemic_graph
+
     acorn = _seed_relation_candidate(vault)
 
     async def scenario(client):
+        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
         item = await _acorn_candidate(client)
         decided = await _call(client, "decide_review_item", {
             "review_item": item["id"], "decision": "accept", "why": "The body already depends on it"})
@@ -230,9 +233,12 @@ def test_an_agent_holds_two_contradicting_pages_as_competing_alternatives(build,
 
 
 def test_a_review_item_id_read_before_the_page_changed_is_refused(build, vault) -> None:
+    from exomem import epistemic_graph
+
     acorn = _seed_relation_candidate(vault)
 
     async def scenario(client):
+        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
         item = await _acorn_candidate(client)
         acorn.write_text(acorn.read_text(encoding="utf-8") + "\nAn edit made after the list was read.\n",
                          encoding="utf-8")
@@ -245,6 +251,42 @@ def test_a_review_item_id_read_before_the_page_changed_is_refused(build, vault) 
     assert item is not None
     assert decided.get("error", {}).get("code") == "REVIEW_ITEM_CHANGED", decided
     assert "## Relations" not in acorn.read_text(encoding="utf-8")
+
+
+def test_accept_by_id_retries_when_the_relation_graph_has_a_startup_fence(
+    build, vault, monkeypatch,
+) -> None:
+    from exomem import audit, epistemic_graph, review_state
+
+    acorn = _seed_relation_candidate(vault)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+
+    async def scenario(client):
+        assert graph.validate_startup_snapshot() is True
+        item = await _acorn_candidate(client)
+        assert item is not None
+        arguments = {"review_item": item["id"], "decision": "accept", "why": "The pages are linked."}
+        before = acorn.read_bytes()
+        state = review_state.ReviewStateStore(vault)
+        prior_reviews = state.load()
+        epistemic_graph.require_startup_source_proof(vault)
+
+        def unexpected_audit(*args, **kwargs):
+            raise AssertionError("relation acceptance must not audit the vault")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(audit, "audit", unexpected_audit)
+            refused = await _call(client, "decide_review_item", arguments)
+        assert refused.get("error", {}).get("code") == "REVIEW_REFRESH_REQUIRED", refused
+        assert acorn.read_bytes() == before
+        assert state.load() == prior_reviews
+
+        assert graph.validate_startup_snapshot() is True
+        accepted = await _call(client, "decide_review_item", arguments)
+        assert "error" not in accepted, accepted
+
+    _session(build(), scenario)
+    assert "birch]]" in acorn.read_text(encoding="utf-8").partition("## Relations")[2]
 
 
 def _item_files(vault: Path, folder: str) -> str:

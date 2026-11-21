@@ -198,6 +198,10 @@ class _RepairCoverage:
             return None
 
 
+class _StartupSourceProofPending(Exception):
+    """Incremental publication lost its inherited source proof before commit."""
+
+
 class _DrainPublicationMoved(Exception):
     """A drain's publication proof failed at commit time; roll the pass back.
 
@@ -3271,6 +3275,20 @@ class EpistemicGraphIndex:
             and (checkpoint is None or _checkpoint_from_value(checkpoint) is not None)
         )
 
+    @staticmethod
+    def _read_startup_metadata(conn: sqlite3.Connection) -> dict[str, str]:
+        """Read the bounded metadata set used by startup and its damage probe."""
+        graph_sync.limit_graph_metadata_read(conn)
+        return dict(conn.execute(
+            "SELECT key, value FROM graph_meta WHERE key IN "
+            "('schema_version', 'core_registry_version', 'extension_registry_hash', "
+            "'recall_policy_version', 'recall_access_fingerprint', "
+            "'recall_projection_identity', 'recall_projection_checkpoint', "
+            "'recall_resolver_topology', 'read_barrier', 'graph_sync_generation', "
+            "'graph_sync_digest', 'graph_sync_checkpoint', 'generation', 'instance', ?)",
+            (_DRAIN_COVERAGE_KEY,),
+        ))
+
     def _startup_state(self) -> _GraphStartupState | None:
         """Sample bounded graph, canonical and observation state under the held boundary."""
         from .writer_lease import read_commit_generation
@@ -3289,16 +3307,7 @@ class EpistemicGraphIndex:
         with closing(self._connect_existing(
             readonly=True, timeout=0.0, identity_deadline=deadline,
         )) as conn:
-            graph_sync.limit_graph_metadata_read(conn)
-            values = dict(conn.execute(
-                "SELECT key, value FROM graph_meta WHERE key IN "
-                "('schema_version', 'core_registry_version', 'extension_registry_hash', "
-                "'recall_policy_version', 'recall_access_fingerprint', "
-                "'recall_projection_identity', 'recall_projection_checkpoint', "
-                "'recall_resolver_topology', 'read_barrier', 'graph_sync_generation', "
-                "'graph_sync_digest', 'graph_sync_checkpoint', 'generation', 'instance', ?)",
-                (_DRAIN_COVERAGE_KEY,),
-            ))
+            values = self._read_startup_metadata(conn)
         if (
             _sidecar_file_identity(self.path) != identity
             or freshness.external_observation_stamp() != observation
@@ -3323,10 +3332,7 @@ class EpistemicGraphIndex:
             and _AVAILABILITY_FRESHNESS_KEY in values
             and (values.get("recall_policy_version"), values.get("recall_access_fingerprint"))
             == policy
-            and values.get("schema_version") == str(SCHEMA_VERSION)
-            and values.get("core_registry_version") == str(self.registry.core_version)
-            and values.get("extension_registry_hash") == self.registry.extension_hash
-            and len(values.get(_RESOLVER_TOPOLOGY_KEY, "")) == 64
+            and self._snapshot_metadata_current(values)
         )
         return _GraphStartupState(
             floor, checkpoint, generation, policy, observation, identity, values,
@@ -3452,6 +3458,7 @@ class EpistemicGraphIndex:
                         )
                     } if table == ("table",) else set()
                     if columns == {"key", "value"}:
+                        self._read_startup_metadata(conn)
                         return None
                     kind = "metadata"
             except sqlite3.Error as error:
@@ -4344,6 +4351,7 @@ class EpistemicGraphIndex:
                     (recall.triple, recall.policy_version, recall.access_policy_fingerprint),
                     checkpoint=local or stored_checkpoint,
                     graph_checkpoint=epoch.checkpoint,
+                    full_source_proof=True,
                 )
                 self._record_complete_read_publication(
                     resolvers[0] if resolvers else None, full_source_proof=True,
@@ -5672,6 +5680,7 @@ class EpistemicGraphIndex:
                             direct,
                             checkpoint=recall.checkpoint,
                             graph_checkpoint=required or prior_acknowledgement,
+                            full_source_proof=True,
                         )
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     if conn.execute("PRAGMA integrity_check").fetchone() != ("ok",):
@@ -6952,6 +6961,7 @@ class EpistemicGraphIndex:
         *,
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
+        full_source_proof: bool = False,
     ) -> None:
         conn = self._connect_existing(readonly=False)
         try:
@@ -6961,6 +6971,7 @@ class EpistemicGraphIndex:
                     identity,
                     checkpoint=checkpoint,
                     graph_checkpoint=graph_checkpoint,
+                    full_source_proof=full_source_proof,
                 )
         finally:
             conn.close()
@@ -7029,6 +7040,7 @@ class EpistemicGraphIndex:
         checkpoint: freshness.RecallFreshnessCheckpoint | None = None,
         graph_checkpoint: graph_sync.GraphSyncCheckpoint | None = None,
         topology: str | None = None,
+        full_source_proof: bool = False,
     ) -> None:
         """Publish the availability marker and the lineage it stands on.
 
@@ -7059,6 +7071,9 @@ class EpistemicGraphIndex:
         if graph_checkpoint is not None:
             self._write_graph_sync_acknowledgement(conn, graph_checkpoint)
         graph_publication.publish(conn)
+        # Full builders prove every source; incremental publication still needs its live origin.
+        if not full_source_proof and startup_source_proof_pending(self.vault_root):
+            raise _StartupSourceProofPending
         # No publication signal here: this transaction may be writing a private
         # rebuild that is swapped into place later, or refused. Each caller
         # signals once its commit or swap has made the marker readable.
@@ -7084,7 +7099,7 @@ class EpistemicGraphIndex:
     ) -> bool:
         if freshness.external_pending(self.vault_root):
             return False
-        self._publish_available_marker(identity, checkpoint=checkpoint)
+        self._publish_available_marker(identity, checkpoint=checkpoint, full_source_proof=True)
         return (
             not freshness.external_pending(self.vault_root)
             and _recall_projection_identity(
@@ -8578,6 +8593,13 @@ class EpistemicGraphIndex:
                 return rebuilt
             stable = True
             return report
+        except _StartupSourceProofPending:
+            self._mark_unavailable()
+            queued = self._queue_graph_repair(
+                deferred_scope, reason="startup_source_unproved", graph_checkpoint=graph_checkpoint,
+            )
+            stable = True
+            return {"indexed_files": 0, "deferred": 1, "queued": int(queued), "startup_pending": 1}
         finally:
             if pass_started and not stable:
                 self._mark_unavailable()
@@ -9433,16 +9455,18 @@ class EpistemicGraphIndex:
                 published = True
 
             def commit_drain(conn: sqlite3.Connection) -> None:
-                if published:
-                    # The earlier batch's witness is only evidence while its
-                    # source still matches. Keep this check next to commit.
-                    moved_coverage.update(
-                        rel for rel, source in previously_covered.items()
-                        if rel not in repaired and not self._drain_source_is_current(rel, source)
-                    )
-                    if moved_coverage:
-                        raise _DrainPublicationMoved("earlier_coverage_changed_before_commit")
                 with freshness.external_observation_guard():
+                    if published:
+                        # Every acknowledged source must still match at the final commit seal.
+                        final_sources = {
+                            **previously_covered, **{rel: sources[rel] for rel in repaired},
+                        }
+                        moved_coverage.update(
+                            rel for rel, source in final_sources.items()
+                            if not self._drain_source_is_current(rel, source)
+                        )
+                        if moved_coverage:
+                            raise _DrainPublicationMoved("coverage_changed_before_commit")
                     if published and freshness.external_observation_stamp() != observation:
                         raise _DrainPublicationMoved("new_observation_before_commit")
                     conn.commit()
@@ -9454,6 +9478,8 @@ class EpistemicGraphIndex:
                     before_commit=publish_drain, drain_sources=sources, repaired=repaired,
                     commit_publication=commit_drain,
                 )
+            except _StartupSourceProofPending:
+                return {**report, "startup_pending": 1}
             except _DrainPublicationMoved as moved:
                 log.info("deferred graph drain rolled back: %s", moved)
                 if moved_coverage:
@@ -13344,6 +13370,16 @@ def _checkpoint_binding_refusal(
     return None
 
 
+def _startup_source_repair_result(
+    required: graph_sync.GraphSyncCheckpoint | None, *, queued: bool,
+) -> GraphDispatchResult:
+    if not queued:
+        return GraphDispatchResult("failed", "graph_startup_source_unproved", required)
+    if required is None:
+        return GraphDispatchResult("completed", "graph_repair_queued_for_drain")
+    return GraphDispatchResult("deferred", "graph_repair_queued", required)
+
+
 def upsert_after_write(
     vault_root: Path,
     written_paths: list[Path],
@@ -13413,7 +13449,7 @@ def upsert_after_write(
                     )
                 if covered_gap and not _caller_can_carry_pending(vault_root, mutation_coordinator):
                     return GraphDispatchResult("deferred", "graph_repair_covered_gap", required)
-                return GraphDispatchResult("deferred", "graph_repair_queued", required)
+                return _startup_source_repair_result(required, queued=True)
             if startup_pending:
                 return GraphDispatchResult("failed", "graph_startup_source_unproved", required)
         if required is not None and not index.available():
@@ -13517,6 +13553,8 @@ def upsert_after_write(
                 if created
                 else index.refresh_paths(written_paths, graph_checkpoint=required, **replay)
             )
+            if report.get("startup_pending"):
+                return _startup_source_repair_result(required, queued=bool(report.get("queued")))
             if report.get("deferred"):
                 if report.get("queued") and _caller_can_carry_pending(
                     vault_root, mutation_coordinator
@@ -13620,6 +13658,8 @@ def upsert_after_write(
             if created
             else index.refresh_paths(written_paths, **acknowledged_batch, **replay)
         )
+        if report.get("startup_pending"):
+            return _startup_source_repair_result(required, queued=bool(report.get("queued")))
         if (
             required is not None
             and report.get("deferred")
@@ -13794,7 +13834,7 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> Graph
                 graph_sync.register_deferred(
                     vault_root, required, state_root=mutation_coordinator.state_root,
                 )
-            return GraphDispatchResult("deferred", "graph_repair_queued", required)
+            return _startup_source_repair_result(required, queued=True)
         index.delete_paths(removed_rel_paths)
         return GraphDispatchResult("completed", "delete_completed", required)
     except OpError as error:

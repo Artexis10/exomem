@@ -45,7 +45,6 @@ from exomem import (
     graph_sync,
     index_sync,
     semantic_contract,
-    state_paths,
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
@@ -889,19 +888,17 @@ def test_watcher_seed_validation_does_not_resuspend_an_external_owner_publicatio
     from exomem.file_watcher import FileWatcher
 
     root = contract_vault
-    sidecar = state_paths.vault_state_dir(root) / ".graph.sqlite"
-    sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_bytes(b"owner")
+    graph = epistemic_graph.EpistemicGraphIndex(root)
+    graph.rebuild_all()
+    (root / INSIGHT_A).write_text(_page("Contract A", "Unobserved startup edit."), encoding="utf-8")
     suspend_calls: list[str] = []
-    monkeypatch.setattr(epistemic_graph, "sidecar_path", lambda _root: sidecar)
-    monkeypatch.setattr(epistemic_graph, "graph_enabled", lambda: True)
     monkeypatch.setattr(find_module, "evict_resolver_caches", lambda _root: None)
     monkeypatch.setattr(vault_module, "evict_inbound_index", lambda _root: None)
     monkeypatch.setattr(index_sync, "recover_full_receipt_graph_epoch", lambda *_a, **_k: True)
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
         "suspend_reads",
-        lambda _self: suspend_calls.append("suspended"),
+        lambda _self, **_kwargs: suspend_calls.append("suspended"),
     )
     monkeypatch.setattr(
         epistemic_graph.EpistemicGraphIndex,
@@ -1080,12 +1077,19 @@ def test_a_standing_whole_vault_marker_owns_the_watcher_rearm(
         target.write_text(content, encoding="utf-8")
         watcher._record(target, deleted=False)
     assert freshness.external_pending(root) is True
+    pending_epoch = freshness.external_pending_epoch(root)
     deferred_index.mark_graph_full_rebuild(root, generation=1)
+    marker = deferred_index.graph_full_rebuild_pending(root)
+    assert marker is not None
 
     watcher._flush()
 
-    assert freshness.external_pending(root) is False, "an owned repair was re-armed"
-    assert deferred_index.graph_full_rebuild_pending(root) is not None
+    if admission == "own_publication":
+        assert freshness.external_pending_epoch(root) == pending_epoch
+        assert freshness.external_pending_only_for(root, [target])
+    else:
+        assert freshness.external_pending(root) is False, "an owned repair was re-armed"
+    assert deferred_index.graph_full_rebuild_pending(root) == marker
 
 
 def test_a_busy_boundary_does_not_latch_the_external_pending_epoch(
