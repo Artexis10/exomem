@@ -99,17 +99,19 @@ def main(argv: list[str] | None = None) -> int:
     if not lock.acquire():
         return 0
     try:
+        from .diarizer_sidecar import reuse_for_media_worker
         from .runtime_resources import lower_background_priority
 
         lower_background_priority()
         from .media_worker import run_child
 
-        return run_child(
-            vault_root,
-            parent_pid=args.parent_pid,
-            idle_seconds=max(0.1, args.idle_seconds),
-            leased_anon_bytes=args.leased_anon_bytes,
-        )
+        with reuse_for_media_worker():
+            return run_child(
+                vault_root,
+                parent_pid=args.parent_pid,
+                idle_seconds=max(0.1, args.idle_seconds),
+                leased_anon_bytes=args.leased_anon_bytes,
+            )
     finally:
         lock.release()
 

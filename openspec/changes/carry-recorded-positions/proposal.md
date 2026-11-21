@@ -16,6 +16,7 @@ Replays with a real model reproduced the gap and pointed at the mechanisms:
 - Presenting the same units as the person's recorded positions did change them, without making the replies simply agree.
 - Under a framing that asked the agent to attribute each line as its text does, the replies, in these replays, did not carry the person's positions.
 - Where the block sat and what it opened with mattered: a block read last, framing first, was used where the same block mid-packet mostly was not.
+- Reproduced on the installed service on 2026-11-20, the block was served on the incident turn and the answer still led with a default explanation. In replays of two incident conversations, a leading yes/no question that presupposes a default cause opened every answer with "Yes", and half left the position out. Putting the block first in the response led every first answer with the position in 4 of 4 replays, against 1 of 8 with the block last.
 - A careful position runs long, and a per-unit cap turned exactly those positions into references the agent did not read.
 
 Those replays were small and scanned by text, not judged, so they guide the design but do not measure it. The blind held-out run is the measurement.
@@ -24,8 +25,8 @@ Those replays were small and scanned by text, not judged, so they guide the desi
 
 - Add a closed trait `position` to the kind-trait set, and let a category declare traits the way a kind does. A reviewed registry save declares which categories and kinds record positions. Code selects position units only through the trait, never by a category name.
 - Serve a turn-scoped `positions` block in maps responses. It holds the position units found on the served task leads and on the pages their served connections name, ranked by relevance to the turn and then by recency. The block has its own bound outside the turn allowance.
-- Frame the block as the person's own recorded positions. That rests on the trait declaration: a category carries the trait because it records the person's positions. The shipped `preference` category carries it from the pack, and a vault category from the owner's reviewed registry save. The agent carries a position with attribution where the turn bears on it, judges the evidence independently, and says plainly where the evidence does not support the position or contradicts it. A recorded position stays the person's for the rest of the conversation. The framing never asks the agent to agree.
-- Serve a position whole whenever it fits the block's bound, with no per-unit cap. End the maps response with the block, and open the block with its framing.
+- Frame the block as the person's own recorded positions. That rests on the trait declaration: a category carries the trait because it records the person's positions. The shipped `preference` category carries it from the pack, and a vault category from the owner's reviewed registry save. The agent carries a position with attribution where the turn bears on it, judges the evidence independently, and says plainly whether the evidence supports the position, leaves it open or contradicts it, with no hedge that the evidence gives no reason for. A recorded position stays the person's for the rest of the conversation. The framing never asks the agent to agree.
+- Serve a position whole whenever it fits the block's bound, with no per-unit cap. Lead the maps response and the hook's rendering with the block, and open the block with its framing. The framing asks the agent to state the position, attributed and dated, in its first answer, and before any yes or no.
 - Teach capture to record a person's position under a category that carries the trait, naming them, and the agent's own analysis under a category without it.
 
 ## Capabilities

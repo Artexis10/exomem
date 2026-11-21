@@ -81,7 +81,7 @@ def seed(store, items, *, cid=CID):
     folder = None if mode == "summary" else path.rsplit("/", 1)[0] + "/Items/"
     with store.handle.transaction() as tx:
         tx.executemany(
-            "INSERT INTO item_rows(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
+            "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json,encoding) "
             "VALUES (?,?,?,1,1,NULL,?,?,?,?,?,?)",
             ((cid, key, collections.manifest_natural_key(stored, values), payload_hash,

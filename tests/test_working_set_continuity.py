@@ -926,7 +926,7 @@ def test_a_token_from_another_index_is_reported_stale_and_ignored(
 
     assert packet["generation"]["continuity"] == runtime_module.CONTINUITY_STALE
     evidence = {
-        kind for anchor in packet["anchors"] for kind in anchor.get("evidence") or ()
+        kind for anchor in packet.get("anchors", ()) for kind in anchor.get("evidence") or ()
     }
     assert "continuity" not in evidence
 
@@ -1575,10 +1575,10 @@ def test_capitals_in_ordinary_prose_never_serve_an_unrelated_anchor(
 
     packet = commands.op_activate_context(activation_vault, turn=turn)
 
-    assert not [item for item in packet["anchors"] if item["status"] == "resolved"], (
-        packet["anchors"]
+    assert not [item for item in packet.get("anchors", ()) if item["status"] == "resolved"], (
+        packet.get("anchors")
     )
-    assert packet["units"] == []
+    assert not packet.get("units")
 
 
 # R-N5: a token minted before an anchor gained its identifier still names it.

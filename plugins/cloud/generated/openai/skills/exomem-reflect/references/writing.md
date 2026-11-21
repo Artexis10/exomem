@@ -207,9 +207,11 @@ restatement of what specs/commits already capture.
 
 These rules are non-negotiable.
 
-1. **Read-only paths.** Never write to anything outside `Knowledge Base/`. Any
+1. **Read-only paths.** Never write vault content outside `Knowledge Base/`. Any
    sibling folders in the vault are inputs only. Compiled notes may **link to**
-   them but never modify them.
+   them but never modify them. Ordinary workspace files (the user's code,
+   documents and project files) are not the vault: write them with your own file
+   tools when asked.
 
 2. **Sources and Evidence are append-only.** Once a file lands in `Sources/` or
    `Evidence/`, never edit its *content*. Corrections happen by adding a new

@@ -12,7 +12,8 @@ role an identifier, a description, the retrieval lane it maps to, the semantic-u
 category set it selects, and the anchor kinds for which it is a default. The initial
 vocabulary SHALL be `identity, preferences, constraints, resources, current_state,
 recent_change, active_plans, methods, precedents, people, location, baseline,
-evidence, open_questions`. A vault override MAY add roles, categories or cues and MAY
+evidence, open_questions, connections`, where `connections` maps to the `graph` lane and
+is a default for every anchor kind. A vault override MAY add roles, categories or cues and MAY
 narrow defaults, but SHALL NOT remove or rename a shipped role. A registry that fails
 to load SHALL fall back to the shipped registry and report the failure in the packet's
 `generation` block.
@@ -26,13 +27,20 @@ to load SHALL fall back to the shipped registry and report the failure in the pa
 - **THEN** activation uses the shipped registry and the packet reports
   `generation.roles_source = "shipped"` with a load warning
 
+#### Scenario: The connections role ships on the graph lane
+- **WHEN** a vault has no override
+- **THEN** the effective registry contains `connections` with lane `graph`, and a resolved anchor
+  of any kind selects it
+
 ### Requirement: Deterministic role selection
 Roles for a turn SHALL be selected as the union of the defaults for each resolved
 anchor's kind and the roles whose cue patterns match the turn, evaluated with the same
 normalisation the anchor resolver uses, with no model call and no randomness; the
-selected set SHALL be bounded (at most 6 roles) in the registry's priority order, and
-the packet SHALL list the selected roles and, for each, whether it came from an anchor
-default or a turn cue.
+selected set SHALL be bounded (at most 6 lenses, plus at most one `graph`-lane role that
+runs beside them because it serves only bounded pointers) in the registry's priority order,
+and the packet SHALL list the selected roles and, for each, whether it came from an anchor
+default or a turn cue. A further `graph`-lane role counts as one of the 6 lenses. A context
+profile reads only through the lenses and runs no `graph` lane.
 
 #### Scenario: Planning verbs add plan and method roles
 - **WHEN** a turn contains a planning cue ("I'm planning to", "how should I") and a
@@ -44,6 +52,16 @@ default or a turn cue.
 - **WHEN** the same turn is activated twice against the same index generation and
   registry hash
 - **THEN** the selected roles and their attributions are identical
+
+#### Scenario: The connections role takes no lens slot
+- **WHEN** a resolved anchor's defaults and a carried page's `material` together fill the six
+  lenses
+- **THEN** `connections` is still selected beside them, and no lens is reported as
+  `role_limit` on its account
+
+#### Scenario: A second graph role is an ordinary lens
+- **WHEN** a vault override adds another `graph`-lane role that the turn's anchors select
+- **THEN** it counts against the six lenses, and the packet lists at most seven roles
 
 ### Requirement: Review-gated evolution
 Changes to the role vocabulary, category sets or cue table SHALL happen only through

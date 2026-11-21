@@ -50,7 +50,7 @@ def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pyt
     assert projected["applicability"] == "read_required"
     assert projected["read_ref"] == method
     assert projected["source_version"]
-    assert packet["anchors"] == []
+    assert "anchors" not in packet
     token = working_set_runtime.decode_continuity(packet["continuity"])
     assert token["refs"] == []
     assert {item["source_ref"] for item in token["method_versions"]} == {method}

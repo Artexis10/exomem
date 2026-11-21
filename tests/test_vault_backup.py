@@ -14,6 +14,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -627,6 +628,135 @@ def test_staging_a_write_ahead_log_database_leaves_no_sidecar_files_beside_it(va
 
     assert staged >= 1 and findings == []
     assert not list(state.glob("collections.sqlite-*"))  # a read-only open would have left a -wal and a -shm
+
+
+_HOLDS_SHARED_LOCK = """
+import fcntl, sys
+# SQLite's shared-lock range on the database file: PENDING_BYTE + 2, 510 bytes (os_unix.c).
+with open(sys.argv[1], "rb+") as database:
+    try:
+        fcntl.lockf(database, fcntl.LOCK_EX | fcntl.LOCK_NB, 510, 0x40000002)
+    except OSError:
+        print("held")
+    else:
+        print("free")
+"""
+
+
+def test_staging_keeps_the_locks_of_the_service_s_own_open_connection(vault: Path, tmp_path: Path) -> None:
+    # A raw read of a live database drops this process's locks on it when it closes: another process then
+    # checkpoints and removes the write-ahead log under the open connection, and a committed write can be lost.
+    pytest.importorskip("fcntl")
+    database = _state_dir(vault) / ".governance.sqlite"
+    service = sqlite3.connect(database)
+    service.execute("PRAGMA journal_mode=WAL")
+    service.execute("CREATE TABLE grants (id INTEGER)")
+    service.execute("INSERT INTO grants VALUES (1)")
+    service.commit()
+    service.execute("SELECT * FROM grants").fetchall()
+
+    def probe() -> str:
+        return subprocess.run([sys.executable, "-c", _HOLDS_SHARED_LOCK, str(database)],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    try:
+        assert probe() == "held"
+        staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+        assert staged >= 1 and findings == []
+        assert probe() == "held"
+    finally:
+        service.close()
+
+
+_DAMAGE_PAGE_SIZE = """
+import sys
+# Bytes 16-17 of a database header hold the page size; 3 is no valid size, so SQLite reads the file as no database.
+with open(sys.argv[1], "r+b") as database:
+    database.seek(16)
+    database.write(b"\\x00\\x03")
+"""
+
+
+def test_staging_keeps_the_locks_on_a_live_database_whose_header_is_damaged(vault: Path, tmp_path: Path) -> None:
+    # SQLite refuses a damaged header as no database while the service's own connection still holds the file, so
+    # any plain read of it in this process would drop that connection's locks.
+    pytest.importorskip("fcntl")
+    database = _state_dir(vault) / ".governance.sqlite"
+    service = sqlite3.connect(database)
+    service.execute("PRAGMA journal_mode=WAL")
+    service.execute("CREATE TABLE grants (id INTEGER)")
+    service.execute("INSERT INTO grants VALUES (1)")
+    service.commit()
+    service.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.execute("SELECT * FROM grants").fetchall()
+    subprocess.run([sys.executable, "-c", _DAMAGE_PAGE_SIZE, str(database)], check=True)
+
+    def probe() -> str:
+        return subprocess.run([sys.executable, "-c", _HOLDS_SHARED_LOCK, str(database)],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    try:
+        assert probe() == "held"
+        _, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+        assert probe() == "held"
+        assert {"kind": "state", "path": ".governance.sqlite", "code": "state_copy_failed"} in findings
+        assert not (tmp_path / "stage" / ".governance.sqlite").exists()
+    finally:
+        service.close()
+
+
+def test_a_stop_ends_staging_between_the_files_that_are_copied_whole(vault: Path, tmp_path: Path) -> None:
+    # Files that SQLite refuses are copied by a child process; a stop request must still end staging between them.
+    state = _state_dir(vault)
+    (state / ".media-jobs.json").write_text('{"jobs": []}')
+    (state / ".voice_profiles.json").write_text('{"profiles": []}')
+    stage = tmp_path / "stage"
+
+    class StopOnceTheFirstIsCopied(threading.Event):
+        def is_set(self) -> bool:
+            return (stage / ".media-jobs.json").exists()
+
+    with pytest.raises(vault_backup.BackupError):
+        vault_backup.stage_state(vault, stage, StopOnceTheFirstIsCopied())
+
+    assert not (stage / ".voice_profiles.json").exists()
+
+
+_LATE_COPIER = r"""
+import json, sys, time
+for line in sys.stdin:
+    source, target = json.loads(line)
+    time.sleep(1.5)  # still copying when the service gives up on it
+    open(target, "wb").write(b"part")
+    print("ok", flush=True)
+"""
+
+
+def test_a_copy_that_the_child_finishes_after_the_service_gave_up_never_reaches_the_snapshot(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A copy the service no longer trusts is removed; a child still running must not write it again afterwards.
+    monkeypatch.setattr(vault_backup, "_PLAIN_COPIER", _LATE_COPIER)
+    monkeypatch.setattr(vault_backup, "_PLAIN_COPY_TIMEOUT", 0.2)
+    (_state_dir(vault) / ".voice_profiles.json").write_text('{"profiles": []}')
+
+    staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+    time.sleep(2)
+
+    assert staged == 0
+    assert {"kind": "state", "path": ".voice_profiles.json", "code": "state_copy_failed"} in findings
+    assert not (tmp_path / "stage" / ".voice_profiles.json").exists()
+
+
+def test_staging_copies_a_one_byte_file_as_it_is(vault: Path, tmp_path: Path) -> None:
+    # SQLite reads a 1-byte file as an empty database, so a staging that asked SQLite first would back up the
+    # media worker's lock file, or any 1-byte state file, as a new 4 KB database and report nothing.
+    (_state_dir(vault) / ".media-worker.lock").write_bytes(b"0")
+
+    staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+
+    assert staged >= 1 and findings == []
+    assert (tmp_path / "stage" / ".media-worker.lock").read_bytes() == b"0"
 
 
 def test_a_stop_ends_staging_instead_of_finishing_every_file(vault: Path, tmp_path: Path) -> None:
