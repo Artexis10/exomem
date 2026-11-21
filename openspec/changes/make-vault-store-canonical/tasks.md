@@ -243,14 +243,18 @@
 Switch path (owner decision, 2026-11-21). The owner's vault switches (7.4) when all of these hold:
 - 7.1 passes on a disposable copy of the owner's vault, including the hard kills that close 2.4;
 - 7.2 passes on an installed wheel, and 7.3 passes against the store-mode build;
-- on that copy, a store-mode save is no slower than a file-mode save (2.2), measured on the same instrument; the work toward the one-second save continues after the switch;
-- a release lifts the gate: `VAULT_STORE_V1` joins the released capabilities, and `availability.require_servable` serves a released store-mode vault. Store mode is still entered only by the explicit `exomem store-mode migrate`, file mode stays the default, and migrate refuses on Windows until 6.3 passes.
+- on that copy, a store-mode save is no slower than a file-mode save (2.2), measured on the same instrument. The work toward the owner's one-second save budget, set on 2026-11-17, continues after the switch;
+- on that copy, the owner's reads are no slower than in file mode, for the first request after the warm-up and for later requests (the owner cells of 3.2), and the warm-up of a managed store-mode process is run once to check that its file-mode freshness rebaseline costs no real time (3.2);
+- 3.1's adopt write-back of the top `index.md`, which can overwrite a newer stored index while the projection lags, is fixed;
+- on that copy, 7.1 measures how long a governed recovery's restored content stays out of recall in store mode (2.5: it stays tombstoned until the vector drain embeds it and a reconcile runs, where file mode embeds it in the write); a window longer than the vector drain's ordinary lag is fixed before the switch;
+- a release lifts the gate: `VAULT_STORE_V1` joins the released capabilities, `availability.require_servable` serves a released store-mode vault, and the same release makes `exomem store-mode migrate` refuse on Windows with a named reason until 6.3 passes. Store mode is entered only by that explicit command, and file mode stays the default.
 
 These do not gate the owner's switch:
-- the restricted-caller read budgets in 3.2, because no restricted caller reads the owner's vault; they gate store mode as a default for other vaults;
+- the restricted-caller read budgets in 3.2, because no restricted caller reads the owner's vault. Because file mode stays the default, they gate making store mode the default for other vaults;
+- 3.2's store route for `collections rollback`, which is later work, and `writer_lease._durable_graph_outcome`, which no store-mode route reaches;
 - 6.3 (native Windows), because the owner's vault runs on Linux;
 - 5.1 to 5.4 (stage 2), 6.2 (Cloud cells), 8.1 and 8.2;
-- the Left items of 2.5 and 3.1, which are old debt or affect neither the owner's vault nor its served answers.
+- the other Left items of 2.5 and 3.1, which are old debt, background work or err on the safe side;
 
 - [ ] 7.1 Rehearse on a disposable copy of a real vault: the replayed write stream, hard kills, the recall canary cases and the graph-lane cases.
   - Progress (2026-11-16): on a copy of about 14,500 pages, `store-mode migrate` applied and the whole-table check against a fresh derivation found 0 differences across 15 tables, with integrity `ok`. No run has yet reached the store-mode answers, the kills or the rollback. Those runs led to the driver's replica adoption, its release of a copy's standing store claim, its 30 s lease term and its `--long-step-seconds` bound.
