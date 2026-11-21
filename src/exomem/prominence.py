@@ -271,8 +271,8 @@ _CAPTURE_RULES = (
     "saved as unsure and attributed, with its doubt, never as fact or as a baseline. A question the work "
     "leaves open is saved as open, including whether something happened at all. Values a task settled, "
     "such as times, prices, terms, contacts and limits, are saved in full, never as a pointer to a working "
-    "file. Trivia and one-offs get no note, because nothing later needs them. A write never mentions what "
-    "stays unwritten."
+    "file. Trivia and one-offs get no note, because nothing later needs them. A write, including the session "
+    "recap, never mentions what stays unwritten."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
