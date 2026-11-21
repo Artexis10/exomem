@@ -235,7 +235,7 @@ def test_converted_summary_rows_keep_their_item_key_order(store):
         "SELECT item_key FROM items WHERE collection_id=? ORDER BY item_key", (CID,))]
     # A conversion keeps each row's item file path, which need not follow item key order.
     with store.handle.transaction() as tx:
-        tx.executemany("UPDATE item_rows SET view_path=? WHERE item_key=?",
+        tx.executemany("UPDATE items SET view_path=? WHERE item_key=?",
                        [(f"Knowledge Base/Records/Work/Items/{n:02d}.md", key) for n, key in enumerate(reversed(keys))])
     with store.read_collection(CID) as manifest:
         whole = [record.identity.key for record in reader.StoreAdapter(store, manifest, None).read().records]

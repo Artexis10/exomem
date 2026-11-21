@@ -773,7 +773,6 @@
           "type": "string",
           "enum": [
             "records.create",
-            "records.retract",
             "records.bulk_upsert",
             "records.discard",
             "records.revise",

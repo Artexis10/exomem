@@ -70,7 +70,7 @@ def test_mixed_hidden_scalar_and_json_traps_never_reach_evaluation(store):
     from exomem.collection_store.index_migrations import ready_plan
     plan = ready_plan(store.connection, CID)
     store.connection.execute("PRAGMA ignore_check_constraints=ON")
-    store.connection.execute("UPDATE item_rows SET values_json='not json' WHERE item_key=?", (OTHER,))
+    store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
     # Valid key JSON but an invalid UTF-8 text key explodes in the residual UDF.
     scalar = next(n for n, scalar in enumerate(plan.scalars) if scalar.field == "title")
     keys = json.loads(plan.encode({"title": "Secret", "count": 1}))

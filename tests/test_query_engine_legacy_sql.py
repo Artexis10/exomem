@@ -163,7 +163,7 @@ def test_matching_withheld_sibling_is_absent_before_value_evaluation(store):
         store.append_record(CID, item={"title": "Secret", "count": 999}, item_key=OTHER, why="fixture")
     assert query() == before == (1, 1, {"sum": 2.0, "n": 1})
     # Invalid JSON is a real decode trap: reading the withheld row at all would raise.
-    store.connection.execute("UPDATE item_rows SET values_json='not json' WHERE item_key=?", (OTHER,))
+    store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
     assert query() == before
 
 
@@ -179,7 +179,7 @@ def test_scan_reads_in_row_order_on_the_collection_row_index_without_a_sorter(st
         assert scans
         for sql in scans:
             plan = " ".join(str(row[-1]) for row in session.connection.execute("EXPLAIN QUERY PLAN " + sql))
-            assert "item_rows_current" in plan  # the partial row index: current rows only, in row order
+            assert "items_by_collection_row" in plan
             assert "TEMP B-TREE" not in plan
 
 
