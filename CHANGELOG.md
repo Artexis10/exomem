@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.195.0](https://github.com/Artexis10/exomem/compare/v0.194.0...v0.195.0) (2026-11-21)
+
+
+### Features
+
+* **capture-nudge:** deliver the capture reminder on the next prompt (opt-in) ([#2986](https://github.com/Artexis10/exomem/issues/2986)) ([8ff42b7](https://github.com/Artexis10/exomem/commit/8ff42b707e23b4b42da037f7d9c22212bdf62976))
+
+
+### Bug Fixes
+
+* **agent:** stop agents misreading empty recall arrays, stub excerpts and the read-only rule ([#2980](https://github.com/Artexis10/exomem/issues/2980)) ([4958bbd](https://github.com/Artexis10/exomem/commit/4958bbd4132dc7e19e9aca84b441931fade369f4))
+* **backup:** keep the governance store in vault backups ([#2975](https://github.com/Artexis10/exomem/issues/2975)) ([1bd28ac](https://github.com/Artexis10/exomem/commit/1bd28acf1ac371572f740ab42bebc9d9b0298f42))
+
 ## [0.194.0](https://github.com/Artexis10/exomem/compare/v0.193.0...v0.194.0) (2026-11-21)
 
 
