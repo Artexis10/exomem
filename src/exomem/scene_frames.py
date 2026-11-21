@@ -392,6 +392,27 @@ class PreparedSceneFrames:
         for stream in self.streams:
             stream.close()
 
+    def drop_reserved(self) -> None:
+        """Drop each frame pair whose sidecar path a moved page still claims; the boundary is held.
+
+        A frame pair that moved away still claims these names, so its old links never reach a
+        re-extracted frame; that one frame is skipped. A move can land after preparation and no
+        commit guard rechecks a reservation, so this reads the newest claims inside the hold.
+        """
+        kept: list[tuple[Path, Path]] = []
+        for jpg, sidecar in self.written:
+            try:
+                prior_claims.require_unreserved(self.root, sidecar.relative_to(self.root).as_posix())
+            except Exception as error:  # noqa: BLE001 - keep per-frame isolation
+                log.warning("scene frame companion failed for %s: %s", jpg.name, error)
+                continue
+            kept.append((jpg, sidecar))
+        if len(kept) == len(self.written):
+            return
+        paths = {path for pair in kept for path in pair}
+        self.writes = [write for write in self.writes if write.path in paths]
+        self.written = kept
+
 
 def prepare_scene_frames(
     vault_root: Path,
@@ -405,7 +426,8 @@ def prepare_scene_frames(
 
     Returns None when the video cannot be hashed or no frame could be prepared. Encoding failures
     are per-frame soft failures. The parent video's content hash is taken here; the commit's
-    guards prove the video unchanged when the frames publish.
+    guards prove the video unchanged when the frames publish, and the commit drops the frames
+    whose names a moved page still claims (`PreparedSceneFrames.drop_reserved`).
     """
     root = Path(os.path.abspath(vault_root))
     try:
@@ -453,9 +475,6 @@ def prepare_scene_frames(
         sidecar = jpg.with_name(name + ".md")
         artifact_rel = jpg.relative_to(root).as_posix()
         try:
-            # A frame pair that moved away still claims these names, so its old links never
-            # reach a re-extracted frame; that one frame is skipped.
-            prior_claims.require_unreserved(root, sidecar.relative_to(root).as_posix())
             md = _render_sidecar(
                 artifact_name=name,
                 scope=scope,
@@ -526,13 +545,18 @@ def commit_scene_frames(
     same successor. Open/schema-v3 vaults retain legacy delete-then-insert reprocessing, and the
     removal of a previous frame set keeps its fan-out inside the hold so that it precedes the new
     frames' fan-out. Exact-v4 refuses an existing frame set before deletion until removal
-    publication has its own atomic successor protocol. A batch failure soft-fails to `[]`;
-    exact-v4 catalog refusal/uncertainty is surfaced to the caller.
+    publication has its own atomic successor protocol. It first drops the frames whose names a
+    moved page claims (`PreparedSceneFrames.drop_reserved`), and commits nothing, clearing no
+    earlier frame set, when none remain. A batch failure soft-fails to `[]`; exact-v4 catalog
+    refusal/uncertainty is surfaced to the caller.
     """
     from .governance import catalog_publication, graph_producer
     from .vault_store import mode as store_mode
 
     root = prepared.root
+    prepared.drop_reserved()
+    if not prepared.writes:
+        return [], None
     writes = prepared.writes
     clip_replacements: tuple[catalog_publication.ClipMeasurementReplacement, ...] = ()
     parent_sidecar_guard: PathGuard | None = None

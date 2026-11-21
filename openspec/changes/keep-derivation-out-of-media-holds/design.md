@@ -36,7 +36,7 @@ A transient `OpError` (busy boundary, deferred semantic work) still re-raises so
 
 1. The clip hold commits the CLIP vectors only.
 2. `prepare_scene_frames` runs with no hold. It encodes the JPEG bytes, renders the sidecar text, hashes the video for its content guard and builds the planned writes.
-3. `commit_scene_frames` runs under a hold named `background_media_scene_frame_commit`. It adds the full-index receipts for the frame sidecars, commits the batch with `post_commit_fanout=False` and registers the watcher self-writes as publication intents, then publishes the graph epoch in the same hold.
+3. `commit_scene_frames` runs under a hold named `background_media_scene_frame_commit`. It first drops each frame whose sidecar path a moved page still claims as a prior path, reading the newest claims, because a move can land between preparation and the hold. It adds the full-index receipts for the remaining frame sidecars, commits the batch with `post_commit_fanout=False` and registers the watcher self-writes as publication intents, then publishes the graph epoch in the same hold.
 4. The fan-out of the new pages runs after the hold through `_complete_deferred_graph_completion`.
 
 Crash between step 3 and step 4: the receipts added before the commit mark the frame sidecars as owed a full index. The drain replays the full upsert for them, and `recover_full_receipt_graph_epoch` recovers the graph epoch. This is the same repair that covers a crash after any media sidecar commit.

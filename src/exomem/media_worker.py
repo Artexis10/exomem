@@ -2023,6 +2023,8 @@ class MediaWorker:
         def commit():
             if not result_holds():
                 return None
+            # Dropped here as well as in the commit, so no receipt names a frame that a moved page reserves.
+            prepared.drop_reserved()
             # A full-index receipt per frame sidecar is durable before the files exist, so a crash
             # between the commit and the fan-out leaves the replay that finishes it.
             receipts = deferred_index.add_full_receipts(
