@@ -846,7 +846,7 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
                     if reference is None:
                         raise _Unreadable("no stored version")
                     head = media_store.write_stored_original(
-                        vault, reference, target, store=copy["store"] if copy["source"] == REPLICA else None)
+                        vault, reference, target, store=copy["store"] if copy["source"] == REPLICA else None, prove=True)
                     sha256, size = head.sha256, head.size
                 else:
                     digest, size = hashlib.sha256(), 0

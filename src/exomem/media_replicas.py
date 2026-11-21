@@ -73,14 +73,19 @@ DEFAULT_CHECK_READ_MIB_PER_SECOND = 32.0
 #: The least time between two check rounds of a vault, and the replicas one pick takes. A round takes each store's share
 #: of the cycle, a pick at a time (`check`): `replicas x interval / cycle` rows, floored at `_CHECK_FLOOR_ROWS` so a
 #: small vault still finishes its cycle, and for a content check `bytes x interval / cycle` bytes.
-#: A round runs `_CHECK_ROUND_FACTOR` times the seconds that the read cap needs for its byte share, never less than
-#: `_CHECK_ROUND_SECONDS` and never more than `_CHECK_ROUND_MAX`. At the sizing target (500,000 replicas and 25 TB in
-#: a store, the default 30-day cycle and 32 MiB/s cap) a round holds 116 replicas and 5.4 GiB: 173 s of reading, so
-#: a 216 s round, and 4,320 rounds in the cycle check 501,120 replicas and 25 TB. The cap is an average over the round:
-#: one object is read at the store's speed and the wait for its share follows it, so no read is paced in chunks.
+#: One read cap is shared by every store of a round, so a round runs `_CHECK_ROUND_FACTOR` times the seconds that the cap
+#: needs for the byte shares of all its content stores together, never less than `_CHECK_ROUND_SECONDS`. At the sizing
+#: target (500,000 replicas and 25 TB in a store, the default 30-day cycle and 32 MiB/s cap) one store's round holds 116
+#: replicas and 5.4 GiB: 173 s of reading, so a 216 s round, and 4,320 rounds in the cycle check 501,120 replicas and
+#: 25 TB. Two such stores read 10.8 GiB per round: 346 s, so a 432 s round. The sample that follows a round has
+#: `_CHECK_ROUND_SECONDS` of its own, and the two fit one interval (the next round starts an interval after this one
+#: began), so a round never runs past `_CHECK_ROUND_MAX`: the interval less the sample's share, which reads 15 GiB at the
+#: cap. Three such stores need 16.2 GiB: their cycle stretches to about 32 days, and the raised cap that the status's
+#: oldest check calls for ends it. The cap is an average over the round: one object is read at the store's speed and the
+#: wait for its share follows it, so no read is paced in chunks.
 _CHECK_INTERVAL = 600.0
 _CHECK_ROUND_SECONDS = 120.0
-_CHECK_ROUND_MAX = 300.0
+_CHECK_ROUND_MAX = _CHECK_INTERVAL - _CHECK_ROUND_SECONDS
 _CHECK_ROUND_FACTOR = 1.25
 _CHECK_BATCH = 64
 _CHECK_FLOOR_ROWS = 16
@@ -1137,24 +1142,28 @@ def _passed(vault: Path, binary_rel: str, replica: originals.StoredObject, level
                       replica.version))
 
 
-def _failed(vault: Path, row: sqlite3.Row, finding: str, *, sample: bool = False) -> None:
+def _failed(vault: Path, row: sqlite3.Row, finding: str, *, attempted: originals.StoredObject | None = None,
+            sample: bool = False) -> None:
     """Record an attempt on a replica that found no damage and proved nothing, and move the row on in its schedule.
 
     The finding replaces what the row showed and is counted in the status. It never quarantines: an attempt that
     could not complete says nothing about the bytes. The row's next turn comes after `_FAILED_RETRY`, so one unreadable
-    row never holds back the rows behind it.
+    row never holds back the rows behind it. It lands on the version that was attempted (`attempted`, else the row's
+    own), so a version that a copy again published meanwhile does not inherit a finding about the one it replaced.
     """
     column, cycle = ("sample_from" if sample else "check_from"), check_cycle()
+    name, version = (attempted.object, attempted.version) if attempted is not None else (row["object"], row["version"])
     # A quarantined row (a sample's second look) keeps the finding that quarantined it; only its turn moves.
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
         conn.execute(f"UPDATE media_replicas SET {column} = ?, failure = CASE WHEN state = '{QUARANTINED}' "
-                     "THEN failure ELSE ? END WHERE binary_rel = ? AND store = ?",
-                     (time.time() - cycle + min(cycle, _FAILED_RETRY), finding, row["binary_rel"], row["store"]))
+                     "THEN failure ELSE ? END WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
+                     (time.time() - cycle + min(cycle, _FAILED_RETRY), finding, row["binary_rel"], row["store"],
+                      name, version))
 
 
 #: The replicas of a store attempted longest ago, never-attempted first, that the cycle has made due: a range of
 #: `media_replicas_due` in its own order, so a pick reads `LIMIT` rows whatever the table holds.
-_DUE = ("SELECT binary_rel, store, object, version FROM media_replicas "
+_DUE = ("SELECT binary_rel, store, object, version, check_from FROM media_replicas "
         f"WHERE store = ? AND state <> '{QUARANTINED}' AND check_from <= ? ORDER BY check_from LIMIT ?")
 
 
@@ -1174,9 +1183,21 @@ def _store_budget(ledger: MediaJobStore, store: str, cycle: float) -> tuple[int,
             original_fixity.budget_for([size], interval=_CHECK_INTERVAL, cycle=cycle))
 
 
-def _round_seconds(shares: int, rate: float) -> float:
-    """How long a check round may run to read `shares` bytes at the read cap: see `_CHECK_ROUND_FACTOR`."""
+def _round_seconds(ledger: MediaJobStore, content_stores: list[str], cycle: float, rate: float) -> float:
+    """How long a check round may run to read the byte shares of all its content stores at the one read cap."""
+    shares = sum(_store_budget(ledger, name, cycle)[1] for name in content_stores)
     return min(_CHECK_ROUND_MAX, max(_CHECK_ROUND_SECONDS, _CHECK_ROUND_FACTOR * shares / rate))
+
+
+def _longest_waiting_first(ledger: MediaJobStore, stores: list[str], cycle: float) -> list[str]:
+    """The stores in the order of their oldest due replica, a store with nothing due last.
+
+    A round that the shared cap ends before its last store would leave that store behind every time in a fixed order.
+    Here the store that was left waits longest, so it comes first in the next round: the order rotates by itself, and
+    keeps no state to lose.
+    """
+    waiting = {name: (due[0]["check_from"] if (due := _due(ledger, name, cycle, 1)) else math.inf) for name in stores}
+    return sorted(stores, key=waiting.__getitem__)
 
 
 def check(vault: Path, *, deadline: float | None = None) -> int:
@@ -1186,7 +1207,7 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
     (replicas, and for a content check bytes under the read-rate cap) or the round's time is. It holds no vault guard: a
     check reads a store and writes one derived row. A replica whose binding or read fails is recorded and skipped; a
     store that does not answer as itself, or fails `_STORE_FAILURES` replicas in a row, ends its own round and changes
-    no row that it did not attempt.
+    no row that it did not attempt. The store that has waited longest goes first.
     """
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
@@ -1194,13 +1215,13 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
         return 0
     ledger = MediaJobStore(vault)
     cycle, rate = check_cycle(), check_read_rate()
-    entries = originals.store_entries(config)
-    shares = sum(_store_budget(ledger, name, cycle)[1] for name, entry in entries.items()
-                 if scheduled_level(entry) == CONTENT)
-    limit = time.monotonic() + _round_seconds(shares, rate) if deadline is None else deadline
+    levels = {name: level for name, entry in originals.store_entries(config).items()
+              if (level := scheduled_level(entry)) is not None}
+    content = [name for name, level in levels.items() if level == CONTENT]
+    limit = time.monotonic() + _round_seconds(ledger, content, cycle, rate) if deadline is None else deadline
     cap = _ReadCap(rate, limit)
-    return sum(_check_store(vault, ledger, name, level, cycle, cap, limit) for name, entry in entries.items()
-               if (level := scheduled_level(entry)) is not None)
+    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit)
+               for name in _longest_waiting_first(ledger, list(levels), cycle))
 
 
 def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycle: float, cap: _ReadCap,
@@ -1231,10 +1252,13 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
             try:
                 failure = media_store.check_replica(vault, replica)
             except ValueError:
-                _failed(vault, row, RECORD_INVALID)  # the store answered; it cannot address this version
+                _failed(vault, row, RECORD_INVALID, attempted=replica)  # the store answered; it cannot address this version
                 continue
             except media_store.MediaStoreError:
-                _failed(vault, row, READ_FAILED)  # unavailable is no proof of loss: the row is not quarantined
+                if media_store.store_reachable(vault, name) is False:
+                    _note_reach(vault, name, False)  # the store went away mid-round: an outage, and no row's finding
+                    return attempted - 1
+                _failed(vault, row, READ_FAILED, attempted=replica)  # unavailable is no proof of loss: not quarantined
                 failing += 1
                 if failing >= _STORE_FAILURES:
                     return attempted
@@ -1283,11 +1307,15 @@ def _month(moment: float) -> int:
     return stamp.year * 100 + stamp.month
 
 
-def _mark_sample(vault: Path, row: sqlite3.Row, month: int) -> None:
-    """Take a replica out of the sample picks for `month` (or for good, for `_UNSAMPLEABLE`)."""
+def _mark_sample(vault: Path, row: sqlite3.Row, month: int, *, attempted: originals.StoredObject | None = None) -> None:
+    """Take a replica out of the sample picks for `month` (or for good, for `_UNSAMPLEABLE`).
+
+    It lands on the version that was looked at (`attempted`, else the row's own), as `_failed` does.
+    """
+    name, version = (attempted.object, attempted.version) if attempted is not None else (row["object"], row["version"])
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("UPDATE media_replicas SET sample_month = ? WHERE binary_rel = ? AND store = ?",
-                     (month, row["binary_rel"], row["store"]))
+        conn.execute("UPDATE media_replicas SET sample_month = ? WHERE binary_rel = ? AND store = ? "
+                     "AND object = ? AND version = ?", (month, row["binary_rel"], row["store"], name, version))
 
 
 def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, store: str) -> None:
@@ -1382,12 +1410,13 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 continue
             snapshot, replica = bound
             if snapshot.binary_sha256 is None or snapshot.binary_size is None:
-                _mark_sample(vault, row, _UNSAMPLEABLE)  # the binding is readable and lists no plaintext digest: nothing to hash against
+                # the binding is readable and lists no plaintext digest: nothing to hash against
+                _mark_sample(vault, row, _UNSAMPLEABLE, attempted=replica)
                 skips += 1
                 continue
             if replica.ciphertext_size > remaining:
                 if not quarantined:
-                    _mark_sample(vault, row, month)
+                    _mark_sample(vault, row, month, attempted=replica)
                     skips += 1
                 continue
             with closing(ledger._connect()) as conn, conn:
@@ -1398,12 +1427,16 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 damage = media_store.sample_replica(
                     vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
             except media_store.KeyRefused:
-                _failed(vault, row, media_store.KEY_REFUSED, sample=True)  # the bytes match their record: no damage
+                # the bytes match their record: no damage
+                _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)
                 failing += 1
             except ValueError:
-                _failed(vault, row, RECORD_INVALID, sample=True)  # the store answered; it cannot address this version
+                # The store refused the locator before it read anything, so nothing was downloaded and nothing is billed.
+                with closing(ledger._connect()) as conn, conn:
+                    _charge(conn, name, month, -replica.ciphertext_size)
+                _failed(vault, row, RECORD_INVALID, attempted=replica, sample=True)
             except media_store.MediaStoreError:
-                _failed(vault, row, READ_FAILED, sample=True)  # unavailable is no proof of loss
+                _failed(vault, row, READ_FAILED, attempted=replica, sample=True)  # unavailable is no proof of loss
                 failing += 1
             else:
                 failing = 0

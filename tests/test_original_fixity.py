@@ -372,9 +372,9 @@ def _count_downloads(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
     downloads: list[str | None] = []
     real = media_store.write_stored_original
 
-    def counted(vault, reference, sink, *, store=None):
+    def counted(vault, reference, sink, *, store=None, **options):
         downloads.append(store)
-        return real(vault, reference, sink, store=store)
+        return real(vault, reference, sink, store=store, **options)
 
     monkeypatch.setattr(media_store, "write_stored_original", counted)
     return downloads

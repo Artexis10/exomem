@@ -1372,7 +1372,7 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> 
     from . import media_replicas
 
     try:
-        head = write_stored_original(vault, replica, _NullSink(), store=replica.store)
+        head = write_stored_original(vault, replica, _NullSink(), store=replica.store, prove=True)
     except ReplicaMismatch as mismatch:
         return mismatch.failure
     return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
@@ -2299,13 +2299,15 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
         raise
 
 
-def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) -> Iterator[bytes]:
+def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *, prove: bool = False) -> Iterator[bytes]:
     """Stream plaintext; exhaustion settles what a failed read means. This is the one place that proves damage.
 
-    The whole ciphertext is hashed even when age stops early, so a failed read is judged against the record:
-    a size or digest that differs from it is damage (`ReplicaMismatch`). Ciphertext that matches its record and that
-    age refuses is `KeyRefused`: the identity or recipient is wrong, and the bytes are no worse for it. An age that a
-    signal stopped says nothing about either and raises `MEDIA_STORE_UNAVAILABLE` (a platform that reports a stopped
+    A read that reaches the end of the ciphertext judges it against the record: a size or digest that differs from it
+    is damage (`ReplicaMismatch`). With `prove`, a read whose age stops early goes on hashing the rest, so that a refusal
+    is judged too: ciphertext that matches its record and that age refuses is `KeyRefused` (the identity or recipient is
+    wrong, and the bytes are no worse for it). Only a sampled check and a repair prove: nothing else quarantines, so
+    hydration and export stop downloading when age stops, and say only that the original did not verify. An age that
+    a signal stopped says nothing about either and raises `MEDIA_STORE_UNAVAILABLE` (a platform that reports a stopped
     process as a positive code reads it as a key refusal, which damages nothing).
     """
     process = subprocess.Popen(["age", "--decrypt", "--identity", identity],
@@ -2313,6 +2315,7 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) ->
     assert process.stdin is not None and process.stdout is not None
     ciphertext, fed, feed_errors = hashlib.sha256(), [0], []
     stopped = threading.Event()  # the reader is gone: nothing needs the rest of the download
+    abandoned = []  # age stopped early and nothing asked for proof: the ciphertext was not read to its end
 
     def feed() -> None:
         piping = True
@@ -2327,6 +2330,9 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) ->
                         try:
                             process.stdin.write(chunk)
                         except BrokenPipeError:
+                            if not prove:
+                                abandoned.append(True)
+                                return
                             piping = False  # age stopped early; the rest is still hashed against the record
         except BaseException as error:  # noqa: BLE001 - re-raised on the calling thread below.
             feed_errors.append(error)
@@ -2351,20 +2357,24 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) ->
         process.stdout.close()
     if feed_errors:
         raise feed_errors[0]
-    if fed[0] != reference.ciphertext_size:
-        raise ReplicaMismatch("size_mismatch")
-    if ciphertext.hexdigest() != reference.ciphertext_sha256:
-        raise ReplicaMismatch("digest_mismatch")
+    if not abandoned:
+        if fed[0] != reference.ciphertext_size:
+            raise ReplicaMismatch("size_mismatch")
+        if ciphertext.hexdigest() != reference.ciphertext_sha256:
+            raise ReplicaMismatch("digest_mismatch")
     if returncode < 0:
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the decryption was stopped before it finished")
+    if abandoned:
+        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the decryption stopped before the whole ciphertext was read")
     if returncode:
         raise KeyRefused()
 
 
-def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
-    """Download and decrypt in one pass; local sink failures remain local errors."""
+def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO, *,
+                  prove: bool = False) -> ObjectHead:
+    """Download and decrypt in one pass; local sink failures remain local errors. `prove` is `_decrypted_chunks`'s."""
     plaintext, size = hashlib.sha256(), 0
-    with closing(_decrypted_chunks(backend, reference, identity)) as chunks:
+    with closing(_decrypted_chunks(backend, reference, identity, prove=prove)) as chunks:
         for chunk in chunks:
             plaintext.update(chunk)
             size += len(chunk)
@@ -2373,16 +2383,17 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
     return ObjectHead(size, plaintext.hexdigest())
 
 
-def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO, *, store: str | None = None) -> ObjectHead:
+def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO, *, store: str | None = None,
+                          prove: bool = False) -> ObjectHead:
     """Decrypt one stored version into `sink` and return the plaintext's head; the export pack's read (D8).
 
     `store` names the declared store that holds the version, as a replica's pointer does; None reads the store that
-    serves eviction.
+    serves eviction. `prove` is for a read whose failure may quarantine the version: see `_decrypted_chunks`.
 
     The pack reads a staging copy, not the live vault, so this takes no pin, reservation or ledger row. A
     transport failure raises `MEDIA_STORE_UNAVAILABLE`, after `sink` may have received a verified prefix.
     """
-    return _decrypt_into(store_for(vault, store), reference, str(_settings(vault)["identity_path"]), sink)
+    return _decrypt_into(store_for(vault, store), reference, str(_settings(vault)["identity_path"]), sink, prove=prove)
 
 
 def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bool) -> str:

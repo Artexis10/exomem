@@ -30,7 +30,9 @@ A store whose checks are not scheduled is never sampled and is never charged byt
 Each replica is checked about once in 30 days, oldest check first.
 A round runs every ten minutes and takes each store's share of the cycle: its replicas and, for a content check, its bytes, each times ten minutes over the cycle.
 A content check reads at up to 32 MiB per second on average over a round: an object is read at the store's speed, and the wait for its share of time follows it.
-At 500,000 replicas and 25 TB in one store, a round checks 116 replicas and 5.4 GiB in about 216 seconds, which covers the store in 30 days.
+The stores of a round share that cap. At 500,000 replicas and 25 TB in one store, a round checks 116 replicas and 5.4 GiB in about 216 seconds, which covers the store in 30 days. Two such stores take about 432 seconds a round, and also finish in 30 days.
+Three such stores need more than the cap allows within the ten minutes, so their cycle runs a little over 30 days. Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` to shorten it.
+The store that has waited longest goes first in each round.
 Set these two environment variables on the service to change them:
 
 - `EXOMEM_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
@@ -84,6 +86,7 @@ These are not findings, because they say nothing about the bytes: a store that i
 The status reports them in `failed_attempts`, and the next turn of the replica tries again after a day.
 When ciphertext matches its record and your identity refuses it, the status reports `key_refused`.
 Check the identity file, then wait for the next sample: a passing sample clears it, and a repair is never blocked by it.
+A later failed attempt on the same replica replaces it with that attempt's finding, and a passing check does not clear it.
 
 List the findings with the command line:
 
@@ -100,7 +103,7 @@ The `recopy` value says what the worker does about the finding:
 - `null`: no copy is queued.
 
 The worker writes a new version, from the local original when it still hashes to the binding, or else from another replica that is not quarantined.
-The damaged version stays in its store as an orphan. For the store that serves eviction, its name is also released for collection.
+The damaged version stays in its store as an orphan. For the store that serves eviction, its name is also released for collection, unless a retried copy reuses it.
 Eviction and fixity never read a quarantined replica.
 A `plaintext_mismatch` finding gets one more sample per cycle, and a sample that decrypts to the original lifts it and drops the queued copy.
 Any other finding stays until a new copy replaces the entry.
