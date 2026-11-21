@@ -987,6 +987,11 @@ class CreationPreflight:
     profile_source_hash: str | None = None
     #: Whether the page is a profile, so its preview says when its proof may be used.
     profile: bool = False
+    #: `corpus` with `semantic_state` added, as the structural evaluation judged it. Retained so no
+    #: later step of the save derives it again.
+    after_corpus: semantic_contract.SemanticCorpusContext | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def draft_hash(self) -> str | None:
@@ -5416,6 +5421,7 @@ def _preflight_creation(
                 requested_disposition=relation_disposition,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                structural=(before_corpus, state, after_corpus),
             )
         finally:
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
@@ -5490,6 +5496,7 @@ def _preflight_creation(
             ),
             draft_bound=draft_bound,
             profile=_is_profile(root, state.page_type),
+            after_corpus=after_corpus,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -5536,6 +5543,7 @@ def _preflight_creation(
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
         profile_source_hash=vault.content_hash(source) if profile else None,
         profile=profile,
+        after_corpus=after_corpus,
     )
 
 

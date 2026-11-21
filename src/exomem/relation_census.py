@@ -275,7 +275,9 @@ def operation_provenance(
     else:
         before = preflight.corpus
         state = preflight.semantic_state
-        after = before.with_candidate(state) if before is not None else None
+        after = preflight.after_corpus
+        if after is None and before is not None:
+            after = before.with_candidate(state)
         prior_path = predecessor_path
         before_hash = None
         after_hash = vault.content_hash(preflight.source)
