@@ -1061,12 +1061,13 @@ def test_the_sample_pick_and_the_month_release_read_the_sample_index_with_no_sor
     assert "USING INDEX media_replicas_sample" in release
 
 
-def test_the_eviction_gate_reads_the_index_of_quarantined_rows(vault: Path, selected_store, mirrored: Path) -> None:
+def test_the_eviction_gate_reads_the_damaged_versions_by_their_key(vault: Path, selected_store, mirrored: Path) -> None:
     """Eviction asks this for every candidate: a scan of every replica would cost the size of the store each time."""
     _replicated(vault)
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DAMAGED, (json.dumps([["o", "v"]]),)))
-    assert "USING COVERING INDEX media_replicas_damaged" in plan
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DAMAGED,
+                                                         (json.dumps([["s", "o", "v"]]),)))
+    assert "USING PRIMARY KEY" in plan and "SCAN media_damaged_versions" not in plan
 
 
 def test_the_eviction_gate_asks_the_table_once_however_many_pointers_a_pooled_object_has(
@@ -1075,11 +1076,8 @@ def test_the_eviction_gate_asks_the_table_once_however_many_pointers_a_pooled_ob
     transaction, so its cost grew with the pool and held the vault's single writer."""
     pointers = [originals.StoredObject(1, MIRROR, "1", f"{number:064x}", f"version-{number}", 10, "0" * 64)
                 for number in range(1000)]
-    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
-        for pointer, state in ((pointers[0], media_replicas.UPLOAD_VERIFIED), (pointers[777], media_replicas.QUARANTINED)):
-            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
-                         "VALUES (?, ?, ?, ?, '1', 10, ?, 0)", (f"Originals/{pointer.object}.bin", MIRROR, pointer.object,
-                                                               pointer.version, state))
+    media_replicas.quarantine(vault, "Originals/damaged.bin", pointers[777], level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
     statements: list[str] = []
     with closing(media_jobs.MediaJobStore(vault)._connect(readonly=True)) as conn:
         conn.set_trace_callback(statements.append)
@@ -1089,6 +1087,39 @@ def test_the_eviction_gate_asks_the_table_once_however_many_pointers_a_pooled_ob
 
     assert (found, clean) == (True, False)  # only the quarantined pointer counts, wherever it stands in the set
     assert len([sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]) == 2
+
+
+def _vm_steps_of_a_repeated_finding(vault: Path, holders: int, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Quarantine one version that `holders` filings already hold quarantined, and count what SQLite runs for it."""
+    pointer = originals.StoredObject(1, MIRROR, "1", f"{holders:064x}", "version", 10, "0" * 64)
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as ledger, ledger:
+        ledger.executemany(
+            "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, level, "
+            "failure, seen) VALUES (?, ?, ?, ?, '1', 10, 0, 'quarantined', 'content', 'digest_mismatch', 1)",
+            [(f"Originals/{holders}/{number}.bin", MIRROR, pointer.object, pointer.version) for number in range(holders)])
+        ledger.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure) "
+                       "VALUES (?, ?, ?, 'content', 'digest_mismatch')", (MIRROR, pointer.object, pointer.version))
+    steps = [0]
+    connect = media_jobs.MediaJobStore._connect
+
+    def counting(self, **options):
+        conn = connect(self, **options)
+        conn.set_progress_handler(lambda: steps.__setitem__(0, steps[0] + 1), 1)
+        return conn
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", counting)
+    media_replicas.quarantine(vault, f"Originals/{holders}/0.bin", pointer, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+    return steps[0]
+
+
+def test_a_finding_that_repeats_over_many_quarantined_filings_costs_what_it_costs_over_few(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every filing's attempt can record the finding again: a rescan of the group would make n attempts cost n squared."""
+    few = _vm_steps_of_a_repeated_finding(vault, 50, monkeypatch)
+    many = _vm_steps_of_a_repeated_finding(vault, 5000, monkeypatch)
+
+    assert many < few * 2 + 500
 
 
 # --- verify-stored-replicas: findings from a check and from eviction ---------------------------------------
@@ -1193,98 +1224,57 @@ def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_dama
     assert original_pool.object_path(vault, digest).exists()
 
 
-def _filed_under_many_names(vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, names: int) -> tuple[Path, str]:
-    """Pool the original's object, file it under `names` more names and damage its replica; return the original and the digest."""
+@pytest.mark.parametrize("failure", ["absent", "condemned"])
+def test_eviction_of_a_shared_original_whose_pointer_is_absent_or_condemned_quarantines_it_and_queues_a_copy_again(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
+    """A store with no scheduled check would never find a lost version later: eviction's own HEAD is the only finding."""
     values, _config = selected_store
     path = _preserved(vault)
     reference = _offload(vault, path)
     digest = _pooled(vault, path, monkeypatch)
-    relative = path.relative_to(vault).as_posix()
-    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
-        for number in range(names):
-            conn.execute("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
-                         "resident_only, reference FROM media_bindings WHERE binary_rel = ?", (f"Aliases/{number:04d}.txt", relative))
-    _damage_a_byte(Path(values["root"]) / reference.object / reference.version)
-    return path, digest
+    if failure == "absent":
+        (Path(values["root"]) / reference.object / reference.version).unlink()
+    else:
+        head = media_store.FilesystemStore.head
 
+        def condemned(self, name: str, version: str):
+            found = head(self, name, version)
+            return found if found is None else dataclasses.replace(found, condemned=True)
 
-def _quarantined_rows(vault: Path) -> int:
-    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        return ledger.execute("SELECT COUNT(*) FROM media_replicas WHERE state = ?", (media_replicas.QUARANTINED,)).fetchone()[0]
-
-
-def test_a_damaged_pointer_of_an_object_with_many_filings_is_quarantined_in_a_few_transactions(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pooled object has a filing per name that holds its bytes: one write transaction for each would not scale with them."""
-    names = 300
-    path, _digest = _filed_under_many_names(vault, selected_store, monkeypatch, names)
-    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 3600.0)  # the time bound has its own limit; this test counts transactions
-    transactions, quarantine_all = [], media_replicas.quarantine_all
-
-    def counting(*arguments, **options):
-        transactions.append(len(arguments[1]))  # each call is one write transaction, for this many filings
-        return quarantine_all(*arguments, **options)
-
-    monkeypatch.setattr(media_replicas, "quarantine_all", counting)
+        monkeypatch.setattr(media_store.FilesystemStore, "head", condemned)
 
     assert not media_store.evict(vault, path)
 
-    assert _quarantined_rows(vault) == names + 1
-    assert len(transactions) <= 1 + -(-names // media_store._ALIAS_PAGE)  # the evicting filing, then a page at a time
+    row = _replica_row(vault, store=reference.store)
+    assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, failure)
+    assert _requests(vault) == [(path.relative_to(vault).as_posix(), media_replicas.RECOPY)]
+    assert original_pool.object_path(vault, digest).exists()  # the bytes that the copy again reads
 
 
-def test_a_damaged_pointer_of_an_object_with_more_filings_than_the_bound_quarantines_the_bounded_few_and_keeps_the_original(
+def test_eviction_of_a_shared_original_records_a_damaged_pointer_that_another_filing_holds(
         vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One eviction attempt must not walk a table's worth of names: the rest waits for the next attempt or check."""
-    path, digest = _filed_under_many_names(vault, selected_store, monkeypatch, 300)
-    monkeypatch.setattr(media_store, "_ALIAS_ROWS", 2 * media_store._ALIAS_PAGE)
-    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 3600.0)
-
-    assert not media_store.evict(vault, path)
-
-    assert 1 < _quarantined_rows(vault) <= 1 + media_store._ALIAS_ROWS
-    assert original_pool.object_path(vault, digest).exists()  # one quarantined filing already keeps the object
-
-
-def test_a_damaged_pointer_of_an_object_with_many_filings_stops_at_the_time_bound_after_a_page(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A slow ledger must not hold an eviction attempt for a table's worth of names: it stops at its time bound."""
-    path, _digest = _filed_under_many_names(vault, selected_store, monkeypatch, 300)
-    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 0.0)
-
-    assert not media_store.evict(vault, path)
-
-    assert 1 < _quarantined_rows(vault) <= 1 + media_store._ALIAS_PAGE
-
-
-def test_a_damaged_pointer_held_only_by_a_filing_past_the_bound_is_still_recorded_in_one_attempt(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An object's filings may hold several pointers: the bound on the filings looked at must never hide a damaged one."""
+    """The filing under eviction may hold a healthy pointer: the damaged one of the object's other filing is still recorded."""
     values, _config = selected_store
     path = _preserved(vault)
     healthy = _offload(vault, path)
     digest = _pooled(vault, path, monkeypatch)
-    relative = path.relative_to(vault).as_posix()
     stored = Path(values["root"]) / healthy.object / healthy.version
     other = healthy.version + "-other"
     damaged = bytearray(stored.read_bytes())
     damaged[len(damaged) // 2] ^= 0xFF
     (stored.parent / other).write_bytes(damaged)  # a second version of the object, whose bytes are not the recorded ones
-    pointer = json.dumps({**healthy.fields(), "version": other})
-    filings = media_store._ALIAS_ROWS + 1  # more than the bound looks at, on the healthy pointer; the damaged one sorts last
     with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
-        copy = ("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
-                "resident_only, {} FROM media_bindings WHERE binary_rel = ?")
-        for number in range(filings):
-            conn.execute(copy.format("reference"), (f"Aliases/{number:05d}.txt", relative))
-        conn.execute(copy.format("?"), ("Zzz/owner-of-the-other-pointer.txt", pointer, relative))
+        conn.execute("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
+                     "resident_only, ? FROM media_bindings WHERE binary_rel = ?",
+                     ("Other/holder-of-the-other-pointer.txt", json.dumps({**healthy.fields(), "version": other}),
+                      path.relative_to(vault).as_posix()))
 
     assert not media_store.evict(vault, path)
 
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         found = ledger.execute("SELECT binary_rel, version, failure FROM media_replicas WHERE state = ?",
                                (media_replicas.QUARANTINED,)).fetchall()
-    assert ("Zzz/owner-of-the-other-pointer.txt", other, "digest_mismatch") in found
+    assert found == [("Other/holder-of-the-other-pointer.txt", other, "digest_mismatch")]
     assert original_pool.object_path(vault, digest).exists()
 
 
@@ -1668,6 +1658,96 @@ def test_a_copy_again_of_a_version_that_two_filings_share_uploads_it_once_and_ke
     assert len(_objects(Path(selected_store[0]["root"]))) == 2  # the damaged version and its one replacement
 
 
+def test_a_copy_again_after_a_key_rotation_is_still_shared_by_the_filings_of_one_version(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A copy of ciphertext keeps its source's key version: a rotated key must not make each filing upload its own."""
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    second = _preserved(vault, category="second")
+    assert _offload(vault, second) == pointer
+    _replicate_all(vault)
+    size = originals.original_state(vault, first).binary_size
+    for original in (first, second):
+        assert media_store.evict(vault, original)  # no local bytes: the new version is copied from the mirror's ciphertext
+    _damage_a_byte(Path(selected_store[0]["root"]) / pointer.object / pointer.version)
+    media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+    _configure(selected_store, vault, key_version="2", allowance_bytes=size)
+
+    _recopy_all(vault)
+
+    fresh = _entry(vault, first, pointer.store)
+    assert (fresh.key_version, fresh != pointer) == (pointer.key_version, True)
+    assert _entry(vault, second, pointer.store) == fresh
+    assert media_allowance.reference_usage(vault).used_bytes == size
+
+
+def test_equal_bytes_filed_while_a_version_is_recorded_damaged_get_a_version_of_their_own(
+        vault: Path, selected_store) -> None:
+    """Reusing it would bind the new filing to bytes that a finding condemned, and eviction could then drop its only good copy."""
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")  # the store's HEAD still answers well: nothing else says so
+    second = _preserved(vault, category="second")
+
+    fresh = _offload(vault, second)
+
+    assert fresh.object != pointer.object
+    assert media_store.check_replica(vault, fresh) is None
+    media_store.forget_original(vault, first)  # the filing that held the finding is gone; the finding is not
+    assert media_replicas.has_quarantined(vault, (pointer,))
+
+
+def test_the_filing_that_skipped_a_damaged_version_is_where_the_filings_that_hold_it_look_for_a_copy(
+        vault: Path, selected_store) -> None:
+    """Without it each filing that still lists the damaged version would upload its own copy of the same bytes."""
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+    second = _preserved(vault, category="second")
+    fresh = _offload(vault, second)
+
+    media_store.recopy(vault, first, pointer.store)
+
+    assert _entry(vault, first, pointer.store) == fresh
+
+
+def test_offload_that_finds_the_version_it_would_reuse_damaged_uploads_its_own_and_records_the_finding(
+        vault: Path, selected_store) -> None:
+    """The finding is made on the way: failing the offload would retry it against the same version for good."""
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    _damage_a_byte(Path(selected_store[0]["root"]) / pointer.object / pointer.version)
+    second = _preserved(vault, category="second")
+
+    fresh = _offload(vault, second)
+
+    assert fresh.object != pointer.object
+    row = _replica_row(vault, store=pointer.store)
+    assert (row["binary_rel"], row["state"], row["failure"]) == (first.relative_to(vault).as_posix(),
+                                                                 media_replicas.QUARANTINED, "digest_mismatch")
+
+
+def test_a_filing_whose_row_was_lost_stays_gated_and_is_quarantined_by_the_next_rebuild(
+        vault: Path, selected_store) -> None:
+    """The record is the version's: a filing that no row lists, or that a rebuild writes late, must not lose it."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("DELETE FROM media_replicas WHERE binary_rel = ?", (second.relative_to(vault).as_posix(),))
+    media_store.recopy(vault, first, pointer.store)  # the one filing that the table lists heals; `second` still lists the version
+
+    assert media_replicas.has_quarantined(vault, (pointer,))
+    media_replicas.rebuild(vault)
+
+    assert (second.relative_to(vault).as_posix(), media_replicas.RECOPY) in _requests(vault)
+    _recopy_all(vault)
+    media_replicas.rebuild(vault)
+    assert _entry(vault, second, pointer.store) == _entry(vault, first, pointer.store)
+    assert not media_replicas.has_quarantined(vault, (pointer,))  # nothing lists it any more
+
+
 def test_a_copy_again_that_stops_after_its_first_filing_keeps_the_other_quarantined_and_ends_an_active_census(
         vault: Path, selected_store) -> None:
     """The record of the damage must outlive the copy that found it, and a batch's census must see the new version."""
@@ -1704,14 +1784,15 @@ def test_a_copy_again_does_not_reuse_a_replacement_that_no_live_filing_confirms(
     media_store.recopy(vault, first, pointer.store)
     replacement = _entry(vault, first, pointer.store)
     if deleted:
-        media_store.forget_original(vault, first)
-    head = media_store.FilesystemStore.head
+        media_store.forget_original(vault, first)  # alone: the store still holds the version, and answers well
+    else:
+        head = media_store.FilesystemStore.head
 
-    def condemned_replacement(self, name: str, version: str):
-        found = head(self, name, version)
-        return found if found is None or name != replacement.object else dataclasses.replace(found, condemned=True)
+        def condemned_replacement(self, name: str, version: str):
+            found = head(self, name, version)
+            return found if found is None or name != replacement.object else dataclasses.replace(found, condemned=True)
 
-    monkeypatch.setattr(media_store.FilesystemStore, "head", condemned_replacement)
+        monkeypatch.setattr(media_store.FilesystemStore, "head", condemned_replacement)
 
     media_store.recopy(vault, second, pointer.store)
 
@@ -1726,8 +1807,7 @@ def test_a_copy_again_does_not_reuse_the_version_of_a_filing_that_holds_other_by
     first, second, pointer = _two_filings_of_one_version(vault, selected_store)
     stranger = _filed(vault, 1)[0]
     stranger_pointer = _offload(vault, stranger)
-    media_replicas.quarantine_holders(vault, first.relative_to(vault).as_posix(), pointer)
-    media_replicas.note_repair(vault, stranger.relative_to(vault).as_posix(), pointer)
+    media_replicas.note_repair(vault, stranger.relative_to(vault).as_posix(), [pointer])
 
     media_store.recopy(vault, second, pointer.store)
 
@@ -1754,6 +1834,36 @@ def test_a_copy_again_stops_when_the_filing_of_the_replacement_changes_before_it
 
     assert stopped.value.code == media_store.STORE_BUSY_CODE
     assert _entry(vault, second, pointer.store) == pointer
+
+
+def test_a_reuse_that_stops_after_it_protected_the_replacement_publishes_nothing_and_leaves_no_hold_on_it(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A hold on a version that no sidecar of this filing names would keep it from being collected once its filing is gone."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    media_store.recopy(vault, first, pointer.store)
+    replacement = _entry(vault, first, pointer.store)
+    confirmed = media_store._confirmed
+    asked: list[object] = []
+
+    def filing_deleted_after_the_hold_was_taken(backend, reference):
+        found = confirmed(backend, reference)
+        if reference == replacement:
+            asked.append(reference)
+            if len(asked) == 2:  # the first answer picks the replacement; the second comes after the hold, before the write
+                media_store.forget_original(vault, first)
+        return found
+
+    monkeypatch.setattr(media_store, "_confirmed", filing_deleted_after_the_hold_was_taken)
+
+    with pytest.raises(media_store.MediaStoreError) as stopped:
+        media_store.recopy(vault, second, pointer.store)
+
+    assert stopped.value.code == media_store.STORE_BUSY_CODE
+    assert _entry(vault, second, pointer.store) == pointer
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        held = ledger.execute("SELECT 1 FROM media_protections WHERE binary_rel = ? AND object = ?",
+                              (second.relative_to(vault).as_posix(), replacement.object)).fetchall()
+    assert held == []
 
 
 # --- verify-stored-replicas: what the owner sees ----------------------------------------------------------

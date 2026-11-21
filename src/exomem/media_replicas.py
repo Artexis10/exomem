@@ -111,9 +111,6 @@ _ADDED_COLUMNS = (
     # because a failed attempt proves nothing and must not read as a proof.
     ("check_from", "REAL NOT NULL DEFAULT 0"),
     ("sample_from", "REAL NOT NULL DEFAULT 0"),
-    # For a quarantined row: the original that last published a new version in place of this row's, where a copy again of
-    # this row looks for it (`note_repair`). A reader re-reads that original's binding and trusts nothing recorded here.
-    ("repair_via", "TEXT"),
 )
 _STATUS_INDEX_COLUMNS = ("store", "key_version", "state", "level", "verified_at", "checked_at", "decrypted_at",
                          "sample_month")
@@ -156,11 +153,17 @@ def initialize(conn: sqlite3.Connection) -> None:
     # The quarantined rows, which the findings list reads in path order.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_findings ON media_replicas(binary_rel, store) "
                  f"WHERE state = '{QUARANTINED}'")
-    # The same rows by the stored version, which eviction asks about before it drops an original's local bytes.
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_damaged ON media_replicas(object, version) "
-                 f"WHERE state = '{QUARANTINED}'")
-    # The filings that list one stored version, which a copy again quarantines together (`quarantine_holders`).
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version)")
+    # The filings that list one stored version and are not quarantined, which a finding quarantines together
+    # (`_quarantine_listing`). A quarantined filing is not in it, so a version that every filing already holds as damaged
+    # costs nothing to find again.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version) "
+                 f"WHERE state <> '{QUARANTINED}'")
+    # A stored version that a check, a sample or eviction found damaged, whichever filings list it: what eviction asks
+    # before it drops an original's local bytes. Damage is a fact of the version, so it outlives any filing's row: a row
+    # that a rebuild writes late, or that a lost write never made, is gated by it and quarantined by `rebuild`.
+    conn.execute("CREATE TABLE IF NOT EXISTS media_damaged_versions ("
+                 "store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, level TEXT NOT NULL, "
+                 "failure TEXT NOT NULL, repair_via TEXT, PRIMARY KEY (store, object, version)) WITHOUT ROWID")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
     if existed is None or healed:
@@ -230,7 +233,7 @@ def _upsert(seen: str) -> str:
             "ELSE excluded.verified_at END, "
             + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
             + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0") + ", "
-            + keep("check_from", "0") + ", " + keep("sample_from", "0") + ", " + keep("repair_via", "NULL"))
+            + keep("check_from", "0") + ", " + keep("sample_from", "0"))
 
 
 #: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
@@ -251,16 +254,25 @@ def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *,
     quarantine_all(vault, [binary_rel], replica, level=level, failure=failure)
 
 
+#: A request that is made again: pending, with no attempt spent and a new token.
+_RENEW = "state = excluded.state, kind = excluded.kind, code = NULL, attempts = 0, retry_at = 0, token = excluded.token"
+
+
 def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.StoredObject, *, level: str,
                    failure: str) -> None:
-    """Mark `replica` quarantined for each of these originals, in one transaction: the filings that share one version.
+    """Mark `replica` quarantined for each of these originals, in one transaction, and record the version as damaged.
 
-    A row is written first when the table does not know the store's replica (a publication whose write was lost), so
-    a finding is never dropped for want of a row. A row that names another version is left alone: it is a newer
-    replica, not the one that failed. The same write queues the new copy that the worker makes.
+    The finding is about the stored version, so it also quarantines every other filing that lists it: filings of equal
+    bytes share one version, and each needs its own copy again. A row is written first when the table does not know
+    the store's replica (a publication whose write was lost), so a finding is never dropped for want of a row. A row that
+    names another version is left alone: it is a newer replica, not the one that failed. The same write queues the new
+    copy that the worker makes.
     """
     now, changed = time.time(), False
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure) VALUES (?, ?, ?, ?, ?) "
+                     "ON CONFLICT(store, object, version) DO UPDATE SET level = excluded.level, failure = excluded.failure",
+                     (replica.store, replica.object, replica.version, level, failure))
         for binary_rel in binary_rels:
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
                          "state, seen) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM media_replica_generation "
@@ -274,78 +286,77 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
                      replica.version)).rowcount:
                 conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
                              "VALUES (?, ?, ?, ?, random()) "
-                             "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
-                             "code = NULL, attempts = 0, retry_at = 0, token = excluded.token",
+                             f"ON CONFLICT(store, binary_rel) DO UPDATE SET {_RENEW}",
                              (replica.store, binary_rel, PENDING, RECOPY))
                 changed = True
+        changed |= _quarantine_listing(conn, now, replica)
     if changed:
         wake()
 
 
-#: The rows that list one stored version in one store, bar the owner's and those already quarantined: `media_replicas_held`.
-_SHARING = "WHERE object = ? AND version = ? AND store = ? AND binary_rel <> ? AND state <> ?"
+def _quarantine_listing(conn: sqlite3.Connection, now: float, only: originals.StoredObject | None = None) -> bool:
+    """Quarantine each filing that lists a damaged version and is not quarantined yet, and queue its copy again.
 
-
-def quarantine_holders(vault: Path, owner: str, replica: originals.StoredObject) -> None:
-    """Quarantine every other filing that lists `replica` with the owner's finding, and queue each one's copy again.
-
-    Filings of equal bytes share one stored version, so the damage is theirs too. Recording it before the owner's copy
-    publishes keeps eviction's gate, the status and a queued request for each of them across a busy boundary, a restart
-    and a rebuild. It is two statements in one transaction, each one indexed read of the filings that share the version.
-    A filing that is already quarantined keeps its own request; one that the table does not list is found by its own check.
+    The version is `only`, or any in `media_damaged_versions`. Two statements whose reads are indexed: the filings of one
+    version in `media_replicas_held` (they state the index's condition), and, for every version, the damaged table.
+    A filing that is already quarantined keeps its own request. Returns whether a filing changed.
     """
-    now = time.time()
-    held = (replica.object, replica.version, replica.store, owner, QUARANTINED)
+    version = ""
+    parameters: tuple[str, ...] = ()
+    if only is not None:
+        version, parameters = " WHERE object = ? AND version = ? AND store = ?", (only.object, only.version, only.store)
+    damaged = f"(object, version, store) IN (SELECT object, version, store FROM media_damaged_versions{version})"
+
+    def found(column: str) -> str:
+        return (f"(SELECT d.{column} FROM media_damaged_versions AS d WHERE d.object = media_replicas.object "
+                "AND d.version = media_replicas.version AND d.store = media_replicas.store)")
+
+    conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
+                 f"SELECT store, binary_rel, ?, ?, random() FROM media_replicas WHERE state <> '{QUARANTINED}' "
+                 f"AND {damaged} ON CONFLICT(store, binary_rel) DO UPDATE SET {_RENEW}", (PENDING, RECOPY, *parameters))
+    return bool(conn.execute(
+        f"UPDATE media_replicas SET state = '{QUARANTINED}', level = {found('level')}, failure = {found('failure')}, "
+        f"checked_at = ?, sample_from = ? WHERE state <> '{QUARANTINED}' AND {damaged}",
+        (now, now, *parameters)).rowcount)
+
+
+def note_repair(vault: Path, owner: str, replicas: Iterable[originals.StoredObject]) -> None:
+    """Name `owner` as the original that published a new version for each of these damaged versions."""
+    triples = json.dumps(sorted({(replica.store, replica.object, replica.version) for replica in replicas}))
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        found = conn.execute(
-            "SELECT level, failure FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
-            "AND state = ?", (owner, replica.store, replica.object, replica.version, QUARANTINED)).fetchone()
-        if found is None:
-            return
-        conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
-                     f"SELECT store, binary_rel, ?, ?, random() FROM media_replicas {_SHARING} "
-                     "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
-                     "code = NULL, attempts = 0, retry_at = 0, token = excluded.token", (PENDING, RECOPY, *held))
-        conn.execute("UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
-                     f"{_SHARING}", (QUARANTINED, found["level"], found["failure"], now, now, *held))
+        conn.execute("UPDATE media_damaged_versions SET repair_via = ? WHERE (store, object, version) IN "
+                     "(SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') "
+                     "FROM json_each(?))", (owner, triples))
 
 
-def note_repair(vault: Path, owner: str, replica: originals.StoredObject) -> None:
-    """Name `owner` as the original that published a new version for `replica`, on every filing still quarantined for it."""
-    with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute(f"UPDATE media_replicas SET repair_via = ? WHERE state = '{QUARANTINED}' AND object = ? "
-                     "AND version = ? AND store = ?", (owner, replica.object, replica.version, replica.store))
-
-
-def repaired_via(vault: Path, binary_rel: str, replica: originals.StoredObject) -> str | None:
-    """The original that a quarantined entry of this filing was last replaced through, or None when none is named."""
+def repaired_via(vault: Path, replica: originals.StoredObject) -> str | None:
+    """The original that last published a new version for the damaged `replica`, or None when none is named."""
     with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
-        row = conn.execute("SELECT repair_via FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? "
-                           "AND version = ? AND state = ?",
-                           (binary_rel, replica.store, replica.object, replica.version, QUARANTINED)).fetchone()
+        row = conn.execute("SELECT repair_via FROM media_damaged_versions WHERE store = ? AND object = ? AND version = ?",
+                           (replica.store, replica.object, replica.version)).fetchone()
     return None if row is None else row[0]
 
 
-#: Whether any of the (object, version) pairs of one JSON array is quarantined: a probe of `media_replicas_damaged`, which
-#: holds only quarantined rows, for each pair, and no scan of the table. The pairs travel as one value, so the statement
-#: is the same for one pair and for thousands. SQLite uses a partial index only when the query states its condition.
-_DAMAGED = ("SELECT 1 FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_replicas "
-            f"WHERE state = '{QUARANTINED}' AND object = json_extract(wanted.value, '$[0]') "
-            "AND version = json_extract(wanted.value, '$[1]')) LIMIT 1")
+#: Whether any of the (store, object, version) triples of one JSON array is damaged: a primary-key probe of
+#: `media_damaged_versions` for each, and no scan. The triples travel as one value, so the statement is the same for one
+#: and for thousands.
+_DAMAGED = ("SELECT 1 FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_damaged_versions "
+            "WHERE store = json_extract(wanted.value, '$[0]') AND object = json_extract(wanted.value, '$[1]') "
+            "AND version = json_extract(wanted.value, '$[2]')) LIMIT 1")
 
 
 def quarantined_in(conn: sqlite3.Connection, references: Iterable[originals.StoredObject]) -> bool:
-    """Whether the table holds any of these stored versions as quarantined, read on `conn`'s own transaction.
+    """Whether the table holds any of these stored versions as damaged, read on `conn`'s own transaction.
 
     One statement however many versions: the pointers that a pooled object collects grow with its filings and its
     re-copies, and a lookup for each would run inside eviction's write transaction.
     """
-    pairs = sorted({(reference.object, reference.version) for reference in references})
-    return bool(pairs) and conn.execute(_DAMAGED, (json.dumps(pairs),)).fetchone() is not None
+    triples = sorted({(reference.store, reference.object, reference.version) for reference in references})
+    return bool(triples) and conn.execute(_DAMAGED, (json.dumps(triples),)).fetchone() is not None
 
 
 def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:
-    """Whether the table holds any of these stored versions as quarantined: what eviction asks before it trusts a pointer."""
+    """Whether the table holds any of these stored versions as damaged: what eviction asks before it trusts a pointer."""
     with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
         return quarantined_in(conn, references)
 
@@ -413,6 +424,11 @@ def rebuild(vault: Path) -> int:
     flush()
     with closing(ledger._connect()) as conn, conn:
         conn.execute("DELETE FROM media_replicas WHERE seen < ?", (generation,))
+        # A filing that the walk wrote as sound but lists a damaged version is quarantined with it; a damaged version that
+        # no filing lists any more is forgotten, now that every row of a binding exists.
+        _quarantine_listing(conn, time.time())
+        conn.execute("DELETE FROM media_damaged_versions WHERE (object, version, store) NOT IN "
+                     f"(SELECT object, version, store FROM media_replicas WHERE state = '{QUARANTINED}')")
         conn.execute("DELETE FROM media_replica_store_totals")
         conn.executemany("INSERT INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
                          [(store, held[0], held[1]) for store, held in totals.items()])
@@ -1455,6 +1471,10 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         if released:
             conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND token = ?",
                          (row["store"], row["binary_rel"], row["token"]))
+            # The ciphertext decrypted to the binding, so the version is no damage for any filing of equal bytes; the
+            # others that still hold it quarantined are released by their own samples.
+            conn.execute("DELETE FROM media_damaged_versions WHERE store = ? AND object = ? AND version = ? AND failure = ?",
+                         (row["store"], replica.object, replica.version, PLAINTEXT_MISMATCH))
 
 
 def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
