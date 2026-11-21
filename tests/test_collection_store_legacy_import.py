@@ -929,7 +929,7 @@ def test_changed_source_during_mapping_and_corrupt_stored_body_roll_back(tmp_pat
             with _connection() as conn:
                 if failure == "stored-body":
                     conn.execute(
-                        "CREATE TEMP TRIGGER changed_body AFTER INSERT ON items BEGIN UPDATE items SET body='corrupt' WHERE row_id=NEW.row_id; END"
+                        "CREATE TEMP TRIGGER changed_body AFTER INSERT ON item_rows BEGIN UPDATE item_rows SET body='corrupt' WHERE row_id=NEW.row_id; END"
                     )
                     expected = r"check\(c\).*payload_hash"
                 else:
@@ -941,7 +941,7 @@ def test_changed_source_during_mapping_and_corrupt_stored_body_roll_back(tmp_pat
 
                     conn.create_function("edit_source", 0, edit_source)
                     conn.execute(
-                        "CREATE TEMP TRIGGER changed_source AFTER INSERT ON items BEGIN SELECT edit_source(); END"
+                        "CREATE TEMP TRIGGER changed_source AFTER INSERT ON item_rows BEGIN SELECT edit_source(); END"
                     )
                     expected = "SOURCE_CHANGED"
                 with pytest.raises(CollectionStoreError, match=expected):
@@ -971,9 +971,9 @@ def test_missing_checkpoint_cannot_receive_verified_watermark(tmp_path):
 @pytest.mark.parametrize(
     "check, corruption",
     [
-        ("a", "CREATE TEMP TRIGGER renamed_row AFTER INSERT ON items BEGIN UPDATE items "
+        ("a", "CREATE TEMP TRIGGER renamed_row AFTER INSERT ON item_rows BEGIN UPDATE item_rows "
               "SET item_key='renamed-' || item_key WHERE row_id=NEW.row_id; END"),
-        ("b", "CREATE TEMP TRIGGER corrupt_key AFTER INSERT ON items BEGIN UPDATE items "
+        ("b", "CREATE TEMP TRIGGER corrupt_key AFTER INSERT ON item_rows BEGIN UPDATE item_rows "
               "SET natural_key='corrupt' WHERE row_id=NEW.row_id; END"),
         ("e", "CREATE TEMP TRIGGER lost_manifest BEFORE INSERT ON collection_manifests "
               "BEGIN SELECT RAISE(IGNORE); END"),

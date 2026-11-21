@@ -1272,7 +1272,7 @@ class TestCaptureReminderLandingGate:
         assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Saved to lease-summary.md", failed)) is None
 
     def test_the_file_name_must_stand_as_a_whole_token_in_the_reply(self) -> None:
-        write = {"name": "Write", "input": {"file_path": "C:\\work\\a.md"}, "failed": False}
+        write = {"name": "Write", "input": {"file_path": "notes\\a.md"}, "failed": False}
         assert hook._handed_over_file([write], "The summary is in a.md.")
         assert not hook._handed_over_file([write], "The summary is in data.md.")
         assert not hook._handed_over_file([{**write, "input": {"file_path": "/work/dir/"}}], "Done.")

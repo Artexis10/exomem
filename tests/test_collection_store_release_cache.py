@@ -198,7 +198,7 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, tmp_path,
 
     def interleave(current=None, manifest=None):
         conn = current.connection if current is not None else store.connection
-        conn.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+        conn.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                      ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
         if before_authorization:
             original(current, manifest)
@@ -253,7 +253,7 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
         assert KEY not in rendered()
         store.connection.execute("BEGIN")
         try:
-            store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+            store.connection.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                                      ('{"classes":[],"projects":[],"tags":[]}', KEY))
             assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
             assert KEY in rendered()
@@ -491,7 +491,7 @@ def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
     before["observed_values"]["title"]["values"][0]["value"] = "Caller mutation"
     assert store.inspect_collection(CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
     # Trusted SQL is deliberately unexplained, even though its version/hash did not move.
-    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
+    store.connection.execute("UPDATE item_rows SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
     current = store.inspect_collection(CID)
     assert current["observed_values"]["title"]["values"][0]["value"] == "Changed"
     cache = store.handle.release_cache.inspections
@@ -627,17 +627,17 @@ def test_unknown_sql_rebuilds_portable_filename_occupancy_with_duplicate_keys(st
     store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="capture")
     source = "Knowledge Base/Records/Work/Items"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
     # Updating one unchanged path must retain the other portable-equivalent occupant.
     guards = store.inspect_collection(CID)["lifecycle_guards"]
     store.update_record(CID, item_key=KEY, changes={"count": 10},
                         expected_container_hash=guards["expected_container_hash"],
                         expected_item_version=first["after_item_hash"], why="correct")
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
     remaining = store.append_record(CID, item={"title": "Strasse", "count": 3}, why="capture")
     assert remaining["affected_paths"][0] != f"{source}/Strasse.md"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
     freed = store.append_record(CID, item={"title": "Strasse", "count": 4}, why="capture")
     assert freed["affected_paths"] == [f"{source}/Strasse.md"]

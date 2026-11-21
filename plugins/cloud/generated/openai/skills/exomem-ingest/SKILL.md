@@ -2,7 +2,7 @@
 name: exomem-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: cd835ee022b570c09f89b365d23f47f197f8eb07e31c5db4c54728d8c419d5ad
+  skill_contract: 8e0d59a092261ab6abbed1e11b0892d05cfab1446a0b2933f5c87386866fbb26
   version: "0.1.0"
 ---
 

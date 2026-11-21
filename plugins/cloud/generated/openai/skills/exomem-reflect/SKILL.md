@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: cd835ee022b570c09f89b365d23f47f197f8eb07e31c5db4c54728d8c419d5ad
+  skill_contract: 8e0d59a092261ab6abbed1e11b0892d05cfab1446a0b2933f5c87386866fbb26
   version: "0.1.0"
 ---
 
@@ -74,7 +74,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 
 ## Workflow
 1. Search Exomem with `search_memory` for the project/topic so reflection builds on existing memory.
-2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, open questions, and next actions.
+2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views (attributed, with their uncertainty, not as fact), open questions (not a person's unsure report of an event), settled values (in full, not file pointers), and next actions.
 3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
 5. Link the pages you already read in step 1 inline, using `inspect_memory(operation="connections.suggest_links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `create_note`, carrying the sources and accepted links in the first write.

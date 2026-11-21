@@ -55,6 +55,7 @@ def record_memory(
         "append",
         "bulk_upsert",
         "update",
+        "retract",
         "revise",
         "rebaseline",
         "discard",
@@ -100,7 +101,7 @@ def record_memory(
     query: dict[str, Any] | None = None,
     item_id: str | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, bulk_upsert, update, revise, rebaseline, discard or import Records.
+    """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
@@ -108,7 +109,7 @@ def record_memory(
 
     Args:
         action: describe, validate, inspect, create, query, append, bulk_upsert, update,
-            revise, rebaseline, or discard.
+            retract, revise, rebaseline, or discard.
         collection: Vault-relative manifest path, collection UUID or memory reference.
             Omit for inventory inspect; required for targeted reads and writes.
         manifest_path: Proposed manifest path for validate or create.
@@ -160,14 +161,19 @@ def record_memory(
         query: query only, for a store-routed collection: a typed v1 query object
             instead of the legacy shaping arguments; store-mode `describe` names its
             grammar route.
-        item_id: update only: the row `id` a query returned. It stands for item_key,
+        item_id: update or retract only: the row `id` a query returned. It stands for item_key,
             expected_item_version and expected_container_hash, which the call reads under
             the writer lease. A stale id is refused with the current one.
+
+    retract takes one row out of current state with a required why. Its history stays, and
+    appending the same natural key later brings the row back. A store-routed collection
+    without one view file per row takes it; any other refuses RETRACT_UNAVAILABLE.
     """
     collection = collection_refs.resolve_collection(vault_root, collection, profile="records")
     if item_id is not None:
-        if action != "update" or any(v is not None for v in (item_key, expected_container_hash, expected_item_version)):
-            _invalid_arguments("item_id applies to update and replaces item_key and both guards")
+        if action not in {"update", "retract"} or any(
+                v is not None for v in (item_key, expected_container_hash, expected_item_version)):
+            _invalid_arguments("item_id applies to update or retract and replaces item_key and both guards")
         from .collection_store import preview
 
         bound = preview.bind_row(vault_root, str(collection), item_id) or collection_refs.bind_item(
@@ -217,8 +223,8 @@ def record_memory(
         "query": query,
     }
     _validate_arguments(action, values)
-    if action == "update" and None in (item_key, expected_container_hash, expected_item_version):
-        _invalid_arguments("update requires item_id, or item_key with expected_container_hash and expected_item_version")
+    if action in {"update", "retract"} and None in (item_key, expected_container_hash, expected_item_version):
+        _invalid_arguments(f"{action} requires item_id, or item_key with expected_container_hash and expected_item_version")
     from .query_engine.errors import QueryError
 
     try:
@@ -227,7 +233,7 @@ def record_memory(
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
-        if action == "import" or query is not None or (action == "query" and item_key is not None):
+        if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
             # Resolve under the caller's authority first: an absent or withheld selector
             # answers exactly as a sealed store-routed collection does, so the refusal
             # below never confirms that a collection exists.
@@ -236,6 +242,10 @@ def record_memory(
             if action == "import":
                 raise CollectionError(
                     "IMPORT_UNAVAILABLE", "import runs only for a store-routed Records collection"
+                )
+            if action == "retract":
+                raise CollectionError(
+                    "RETRACT_UNAVAILABLE", "retract runs only for a store-routed Records collection"
                 )
             if query is None:
                 raise CollectionError(

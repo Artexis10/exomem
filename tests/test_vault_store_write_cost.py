@@ -27,7 +27,7 @@ from test_vault_store_readers import EXTERNAL, restrict_external
 
 from exomem import commands, entity_recurrence, semantic_contract
 from exomem import vault as vault_module
-from exomem.collection_store import connection
+from exomem.collection_store import connection, runtime
 from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import egress, policy, receipts
@@ -208,6 +208,9 @@ def test_a_store_writes_decisions_do_not_grow_with_the_pages_under_one_policy_lo
     flat, and the corpus admission boundary, which no receipt is emitted from, records none.
     """
     grow(writer, 1, 24, on_disk=served)
+    # Migration leaves a retired runtime weakly registered until cyclic GC runs. This fixture
+    # binds a private writer, so measure with no serving runtime at either size.
+    runtime._SERVING.pop(served, None)
     # The first write of a process loads what the later writes reuse.
     edit(served, create(served, "Warm-up"))
     counts = Counts(monkeypatch, writer)
