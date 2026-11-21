@@ -1326,6 +1326,7 @@ class FileWatcher:
         self._kb_root = managed_root(vault_root)
         self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
@@ -2863,6 +2864,10 @@ class FileWatcher:
 
     def start(self) -> bool:
         """Start observation, or reconcile-only polling when watchdog is absent."""
+        with self._lifecycle_lock:
+            return self._start()
+
+    def _start(self) -> bool:
         observer_alive = getattr(self._observer, "is_alive", None)
         if (observer_alive is not None and observer_alive()) or any(
             worker is not None and worker.is_alive() for worker in (self._thread, self._reconcile_thread)
@@ -2992,6 +2997,10 @@ class FileWatcher:
         return True
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._stop_workers()
+
+    def _stop_workers(self) -> None:
         self._stop.set()
         self._raw_witness.withdraw(stopped=True)
         self._wake.set()

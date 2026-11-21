@@ -190,7 +190,7 @@ def test_a_stopped_watchers_preview_fallback_builds_once_from_disk(
         assert referrer in first.result(timeout=5).rewritten
 
 
-@pytest.mark.parametrize("fault", ["unreadable", "changed", "new-checkpoint", "interrupted"])
+@pytest.mark.parametrize("fault", ["unreadable", "changed", "unchanged-metadata", "new-checkpoint", "interrupted"])
 def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schema, monkeypatch, fault):
     from exomem import freshness, request_budget
     from exomem import vault as vault_module
@@ -202,6 +202,8 @@ def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schem
     linked = f"# Sampling\n\n[[{source}]]\n"
     referrer.write_text(linked, encoding="utf-8")
     read_text = vault_module.read_guarded_text
+    signature = freshness.stat_signature(referrer)
+    stat_signature = freshness.stat_signature
 
     def unstable_read(root, path):
         text, guard = read_text(root, path)
@@ -210,6 +212,8 @@ def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schem
                 raise PermissionError("temporarily unreadable")
             if fault == "changed":
                 referrer.write_text("# Sampling changed\n", encoding="utf-8")
+            if fault == "unchanged-metadata":
+                referrer.write_text(" " * len(linked), encoding="utf-8")
             if fault == "new-checkpoint":
                 freshness.on_files_changed(vault, changed=[referrer])
             if fault == "interrupted":
@@ -218,6 +222,9 @@ def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schem
 
     if fault == "new-checkpoint":
         freshness.seed(vault, "vault", [])
+    if fault == "unchanged-metadata":
+        monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False)
+        monkeypatch.setattr(freshness, "stat_signature", lambda path: signature if path == referrer else stat_signature(path))
     with request_scope(owner_principal(surface="mcp")):
         monkeypatch.setattr(vault_module, "read_guarded_text", unstable_read)
         with pytest.raises(OpError) as retry:
@@ -253,7 +260,7 @@ def test_polling_watcher_does_not_serve_stale_preview_between_sweeps(vault, sour
         watcher.stop()
 
 
-@pytest.mark.parametrize("gap", ["external-pending", "new-seed"])
+@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "pending-during-scheduling"])
 def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
     from exomem import find, freshness
     from exomem import vault as vault_module
@@ -268,8 +275,16 @@ def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source
     assert vault_module.prime_inbound_index(vault, eager=True)
     if gap == "external-pending":
         freshness.mark_external_pending(vault)
-    else:
+    elif gap == "new-seed":
         freshness.seed(vault, "vault", entries)
+    else:
+        vault_module.evict_inbound_index(vault)
+
+        def decline_after_event(root):
+            freshness.mark_external_pending(root)
+            return False
+
+        monkeypatch.setattr(find, "schedule_inbound_rebuild", decline_after_event)
 
     builds = []
     original_build = vault_module._build_inbound_index
@@ -283,7 +298,7 @@ def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source
         rc.propose(vault, source, source_kind="dataset-export")
     assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
     assert find.await_recall_resolver_warm()
-    assert builds == ([] if gap == "external-pending" else ["exomem-inbound-index-warm"])
+    assert builds == (["exomem-inbound-index-warm"] if gap == "new-seed" else [])
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,7 @@ from .kbdir import (
 from .log_events import log_event
 
 if TYPE_CHECKING:
+    from .governance.egress import ReaderView
     from .graph_sync import GraphSyncCheckpoint
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
@@ -8501,6 +8502,7 @@ def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = Non
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
     for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root) if paths is None else paths):
+        request_budget.checkpoint()
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -8534,10 +8536,11 @@ def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = Non
 
 
 def checked_disk_inbound_wikilinks(
-    vault_root: Path, target_rel_path: str, *, visible: Callable[[str], bool] | None,
+    vault_root: Path, target_rel_path: str, *, visible: ReaderView | None,
 ) -> list[InboundLink] | None:
     """Read literal links from a stable disk scan without publishing the result to the cache."""
     from . import foreground_priority
+    from .governance import egress
 
     def inventory() -> dict[Path, freshness.FileSignature]:
         return {path: freshness.stat_signature(path) for path in walk_vault_md(vault_root, strict=True)}
@@ -8551,20 +8554,46 @@ def checked_disk_inbound_wikilinks(
     with inbound_build_slot(vault_root) as acquired:
         if not acquired:
             return None
-        budget = request_budget.current()
-        check = request_budget.current_checkpoint() or (request_budget.ReadCheckpoint(budget) if budget else None)
+        # REST has no origin context. Give its disk work the same configured allowance as MCP.
+        budget = request_budget.current() or request_budget.RequestBudget(seconds=request_budget.budget_seconds())
+        check = request_budget.current_checkpoint() or request_budget.ReadCheckpoint(budget)
         try:
             with request_budget.checking(check):
                 start = epoch()
+                if start[2] is not None and inbound_recovery_stop(vault_root, observing=True) is not None:
+                    return None  # defer to a watcher that observed a change after the scheduling decision
+                started_ns = time.time_ns()
                 before = inventory()
                 data = _build_inbound_index(vault_root, paths=before)
-                if len(data.sources) != len(before):
-                    return None
-                snapshot = _snapshot_inbound(data, target_rel_path)
-                result = _select_inbound_wikilinks(snapshot, target_rel_path, visible)
                 after = inventory()
+                unproven = {
+                    relative_posix(path, vault_root) for path in before.keys() | after.keys()
+                    if before.get(path) != after.get(path) or relative_posix(path, vault_root) not in data.sources
+                }
+                for path, (mtime, ctime, size) in before.items():
+                    rel = relative_posix(path, vault_root)
+                    if rel in unproven or (STAT_GENERATION_TRUSTED and started_ns - max(mtime, ctime) > GENERATION_RACY_WINDOW_NS):
+                        continue
+                    request_budget.checkpoint()
+                    try:
+                        read_bounded_guarded_bytes(vault_root, rel, limit=size, expected_hash=data.sources[rel])
+                    except PathGuardError:
+                        unproven.add(rel)
+                keep: Callable[[str], bool] | None = visible
+                if unproven:
+                    if visible is None or visible.possibly_visible_without_bytes(unproven):
+                        return None
+                    if not egress.pin_proven_withheld(frozenset(unproven)):
+                        return None
+
+                    def proven_visible(path: str) -> bool:
+                        return path not in unproven and visible(path)
+
+                    keep = proven_visible
+                snapshot = _snapshot_inbound(data, target_rel_path)
+                result = _select_inbound_wikilinks(snapshot, target_rel_path, keep)
                 request_budget.checkpoint()
-                if before == after and start == epoch():
+                if start == epoch():
                     return result
         except (OSError, request_budget.ReadBudgetExhausted, foreground_priority.BulkCancelled):
             return None

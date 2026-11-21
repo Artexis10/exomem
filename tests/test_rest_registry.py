@@ -117,6 +117,39 @@ def _auth() -> dict:
     return {"Authorization": "Bearer sekret"}
 
 
+def test_rest_preview_that_exhausts_its_disk_budget_returns_warming(vault, monkeypatch):
+    from exomem import request_budget
+
+    source = "Knowledge Base/Sources/Other/field-samples.md"
+    page = vault / source
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("---\nsource_type: other\n---\n# Field samples\n", encoding="utf-8")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    scans = []
+    read_guarded_text = vault_module.read_guarded_text
+
+    class Budget(request_budget.RequestBudget):
+        def remaining(self):
+            return 0.0 if scans else super().remaining()
+
+    def read_until_expired(root, path):
+        result = read_guarded_text(root, path)
+        scans.append(path)
+        return result
+
+    monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+    monkeypatch.setattr(vault_module, "read_guarded_text", read_until_expired)
+    answer = client.post("/api/manage_memory_file", headers=_auth(), json={
+        "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+    })
+
+    assert answer.status_code == 503, answer.json()
+    assert len(scans) == 1
+    error = answer.json()["error"]
+    assert error["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+    assert error["retry_after_ms"] > 0
+
+
 def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     for name in PRODUCT_ROUTES:

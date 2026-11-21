@@ -1328,6 +1328,37 @@ def test_restart_waits_for_the_previous_run_to_exit(vault):
         watcher.stop()
 
 
+def test_restart_cannot_replace_the_run_that_stop_is_still_cleaning_up(vault, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    watcher = file_watcher.FileWatcher(vault)
+    entered, release = threading.Event(), threading.Event()
+    original = watcher._raw_witness.withdraw
+
+    def hold_shutdown(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(watcher._raw_witness, "withdraw", hold_shutdown)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stopping = pool.submit(watcher.stop)
+            assert entered.wait(5)
+            restarting = pool.submit(watcher.start)
+            try:
+                with pytest.raises(TimeoutError):
+                    restarting.result(timeout=0.5)
+            finally:
+                release.set()
+            stopping.result(timeout=5)
+            assert restarting.result(timeout=5)
+        assert watcher.wait_until_seeded(10)
+    finally:
+        watcher.stop()
+
+
 # ---- Self-write suppression (OpenSpec: improve-find-latency-token-cost) ----
 
 

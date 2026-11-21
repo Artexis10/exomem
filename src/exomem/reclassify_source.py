@@ -746,7 +746,7 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
 
 
 def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
-    from . import find, freshness
+    from . import find
     from .cli_ops import OpError
     from .governance.principal import effective_principal
     from .vault_store.mode import store_mode_for_reads
@@ -763,8 +763,7 @@ def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
         if vault.inbound_recovery_stop(vault_root, observing=True) is owner:
             if inbound is not None:
                 return inbound
-            # A live observer settles its debounce batch without a request-owned walk.
-            recovering = freshness.external_pending(vault_root) or find.schedule_inbound_rebuild(vault_root)
+            recovering = find.schedule_inbound_rebuild(vault_root)
     if not recovering:
         inbound = vault.checked_disk_inbound_wikilinks(vault_root, rel, visible=reader)
         if inbound is not None:

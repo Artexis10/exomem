@@ -153,6 +153,27 @@ def test_a_withheld_referrer_does_not_delay_reclassification_preview(
     assert preview["preview_digest"]
 
 
+def test_unreadable_withheld_referrer_does_not_change_disk_preview(served, monkeypatch):
+    source = "Knowledge Base/Sources/Other/coverage-source.md"
+    _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
+    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
+    owner = vault_module.inbound_recovery_stop(served)
+    assert owner is not None
+    owner.set()
+    read_guarded_text = vault_module.read_guarded_text
+
+    def read_visible(root, path):
+        if path == served / HIDDEN:
+            raise PermissionError("this withheld page is unreadable")
+        return read_guarded_text(root, path)
+
+    with request_scope(replace(_external(), administrative_ingress=True)):
+        arguments = {"path": source, "source_kind": "dataset-export"}
+        before = commands.op_propose_reclassification(served, **arguments)
+        monkeypatch.setattr(vault_module, "read_guarded_text", read_visible)
+        assert commands.op_propose_reclassification(served, **arguments) == before
+
+
 def test_a_withheld_write_leaves_the_restricted_pack_complete(served: Path) -> None:
     before = _pack_truncation(served, restricted=True)
     assert before == ([BACKLINKER, OUTLINKED], [])

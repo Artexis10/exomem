@@ -8663,12 +8663,13 @@ def schedule_inbound_rebuild(vault_root: Path) -> bool:
     from . import vault as vault_module
 
     stop = vault_module.inbound_recovery_stop(vault_root)
+    if stop is not None and freshness.external_pending(vault_root):
+        return True  # the watcher owns pending events, even if an immediate build must wait
     if (
         stop is None
         or os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM")
         or readiness.is_warming()
         or freshness.generation(vault_root, "vault") is None
-        or freshness.external_pending(vault_root)
     ):
         return False
     if not vault_module.inbound_rebuild_needed(vault_root):
