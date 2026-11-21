@@ -687,7 +687,7 @@ def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class UploadFiles(Wire):
     lane: Literal["source", "evidence", "import"] = Field(
-        description="Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).")
+        description="Original, proof, or a local-only folder archive.")
     expected_sha256: str | None = Field(default=None, description="SHA-256 of the file you intend to send.")
     import_identity: str | None = Field(default=None, description="Durable external ID for a held Source upload.")
     hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
@@ -1033,7 +1033,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           destructive=True,
           captures=True),
     _tool("save_source", "Save source",
-          "Save original material verbatim. Never retype a file: pass attached files in `files`.",
+          "Save originals verbatim. Never retype files. Use `files`.",
           SaveSource, "write", _save_source,
           [Route("capture_source", inverse={"why_captured": "why", "response_detail": "detail"}, bag="options")],
           meta=_FILES_META,
@@ -1052,7 +1052,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("episode_memory", "record"),),
           captures=True),
     _tool("upload_files", "Upload files",
-          "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
+          "Get a one-use upload. Follow the reply, then pass its handle to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
           [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
     _tool("download_files", "Download files",

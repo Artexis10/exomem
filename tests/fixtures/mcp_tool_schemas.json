@@ -1329,7 +1329,7 @@
     }
   },
   "save_source": {
-    "description": "Save original material verbatim. Never retype a file: pass attached files in `files`.",
+    "description": "Save originals verbatim. Never retype files. Use `files`.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -1399,7 +1399,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only."
+          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity."
         },
         "detail": {
           "enum": [
@@ -1566,11 +1566,11 @@
     }
   },
   "upload_files": {
-    "description": "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
+    "description": "Get a one-use upload. Follow the reply, then pass its handle to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).",
+          "description": "Original, proof, or a local-only folder archive.",
           "enum": [
             "source",
             "evidence",
@@ -1581,6 +1581,10 @@
         "expected_sha256": {
           "type": "string",
           "description": "SHA-256 of the file you intend to send."
+        },
+        "import_identity": {
+          "type": "string",
+          "description": "Durable external ID for a held Source upload."
         },
         "hold": {
           "type": "boolean",
