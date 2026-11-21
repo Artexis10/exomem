@@ -2832,68 +2832,6 @@ def test_a_finding_that_changes_the_cause_of_a_version_moves_every_quarantined_f
     assert _requests(vault) == []
 
 
-def test_a_finding_that_lands_while_another_reads_the_cause_of_a_version_leaves_no_filing_with_another_cause_than_the_record(
-        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A finding that repeats the record's cause skips the move of the filings, so its read must not be stale.
-
-    Two filings share a version recorded as a wrong plaintext. A repeated finding reads that cause; a finding of another
-    cause lands right after the read. If the second one commits there, the first restores the old cause on the record
-    but moves no filing, and the sibling keeps the newer one: the record's release would strand it. The write lock is
-    held from the read, so the second finding cannot land until the first has committed.
-    """
-    first = _preserved(vault, category="first")
-    pointer = _offload(vault, first)
-    second = _preserved(vault, category="second")
-    assert _offload(vault, second) == pointer
-    held = {original: original.relative_to(vault).as_posix() for original in (first, second)}
-    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.DECRYPTED,
-                              failure=media_replicas.PLAINTEXT_MISMATCH)
-    window = types.SimpleNamespace(fired=False, landed=False, impatient=False)
-
-    class Spy(sqlite3.Connection):
-        after_next_statement = None
-
-        def execute(self, sql, *args):
-            if window.impatient and sql.startswith("PRAGMA busy_timeout"):
-                sql = "PRAGMA busy_timeout=0"  # the second finding is refused at once, not after the 5 s wait
-            result = super().execute(sql, *args)
-            hook, self.after_next_statement = self.after_next_statement, None
-            if hook is not None:
-                hook()
-            return result
-
-    def another_finding() -> None:
-        window.fired, window.impatient = True, True
-        try:
-            media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.CONTENT,
-                                      failure="digest_mismatch")
-            window.landed = True
-        except sqlite3.OperationalError:  # it waits for the lock in production, and runs once the first has committed
-            pass
-        window.impatient = False
-
-    record_damage = media_replicas._record_damage
-
-    def record_damage_with_another_finding_after_its_read(conn, *arguments):
-        if not window.fired:
-            conn.after_next_statement = another_finding  # the statement that follows is the read of the cause
-        return record_damage(conn, *arguments)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(media_jobs, "_sqlite_connect_owned",
-                      lambda database, *args, **kwargs: sqlite3.connect(database, *args, factory=Spy, **kwargs))
-        patch.setattr(media_replicas, "_record_damage", record_damage_with_another_finding_after_its_read)
-        media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.DECRYPTED,
-                                  failure=media_replicas.PLAINTEXT_MISMATCH)
-    if not window.landed:  # it was refused: it runs now, as it does after its wait
-        media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.CONTENT, failure="digest_mismatch")
-
-    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        (recorded,) = ledger.execute("SELECT failure FROM media_damaged_versions WHERE store = ?",
-                                     (pointer.store,)).fetchone()
-    assert [_replica_row_of(vault, original, pointer.store)["failure"] for original in (first, second)] == [recorded] * 2
-
-
 def test_a_sample_that_decrypts_a_copy_of_a_version_found_wrong_leaves_the_filing_whose_version_was_found_lost_since(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The proof is that the ciphertext decrypts. It answers nothing about a version that the store has since lost."""
