@@ -273,6 +273,9 @@ def stopping_at_budget() -> Iterator[BudgetStop]:
     client has gone, however its code between queries read the empty answer. Opt-in, because only a
     caller with a way to give up (the activation carry) may be handed no answer; with no budget
     bound the scope changes nothing.
+
+    The guard applies once the query has an admitted reader. Opening and pinning file or store
+    snapshots and proving readiness retain their own lock waits and can finish after the deadline.
     """
     stop = BudgetStop()
     token = _STOP_AT_BUDGET.set(stop)
@@ -283,30 +286,10 @@ def stopping_at_budget() -> Iterator[BudgetStop]:
 
 
 class _CatalogueDeadline(Exception):
-    """Unwind a stopped read before returning its typed result."""
+    """Unwind a stopped query before returning its typed result."""
 
     def __init__(self, scope: BudgetStop) -> None:
         scope.hit = True
-
-
-class _CatalogueOpenUnavailable(Exception):
-    def __init__(self, status: Literal["stale", "transient_failure"]) -> None:
-        super().__init__(status)
-        self.status = status
-
-
-def _catalogue_budget() -> request_budget.RequestBudget | None:
-    return request_budget.current() if _STOP_AT_BUDGET.get() is not None else None
-
-
-def _catalogue_budget_expired() -> bool:
-    budget = _catalogue_budget()
-    return budget is not None and budget.remaining() <= 0
-
-
-def _check_catalogue_budget() -> None:
-    if (scope := _STOP_AT_BUDGET.get()) is not None and _catalogue_budget_expired():
-        raise _CatalogueDeadline(scope)
 
 
 _CATALOGUE_PROGRESS: ContextVar[
@@ -314,22 +297,14 @@ _CATALOGUE_PROGRESS: ContextVar[
 ] = ContextVar("catalogue_progress", default=())
 
 
-def _catalogue_schema_read_interrupted(conn: sqlite3.Connection, error: sqlite3.Error) -> bool:
-    """An interrupted opt-in probe must not mistake an unreadable schema for a legacy one."""
-    return any(reader is conn for reader, _ in _CATALOGUE_PROGRESS.get()) and (
-        classify_sqlite_error(error) == "transient"
-    )
-
-
 @contextlib.contextmanager
 def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[None]:
-    """Check SQLite's VM deadline and let lock contention fail this read immediately."""
+    """Check SQLite's VM deadline on a connection the caller has admitted."""
     scope = _STOP_AT_BUDGET.get()
-    budget = request_budget.current() if scope is not None else None
-    if budget is None:
+    if scope is None or (budget := request_budget.current()) is None:
         yield
         return
-    _check_catalogue_budget()
+
     interrupted = False
 
     def check() -> int:
@@ -339,18 +314,23 @@ def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[None]:
         interrupted = scope.hit = True
         return 1
 
+    def require_time() -> None:
+        if interrupted or budget.remaining() <= 0:
+            raise _CatalogueDeadline(scope)
+
+    require_time()
     active = _CATALOGUE_PROGRESS.get()
     previous = next((handler for reader, handler in reversed(active) if reader is conn), None)
     original_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     token = _CATALOGUE_PROGRESS.set((*active, (conn, check)))
     try:
-        # SQLite reapplies a busy timeout to every lock wait. The VM callback
-        # cannot check the deadline during a wait, so budgeted reads never wait.
+        # SQLite starts a fresh busy timeout on every lock wait and does not
+        # call the VM handler while waiting. Fail immediately on contention.
         if original_ms:
             conn.execute("PRAGMA busy_timeout=0")
         conn.set_progress_handler(check, _BUDGET_CHECK_INSTRUCTIONS)
-        _check_catalogue_budget()
         try:
+            require_time()
             yield
         except sqlite3.Error as error:
             code = getattr(error, "sqlite_errorcode", 0) & 0xFF
@@ -359,20 +339,18 @@ def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[None]:
             if code == sqlite3.SQLITE_BUSY and budget.remaining() <= 0:
                 raise _CatalogueDeadline(scope) from error
             raise
-        # A small statement can finish between checks, or the caller can swallow
-        # an interrupt and return rows that cover only part of the read.
-        if interrupted:
-            raise _CatalogueDeadline(scope)
-        _check_catalogue_budget()
+        # A short statement can finish between checks, or the caller can
+        # swallow an interrupt and return rows for only part of the query.
+        require_time()
     finally:
         conn.set_progress_handler(None, 0)
         try:
             if original_ms:
                 conn.execute(f"PRAGMA busy_timeout={original_ms}")
         finally:
+            _CATALOGUE_PROGRESS.reset(token)
             if previous is not None:
                 conn.set_progress_handler(previous, _BUDGET_CHECK_INSTRUCTIONS)
-            _CATALOGUE_PROGRESS.reset(token)
 
 
 def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
@@ -5562,8 +5540,8 @@ def catalogue_schema_current(conn: sqlite3.Connection, *, raise_errors: bool = F
     """
     try:
         row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-    except sqlite3.OperationalError as error:
-        if raise_errors or _catalogue_schema_read_interrupted(conn, error):
+    except sqlite3.OperationalError:
+        if raise_errors:
             raise
         return False  # no catalogue tables yet
     if not (row and row[0] == str(SCHEMA_VERSION)):
@@ -6140,32 +6118,7 @@ class LexicalStore:
         finally:
             conn.close()
 
-    @contextlib.contextmanager
-    def _catalogue_read_connection(self) -> Iterator[sqlite3.Connection]:
-        """Own a sidecar handle. A budgeted read can only open an existing file."""
-        from .cli_ops import OpError
-
-        budget = _catalogue_budget()
-        _check_catalogue_budget()
-        try:
-            conn = self._connect() if budget is None else self._connect(read_deadline=budget.deadline)
-        except FileNotFoundError as error:
-            if budget is None:
-                raise
-            _check_catalogue_budget()
-            raise _CatalogueOpenUnavailable("stale") from error
-        except OpError as error:
-            if budget is None or error.code != "MUTATION_BUSY":
-                raise
-            _check_catalogue_budget()
-            raise _CatalogueOpenUnavailable("transient_failure") from error
-        with contextlib.closing(conn):
-            _check_catalogue_budget()
-            yield conn
-
-    def _connect(
-        self, path: Path | None = None, *, read_deadline: float | None = None
-    ) -> sqlite3.Connection:
+    def _connect(self, path: Path | None = None) -> sqlite3.Connection:
         """Ordinary-read connection: bounded busy/synchronous policy only.
 
         Journal-mode negotiation is a setup/rebuild concern (`_connect_setup`);
@@ -6178,8 +6131,6 @@ class LexicalStore:
         descriptor_id = reserved_paths.state_target_descriptor_id(
             self.vault_root, target
         )
-        if read_deadline is not None and descriptor_id != "lexical-store":
-            raise RuntimeError("budgeted catalogue read target is not owner-bound")
         descriptor_ids = (
             (descriptor_id,)
             if descriptor_id
@@ -6193,7 +6144,7 @@ class LexicalStore:
                 if descriptor_id == "lexical-store":
                     # An open of the live store that is already there changes no identity, so
                     # it skips the identity gate and the generation bump: a read must not
-                    # queue behind a writer. Only ordinary opens may create a missing store.
+                    # queue behind a writer. A missing store is created under the full guard.
                     try:
                         with call_spans.entered(
                             "lexical.connect.guard",
@@ -6201,13 +6152,11 @@ class LexicalStore:
                                 self.vault_root,
                                 descriptor_ids=descriptor_ids,
                                 identity_may_change=False,
-                                deadline=read_deadline,
                             ),
                         ):
-                            return self._connect_owned(path, create=False, read_deadline=read_deadline)
+                            return self._connect_owned(path, create=False)
                     except FileNotFoundError:
-                        if read_deadline is not None:
-                            raise
+                        pass
                 # The guard span above already covered a missing live store's connect; only a
                 # connect that has not been spanned yet gets one here.
                 fallback = reserved_paths._identity_coordination_scope(
@@ -6226,7 +6175,6 @@ class LexicalStore:
         *,
         publish: bool = True,
         create: bool = True,
-        read_deadline: float | None = None,
     ) -> sqlite3.Connection:
         target = path if path is not None else self.path
         descriptor_id = reserved_paths.state_target_descriptor_id(
@@ -6246,42 +6194,21 @@ class LexicalStore:
                 return self._connect_retained(
                     retained_target,
                     publish=publish,
-                    read_deadline=read_deadline,
                 )
-        return self._connect_retained(target, publish=publish, read_deadline=read_deadline)
+        return self._connect_retained(target, publish=publish)
 
     def _connect_retained(
         self,
         target: Path,
         *,
         publish: bool,
-        read_deadline: float | None = None,
     ) -> sqlite3.Connection:
-        if read_deadline is None:
-            target.parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with call_spans.span("lexical.connect.sqlite"):
-            if read_deadline is None:
-                conn = _sqlite_connect_owned(target)
-            else:
-                _check_catalogue_budget()
-                try:
-                    # SQLite must also refuse creation between the held-path check and open.
-                    conn = _sqlite_connect_owned(f"{target.as_uri()}?mode=rw", uri=True)
-                except sqlite3.OperationalError as error:
-                    if (
-                        getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_CANTOPEN
-                        and not target.exists()
-                    ):
-                        raise FileNotFoundError(target) from error
-                    raise
+            conn = _sqlite_connect_owned(target)
             try:
                 conn.execute("PRAGMA busy_timeout=5000")
-                if read_deadline is None:
-                    conn.execute("PRAGMA synchronous=NORMAL")
-                else:
-                    # This pragma reads the database header and can wait for a writer.
-                    with _interrupt_at_budget(conn):
-                        conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
             except BaseException:
                 # A corrupt/NOTADB main can fail during connection policy setup.
                 # Close the handle before propagating so fatal whole-set recovery can
@@ -6991,9 +6918,9 @@ class LexicalStore:
             } and LexicalStore._CURRENT_UNIT_COLUMNS <= {
                 row[1] for row in conn.execute("PRAGMA table_info(semantic_units)")
             }
-        except sqlite3.OperationalError as error:
+        except sqlite3.OperationalError:
             # Positive assessments must distinguish unreadable from legacy.
-            if raise_errors or _catalogue_schema_read_interrupted(conn, error):
+            if raise_errors:
                 raise
             return False
 
@@ -11921,37 +11848,13 @@ class LexicalStore:
         vault whose state manifest cannot be read: the mode lookup raises, as it
         does for every reader that asks the mode, and this seam does not catch it.
         """
-        backend_name = backend()
-        try:
-            _check_catalogue_budget()
-            return self._catalog_readiness(
-                scope, freshness, backend_name, allow_delta, schedule_repair, recall_checkpoint
-            )
-        except _CatalogueDeadline:
-            return CatalogReadiness(DEADLINE_STATUS, False, backend_name)
-
-    def _catalog_readiness(
-        self, scope: str, freshness: tuple | None, backend_name: str,
-        allow_delta: bool, schedule_repair: bool, recall_checkpoint: Any | None,
-    ) -> CatalogReadiness:
         from . import freshness as freshness_module
+
+        backend_name = backend()
 
         def repair_wanted() -> bool:
             # Asked only where an outcome is incomplete, so a vault that is ready reads no mode.
-            return (
-                schedule_repair and not _catalogue_budget_expired()
-                and not _file_repair_is_moot(self.vault_root)
-            )
-
-        def defer(status: str, *, lag_only: bool = False) -> CatalogReadiness:
-            wanted = repair_wanted()
-            _check_catalogue_budget()
-            if wanted:
-                _schedule_runtime_catalog_repair(
-                    self.vault_root, lag_only=lag_only,
-                    cause=RepairCause.CATALOGUE_LAG if lag_only else None,
-                )
-            return CatalogReadiness(status, False, backend_name)
+            return schedule_repair and not _file_repair_is_moot(self.vault_root)
 
         # Explicit checkpoints belong to strict proofs or independent callers.
         # Only an ambient request query may borrow its selection transaction.
@@ -11960,8 +11863,7 @@ class LexicalStore:
             from .vocabulary.registry import RegistryError
 
             try:
-                with _interrupt_at_budget(view.connection):
-                    return self._catalogue_view_status(view, scope)
+                return self._catalogue_view_status(view, scope)
             except RegistryError:
                 return CatalogReadiness("definitions_unavailable", False, backend_name)
             except sqlite3.Error as error:
@@ -11977,8 +11879,9 @@ class LexicalStore:
         )
         target_state = checkpoint_state(target_checkpoint)
         if not _checkpoint_policy_current(self.vault_root, target_checkpoint):
-            return defer("stale")
-        _check_catalogue_budget()
+            if repair_wanted():
+                _schedule_runtime_catalog_repair(self.vault_root)
+            return CatalogReadiness("stale", False, backend_name)
         if backend_name == "python":
             return CatalogReadiness("unsupported", False, backend_name)
         if self._failed:
@@ -11991,23 +11894,39 @@ class LexicalStore:
             # single failed attempt would strand the store as fatal for the
             # process. `_schedule_repair` is itself single-flight, so this cannot
             # storm.
-            return defer("fatal_failure")
+            if repair_wanted():
+                _schedule_runtime_catalog_repair(self.vault_root)
+            return CatalogReadiness("fatal_failure", False, backend_name)
         if not self.path.exists():
-            return defer("stale")
+            if repair_wanted():
+                _schedule_runtime_catalog_repair(self.vault_root)
+            return CatalogReadiness("stale", False, backend_name)
         try:
-            with self._catalogue_read_connection() as conn, _interrupt_at_budget(conn):
-                checkpoint = (
-                    self._meta_checkpoint(conn, scope) if self._schema_is_current(conn) else None
-                )
-                matching = checkpoint is not None and checkpoint_state(checkpoint) == target_state
-                if matching and (
-                    self._meta_catalog_identity(conn) == catalog_semantic_identity(self.vault_root)
-                    and _checkpoint_policy_current(self.vault_root, target_checkpoint)
-                ):
+            conn = self._connect()
+            try:
+                if not self._schema_is_current(conn):
+                    # Read-only probe: an absent/old-shape (v4) or version-stale
+                    # sidecar defers to the atomic rebuild — this seam emits no DDL.
+                    if repair_wanted():
+                        _schedule_runtime_catalog_repair(self.vault_root)
+                    return CatalogReadiness("stale", False, backend_name)
+                checkpoint = self._meta_checkpoint(conn, scope)
+                if checkpoint is None:
+                    if repair_wanted():
+                        _schedule_runtime_catalog_repair(self.vault_root)
+                    return CatalogReadiness("stale", False, backend_name)
+                if checkpoint_state(checkpoint) == target_state:
+                    if (
+                        self._meta_catalog_identity(conn)
+                        != catalog_semantic_identity(self.vault_root)
+                        or not _checkpoint_policy_current(self.vault_root, target_checkpoint)
+                    ):
+                        if repair_wanted():
+                            _schedule_runtime_catalog_repair(self.vault_root)
+                        return CatalogReadiness("stale", False, backend_name)
                     return CatalogReadiness("available", True, backend_name)
-            # An absent/old-shape sidecar or an identity mismatch defers to the rebuild.
-            if checkpoint is None or matching:
-                return defer("stale")
+            finally:
+                conn.close()
             # Well-formed sidecar whose checkpoint predates the request. Try one
             # bounded foreground delta to catch up before deferring to repair.
             if allow_delta:
@@ -12022,14 +11941,19 @@ class LexicalStore:
                         <= CATALOG_FOREGROUND_DELTA_CAP
                     ):
                         try:
-                            _check_catalogue_budget()
                             self.apply_catalog_delta(scope, delta)
                         except ValueError:
                             # A concurrent publish moved the stored checkpoint out
                             # from under this delta (no longer bound), so it could
                             # not be applied. Defer to the repair worker rather than
                             # letting the mismatch escape this seam.
-                            return defer("stale", lag_only=True)
+                            if repair_wanted():
+                                _schedule_runtime_catalog_repair(
+                                    self.vault_root,
+                                    lag_only=True,
+                                    cause=RepairCause.CATALOGUE_LAG,
+                                )
+                            return CatalogReadiness("stale", False, backend_name)
                         return self.catalog_readiness(
                             scope,
                             freshness,
@@ -12037,12 +11961,13 @@ class LexicalStore:
                             schedule_repair=schedule_repair,
                             recall_checkpoint=target_checkpoint,
                         )
-            # The worker's catch-up must prove the lagging catalogue current, or the full pass runs.
-            return defer("stale", lag_only=True)
-        except _CatalogueOpenUnavailable as error:
-            if error.status == "stale":
-                return defer("stale")
-            return CatalogReadiness(error.status, False, backend_name)
+            if repair_wanted():
+                # The stored checkpoint differs from the target; the worker's catch-up
+                # must prove it exactly current, or the full pass runs.
+                _schedule_runtime_catalog_repair(
+                    self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+                )
+            return CatalogReadiness("stale", False, backend_name)
         except sqlite3.Error as e:
             return self._catalog_readiness_error(
                 e,
@@ -12891,14 +12816,10 @@ class LexicalStore:
         """`_serve_ready_catalog`, reporting its wall time and the rows it
         returned (a list or mapping value) to an open `call_spans.meter`."""
         with call_spans.measure_ms(call_spans.CATALOGUE_MS):
-            try:
-                _check_catalogue_budget()
-                result = self._serve_ready_catalog(
-                    scope, freshness, query_fn, failure_message,
-                    recall_checkpoint=recall_checkpoint, allow_delta=allow_delta,
-                )
-            except _CatalogueDeadline:
-                return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend()))
+            result = self._serve_ready_catalog(
+                scope, freshness, query_fn, failure_message,
+                recall_checkpoint=recall_checkpoint, allow_delta=allow_delta,
+            )
         if isinstance(result.value, (list, dict)):
             call_spans.measure(call_spans.CATALOGUE_ROWS, len(result.value))
         return result
@@ -12936,13 +12857,12 @@ class LexicalStore:
         view = _admitted_catalog_view(self.vault_root)
         if view is not None:
             try:
-                with call_spans.span("lexical.readiness"), _interrupt_at_budget(view.connection):
+                with call_spans.span("lexical.readiness"):
                     readiness = self._catalogue_view_status(view, scope, recall_checkpoint)
                 if not readiness.complete:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
                     # exactly current, or the full pass runs.
-                    _check_catalogue_budget()
                     _schedule_runtime_catalog_repair(
                         self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
                     )
@@ -12967,8 +12887,9 @@ class LexicalStore:
         if not readiness.complete:
             return CatalogQueryResult(None, readiness)
         try:
-            with self._catalogue_read_connection() as conn:
-                with call_spans.span("lexical.proof"), _interrupt_at_budget(conn):
+            conn = self._connect()
+            try:
+                with call_spans.span("lexical.proof"):
                     # BEGIN + the first read establish one snapshot before any row is
                     # returned; the whole validate-then-query runs inside it.
                     conn.execute("BEGIN")
@@ -12992,7 +12913,6 @@ class LexicalStore:
                     # generation; the repair worker reconciles it. Only metadata
                     # disagrees, so its catch-up must prove the catalogue exactly
                     # current, or the full pass runs.
-                    _check_catalogue_budget()
                     _schedule_runtime_catalog_repair(
                         self.vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
                     )
@@ -13000,11 +12920,8 @@ class LexicalStore:
                         None, CatalogReadiness("stale", False, readiness.backend)
                     )
                 return self._query_within_budget(conn, query_fn, readiness)
-        except _CatalogueOpenUnavailable as error:
-            if error.status == "stale":
-                _check_catalogue_budget()
-                _schedule_runtime_catalog_repair(self.vault_root)
-            return CatalogQueryResult(None, CatalogReadiness(error.status, False, readiness.backend))
+            finally:
+                conn.close()
         except RegistryError:
             return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, readiness.backend))
         except sqlite3.Error as e:
@@ -13053,7 +12970,6 @@ class LexicalStore:
         next call retries). A proof-only caller neither retires nor repairs state.
         """
         kind = classify_sqlite_error(error)
-        schedule_repair = schedule_repair and not _catalogue_budget_expired()
         if kind == "fatal":
             # A proven-fatal disposable sidecar recovers only by whole replacement.
             if schedule_repair:
