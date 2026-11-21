@@ -7,7 +7,7 @@ import datetime as dt
 import pytest
 from test_vault_store_write_path import coordinator_url, served, stored, vault, writer  # noqa: F401
 
-from exomem import adopt, preserve
+from exomem import adopt, create_file, link, preserve
 from exomem import vault as vault_module
 from exomem.vault_store import read, write
 
@@ -54,6 +54,54 @@ def test_preserve_updates_a_stored_top_index_without_a_projection(served):  # no
     with read.snapshot(served) as view:
         assert result.path.removeprefix("Knowledge Base/") in view.page(rel).body.decode("utf-8")
     assert not any("index.md missing" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("creation", ["entity", "note"])
+def test_creation_records_activity_in_a_stored_top_index_without_a_projection(served, creation):  # noqa: F811
+    """Creating a page must not skip recent activity because the index file is not projected yet."""
+    rel = "Knowledge Base/index.md"
+    with read.snapshot(served) as view:
+        before = view.page(rel).body
+    (served / rel).unlink()
+
+    if creation == "entity":
+        result = link.link(
+            served, entity_type="organization", name="Harbour Survey Office",
+            summary="An invented office for the activity check.", today=dt.date(2026, 1, 2),
+        )
+    else:
+        result = create_file.create_file(
+            served, path="Knowledge Base/Notes/Insights/tide-tables-drift.md",
+            content="---\ntitle: Tide tables drift\ntype: insight\n---\n# Tide tables drift\n\n## Observations\n\n- [operating constraint] Re-read the tide tables each season #survey\n",
+            today=dt.date(2026, 1, 2),
+        )
+
+    with read.snapshot(served) as view:
+        assert view.page(rel).body != before
+    assert not any("index.md missing" in warning for warning in result.warnings)
+
+
+def test_adoption_manifest_refuses_a_top_index_changed_before_commit(served, writer, monkeypatch):  # noqa: F811
+    """A commit between the manifest's read and its write must refuse, not be overwritten."""
+    rel = "Knowledge Base/index.md"
+    with read.snapshot(served) as view:
+        current = view.page(rel).body.decode("utf-8")
+    concurrent = current + "\n- 2026-01-02: Captured the estuary survey.\n"
+    commit = adopt.batch_atomic_write
+
+    def change_before_commit(writes, **kwargs):
+        write.commit(writer, write.StoreChange(
+            write.Origin.GOVERNED, "test", puts=(write.PagePut(rel, concurrent.encode("utf-8")),),
+        ))
+        return commit(writes, **kwargs)
+
+    monkeypatch.setattr(adopt, "batch_atomic_write", change_before_commit)
+
+    with pytest.raises(vault_module.PathGuardError):
+        adopt.adopt(served, mode="save-manifest", today=dt.date(2026, 1, 2))
+
+    with read.snapshot(served) as view:
+        assert view.page(rel).body.decode("utf-8") == concurrent
 
 
 @pytest.mark.parametrize("backend", ["file", "store"])

@@ -995,9 +995,11 @@ def commit_import_items(
             if folder not in folders:
                 folders.append(folder)
 
+        from .vault_store import read as store_read
+
         sources_index = sources_dir / "index.md"
         warnings: list[str] = []
-        if sources_index.exists():
+        if store_read.holds_file(root, relative_posix(sources_index, root)):
             sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
             sources_text = indexes._replace_by_type_section(
                 sources_current,
@@ -1016,8 +1018,6 @@ def commit_import_items(
 
         where = ", ".join(f"Sources/{folder}/" for folder in folders)
         top_index = kb / "index.md"
-        from .vault_store import read as store_read
-
         if store_read.holds_file(root, relative_posix(top_index, root)):
             # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
             summary = escape_wikilinks_for_log(
