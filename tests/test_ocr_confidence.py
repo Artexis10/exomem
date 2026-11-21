@@ -10,8 +10,10 @@ import pytest
 import yaml
 
 from exomem import (
+    commands,
     extract,
     find_types,
+    image_tags,
     media_jobs,
     media_processing,
     media_worker,
@@ -96,6 +98,43 @@ def test_a_word_tesseract_doubts_is_kept_in_the_sidecar_but_never_found(
         assert find(vault, query=word, mode="hybrid") == []
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake Tesseract is a POSIX script")
+@pytest.mark.parametrize(
+    ("word_floor", "available", "extracted"),
+    [("70", True, "harbour lantern  was repaired\n\nTags: whiteboard"), ("100", False, "Tags: whiteboard")],
+)
+def test_page_read_reports_image_ocr_text_availability(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch, word_floor: str, available: bool, extracted: str
+) -> None:
+    pytest.importorskip("PIL.Image")
+    monkeypatch.setenv("EXOMEM_TESSERACT_CMD", _fake_tesseract(tmp_path))
+    monkeypatch.setenv(ocr_models.WORD_FLOOR_ENV, word_floor)
+    monkeypatch.delenv("EXOMEM_VISION_CAPTION", raising=False)
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
+    monkeypatch.setattr(image_tags, "compute_tags", lambda _path: ["whiteboard"])
+    picture = Path(__file__).parent / "fixtures" / "media-samples" / "ocr-eng.png"
+    stored = preserve.preserve_bytes(
+        vault, scope="Rental", category="image", filename="label.png", data=picture.read_bytes()
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(media_jobs.MediaJob(
+        binary_path=vault / stored.path, sidecar_path=vault / stored.sidecar_path, media_type="image"
+    ))
+    job = store.claim_next()
+    assert job is not None
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._process(job)
+    worker._publish_parent_results(store.pending_results())
+
+    page = commands.op_read_memory(vault, stored.sidecar_path)
+    assert page["frontmatter"]["processing_state"] == "completed"
+    assert preserve.extracted_text(page["body"]) == extracted
+    assert [hit.path for hit in find(vault, query="whiteboard", mode="keyword")] == [stored.sidecar_path]
+    assert find(vault, query="blorft", mode="keyword") == []
+    assert page["frontmatter"].get("ocr_text_available") is available
+
+
 def test_dropping_a_word_keeps_the_spacing_tesseract_measured_for_the_words_that_stay() -> None:
     # `preserve_interword_spaces` leaves CJK words spaced only where the page had a gap.
     reading = _reading(("東京駅", 95.0), ("zz", 20.0), ("の近く", 91.0), text="東京駅 zz  の近く")
@@ -154,8 +193,13 @@ def test_a_sidecar_without_ocr_facts_is_unchanged_and_an_empty_one_drops_the_old
     plain = preserve.render_sidecar_extraction(_SIDECAR, text="steady calm", engine="tesseract")
     assert "ocr_confidence" not in plain and preserve.LOW_CONFIDENCE_OCR_HEADING not in plain
 
+    legacy = preserve.render_sidecar_extraction(plain, text="steady", engine="tesseract", ocr=OcrFacts(confidence=71.3))
+    assert _frontmatter_of(legacy)["ocr_confidence"] == 71.3
+    assert "ocr_text_available" not in _frontmatter_of(legacy)
+
     doubtful = preserve.render_sidecar_extraction(
-        plain, text="steady", engine="tesseract", ocr=OcrFacts(confidence=71.3, low_confidence_text="qz")
+        legacy, text="steady", engine="tesseract",
+        ocr=OcrFacts(confidence=71.3, low_confidence_text="qz", text_available=True),
     )
     assert "ocr_confidence: 71.3" in doubtful
     assert preserve.extracted_text(doubtful) == "steady"
@@ -166,6 +210,7 @@ def test_a_sidecar_without_ocr_facts_is_unchanged_and_an_empty_one_drops_the_old
     )
     assert preserve.LOW_CONFIDENCE_OCR_HEADING not in again
     assert preserve.low_confidence_text(again) == ""
+    assert "ocr_text_available" not in _frontmatter_of(again)
 
 
 def test_the_section_sits_inside_the_extraction_so_the_notes_below_it_survive() -> None:
@@ -197,7 +242,8 @@ def test_only_a_media_page_loses_a_section_with_that_heading_from_its_search_tex
 
 def test_a_prior_extraction_page_keeps_the_withheld_words_and_stays_out_of_search() -> None:
     sidecar = preserve.render_sidecar_extraction(
-        _SIDECAR, text="steady", engine="tesseract", ocr=OcrFacts(confidence=80.0, low_confidence_text="qz")
+        _SIDECAR, text="Tags: whiteboard", engine="tesseract+tags",
+        ocr=OcrFacts(confidence=31.0, low_confidence_text="qz", text_available=False),
     )
 
     prior = prior_extraction.render(
@@ -205,21 +251,33 @@ def test_a_prior_extraction_page_keeps_the_withheld_words_and_stays_out_of_searc
         text=preserve.extracted_text(sidecar),
     )
 
-    assert preserve.extracted_text(prior) == "steady"
+    assert preserve.extracted_text(prior) == "Tags: whiteboard"
     assert preserve.low_confidence_text(prior) == "qz"
     page = find_types.ParsedPage(Path("p.md"), "p.md", _frontmatter_of(prior), prior, "p", 0.0)
-    assert "qz" not in page.search_body and "steady" in page.search_body
+    assert page.frontmatter["ocr_text_available"] is False
+    assert "qz" not in page.search_body and "whiteboard" in page.search_body
 
 
 def test_the_ocr_facts_survive_the_job_store_and_a_malformed_one_voids_the_result() -> None:
-    facts = OcrFacts(confidence=64.25, low_confidence_text="qz")
+    facts = OcrFacts(confidence=64.25, low_confidence_text="qz", text_available=True)
     payload = {"text": "steady", "engine": "tesseract", "ocr": facts.as_payload()}
 
     kept = media_jobs._validated_result_payload("extraction", payload)
     voided = media_jobs._validated_result_payload("extraction", {**payload, "ocr": {"confidence": "high"}})
+    wrong_type = media_jobs._validated_result_payload("extraction", {**payload, "ocr": {"text_available": 1}})
 
     assert kept is not None and OcrFacts.from_payload(kept["ocr"]) == facts
     assert voided is None
+    assert wrong_type is None
+
+
+def test_pending_legacy_ocr_results_keep_their_canonical_payload() -> None:
+    # Changing this payload would make the stored hash fail validation after an upgrade.
+    payload = {
+        "text": "steady", "engine": "tesseract", "ocr": {"confidence": 64.25, "low_confidence_text": "qz"},
+    }
+
+    assert media_jobs._validated_result_payload("extraction", payload) == payload
 
 
 def test_a_scanned_pdf_page_keeps_all_of_its_text(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:

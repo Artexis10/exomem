@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -1454,8 +1454,8 @@ class MediaWorker:
             if asr is not None and asr.reported:
                 payload["asr"] = asr.as_payload()
             if ocr is not None:
-                payload["ocr"] = OcrFacts(
-                    ocr.confidence, preserve._cap_low_confidence_text(ocr.low_confidence_text)
+                payload["ocr"] = replace(
+                    ocr, low_confidence_text=preserve._cap_low_confidence_text(ocr.low_confidence_text)
                 ).as_payload()
             if capture is not None:
                 payload["capture"] = capture.as_payload()

@@ -1617,6 +1617,7 @@ LOW_CONFIDENCE_OCR_HEADING = "## Low-confidence OCR"
 #: ownership, because the OCR text may hold one, as the notes and artifact sentinels below show.
 SIDECAR_LOW_CONFIDENCE_SENTINEL = "<!-- exomem:sidecar-low-confidence-ocr -->"
 OCR_CONFIDENCE_FIELD = "ocr_confidence"
+OCR_TEXT_AVAILABLE_FIELD = "ocr_text_available"
 SIDECAR_ARTIFACT_SENTINEL = "<!-- exomem:sidecar-artifact -->"
 SIDECAR_PRESERVED_NOTES_SENTINEL = "<!-- exomem:sidecar-preserved-notes -->"
 _LEGACY_ARTIFACT_BLOCK_RE = re.compile(
@@ -1851,7 +1852,7 @@ _SPEAKER_FIELDS = ("speakers", "speaker_verification")
 _ASR_FIELD_PREFIX = "asr_"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
-    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
+    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, OCR_TEXT_AVAILABLE_FIELD, *_SPEAKER_FIELDS,
 })
 
 
@@ -1883,8 +1884,8 @@ def render_sidecar_extraction(
     part pages that hold the rest, as `extraction_parts.layout` gives it.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
-    survive into the new one. `ocr` records the confidence of an image's OCR and holds the
-    words it withheld under `## Low-confidence OCR`; an extraction without it records neither.
+    survive into the new one. `ocr` records the confidence and text availability of image OCR.
+    The words it withheld stay under `## Low-confidence OCR`.
     `capture` is what the original states about its capture; without it the page's capture fields stay as they are.
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
@@ -1927,7 +1928,7 @@ def render_sidecar_extraction(
         if labels:
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
-    content = _set_ocr_confidence(content, ocr)
+    content = _set_ocr_facts(content, ocr)
     if capture is not None:
         content = set_capture_fields(content, capture)
     if identity_check is not None:
@@ -2024,11 +2025,15 @@ def asr_language_pin(content: str) -> tuple[str | None, bool]:
     return None, fields.get(_ASR_MODE_FIELD) == LANGUAGE_MODE_MULTILINGUAL
 
 
-def _set_ocr_confidence(content: str, ocr: OcrFacts | None) -> str:
-    """Record the mean word confidence of this extraction's OCR, or drop the one an earlier extraction left."""
+def _set_ocr_facts(content: str, ocr: OcrFacts | None) -> str:
+    """Replace the current OCR facts with the measurements from this extraction."""
     if ocr is None or ocr.confidence is None:
-        return _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
-    return _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
+        content = _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
+    else:
+        content = _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
+    if ocr is None or ocr.text_available is None:
+        return _remove_frontmatter_fields(content, lambda key: key == OCR_TEXT_AVAILABLE_FIELD)
+    return _set_frontmatter_field(content, OCR_TEXT_AVAILABLE_FIELD, json.dumps(ocr.text_available))
 
 
 def _set_asr_facts(content: str, asr: AsrFacts | None) -> str:

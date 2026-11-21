@@ -1,8 +1,8 @@
 """What image OCR measured and kept out of search for one image.
 
 OCR fills one `OcrFacts` beside the words it indexes. The job runtime carries it as a
-plain mapping, and the sidecar records it, so a reader of the page can see how sure
-the engine was and which words it withheld.
+plain mapping, and the sidecar records it, so a reader can see what the engine
+retained and withheld, and how sure it was.
 """
 
 from __future__ import annotations
@@ -16,9 +16,15 @@ class OcrFacts:
     confidence: float | None = None
     #: The words under the confidence floor, in reading order. No search field reads them.
     low_confidence_text: str = ""
+    #: Whether OCR retained any text before enrichment. None when unmeasured.
+    text_available: bool | None = None
 
     def as_payload(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.text_available is None:
+            # The durable store verifies the canonical payload hash of older results.
+            del payload["text_available"]
+        return payload
 
     @classmethod
     def from_payload(cls, value: object) -> OcrFacts:
@@ -33,4 +39,11 @@ class OcrFacts:
         text = value.get("low_confidence_text", "")
         if not isinstance(text, str):
             raise ValueError("OCR fact 'low_confidence_text' must be text")
-        return cls(confidence=None if confidence is None else float(confidence), low_confidence_text=text)
+        available = value.get("text_available")
+        if available is not None and not isinstance(available, bool):
+            raise ValueError("OCR fact 'text_available' must be a boolean")
+        return cls(
+            confidence=None if confidence is None else float(confidence),
+            low_confidence_text=text,
+            text_available=available,
+        )
