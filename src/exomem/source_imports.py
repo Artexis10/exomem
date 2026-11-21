@@ -174,7 +174,7 @@ class ImportCapture:
             from .governance import connector_boundary
             from .vault_store import availability
 
-            connector_boundary.require_write(root, receipt.page, content=None)
+            connector_boundary.require_create(root, receipt.page)
             self._require_same_input(receipt)
             if availability.page_writer(root) is None or receipt.captured is None:
                 raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
@@ -188,6 +188,7 @@ class ImportCapture:
 
     def _recover_original(self, root: Path, receipt: Receipt, artifact) -> None:
         """Complete only the missing original of the exact, already-installed Source."""
+        from . import vocabulary_auxiliaries
         from .add import artifact_binary_write, pools_original
         from .governance import connector_boundary
 
@@ -195,7 +196,6 @@ class ImportCapture:
         if (
             payload is None or payload.ref != receipt.ref or payload.artifact_path != receipt.artifact
             or payload.sha256 != self.original_sha256 or payload.protected != self.protected
-            or vault.content_hash(payload.text) != receipt.source_hash
         ):
             raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
         if duplicates.original_intact(root, receipt.page, payload, bound=True):
@@ -203,7 +203,8 @@ class ImportCapture:
         page = root / receipt.page
         target = root / receipt.artifact
         if (
-            target.parent != page.parent or pools_original(root, target)
+            vault.content_hash(payload.text) != receipt.source_hash
+            or target.parent != page.parent or pools_original(root, target)
             or duplicates.binding_unproven(root, receipt.page, payload)
         ):
             raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
@@ -214,16 +215,21 @@ class ImportCapture:
             binary_guard = vault.PathGuard.capture(root, receipt.artifact, leaf_policy="absent")
         except vault.PathGuardError:
             raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
-        # The original's authority comes from the exact installed Source. Recheck
-        # the caller's current write admission before using the local repair owner.
-        connector_boundary.require_write(root, receipt.page, content=payload.text.encode("utf-8"))
+        # Require the current caller to be able to publish both exact components.
+        # Only the bound original goes to the repair writer.
         binary, stream = artifact_binary_write(artifact.path, target, self.original_sha256, artifact.size)
         binary.guard = binary_guard
-        with stream, owner_local_producer(root, OWNER):
-            vault.batch_atomic_write(
-                [binary], vault_root=root, required_guards=(page_guard,),
-                post_commit_fanout=False, commit_point=False,
-            )
+        with stream:
+            primary = vault.PlannedWrite(page, payload.text, guard=page_guard)
+            proposed = {receipt.page: primary, receipt.artifact: binary}
+            connector_boundary.require_write(root, receipt.page, content=payload.text.encode("utf-8"), proposed=proposed)
+            connector_boundary.require_write(root, receipt.artifact, content=None, proposed=proposed)
+            bound = vocabulary_auxiliaries.seal_retained_original(root, primary=primary, original=binary)
+            with owner_local_producer(root, OWNER):
+                vault.batch_atomic_write(
+                    [binary], vault_root=root, required_guards=(page_guard,),
+                    post_commit_fanout=False, commit_point=False, _vocabulary_auxiliaries=bound,
+                )
 
     def _verified_duplicate(self, root: Path, receipt: Receipt) -> duplicates.Duplicate:
         duplicate = duplicates.named_duplicate(

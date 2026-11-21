@@ -45,7 +45,12 @@ def timed_lines(text: str) -> list[tuple[int, int, float]]:
     start = 0
     for line in text.splitlines(keepends=True):
         if line.startswith("[") and (marker := semantic_segments.TIMED_LINE_RE.match(line)):
-            lines.append((start, start + len(line.rstrip("\r\n")), semantic_segments.ts_from_match(marker)))
+            try:
+                timestamp = semantic_segments.ts_from_match(marker)
+            except (ValueError, OverflowError):
+                pass  # Out-of-range tokens are ordinary Source text.
+            else:
+                lines.append((start, start + len(line.rstrip("\r\n")), timestamp))
         start += len(line)
     return lines
 

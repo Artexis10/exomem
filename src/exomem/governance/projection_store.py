@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths, state_paths
-from . import projections, schema_v4
+from . import projections, schema_v4, transcript_banks
 
 # 3 adds `projection_variant_parts` and `projection_variant_heads`; a store at 2 is read as one
 # whose variants hold no parts.
@@ -1503,7 +1503,7 @@ def _namespace_id(value: object) -> str:
 
 
 def _is_transcript_bank_leaf(parts: list[str]) -> bool:
-    if len(parts) != 2 or parts[0] != "transcript-banks":
+    if len(parts) != 2 or parts[0] != transcript_banks.DIRECTORY:
         return False
     # Only the owner's SHA-256 names and its atomic-write temporary suffix.
     stem, _, suffix = parts[1].partition(".")
@@ -1539,7 +1539,7 @@ def _collectable_namespace_path(record: held_fs.SagaRecord) -> bool:
     if record.identity.kind != "directory":
         return False
     return (
-        parts in (["measurements"], ["transcript-banks"])
+        parts in (["measurements"], [transcript_banks.DIRECTORY])
         or (
             len(parts) == 2
             and parts[0] == "measurements"

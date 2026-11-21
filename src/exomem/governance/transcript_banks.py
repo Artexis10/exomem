@@ -16,7 +16,6 @@ from .. import private_state, state_paths
 from ..transcript_passages import TranscriptMatch
 from .projections import ProjectionNamespaceKey
 
-_PROJECTIONS = ".authorization-projections"
 DIRECTORY = "transcript-banks"
 _BAD_LIMIT = 256
 _bad: OrderedDict[tuple[Path, str], None] = OrderedDict()
@@ -85,13 +84,15 @@ def load(
 
 
 def _directory(root: Path, key: ProjectionNamespaceKey, *, create: bool = False) -> Path:
-    parent = f"{_PROJECTIONS}/{key.namespace_id}"
-    name = f"{parent}/{DIRECTORY}"
+    from .projection_store import variant_store_path
+
+    namespace = variant_store_path(root, key).parent
+    directory = namespace / DIRECTORY
     if create:
-        private_state.store(root, _PROJECTIONS)
-        private_state.store(root, parent)
-        return private_state.store(root, name)
-    return state_paths.vault_state_dir(root) / name
+        state = state_paths.vault_state_dir(root)
+        for path in (namespace.parent, namespace, directory):
+            private_state.store(root, path.relative_to(state).as_posix())
+    return directory
 
 
 def carry(root: Path, before: ProjectionNamespaceKey, after: ProjectionNamespaceKey, digest: str) -> bool:

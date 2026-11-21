@@ -527,12 +527,17 @@ def catalog_item(
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
             text = head or transcript_passages.source_text(parsed.body)
-            if parts or transcript_passages.is_transcript(text):
+            marks = len(transcript_passages.timed_lines(text))
+            for _, part, _ in parts:
+                if marks >= 2:
+                    break
+                marks += len(transcript_passages.timed_lines(part))
+            if marks >= 2:
                 if parsed.frontmatter.get("source_identity") is not None:
-                    # These derivatives have independent retention. The Source
-                    # eraser has no owner that can account for this bank.
+                    # The existing Source eraser cannot account for this bank.
                     fields["source_erasure"] = "managed"
-                elif not head:
+                else:
+                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = "true"
                     head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
@@ -880,6 +885,8 @@ def _target_vector_measurements(
     from . import transcript_banks
 
     def bank_for(variant) -> str | None:
+        if variant.search_fields.get(projected_retrieval.TIMED_SOURCE_FIELD) != "true":
+            return None
         variant_id = variant.projection_variant_id
         previous = active_by_id.get(variant_id)
         old = active_variants.get(variant_id)

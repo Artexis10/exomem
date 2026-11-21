@@ -75,3 +75,11 @@ def test_legacy_block_vector_cannot_choose_one_of_multiple_turns():
     assert transcript_passages.match(
         text, chunk=f"Meeting\n\n{text}", title="Meeting", query="what was discussed",
     ) is None
+
+
+
+def test_out_of_range_timestamps_stay_ordinary_text():
+    invalid = f"[{'9' * 400}:00:00] A malformed timestamp."
+    text = f"{invalid}\n[0:03] First report.\n[0:18] Second report."
+
+    assert transcript_passages.chunks(text) == [invalid, "[0:03] First report.", "[0:18] Second report."]

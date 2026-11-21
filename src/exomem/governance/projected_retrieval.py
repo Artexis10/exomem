@@ -25,6 +25,7 @@ _BM25_B = 0.75
 _MAX_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 _SNIPPET_CHARS = 320
 MAX_PROJECTED_TRANSCRIPT_SAMPLES = 512
+TIMED_SOURCE_FIELD = "timed_source"
 
 
 class ProjectedRetrievalUnavailable(RuntimeError):
@@ -607,7 +608,7 @@ def projection_text(variant: projections.ProjectionVariant) -> str:
 
 def searchable_text(fields: Mapping[str, str]) -> str:
     # Source attribution and custody fields affect eligibility, never search tokens.
-    return " ".join(fields[key] for key in sorted(fields, key=_sort_key) if key not in {"sources", "source_erasure"})
+    return " ".join(fields[key] for key in sorted(fields, key=_sort_key) if key not in {"sources", "source_erasure", TIMED_SOURCE_FIELD})
 
 
 def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:

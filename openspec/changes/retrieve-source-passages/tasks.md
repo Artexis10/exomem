@@ -13,6 +13,6 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Compare default search on the frozen synthetic cases and the existing retrieval goldens.
-- [ ] 3.2 Measure paired latency on the public MCP reference.
+- [x] 3.1 Compare default search on the frozen synthetic cases and the existing retrieval goldens.
+- [x] 3.2 Measure paired latency on the public MCP reference.
 - [ ] 3.3 Verify the published build with the synthetic MCP workflow.
