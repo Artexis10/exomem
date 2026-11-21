@@ -828,7 +828,7 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
     policy = prominence.capture_policy("silent", "advisory")
     _serve(monkeypatch, _packet())
     plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
-    # One character short of the policy and the whole block together: the block must give way.
+    # One character short of `say` and the whole block together: the block must give way.
     cap = len(hook._capture_policy_text(policy)) + 1 + len(plain) - 1
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", str(cap))
     _serve(monkeypatch, {**_packet(), "capture_policy": policy})
@@ -837,7 +837,34 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
 
     assert policy["say"] in context
     assert hook._WORKING_SET_HEADER in context
-    assert len(context) <= cap
+    assert len(context) <= cap + 1 + len(policy["rules"])
+
+
+def test_the_full_rule_takes_no_room_from_the_retrieved_material(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The rules have their own render budget: the ceiling that fits `say` and the block still shows all of it.
+
+    A hook that counted the rules against the ceiling would cut the working set on the first turn, which is the
+    turn where recall matters most. The whole injection is the ceiling plus the rules.
+    """
+    from exomem import prominence
+
+    policy = prominence.capture_policy("silent", "advisory")
+    _serve(monkeypatch, _packet())
+    plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
+    cap = len(hook._capture_policy_text(policy)) + 1 + len(plain)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", str(cap))
+    _serve(monkeypatch, {**_packet(), "capture_policy": policy})
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="other"), tmp_path / "home"))
+
+    assert context.startswith(f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{policy['rules']}\n")
+    assert context.endswith("\n" + plain)
+    assert len(context) == cap + 1 + len(policy["rules"])
 
 
 def test_a_policy_longer_than_the_hook_was_built_for_still_states_its_disposition() -> None:

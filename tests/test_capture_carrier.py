@@ -159,12 +159,12 @@ def test_a_saved_preference_reaches_the_next_turn_that_holds_a_token(served) -> 
 def test_a_full_map_still_delivers_the_block_inside_limit_chars(served) -> None:
     # 2,000 -> 2,200 on 2026-11-09: the block grew by the correction rule; it still fits with the minimum map.
     # 2,200 -> 2,300 on 2026-11-17: the block carries the document-identity rule.
-    # 2,300 -> 3,300 on 2026-11-21: the block carries the full capture rule under `rules`.
+    # The full capture rule rides under `rules` with its own bound, so it did not move this threshold.
     with request_scope(CALLER):
-        packet = _activate(served, max_chars=3300)
+        packet = _activate(served, max_chars=2300)
 
     assert "capture_policy" in packet
-    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"] == 3300
+    assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"] == 2300
 
 
 def test_a_request_too_small_for_the_block_is_not_starved_and_is_owed_it_later(served) -> None:
@@ -184,6 +184,17 @@ def test_an_attached_block_is_counted_in_the_packet_budget() -> None:
 
     assert packet["capture_policy"] == block
     assert packet["budget"]["used_chars"] == 1000 + capture_carrier.size(block)
+
+
+def test_the_full_rule_is_attached_but_not_counted_in_the_packet_budget() -> None:
+    """`rules` has its own bound: a longer rule text must not shrink the map that shares the request."""
+    block = {"disposition": "silent", "say": "x" * 100, "rules": "y" * 5000}
+    packet = {"budget": {"limit_chars": 4000, "used_chars": 1000}}
+
+    capture_carrier.for_packet(packet, capture_carrier.Policy(block, "d", False, capture_carrier.size(block)))
+
+    assert packet["capture_policy"] == block
+    assert packet["budget"]["used_chars"] == 1000 + capture_carrier.size({"disposition": "silent", "say": "x" * 100})
 
 
 def test_a_block_that_would_overflow_the_packet_is_left_off_and_uncounted() -> None:
@@ -288,14 +299,15 @@ def test_every_carrying_block_survives_the_hooks_cap_with_the_epistemic_sentence
         for acceptance in envelope.LINK_ACCEPTANCE_MEANING:
             block = prominence.capture_policy(disposition, acceptance)
             rendered = hook._capture_policy_text(block)
-            header, say, rules = rendered.split("\n")
+            header, say = rendered.split("\n")
+            rules = hook._capture_rules_text(block)
 
             assert prominence._EPISTEMIC_CAPTURE in rendered, (disposition, acceptance)
             assert say == block["say"], (disposition, acceptance)
-            assert len(header) + 1 + len(say) <= hook._CAPTURE_POLICY_MAX_CHARS, (disposition, acceptance)
+            assert len(rendered) <= hook._CAPTURE_POLICY_MAX_CHARS, (disposition, acceptance)
             assert rules == block["rules"], (disposition, acceptance)
             assert len(rules) <= hook._CAPTURE_RULES_MAX_CHARS, (disposition, acceptance)
-            assert rendered.isascii(), (disposition, acceptance)
+            assert rendered.isascii() and rules.isascii(), (disposition, acceptance)
 
 
 def test_a_rule_text_over_its_cap_is_dropped_and_say_is_kept() -> None:
@@ -306,6 +318,7 @@ def test_a_rule_text_over_its_cap_is_dropped_and_say_is_kept() -> None:
     over = {**block, "rules": "More guidance. " * 100}
 
     assert len(over["rules"]) > hook._CAPTURE_RULES_MAX_CHARS
+    assert hook._capture_rules_text(over) == ""
     assert hook._capture_policy_text(over) == f"{hook._CAPTURE_POLICY_HEADER}\n{block['say']}"
 
 
@@ -316,6 +329,7 @@ def test_a_block_from_a_server_that_sends_no_rule_text_renders_say_alone() -> No
     block = prominence.capture_policy("silent", "confirm-shortcut")
     older = {key: value for key, value in block.items() if key != "rules"}
 
+    assert hook._capture_rules_text(older) == ""
     assert hook._capture_policy_text(older) == f"{hook._CAPTURE_POLICY_HEADER}\n{block['say']}"
 
 

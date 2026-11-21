@@ -20,9 +20,9 @@ The bootstrap core stays at its byte ceiling and carries no new text. The baseli
 
 A tentative claim fails the baseline test, so it gets no facet and no affiliation. When later work could use it, the agent saves it as one compiled observation that states it is unconfirmed. This reverses the earlier rule that an unsure report of an event stays unwritten unless a collection has a note field. A tentative claim is still never written as an event that happened.
 
-### Cost of the block
+### The rules take no map room
 
-The block grows by about 810 characters, and the server reserves them from the map's room. The block is sent once per conversation. At the default hook budget of 6,000 characters the map keeps about 3,600. A request with less than about 3,150 characters leaves the block owed, as the existing "request too small" rule states.
+The stance, skills and positions blocks have their own bounds, so they neither reduce `max_chars` nor count in `budget.used_chars`. `rules` follows them. The server counts and reserves the block without `rules`, so the first request of a session keeps the map it had and the smallest `max_chars` that receives the block does not move. `budget.serialized_chars` still counts `rules`, because it names what is sent. The hook subtracts `say` from its working-set ceiling and renders `rules` on top, so its output is at most that ceiling plus `_CAPTURE_RULES_MAX_CHARS`.
 
 ## Risks
 

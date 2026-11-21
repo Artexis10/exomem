@@ -209,9 +209,10 @@ _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last che
 # within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
 # spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
-# The render budget for the block's `rules` text, the full capture rule, which renders after `say` as one
-# product block. The server's text was about 800 characters when this was set; this is 25% above that. A
-# longer text is omitted whole, never cut, and never takes room from `say`.
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
+# text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
+# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus this.
+# A longer text is omitted whole, never cut.
 _CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
@@ -1792,11 +1793,9 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
 
 
 def _capture_policy_text(block: object) -> str:
-    """The served capture policy under its own header, or `""` when the packet carries none.
+    """The served capture policy's `say` under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
-    `say` renders first and alone within its cap; `rules`, the full capture rule, follows it when it fits
-    its own cap.
     """
     say = block.get("say") if isinstance(block, dict) else None
     if not isinstance(say, str) or not say.strip():
@@ -1810,10 +1809,19 @@ def _capture_policy_text(block: object) -> str:
         text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
         if len(text) > _CAPTURE_POLICY_MAX_CHARS:
             return ""
-    rules = block.get("rules")
-    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
-        text += f"\n{rules.strip()}"
     return text
+
+
+def _capture_rules_text(block: object) -> str:
+    """The served full capture rule, or `""` when there is none or it is over its own render budget.
+
+    It renders after `say` and is counted in no other budget: the working set is cut to leave room for `say`
+    alone. A text over the budget is omitted whole, never cut, and `say` is untouched.
+    """
+    rules = block.get("rules") if isinstance(block, dict) else None
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        return rules.strip()
+    return ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -3765,12 +3773,15 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         hit_count = len(packet.get("anchors") or ())
         delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
         delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-        policy_text = _capture_policy_text(packet.get("capture_policy"))
+        say_text = _capture_policy_text(packet.get("capture_policy"))
+        # The working set gives way to `say` and the delta; the rules follow `say` on their own budget.
         render_cap = max(
             0,
             _working_set_max_chars()
-            - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+            - sum(len(text) + 1 for text in (delta_text, say_text) if text),
         )
+        rules_text = _capture_rules_text(packet.get("capture_policy")) if say_text else ""
+        policy_text = f"{say_text}\n{rules_text}" if rules_text else say_text
         acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice

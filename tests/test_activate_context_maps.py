@@ -33,6 +33,7 @@ from exomem import (
     freshness,
     lexstore,
     project_keys,
+    prominence,
     read_next_action,
     working_set_runtime,
 )
@@ -177,6 +178,25 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         assert cached["map"] == _activate(vault, turn="", max_chars=budget)["map"]
 
 
+def test_the_first_requests_map_does_not_pay_for_the_capture_rules_text(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first request of a session carries the capture block, whose full-rule text has its own bound.
+
+    A map that shrank with that text would lose items on the turn where recall matters most.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _built(vault).close()
+    served = _activate(vault, turn="", max_chars=6000)
+    monkeypatch.setattr(prominence, "_CAPTURE_RULES", "More guidance. " * 200)
+
+    heavier = _activate(vault, turn="", max_chars=6000)
+
+    assert len(heavier["capture_policy"]["rules"]) > 3 * len(served["capture_policy"]["rules"])
+    assert served["map"]["items"]
+    assert heavier["map"] == served["map"]
+    assert heavier["budget"]["used_chars"] == served["budget"]["used_chars"]
+
+
 def _topic_titles(packet: dict) -> set[str]:
     return {item["title"] for item in packet["map"]["items"] if item["kind"] == "topic"}
 
@@ -260,11 +280,8 @@ def test_a_maps_packet_reports_what_became_of_its_token(vault: Path, monkeypatch
     _world(vault, with_w=False)
     _built(vault).close()
     options = {"turn": "", "max_chars": 8000}
-    opening = _activate(vault, **options)
-    assert opening["generation"]["continuity"] == "absent"
-    # The opening request carried the capture policy block out of the map's room, so a map that does not fit beside the
-    # block differs from the one the next request serves: the control starts from that next request.
-    first = _activate(vault, continuity=opening["continuity"], **options)
+    first = _activate(vault, **options)
+    assert first["generation"]["continuity"] == "absent"
     assert _activate(vault, continuity=first["continuity"], **options)["map"]["unchanged"] is True  # the control: nothing moved yet
 
     _page(vault, "dock-roster", "topics: [fleet]\nupdated: 2026-09-20\nsummary: Who works which dock.\n")
@@ -316,8 +333,7 @@ def test_a_pathless_map_anchor_opens_its_profile(
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     caller = _external() if restricted else OWNER
-    opening = _activate(vault, caller, max_chars=8000)  # carries the capture policy block, so its map has less room
-    packet = _activate(vault, caller, continuity=opening["continuity"], max_chars=8000)
+    packet = _activate(vault, caller, max_chars=8000)
     anchor = next(item for item in packet["map"]["items"] if item["ref"] == "project:harbour-ops")
     assert not anchor.get("path")
     assert anchor["profile"] == context_views.anchor_profile_ref(anchor["ref"])

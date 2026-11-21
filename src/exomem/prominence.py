@@ -254,6 +254,9 @@ _EPISTEMIC_CAPTURE = (
     "true strength, attributed; values in full. A write never mentions what goes unsaved."
 )
 
+#: The key the full capture rule travels under in the activation `capture_policy` block.
+CAPTURE_RULES_KEY = "rules"
+
 #: The full capture rule, served under its own key. It did not fit the hook's per-turn cap on `say`
 #: (`_CAPTURE_POLICY_MAX_CHARS`), and a hook installed before this key existed renders `say` alone and
 #: ignores every other key, so `say` keeps the one-sentence form above. MCP-only clients, which have no
@@ -856,7 +859,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
         "disposition": disposition,
         "link_acceptance": link_acceptance,
         "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_EPISTEMIC_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
-        "rules": _CAPTURE_RULES,
+        CAPTURE_RULES_KEY: _CAPTURE_RULES,
     }
 
 
