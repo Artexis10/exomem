@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, BinaryIO, Protocol
@@ -1060,21 +1061,33 @@ class OffloadBatch:
     """One owner census for a run of offloads, kept across guard releases (D10).
 
     The batch never holds the mutation boundary, so other writes run between two members. It rests
-    on offload being the only writer that binds a version the census has not seen while the runtime
-    serves; design.md D10 lists every writer of a stored reference (task 5.4.9). `charge` adds each
-    version that a member publishes. `end` drops the census so that the next member reads it again,
-    and `failed` does so only for a member that reached `charge`: a refused member bound nothing, so
-    the next one reuses the census. A stale census can wrongly refuse a member, which the next scan
-    releases, because refusals are read again from a fresh census.
+    on offload and the copy again of a damaged pointer (`recopy`) being the only writers that bind a
+    version the census has not seen while the runtime serves; design.md D10 lists every writer of a
+    stored reference (task 5.4.9). `charge` adds each version that a member publishes. A copy again
+    may run in another thread or process, so it cannot charge: it replaces a version in every filing
+    that holds it, which leaves the total as it was, and it notes the replacement in the ledger before
+    its first write, so that the next `usage` reads the census again. `end` drops the census so that
+    the next member reads it again, and `failed` does so only for a member that reached `charge`: a
+    refused member bound nothing, so the next one reuses the census. A stale census can wrongly refuse
+    a member, which the next scan releases, because refusals are read again from a fresh census.
     """
 
     def __init__(self, vault: Path) -> None:
         self._vault = Path(vault).resolve()
         self._usage: media_allowance.ReferenceUsage | None = None
         self._charged = False
+        self._replacements: str | None = None
 
     def usage(self, ledger: MediaJobStore) -> media_allowance.ReferenceUsage:
+        try:
+            replacements = _replacements_noted(ledger)
+        except _LEDGER_UNREADABLE:
+            replacements = None  # a marker that cannot be read may have changed: read the census again, as for any other change
+        if replacements is None or replacements != self._replacements:
+            self._usage = None
         if self._usage is None:
+            # Read before the census, so that a replacement that lands during the walk is seen by the next call.
+            self._replacements = replacements
             self._usage = media_allowance.reference_usage(self._vault)
             _record_census(ledger, self._usage)
         return self._usage
@@ -1094,6 +1107,23 @@ class OffloadBatch:
 
     def end(self) -> None:
         self._usage = None
+
+
+#: The `meta` key whose value changes with each copy again of a damaged pointer (`_note_replacement`).
+_REPLACEMENTS = "pointer_replacements"
+
+
+def _note_replacement(ledger: MediaJobStore) -> None:
+    """Record, before its first write, that a copy again is replacing a stored version, so that an active census is read again."""
+    _durable(ledger, "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+             (_REPLACEMENTS, uuid.uuid4().hex))
+
+
+def _replacements_noted(ledger: MediaJobStore) -> str:
+    """The marker as last written, or an empty string when no copy again has written one."""
+    with closing(ledger._connect(readonly=True)) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (_REPLACEMENTS,)).fetchone()
+    return "" if row is None else str(row[0])
 
 
 # What reading or writing the media ledger can raise.
@@ -2067,6 +2097,54 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
     raise MediaStoreError(NO_VERIFIED_SOURCE, "no copy of the original verifies now")
 
 
+def _holders(ledger: MediaJobStore, reference: StoredObject) -> Iterator[str]:
+    """The filings that the replica table lists as holding `reference`, in path order, a page at a time and at most `_ALIAS_ROWS`.
+
+    Read from `media_replicas_held`, so that the cost follows the filings of one version and not the table. A row can
+    lag its binding, so a caller edits only what it re-reads from the binding itself.
+    """
+    after = ""
+    for _page in range(_ALIAS_ROWS // _ALIAS_PAGE):
+        with closing(ledger._connect(readonly=True)) as conn:
+            page = [row[0] for row in conn.execute(
+                "SELECT binary_rel FROM media_replicas WHERE object = ? AND version = ? AND store = ? "
+                "AND binary_rel > ? ORDER BY binary_rel LIMIT ?",
+                (reference.object, reference.version, reference.store, after, _ALIAS_PAGE))]
+        yield from page
+        if len(page) < _ALIAS_PAGE:
+            return
+        after = page[-1]
+
+
+def _repoint_one(vault: Path, ledger: MediaJobStore, path: Path, damaged: StoredObject, replica: StoredObject) -> None:
+    """The guarded edit of one filing: it names `replica` instead of `damaged` if its binding still lists `damaged`."""
+    try:
+        held = original_state(vault, path)
+    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return
+    if _entry_in(held, damaged.store) != damaged:
+        return
+    _commit_reference(vault, prepare_reference(vault, held, replica))
+    _repoint_cache(vault, ledger, held, damaged, replica)
+    _note_replica(vault, path, replica, time.time())
+
+
+def _repoint_sharing(vault: Path, ledger: MediaJobStore, damaged: StoredObject, replica: StoredObject,
+                     owner: str) -> None:
+    """Replace `damaged` by `replica` in every other filing that holds it, so that one new version serves them all.
+
+    Each filing is its own guarded edit under its own hold of the vault boundary, so a repair never holds the vault
+    for the filings of one version together. A filing whose binding no longer lists `damaged`, or cannot be read, is
+    left as it is. One that the sweep does not reach keeps the damaged pointer, which the next check or eviction
+    finds and quarantines for its own copy again; the allowance counts it as the version it is, because the census
+    reads each binding, and an active batch read its census again before the first write (`_note_replacement`).
+    """
+    for relative in _holders(ledger, damaged):
+        if relative != owner:
+            _publishing(vault, "media_store_replica_recopy",
+                        partial(_repoint_one, vault, ledger, vault / relative, damaged, replica))
+
+
 def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
     """Replace the quarantined entry that a binding lists for `store_name` with a new version in the same store.
 
@@ -2075,6 +2153,10 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
     version publishes under the vault boundary only if the binding is the one read first, so an entry that a later
     write replaced is never overwritten. The damaged version stays in its store. Returns None when the binding no longer lists
     the entry that the table quarantined: that finding is stale and nothing is written.
+
+    A pointer of the store that serves eviction may be listed by several filings, which share one stored version and
+    count once against the allowance. The one new version then replaces it in every filing (`_repoint_sharing`), so the
+    total that the allowance counts stays as it was. A replica store has no allowance and no sharing: one filing, one copy.
     """
     from . import media_replicas
 
@@ -2139,6 +2221,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 # replica store collects.
                 if damaged.object != name:  # a retried copy that reuses the damaged name must not release its own
                     _release_name(ledger, damaged.object)
+                _note_replacement(ledger)  # before the write, as `OffloadBatch.charge` is: a failed write over-counts, never under
                 _commit_reference(vault, prepare_reference(vault, snapshot, replica))
                 _repoint_cache(vault, ledger, snapshot, damaged, replica)
             else:
@@ -2147,6 +2230,8 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
 
         _publishing(vault, "media_store_replica_recopy", publish)
+    if entry.serves_eviction:
+        _repoint_sharing(vault, ledger, damaged, replica, relative)
     return replica
 
 
@@ -2958,7 +3043,8 @@ def _evict_one(vault: Path, path: Path) -> str:
 
 
 #: The filings of a shared object that one eviction attempt looks at when its pointer is damaged: a page of this many
-#: to a transaction, for at most `_ALIAS_ROWS` filings and `_ALIAS_SECONDS` seconds.
+#: to a transaction, for at most `_ALIAS_ROWS` filings and `_ALIAS_SECONDS` seconds. A copy again reads its filings
+#: (`_holders`) by the same page and row bounds, and has no time bound: it writes each one, so it ends only when it has.
 _ALIAS_PAGE = 64
 _ALIAS_ROWS = 1024
 _ALIAS_SECONDS = 2.0

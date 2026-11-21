@@ -156,6 +156,8 @@ def initialize(conn: sqlite3.Connection) -> None:
     # The same rows by the stored version, which eviction asks about before it drops an original's local bytes.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_damaged ON media_replicas(object, version) "
                  f"WHERE state = '{QUARANTINED}'")
+    # The filings that list one stored version, in path order: a copy again replaces the version in each of them.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version, binary_rel)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
     if existed is None or healed:

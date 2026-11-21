@@ -19,7 +19,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
-from test_media_store import _offload, _preserved
+from test_media_store import _configure, _filed, _offload, _preserved
 from test_media_store import selected_store as selected_store
 from test_original_fixity import DAMAGED, TRANSCRIPT, _count_downloads, _findings, _fixity_on, _stored  # noqa: F401
 
@@ -27,6 +27,7 @@ from exomem import (
     artifact_lifecycle,
     commands,
     held_fs,
+    media_allowance,
     media_bindings,
     media_jobs,
     media_replicas,
@@ -1629,6 +1630,65 @@ def test_a_binding_edited_while_a_replica_is_copied_again_is_not_overwritten(
 
     assert _entry(vault, relative, MIRROR) == newer  # the retry finds the finding stale and writes nothing
     assert _queued(vault) == []
+
+
+def _two_filings_of_one_version(vault: Path, selected_store) -> tuple[Path, Path, originals.StoredObject]:
+    """Two filings of equal bytes, whose offload reused one stored version; the version is damaged and found by one of them."""
+    values, _config = selected_store
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    second = _preserved(vault, category="second")
+    assert _offload(vault, second) == pointer
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.CONTENT,
+                              failure="digest_mismatch")
+    return first, second, pointer
+
+
+def test_a_copy_again_of_a_version_that_two_filings_share_replaces_it_in_both_and_keeps_the_allowance(
+        vault: Path, selected_store) -> None:
+    """One new version for the object, not one for each filing: two would count twice against an allowance that fits one."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    size = first.stat().st_size
+    _configure(selected_store, vault, allowance_bytes=size)
+    assert media_allowance.reference_usage(vault).used_bytes == size
+
+    _recopy_all(vault)
+
+    fresh = _entry(vault, first, pointer.store)
+    assert (fresh.object, fresh.version) != (pointer.object, pointer.version)
+    assert _entry(vault, second, pointer.store) == fresh
+    assert media_allowance.reference_usage(vault).used_bytes == size
+    assert len(_objects(Path(selected_store[0]["root"]))) == 2  # the damaged version and its one replacement
+
+
+def test_a_copy_again_that_leaves_a_filing_on_the_damaged_version_ends_the_census_of_an_active_batch(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch keeps its census across members: a version that a copy again binds meanwhile must reach its next admission."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    one, another = _filed(vault, 2)
+    _configure(selected_store, vault, allowance_bytes=2 * first.stat().st_size + one.stat().st_size)  # fits both versions and one member
+    batch = media_store.OffloadBatch(vault)
+    media_store.offload(vault, one, batch=batch)  # the batch reads its census here: one version of the shared bytes, and this member
+    publishing = media_store._publishing
+    edits = []
+
+    def boundary_busy_for_the_second_filing(root: Path, operation: str, unit) -> None:
+        edits.append(operation)
+        if len(edits) == 2:
+            raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE, "the vault boundary is busy")
+        publishing(root, operation, unit)
+
+    monkeypatch.setattr(media_store, "_publishing", boundary_busy_for_the_second_filing)
+    with pytest.raises(media_store.MediaStoreError):
+        media_store.recopy(vault, first, pointer.store)
+    monkeypatch.setattr(media_store, "_publishing", publishing)
+    assert _entry(vault, second, pointer.store) == pointer  # the sweep stopped before it: two versions are bound now
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, another, batch=batch)
+
+    assert refused.value.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED
 
 
 # --- verify-stored-replicas: what the owner sees ----------------------------------------------------------
