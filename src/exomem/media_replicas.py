@@ -11,13 +11,14 @@ no rebuild has completed, shows every value as unknown.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import sqlite3
 import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -276,17 +277,22 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
         wake()
 
 
-#: A quarantined row of one stored version: the lookup of `media_replicas_damaged`, which holds only quarantined rows.
-_DAMAGED = f"SELECT 1 FROM media_replicas WHERE state = '{QUARANTINED}' AND object = ? AND version = ? LIMIT 1"
+#: Whether any of the (object, version) pairs of one JSON array is quarantined: a probe of `media_replicas_damaged`, which
+#: holds only quarantined rows, for each pair, and no scan of the table. The pairs travel as one value, so the statement
+#: is the same for one pair and for thousands. SQLite uses a partial index only when the query states its condition.
+_DAMAGED = ("SELECT 1 FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_replicas "
+            f"WHERE state = '{QUARANTINED}' AND object = json_extract(wanted.value, '$[0]') "
+            "AND version = json_extract(wanted.value, '$[1]')) LIMIT 1")
 
 
 def quarantined_in(conn: sqlite3.Connection, references: Iterable[originals.StoredObject]) -> bool:
     """Whether the table holds any of these stored versions as quarantined, read on `conn`'s own transaction.
 
-    One lookup per reference through the index of quarantined rows. An object has a handful of versions, never a
-    number that grows with the store.
+    One statement however many versions: the pointers that a pooled object collects grow with its filings and its
+    re-copies, and a lookup for each would run inside eviction's write transaction.
     """
-    return any(conn.execute(_DAMAGED, (reference.object, reference.version)).fetchone() for reference in references)
+    pairs = sorted({(reference.object, reference.version) for reference in references})
+    return bool(pairs) and conn.execute(_DAMAGED, (json.dumps(pairs),)).fetchone() is not None
 
 
 def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:
@@ -1107,8 +1113,9 @@ _owed: dict[tuple[Path, str], float] = {}
 class _ReadCap:
     """Keeps reads under the read-rate cap: each read earns its own time, and time spent elsewhere earns no burst.
 
-    A store's `head` and a sample read whole objects, so the cap applies per object, after its read. A round gives its
-    `key` (vault and kind) to take up the wait that the rounds before it left owing, and to leave its own.
+    A store's `head` and a sample read whole objects, so the cap applies per object. `reading` accounts for the read
+    however it ends, and `ready` is the one place that waits: it holds the next read until the earlier ones are paid
+    for. A round gives its `key` (vault and kind) to take up what the rounds before it left owing, and to leave its own.
     """
 
     def __init__(self, rate: float, limit: float, key: tuple[Path, str] | None = None) -> None:
@@ -1116,25 +1123,32 @@ class _ReadCap:
         self.due = _owed.get(key, 0.0) if key is not None else 0.0
 
     def ready(self) -> bool:
-        """False when the wait that earlier rounds left owing outlasts this round; else waits it out, and the read may go."""
+        """False when the wait that earlier reads left owing outlasts this round; else waits it out, and the read may go."""
         if self.due >= self.limit:
             return False
         foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
         return True
 
-    def spend(self, size: int, started: float) -> bool:
-        """Account for a read of `size` bytes that began at `started`; False when its time would pass the round's end.
+    @contextmanager
+    def reading(self, size: int):
+        """Account for a read of `size` bytes that starts now, whether it verified, failed or was cut off.
 
-        The read's time counts from its start, so the read itself is part of it and only what remains is waited out: a
-        wait added after the read would hold the average rate below the cap and stretch the cycle.
+        The read's time counts from its start, so the read itself is part of it and only what remains is waited out.
+        A failed read is charged its whole size: how much it moved before it failed is unknown, and a store that
+        fails after most of the bytes must not be read faster than the cap for it. A `ValueError` is the store
+        refusing the locator before it reads anything, so it costs nothing.
         """
-        self.due = max(self.due, started) + size / self.rate
-        if self.key is not None:
-            _owed[self.key] = self.due
-        if self.due >= self.limit:
-            return False
-        foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
-        return True
+        started, charged = time.monotonic(), True
+        try:
+            yield
+        except ValueError:
+            charged = False
+            raise
+        finally:
+            if charged and size > 0:
+                self.due = max(self.due, started) + size / self.rate
+                if self.key is not None:
+                    _owed[self.key] = self.due
 
 
 def scheduled_level(entry: originals.StoreEntry) -> str | None:
@@ -1293,10 +1307,13 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 _failed(vault, row, bound)
                 continue
             replica = bound[1]
-            started = time.monotonic()
+            size = replica.ciphertext_size if level == CONTENT else 0  # a presence check moves no object
+            spent += size
             try:
-                failure = media_store.check_replica(vault, replica)
+                with cap.reading(size):
+                    failure = media_store.check_replica(vault, replica)
             except ValueError:
+                spent -= size  # refused before it read anything
                 _failed(vault, row, RECORD_INVALID, attempted=replica)  # the store answered; it cannot address this version
                 continue
             except media_store.MediaStoreError:
@@ -1313,10 +1330,6 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 _passed(vault, row["binary_rel"], replica, level)
             else:
                 quarantine(vault, row["binary_rel"], replica, level=level, failure=failure)
-            if level == CONTENT:
-                spent += replica.ciphertext_size
-                if not cap.spend(replica.ciphertext_size, started):
-                    return attempted  # The cap would hold the worker past the round: the next round goes on.
     return attempted
 
 
@@ -1476,10 +1489,10 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 _charge(conn, name, month, replica.ciphertext_size)
             reads += 1
             sampled += 1
-            started = time.monotonic()
             try:
-                damage = media_store.sample_replica(
-                    vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
+                with cap.reading(replica.ciphertext_size):
+                    damage = media_store.sample_replica(
+                        vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
             except media_store.KeyRefused:
                 # the bytes match their record: no damage
                 _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)
@@ -1500,7 +1513,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     _released(vault, row, replica)
                 else:
                     _proved(vault, row, replica, name)
-            if failing >= _STORE_FAILURES or not cap.spend(replica.ciphertext_size, started):
+            if failing >= _STORE_FAILURES:
                 break  # a store or key that fails three in a row is the likelier cause; the next round tries again
     return sampled
 

@@ -823,6 +823,59 @@ def test_a_store_that_does_not_answer_as_itself_changes_no_replica_when_its_chec
     assert (row["state"], row["level"], row["checked_at"]) == (media_replicas.UPLOAD_VERIFIED, None, 0)
 
 
+def _unmount_when_held(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Make `root` an empty mount point the moment the store takes its hold on it: the volume left after an earlier check."""
+    acquire = media_store.held_fs.acquire
+
+    def vanishing(path, *args, **kwargs):
+        if Path(path) == root and (root / media_store.STORE_MARKER).exists():
+            root.rename(root.with_name(root.name + "-gone"))
+            root.mkdir()
+        return acquire(path, *args, **kwargs)
+
+    monkeypatch.setattr(media_store.held_fs, "acquire", vanishing)
+
+
+def test_a_store_that_leaves_between_its_identity_and_its_head_is_not_read_as_missing_a_version(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The empty mount point answers every HEAD with absent: a quarantine on that has no way back once the NAS returns."""
+    _replicated(vault)
+    _due_again(vault)
+    _unmount_when_held(monkeypatch, mirrored)
+
+    media_replicas.check(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["failure"], row["level"], row["checked_at"]) == (media_replicas.UPLOAD_VERIFIED, None, None, 0)
+
+
+@pytest.mark.parametrize("operation", ["head", "open", "upload"])
+def test_a_store_that_leaves_while_it_is_held_is_unavailable_to_every_operation(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str) -> None:
+    """A put into the empty mount point would land on the wrong disk and read as stored; a get or head would read as gone."""
+    root = tmp_path / "store"
+    root.mkdir()
+    media_store.write_store_marker(root, "solo")
+    backend = media_store.FilesystemStore(root, name="solo")
+    data = b"bytes an owner handed in"
+    digest = hashlib.sha256(data).hexdigest()
+    version = backend.upload(digest, io.BytesIO(data), size=len(data), sha256=digest)
+
+    def open_it() -> None:
+        with backend.open(digest, version):
+            pass
+
+    operations = {"head": lambda: backend.head(digest, version), "open": open_it,
+                  "upload": lambda: backend.upload(digest, io.BytesIO(data), size=len(data), sha256=digest)}
+    _unmount_when_held(monkeypatch, root)
+
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        operations[operation]()
+
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert list(root.iterdir()) == []  # nothing was written where the store is not
+
+
 def test_a_check_round_takes_the_replicas_checked_longest_ago_first_and_stops_at_its_share_of_the_cycle(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A round that checked the same replicas every time would leave the rest of the store unchecked for good."""
@@ -1011,8 +1064,30 @@ def test_the_eviction_gate_reads_the_index_of_quarantined_rows(vault: Path, sele
     """Eviction asks this for every candidate: a scan of every replica would cost the size of the store each time."""
     _replicated(vault)
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DAMAGED, ("o", "v")))
+        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._DAMAGED, (json.dumps([["o", "v"]]),)))
     assert "USING COVERING INDEX media_replicas_damaged" in plan
+
+
+def test_the_eviction_gate_asks_the_table_once_however_many_pointers_a_pooled_object_has(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A pooled object keeps a pointer for every filing and re-copy: a lookup for each ran inside eviction's write
+    transaction, so its cost grew with the pool and held the vault's single writer."""
+    pointers = [originals.StoredObject(1, MIRROR, "1", f"{number:064x}", f"version-{number}", 10, "0" * 64)
+                for number in range(1000)]
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        for pointer, state in ((pointers[0], media_replicas.UPLOAD_VERIFIED), (pointers[777], media_replicas.QUARANTINED)):
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
+                         "VALUES (?, ?, ?, ?, '1', 10, ?, 0)", (f"Originals/{pointer.object}.bin", MIRROR, pointer.object,
+                                                               pointer.version, state))
+    statements: list[str] = []
+    with closing(media_jobs.MediaJobStore(vault)._connect(readonly=True)) as conn:
+        conn.set_trace_callback(statements.append)
+        found = media_replicas.quarantined_in(conn, pointers)
+        clean = media_replicas.quarantined_in(conn, pointers[:777])
+        conn.set_trace_callback(None)
+
+    assert (found, clean) == (True, False)  # only the quarantined pointer counts, wherever it stands in the set
+    assert len([sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]) == 2
 
 
 # --- verify-stored-replicas: findings from a check and from eviction ---------------------------------------
@@ -2080,6 +2155,66 @@ def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_
     rate = media_replicas.check_read_rate()
     for number, (started, _size) in enumerate(reads):
         assert sum(size for _started, size in reads[:number]) <= rate * started  # what was read before is paid for
+
+
+def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store that moves a huge object and then drops the connection costs the same bandwidth as one that finishes: a
+    cap that only the verified reads advanced let it run three such reads back to back, again every round."""
+    gib = 1024**3
+    ledger = media_jobs.MediaJobStore(vault)
+    with closing(ledger._connect()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
+                     (MIRROR, 500_000, 10**15))
+        for number in range(3):
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
+                         "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
+                         (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", 10 * gib,
+                          media_replicas.UPLOAD_VERIFIED))
+    clock = [0.0]
+    monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
+        1, row["store"], "1", row["object"], row["version"], 10 * gib, "0" * 64)))
+
+    def drops_the_connection(_vault, _replica):
+        raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the connection dropped")
+
+    monkeypatch.setattr(media_store, "check_replica", drops_the_connection)
+    cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
+    cap = media_replicas._ReadCap(rate, 10**9)
+
+    attempted = media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle, cap, 10**9)
+
+    assert attempted == 3
+    assert cap.due == pytest.approx(3 * 10 * gib / rate)
+
+
+def test_samples_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third failure in a row ends the round: it moved its bytes as much as the two before it, and must be paid for."""
+    for category in ("a", "b", "c"):
+        _offload(vault, _preserved(vault, category=category))
+    _replicate_all(vault)
+    _unproven(vault)
+    clock, read = [time.monotonic()], []  # the replication above already ran a round on the real clock
+    began = clock[0]
+    monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def drops_the_connection(_vault, replica, _expected):
+        read.append(replica.ciphertext_size)
+        raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the connection dropped")
+
+    monkeypatch.setattr(media_store, "sample_replica", drops_the_connection)
+
+    media_replicas.sample(vault)
+
+    assert len(read) == 6  # three failures in a row end the turn of each of the two stores
+    assert media_replicas._owed[(vault.resolve(), "sample")] - began == pytest.approx(
+        sum(read) / media_replicas.check_read_rate())
 
 
 def test_a_store_that_the_last_round_left_waiting_is_checked_first_in_the_next(

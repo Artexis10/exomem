@@ -184,6 +184,11 @@ def _read_marker(root: Path) -> dict[str, object] | None:
         if not stat.S_ISREG(os.fstat(marker.fileno()).st_mode):
             return None
         raw = marker.read(_MARKER_MAX_BYTES + 1)
+    return _parse_marker(raw)
+
+
+def _parse_marker(raw: bytes) -> dict[str, object] | None:
+    """The marker that `raw` holds; None when it is too long, not JSON or not a marker."""
     try:
         value = json.loads(raw) if len(raw) <= _MARKER_MAX_BYTES else None
     except ValueError:
@@ -191,6 +196,20 @@ def _read_marker(root: Path) -> dict[str, object] | None:
     if isinstance(value, dict) and value.get("schema") == _MARKER_SCHEMA and isinstance(value.get("store"), str):
         return value
     return None
+
+
+def _marker_in(filesystem: held_fs.HeldFilesystem) -> dict[str, object] | None:
+    """The marker, read through `filesystem`'s own handle on the root; None when that root holds no marker.
+
+    Reading through the held handle ties the answer to the very directory the caller then reads or writes: a root
+    that lost its mount is an empty directory behind the handle, and it holds no marker.
+    """
+    try:
+        with filesystem.parent(".").require() as root, filesystem.file(root, STORE_MARKER).require() as marker:
+            raw = filesystem.read(marker, max_bytes=_MARKER_MAX_BYTES).require()
+    except held_fs.HeldFsError:
+        return None
+    return _parse_marker(raw)
 
 
 def read_store_marker(root: Path) -> str | None:
@@ -238,11 +257,29 @@ class FilesystemStore:
         self.store_id = store_id
 
     def require_identity(self) -> None:
-        found = _read_marker(self.root)
+        """Refuse unless the root's marker names this store: a cheap check before work that does not touch the root."""
+        self._require_marker(_read_marker(self.root))
+
+    def _require_marker(self, found: dict[str, object] | None) -> None:
         if found is None or found["store"] != self.name or (self.store_id is not None and found.get("id") != self.store_id):
             # Unavailable is never proof that a version is gone: the caller keeps what it recorded.
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE",
                                   "the store root is missing, or its marker does not name this store")
+
+    @contextmanager
+    def _held(self):
+        """The root's held view, once the marker read through that same view names this store.
+
+        An identity read by path before the view is taken leaves a gap: a volume that goes away in it leaves an empty
+        mount point, which `head` would answer as absent and an upload would fill. Here the proof and the work share
+        one handle, so a root that is not this store is unavailable, never absent.
+        """
+        opened = held_fs.acquire(self.root)
+        if opened.error is not None:
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store root cannot be held") from opened.error
+        with opened.value as filesystem:
+            self._require_marker(_marker_in(filesystem))
+            yield filesystem
 
     def _path(self, name: str, version: str) -> str:
         if not originals.is_sha256(name) or not version or Path(version).name != version or version in {".", ".."}:
@@ -256,8 +293,7 @@ class FilesystemStore:
             raise ValueError("invalid upload declaration")
         if self.max_object_bytes is not None and size > self.max_object_bytes:
             raise ObjectTooLarge(size, self.max_object_bytes)
-        self.require_identity()
-        with held_fs.acquire(self.root).require() as filesystem:
+        with self._held() as filesystem:
             with filesystem.parent(name, create=True, access="mutate").require() as parent:
                 held_fs.publish_bytes(filesystem, parent, version,
                                       held_fs.Chunks(lambda: _declared_chunks(stream, size, sha256))).require()
@@ -267,8 +303,7 @@ class FilesystemStore:
     @contextmanager
     def open(self, name: str, version: str):
         relative = self._path(name, version)
-        self.require_identity()
-        with held_fs.acquire(self.root).require() as filesystem:
+        with self._held() as filesystem:
             with filesystem.parent(name).require() as parent:
                 with filesystem.file(parent, Path(relative).name).require() as file:
                     with os.fdopen(os.dup(file.descriptor), "rb") as stream:
@@ -276,8 +311,7 @@ class FilesystemStore:
 
     def head(self, name: str, version: str) -> ObjectHead | None:
         self._path(name, version)
-        self.require_identity()
-        with held_fs.acquire(self.root).require() as filesystem:
+        with self._held() as filesystem:
             parent_result = filesystem.parent(name)
             if parent_result.error is not None and parent_result.error.code == "MISSING":
                 return None
@@ -1339,10 +1373,8 @@ def check_replica(vault: Path, replica: StoredObject) -> str | None:
     answer as itself, raises `MEDIA_STORE_UNAVAILABLE`: that is no finding, and the caller keeps what it had.
     """
     backend = store_for(vault, replica.store)
-    if isinstance(backend, FilesystemStore):
-        backend.require_identity()
     try:
-        head = _verified_head(backend, replica)
+        head = _verified_head(backend, replica)  # a filesystem store proves its identity inside the view it reads
     except ReplicaMismatch as mismatch:
         return mismatch.failure
     if head is None:

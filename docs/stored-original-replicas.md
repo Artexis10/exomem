@@ -30,6 +30,7 @@ A store whose checks are not scheduled is never sampled and is never charged byt
 Each replica is checked about once in 30 days, oldest check first.
 A round runs every ten minutes and takes each store's share of the cycle: its replicas and, for a content check, its bytes, each times ten minutes over the cycle.
 A content check reads at up to 32 MiB per second on average: an object is read at the store's speed, and only what remains of its share of time after the read is waited out. An object so large that its wait outlasts a round leaves the wait to the next rounds, which read nothing until it is paid.
+A read that fails after the store answered counts as a read of the whole object, because Exomem cannot tell how much it moved.
 The stores of a round share that cap. At 500,000 replicas and 25 TB in one store, a round checks 116 replicas and 5.4 GiB in about 216 seconds, which covers the store in 30 days. Two such stores take about 432 seconds a round, and also finish in 30 days.
 Three such stores need more than the cap allows within the ten minutes, so their cycle runs a little over 30 days. Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` to shorten it.
 The store that has waited longest goes first in each round.
@@ -71,7 +72,7 @@ Each store, and the totals, report these values:
 - `sample`: the `budget_bytes` of the month, the `spent_bytes`, the replicas `skipped_for_size` and the replicas `not_sampled` with a reason each.
 
 A value that Exomem cannot read shows as `unknown`, never as zero.
-A store that is offline, slow or not answering as itself changes no replica.
+A store that is offline, slow or not answering as itself changes no replica. That includes a disk or NAS that is unmounted while a check or a copy starts: the store reads as unavailable, never as empty.
 Unavailable is not proof of loss, so it never makes a finding.
 
 ## Read the findings
