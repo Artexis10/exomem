@@ -16,7 +16,8 @@ shell command that commits, pushes, merges, tags or opens/merges a pull request
 or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
 did not fail. A command counts unless its output reports an explicit non-zero
 exit code (Claude: `is_error`); a Codex cell that returned while the command was
-still running carries no exit code and counts. Q&A, reading and CI-watching turns stay silent however long the reply.
+still running carries no exit code and counts. A turn is also a candidate when it creates a file with Claude's `Write`
+tool and its reply names that file (`_handed_over_file`). Q&A, reading and CI-watching turns stay silent however long the reply.
 Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
 those turns wrote anything. At "maximal" the older gate stays: the reply is
 substantial (>= a char threshold). Either way the KB must not already have been
@@ -107,7 +108,7 @@ import sys
 import threading
 import time
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
 _KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
@@ -741,37 +742,26 @@ def _successful_landing(tool: dict) -> bool:
     return any(_landing_command(command) for command in _tool_commands(tool))
 
 
-#: File-writing tools that the clients fix (Claude's own, Codex's patch tool), matched on the lowercased name.
-_FILE_WRITE_TOOLS = frozenset({"write", "edit", "multiedit", "notebookedit", "apply_patch"})
-#: The file headers of Codex's patch format, a closed grammar that the client fixes.
-_PATCH_FILE_HEADER = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.M)
-
-
-def _written_paths(tool: dict) -> list[str]:
-    """The file paths one successful file-writing call wrote, or none."""
-    if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
-        return []
-    tool_input = tool.get("input")
-    if isinstance(tool_input, str):
-        return _PATCH_FILE_HEADER.findall(tool_input)
-    if not isinstance(tool_input, dict):
-        return []
-    paths = [tool_input[key] for key in ("file_path", "notebook_path", "path") if isinstance(tool_input.get(key), str)]
-    patch = tool_input.get("input") or tool_input.get("patch") or tool_input.get("source")
-    return paths + (_PATCH_FILE_HEADER.findall(patch) if isinstance(patch, str) else [])
+#: The file-creating tool of Claude, matched on the lowercased name. An edit of an existing file is not a
+#: hand-over: a reply that says "let me update app.py" names a file that holds working state.
+_FILE_WRITE_TOOLS = frozenset({"write"})
 
 
 def _handed_over_file(tools: list[dict], reply: str) -> bool:
-    """Whether the turn wrote a file that its reply names: a hand-over that no commit or push marks.
+    """Whether the turn created a file that its reply names: a hand-over that no commit or push marks.
 
-    A reply that names the file it just wrote has delivered work to the user, the same as a landing does.
-    A file the reply never mentions is working state, and stays silent.
+    A reply that names the file it just wrote has delivered work to the user, as a landing does. The name
+    must stand as a whole token in the reply, so `a.md` does not match `data.md`.
     """
-    return any(
-        path.rsplit("/", 1)[-1] in reply
-        for tool in tools
-        for path in _written_paths(tool)
-    )
+    for tool in tools:
+        if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
+            continue
+        tool_input = tool.get("input")
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        name = PureWindowsPath(path).name if isinstance(path, str) else ""
+        if name and re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-])", reply):
+            return True
+    return False
 
 
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The

@@ -6,7 +6,7 @@ Where a client hook enforces the capture contract, at every prominence level
 below the most aggressive it SHALL send the per-turn capture reminder only when
 the latest turn contains a landing or a hand-over. A landing is a shell command that did not fail and runs
 `git commit`, `git push`, `git merge`, `git tag`, `yadm commit`, `yadm push`,
-`gh pr create`, `gh pr merge` or `gh release create`. A hand-over is a file-writing tool call that did not fail, whose written file name the turn's reply also names. The detector SHALL match
+`gh pr create`, `gh pr merge` or `gh release create`. A hand-over is a call of Claude's `Write` tool that did not fail, whose written file name the turn's reply also names as a whole token. The detector SHALL match
 parsed command words, not substrings of prose, SHALL recognise the Claude and
 Codex transcript shapes, and SHALL NOT count a command that reports an explicit non-zero exit code or an error result. A command with no reported exit code, such as a Codex call that returned while the command was still running, counts. A dry run, a merge `--abort` or `--quit`, a push that deletes a remote ref, and a `git tag` that only lists, verifies or deletes are not landings.
 A hand-over SHALL NOT count for the episode ask, which follows its own landing rule. The most aggressive level SHALL keep the reply-length gate. At every level the

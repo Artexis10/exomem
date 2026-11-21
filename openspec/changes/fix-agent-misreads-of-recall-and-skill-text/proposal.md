@@ -20,7 +20,7 @@ close it as agent error.
   gives way to the keyword excerpt of the same page.
 - The skill scaffold limits the read-only rule to vault content. Ordinary workspace files are not the vault, and the agent
   writes them with its own file tools. Every mirrored copy is regenerated.
-- The Stop nudge treats a successfully written file that the reply names as a hand-over, beside a commit or push.
+- The Stop nudge treats a file that Claude's `Write` tool created and the reply names as a hand-over, beside a commit or push.
 
 No tool name, request schema or tool description changes, so the tool-surface fingerprint and the connector contract digest stay as they are.
 

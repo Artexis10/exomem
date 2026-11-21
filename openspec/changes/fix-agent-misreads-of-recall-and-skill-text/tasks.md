@@ -8,7 +8,7 @@
 ## 2. Guidance and hook
 
 - [x] 2.1 Limit the read-only rule in the skill scaffold to vault content, and regenerate the skill contract, the plugin tree and the cloud plugin copies.
-- [x] 2.2 Count a written file that the reply names as a hand-over in the Stop nudge, with tests, and regenerate the packaged hook copies.
+- [x] 2.2 Count a file that Claude's `Write` tool created and the reply names as a hand-over in the Stop nudge, with tests, and regenerate the packaged hook copies.
 
 ## 3. Delivery
 
