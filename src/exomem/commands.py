@@ -8420,12 +8420,13 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     released = released if isinstance(released, dict) else {}
     if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
         return _refuse_unused_offset(result, offset)
+    media_sidecar = bool(released.get("media_type"))
     timed = False
     if extraction_parts.count_of(released) == 1:
-        extracted = _preserve_module().extracted_text(body)
+        extracted = _preserve_module().extracted_body_text(body, legacy_sidecar=media_sidecar)
         if len(extracted) <= extraction_parts.WINDOW_CHARS:
             timed = offset is not None and transcript_passages.is_transcript(
-                extracted or transcript_passages.source_text(body),
+                extracted or transcript_passages.source_text(body, legacy_sidecar=media_sidecar),
             )
             if not timed:
                 return _refuse_unused_offset(result, offset)
@@ -8436,7 +8437,11 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
     frontmatter, stored, _ = parse_frontmatter(raw)
-    first = transcript_passages.source_text(stored) if timed else _preserve_module().extracted_text(stored)
+    media_sidecar = bool(frontmatter.get("media_type"))
+    first = (
+        transcript_passages.source_text(stored, legacy_sidecar=media_sidecar) if timed else
+        _preserve_module().extracted_body_text(stored, legacy_sidecar=media_sidecar)
+    )
     # A read whose hash is not the file's served something other than the stored page (a
     # projected collection summary, or a page that changed meanwhile): it passes through whole.
     if content_hash(raw) != result["content_hash"]:

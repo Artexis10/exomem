@@ -6623,7 +6623,7 @@ def _transcript_match(vault_root: Path, page: ParsedPage, query: str, chunk: str
 
     if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
         return None
-    text = transcript_passages.source_text(page.body)
+    text = transcript_passages.source_text(page.body, legacy_sidecar=bool(page.frontmatter.get("media_type")))
     return transcript_passages.match(
         text, chunk=chunk, title=page.title, query=query,
         withheld=egress.carrier_spans_for_caller(vault_root, text, owner_path=page.rel_path),
@@ -6653,7 +6653,9 @@ def _part_match(
         return None
     try:
         base = extraction_parts.part_start(
-            vault_root, vault_root / page.rel_path, preserve.extracted_text(page.body), number
+            vault_root, vault_root / page.rel_path,
+            preserve.extracted_body_text(page.body, legacy_sidecar=bool(page.frontmatter.get("media_type"))),
+            number,
         )
     except (OSError, UnicodeError):
         return None

@@ -409,6 +409,27 @@ def test_an_empty_first_extraction_reads_part_two_at_zero(vault) -> None:
     assert opened["body"] == "The extraction starts here."
 
 
+def test_an_already_parsed_source_keeps_markdown_between_horizontal_rules(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n"
+        "---\n\n## Extracted text\n\nThe first extraction starts here.\n\n---\n\nMore text.\n",
+        encoding="utf-8",
+    )
+    part.write_text(
+        "---\npart_of: workshop.md\n---\n\n## Extracted text\n\nThe second part starts here.\n",
+        encoding="utf-8",
+    )
+
+    opened = commands.op_read_memory(vault, path=path, offset=0)
+
+    assert opened["window"]["part"] == 1
+    assert opened["body"].startswith("The first extraction starts here.")
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path

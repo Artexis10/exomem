@@ -24,14 +24,14 @@ class TranscriptMatch(NamedTuple):
         return {"text": self.text, "part": 1, "offset": self.start, "length": self.end - self.start}
 
 
-def source_text(body: str, *, multipart: bool = False) -> str:
+def source_text(body: str, *, multipart: bool = False, legacy_sidecar: bool = False) -> str:
     """Return the stored text addressed by a transcript citation."""
-    from .preserve import extracted_text
+    from .preserve import extracted_body_text
     from .source_coverage import CAPTURE_HEADING, fenced_capture
 
     body = body.replace("\r\n", "\n")
-    text = extracted_text(body)
-    if text or multipart:
+    text = extracted_body_text(body, legacy_sidecar=legacy_sidecar)
+    if text or multipart or legacy_sidecar:
         return text
     if (text := fenced_capture(body)) is not None:
         return text

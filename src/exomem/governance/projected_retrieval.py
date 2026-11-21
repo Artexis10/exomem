@@ -277,27 +277,38 @@ def _admitted_transcript(variant: projections.ProjectionVariant) -> bool:
 
 
 def transcript_samples(
-    variant: projections.ProjectionVariant, *, limit: int = MAX_PROJECTED_TRANSCRIPT_SAMPLES,
-) -> tuple[tuple[int, transcript_passages.TranscriptMatch], ...]:
-    """Return timed turns whose offsets map into the released first extraction part."""
+    variant: projections.ProjectionVariant,
+) -> tuple[tuple[tuple[int, transcript_passages.TranscriptMatch], ...], bool]:
+    """Return verifiable turns and whether their visible coverage is incomplete."""
     from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
 
-    if not _admitted_transcript(variant) or variant.head is None:
-        return ()
+    if not _admitted_transcript(variant):
+        return (), False
+    multipart = variant.search_fields[TIMED_SOURCE_FIELD] == TIMED_SOURCE_HEAD
+    body = variant.search_fields.get("body", "")
     # Other parts use a shared catalog budget. Sampling them would expose its occupancy.
     head = variant.head
-    text = variant.search_fields["body"][head.begin:head.end]
+    if head is None:
+        text = transcript_passages.source_text(
+            body, multipart=multipart, legacy_sidecar=bool(variant.search_fields.get("media_type")),
+        )
+        return (), timed_source_coverage(text, multipart=multipart) is not None
+
+    partial = False
     samples = []
-    for match in transcript_passages.bounded_turns(text, max_chars=MAX_PASSAGE_CHARS):
+    for match in transcript_passages.bounded_turns(body[head.begin:head.end], max_chars=MAX_PASSAGE_CHARS):
         stored_start = _stored_position(match.start, head.carrier_spans)
         stored_end = _stored_position(match.end - 1, head.carrier_spans) + 1
-        if stored_end - stored_start == match.end - match.start:
-            samples.append((1, transcript_passages.TranscriptMatch(
-                stored_start, stored_end, match.text, match.timestamp,
-            )))
-            if len(samples) == limit:
-                break
-    return tuple(samples)
+        if stored_end - stored_start != match.end - match.start:
+            partial = True
+            continue
+        if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
+            partial = True
+            break
+        samples.append((1, transcript_passages.TranscriptMatch(
+            stored_start, stored_end, match.text, match.timestamp,
+        )))
+    return tuple(samples), partial or (multipart and bool(samples))
 
 
 @dataclass(frozen=True, slots=True)
@@ -963,26 +974,14 @@ class ProjectedVectorIndex:
         self, root, variant: projections.ProjectionVariant, query_vector: tuple[float, ...], score: float,
     ) -> tuple[ProjectedLexicalHit | None, bool]:
         """Verify and score the bank of one already admitted, competitive Source."""
-        candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
-        multipart = variant.search_fields.get(TIMED_SOURCE_FIELD) == TIMED_SOURCE_HEAD
+        candidates, partial = transcript_samples(variant)
         if not candidates:
-            # A released turn can lack a unique or contiguous stored position.
-            if not _admitted_transcript(variant):
-                return None, False
-            body = variant.search_fields.get("body", "")
-            head = variant.head
-            text = (
-                body[head.begin:head.end] if head is not None
-                else transcript_passages.source_text(body, multipart=multipart)
-            )
-            return None, timed_source_coverage(text, multipart=multipart) is not None
+            return None, partial
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:
             raise transcript_banks.TranscriptBankUnavailable("projected transcript measurements are missing")
         import numpy as np
 
-        partial = multipart or len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
-        candidates = candidates[:MAX_PROJECTED_TRANSCRIPT_SAMPLES]
         query = np.asarray(query_vector, dtype=np.float32)
         matrix = transcript_banks.load(root, self.namespace_key, digest, candidates, len(query))
         norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)

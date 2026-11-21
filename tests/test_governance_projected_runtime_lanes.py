@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from governance_projection_support import verified_namespace
 
-from exomem import embeddings, extraction_parts, lifecycle_statuses, readiness
+from exomem import embeddings, extraction_parts, lifecycle_statuses, readiness, transcript_passages
 from exomem.governance import (
     catalog_publication,
     principal,
@@ -854,7 +854,7 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
         )
     offset = text.index("[00:19]")
     baseline = _runtime((_item(source), _item(summary)))
-    samples = projected_retrieval.transcript_samples(source)
+    samples, _ = projected_retrieval.transcript_samples(source)
     assert any(quote in match.text for _, match in samples)
     bank = transcript_banks.publish(
         tmp_path, baseline.namespace.namespace_key,
@@ -901,7 +901,7 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
 
 
-@pytest.mark.parametrize("layout", ["inline-heading", "fenced-heading", "ambiguous-first-part"])
+@pytest.mark.parametrize("layout", ["inline-heading", "fenced-heading", "unicode-separator", "ambiguous-first-part"])
 def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, layout):
     path = "Knowledge Base/Sources/gate.md"
     turn = "[00:19] Leave the gate open until the truck arrives."
@@ -909,6 +909,7 @@ def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(m
     example = {
         "inline-heading": "A label example is `## Extracted text`.\n\n",
         "fenced-heading": "```markdown\n## Extracted text\n```\n\n",
+        "unicode-separator": "A label example is\u2028## Extracted text\n\n",
     }
     opening = "" if ambiguous else example[layout] + turn + "\n\n"
     extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else ""
@@ -965,6 +966,34 @@ def test_projected_search_checks_coverage_only_for_visible_text(monkeypatch, tmp
     (hit,) = result.hits
     assert hit.path == path and hit.transcript_ts is None and hit.passage is None
     assert result.incomplete_source_passages is visible
+
+
+def test_projected_search_reports_partial_when_another_visible_turn_cannot_be_opened(monkeypatch, tmp_path):
+    path = "Knowledge Base/Sources/gate.md"
+    turn = "[00:19] Leave the gate open until the truck arrives."
+    text = "[00:01] The electronic gate failed.\n" + turn
+    source = _variant(path, "1" * 64, text, fields={"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: "true"})
+    source = replace(source, head=projections.ProjectionHead(0, len(text), ((8, 12),)))
+    item = _item(source)
+    namespace = _runtime((item,)).namespace.namespace_key
+    offset = text.index(turn) + 4
+    bank = transcript_banks.publish(
+        tmp_path, namespace, ((1, transcript_passages.TranscriptMatch(offset, offset + len(turn), turn, 19)),),
+        [(1.0, 0.0)],
+    )
+    runtime = _runtime((item,), vectors=(replace(_vector(source, (0.0, 1.0)), transcript_bank=bank),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts == 19
+    assert hit.passage["text"] == turn and hit.passage["offset"] == offset
+    assert result.incomplete_source_passages
 
 
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):

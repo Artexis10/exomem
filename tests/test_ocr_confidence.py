@@ -24,7 +24,12 @@ from exomem import (
 )
 from exomem.find import find
 from exomem.governance import catalog_publication, egress
-from exomem.ocr_facts import MAX_EXTRACTION_ENGINE_BYTES, OcrFacts, engine_with_ocr_text, ocr_text_available
+from exomem.ocr_facts import (
+    MAX_EXTRACTION_ENGINE_BYTES,
+    OcrFacts,
+    engine_with_ocr_text,
+    ocr_text_available,
+)
 from exomem.ocr_models import OcrReading, OcrWord
 from exomem.vault import parse_frontmatter
 
@@ -414,3 +419,36 @@ def test_the_governed_projection_body_leaves_out_the_withheld_words() -> None:
 
     assert "harbour lantern" in projected
     assert "zyxqv" not in projected
+
+
+def test_ocr_replacement_and_search_survive_an_open_caption_fence() -> None:
+    caption = "## Description\n\n```markdown\nThe label on the box.\n\n"
+    stub = _SIDECAR.replace("## Extracted text", caption + "## Extracted text")
+    stub += f"\n{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\n## Preserved notes\n\nKeep this note.\n"
+    first = preserve.render_sidecar_extraction(
+        stub, text="prior reading", engine="tesseract",
+        ocr=OcrFacts(confidence=80.0, low_confidence_text="firstdoubt"),
+    )
+    second = preserve.render_sidecar_extraction(
+        first, text="updated reading", engine="tesseract",
+        ocr=OcrFacts(confidence=80.0, low_confidence_text="seconddoubt"),
+    )
+    assert caption in second and "Keep this note." in second
+    assert preserve.extracted_text(second) == "updated reading"
+    assert preserve.low_confidence_text(second) == "seconddoubt"
+    frontmatter, body, _ = parse_frontmatter(second)
+    page = find_types.ParsedPage(Path("p.md"), "p.md", frontmatter, body, "p", 0.0)
+
+    for text in (page.search_body, catalog_publication.search_fields(page)["body"]):
+        assert "updated reading" in text and "Keep this note." in text
+        assert all(word not in text for word in ("prior reading", "firstdoubt", "seconddoubt"))
+
+
+def test_ocr_replacement_refuses_to_guess_between_hidden_anchors() -> None:
+    caption = "## Description\n\n```markdown\n## Extracted text\n\nAn example.\n\n"
+    stub = _SIDECAR.replace("## Extracted text", caption + "## Extracted text")
+
+    with pytest.raises(preserve.PreserveError) as error:
+        preserve.render_sidecar_extraction(stub, text="new reading", engine="tesseract")
+
+    assert error.value.code == "AMBIGUOUS_SIDECAR_BOUNDARY"

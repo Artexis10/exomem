@@ -523,11 +523,12 @@ def catalog_item(
         parts = extraction_parts.stored_parts(
             vault_root, path, source, pending=pending, folder=part_folder
         )
-        head = preserve.extracted_text(source) if parts else ""
+        media_sidecar = bool(parsed.frontmatter.get("media_type"))
+        head = preserve.extracted_body_text(parsed.body, legacy_sidecar=media_sidecar) if parts else ""
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
             multipart = extraction_parts.count_of(parsed.frontmatter) > 1
-            text = transcript_passages.source_text(parsed.body, multipart=multipart)
+            text = transcript_passages.source_text(parsed.body, multipart=multipart, legacy_sidecar=media_sidecar)
             coverage = projected_retrieval.timed_source_coverage(text, multipart=multipart)
             if coverage is not None:
                 if parsed.frontmatter.get("source_identity") is not None:
@@ -901,7 +902,7 @@ def _target_vector_measurements(
             return previous.transcript_bank
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             return None
-        candidates = projected_retrieval.transcript_samples(variant)
+        candidates, _ = projected_retrieval.transcript_samples(variant)
         if not candidates:
             return None
         try:

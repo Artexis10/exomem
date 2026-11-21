@@ -268,9 +268,10 @@ def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_pa
     public = _variant("summary", "2" * 64, level=6, text="Gate summary")
     source = _item(path, "1" * 64, low, full)
     summary = _item("summary", "2" * 64, public)
+    samples, _ = projected_retrieval.transcript_samples(full)
     bank = transcript_banks.publish(
         tmp_path, _namespace(source, summary).namespace_key,
-        projected_retrieval.transcript_samples(full), ((0.0, 1.0), (1.0, 0.0)),
+        samples, ((0.0, 1.0), (1.0, 0.0)),
     )
     index = projected_retrieval.ProjectedVectorIndex(
         _namespace(source, summary),
@@ -307,7 +308,7 @@ def test_collection_removes_one_bank_link_and_exact_republication_repairs_corrup
     )
     before = _key()
     after = replace(before, catalog_generation=before.catalog_generation + 1)
-    samples = projected_retrieval.transcript_samples(source)
+    samples, _ = projected_retrieval.transcript_samples(source)
     vectors = ((0.0, 1.0), (1.0, 0.0))
     bank = transcript_banks.publish(tmp_path, before, samples, vectors)
     assert transcript_banks.carry(tmp_path, before, after, bank)
