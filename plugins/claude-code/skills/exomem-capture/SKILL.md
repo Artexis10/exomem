@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 0d5699b8eff92ad9c2477765590154b3e12e36e5281743803d8a663280bf822a
+  skill_contract: 2599a3be6252a403dabb5c088df1ae7b819d3e86492b8eab75a3c058fcc6a653
   version: "0.1.0"
 ---
 
@@ -90,7 +90,11 @@ Before choosing a destination, partition the exchange into independently reusabl
 objects by retrieval question, subject/domain, temporal episode, and epistemic
 role. Reuse current relevant recall and resolve each meaningful cluster against
 canonical homes. The open note has no priority; keep details within one coherent
-scope together. Preserve durable hypotheses as attributed, uncertain claims.
+scope together. Preserve durable hypotheses and held views as attributed, uncertain
+claims, not as fact; at a stepping stone also save a question the work leaves open (as
+an open question, including whether something happened) and settled values (in full,
+not file pointers). A person's unsure report of an event is a tentative event,
+unwritten unless a collection offers a note field for it; no write mentions what stays unwritten.
 Perform one completeness/destination review for the whole write plan, not a new
 review after every write. During development, repository/specification artifacts
 carry transient progress; capture reusable decisions and verified milestones.

@@ -132,12 +132,22 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
   written as an event — say so in a note field if the manifest offers one — and
   elapsed time is never an outcome.
+- A **held view, an open question, or a settled value** is a landing too, and the
+  baseline rule that tentative events stay quiet does not govern it. Save
+  a view someone holds attributed to its holder, with its uncertainty, not as fact;
+  a question the work leaves open, as an open question, including whether something
+  happened; the values a task settled (times, prices, terms, contacts, limits) in
+  full, never as a pointer to a working file. A person's unsure report of an event or
+  its details ("I think I posted it Tuesday") is not a question left open: it is a
+  tentative event, so the tentative-claim rule above applies and it stays unwritten
+  unless the manifest offers a note field for it. Mid-thought exploration still
+  stays quiet. A write never mentions what stays quiet, not even to say it was left out.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
-Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
-questions, or incidental names without durable reusable context. Capture at the
-landing, not during the flight.
+Not a stepping-stone: mid-thought exploration, brainstorm tangents, or incidental
+names without durable reusable context. Capture at the landing, not during the
+flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.

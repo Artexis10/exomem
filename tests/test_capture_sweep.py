@@ -599,8 +599,8 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,483 and 1,494 — 17 and 6 bytes of
-    headroom — so no wording of this clause fits, and the only way to make one
+    into. The prominent blocks sit at 1,489 and 1,474 — 11 and 26 bytes of
+    headroom — so no wording of this clause (about 190 bytes) fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the
     Planning/Records transition rule past seven reviews, so it was not made.
@@ -624,8 +624,9 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         assert "Never save chat transcripts." in block, name
 
     # 2026-11-18, keep-handed-files-as-sources: "chat transcripts" and
-    # "get no note" cost 6 bytes per block, from 1483/1485 to 1489/1491.
-    assert sizes == {"maximal": 1489, "balanced": 1491}, sizes
+    # "get no note" cost 6 bytes per block. 2026-11-20: the balanced block
+    # dropped "or open questions" (-17 bytes), giving 1489/1474.
+    assert sizes == {"maximal": 1489, "balanced": 1474}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
     assert 1500 - sizes["maximal"] >= 11, sizes
