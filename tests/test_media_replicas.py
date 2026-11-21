@@ -1120,8 +1120,8 @@ def _vm_steps_of_a_repeated_finding(vault: Path, holders: int, monkeypatch: pyte
             [(f"Originals/{holders}/{number}.bin", MIRROR, versions[number % len(versions)], level, failure, digest)
              for number in range(holders)])
         ledger.executemany(
-            "INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, generation) "
-            "VALUES (?, ?, 'version', ?, ?, ?, 1)", [(MIRROR, name, level, failure, digest) for name in versions])
+            "INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256) "
+            "VALUES (?, ?, 'version', ?, ?, ?)", [(MIRROR, name, level, failure, digest) for name in versions])
     steps = [0]
     connect = media_jobs.MediaJobStore._connect
 
@@ -2530,8 +2530,16 @@ def test_a_sample_that_decrypts_a_version_lifts_every_filing_that_a_plaintext_fi
     pointer = _offload(vault, first)
     second = _preserved(vault, category="second")
     assert _offload(vault, second) == pointer
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET ciphertext_sha256 = NULL WHERE binary_rel = ?",
+                       (second.relative_to(vault).as_posix(),))  # a row of an earlier release: no digest to be found by
     media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.DECRYPTED,
                               failure=media_replicas.PLAINTEXT_MISMATCH)
+    assert _replica_row_of(vault, second, pointer.store)["state"] == media_replicas.QUARANTINED  # found by its version
+    assert (second.relative_to(vault).as_posix(), media_replicas.RECOPY) in _requests(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET ciphertext_sha256 = ? WHERE binary_rel = ?",
+                       (pointer.ciphertext_sha256, second.relative_to(vault).as_posix()))  # as a rebuild fills it
     _unproven(vault)
     stored = _objects(Path(selected_store[0]["root"]))
 
@@ -2557,9 +2565,11 @@ def _vm_steps_of_a_release(vault: Path, unrelated: int, monkeypatch: pytest.Monk
                                           f"{number:064x}") for number in range(unrelated)])
         ledger.executemany(quarantined, [(f"Originals/{unrelated}/pair-{number}.bin", MIRROR, version.object, version.version,
                                           version.ciphertext_sha256) for number in range(2)])
-        ledger.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, "
-                       f"generation) VALUES (?, ?, ?, 'decrypted', '{media_replicas.PLAINTEXT_MISMATCH}', ?, 7)",
+        ledger.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256) "
+                       f"VALUES (?, ?, ?, 'decrypted', '{media_replicas.PLAINTEXT_MISMATCH}', ?)",
                        (MIRROR, version.object, version.version, version.ciphertext_sha256))
+        ledger.execute("INSERT INTO media_damaged_digests(ciphertext_sha256, generation) VALUES (?, 7)",
+                       (version.ciphertext_sha256,))
     steps = [0]
     connect = media_jobs.MediaJobStore._connect
 
@@ -2638,6 +2648,39 @@ def test_a_sample_that_decrypts_a_version_leaves_a_finding_that_another_filing_r
         assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, failure)  # the version's newest finding
         assert (held[original], media_replicas.RECOPY) in _requests(vault)
     assert media_replicas.has_quarantined(vault, (pointer,))
+
+
+def test_a_sample_that_decrypts_a_copy_leaves_a_finding_that_the_pointer_recorded_again_after_it_was_picked(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The release answers every filing of the ciphertext, so a newer finding on any version of it must stop it.
+
+    The pointer and the mirror's copy hold the same ciphertext under two names and each has its own damage record.
+    The sample picks the copy; the pointer's wrong plaintext is then found again. The copy's proof is older than
+    that finding, so it releases neither filing and removes no record.
+    """
+    relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    _unproven(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET sample_from = ? WHERE store = ?", (time.time() + 3600, pointer.store))
+    found_again = []
+    sample_replica = media_store.sample_replica
+
+    def sample_then_the_pointer_is_found_wrong_again(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead):
+        damage = sample_replica(root, entry, head)
+        if not found_again:
+            found_again.append(entry)
+            media_replicas.quarantine(root, relative, pointer, level=media_replicas.DECRYPTED,
+                                      failure=media_replicas.PLAINTEXT_MISMATCH)
+        return damage
+
+    monkeypatch.setattr(media_store, "sample_replica", sample_then_the_pointer_is_found_wrong_again)
+
+    media_replicas.sample(vault)
+
+    assert found_again == [mirror]  # the copy was the pick: the pointer's finding settled after its download
+    assert _replica_row(vault)["state"] == media_replicas.QUARANTINED
+    assert media_replicas.has_quarantined(vault, (pointer,)) and media_replicas.has_quarantined(vault, (mirror,))
+    assert sorted(item[0] for item in _queued(vault) if item[1] == media_replicas.RECOPY) == sorted([MIRROR, pointer.store])
 
 
 def _evicted_with_a_pointer_found_wrong(vault: Path) -> tuple[str, originals.StoredObject, originals.StoredObject]:
