@@ -3306,6 +3306,9 @@ def _log_values(title: str, grammar: _HeadingGrammar) -> dict[str, Any] | None:
 
 
 def _status_values(descriptor: Mapping[str, Any], note: object) -> dict[str, Any]:
+    # The heading reader removes leading and trailing whitespace from the note.
+    if isinstance(note, str):
+        note = note.strip()
     defaults = descriptor.get("defaults", {})
     rules = descriptor.get("note_rules", [])
     if (

@@ -2288,7 +2288,7 @@ def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_pat
         manifest_file.read_text(encoding="utf-8").replace("field: note\n", "field: annotation\n"),
         encoding="utf-8",
     )
-    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", annotation="Partial")
+    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", annotation=" Partial ")
 
     assert error.code == "SCHEMA_ENUM"
     assert error.details["allowed"] == ["partial"]
@@ -2324,7 +2324,7 @@ def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path:
     adapter = record_formats.load_adapter(tmp_path, manifest)
     [record] = adapter.read().records
     assert record.values["status"] == "partial"
-    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note="Partial")
+    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note=" Partial ")
     assert error.details["allowed"] == ["partial"]
     resumed = records.append_record(
         tmp_path, manifest.path, held=error.details["held"]["held_id"],
