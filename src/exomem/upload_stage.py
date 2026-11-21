@@ -38,9 +38,11 @@ log = logging.getLogger(__name__)
 _CHUNK = 1024 * 1024
 _PART_SUFFIX = ".part"
 _LOCK_SUFFIX = ".lock"
-#: The file-name format this module itself writes (a random id and one of two fixed suffixes), so a regex
+#: Where the sweep sets a file aside before it deletes it; one per stem, since one sweep holds a stem's lock.
+_CLAIM_SUFFIX = ".claim"
+#: The file-name format this module itself writes (a random id and one of three fixed suffixes), so a regex
 #: over a closed format and not a guess at what a name means. Anything else in the directory is not ours.
-_STAGE_NAME = re.compile(r"(?P<stem>[0-9a-f]{32})(?P<kind>\.part|\.lock)", re.ASCII)
+_STAGE_NAME = re.compile(r"(?P<stem>[0-9a-f]{32})(?P<kind>\.part|\.lock|\.claim)", re.ASCII)
 #: How many entries one sweep reads. A directory past it is reported as truncated and the next start continues.
 SWEEP_ENTRY_LIMIT = 4096
 _LOCK_WAIT_SECONDS = 10.0
@@ -198,7 +200,8 @@ def stage(
 _PINNABLE = (
     hasattr(os, "O_DIRECTORY")
     and hasattr(os, "O_NOFOLLOW")
-    and {os.open, os.stat, os.unlink} <= os.supports_dir_fd
+    and {os.open, os.stat, os.unlink, os.rename, os.link} <= os.supports_dir_fd
+    and os.link in os.supports_follow_symlinks
     and os.scandir in os.supports_fd
 )
 _FileId = tuple[int, int]
@@ -221,17 +224,52 @@ class _StageDirectory:
     def scan(self) -> contextlib.AbstractContextManager[Iterator[os.DirEntry[str]]]:
         return os.scandir(self.fd if self.fd is not None else self.path)
 
-    def remove(self, leaf: str, expected: _FileId) -> bool:
-        """Unlink `leaf` while it is still the regular file the scan saw. False means it changed and stays."""
+    def discard(self, leaf: str, expected: _FileId | None, *, empty_only: bool = False) -> bool:
+        """Delete `leaf` once it is shown to be the regular file the sweep means to delete. True: it is gone.
+        False: it stays, because it is something else, or the sweep could not tell.
+
+        A name can be pointed at another file between a check and the unlink that follows it. Descriptor-relative
+        calls cannot close that gap, so the sweep never unlinks a name it checked. It renames the entry to the
+        stem's claim name, which nothing else uses while the sweep holds the stem's lock, judges the entry
+        there and unlinks the claim. An entry that is not the expected one is linked back to its own name,
+        which fails rather than replace a newer file; then the claim stays where it is, never deleted.
+        A crash between the claim and the unlink leaves the claim beside its stem's lock, where the next sweep
+        removes it under the same proof. `expected` is the scan's identity, None for an entry the scan never saw.
+        """
+        if self.fd is None:  # no descriptor-relative calls: the path route checks the name, then unlinks it
+            claim = leaf
+        else:
+            claim = f"{leaf.partition('.')[0]}{_CLAIM_SUFFIX}"
+            if leaf != claim:
+                try:
+                    os.rename(leaf, claim, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+                except FileNotFoundError:
+                    return True  # not there: nothing to delete
+                except OSError:
+                    return False
         try:
-            info = os.stat(self.name(leaf), dir_fd=self.fd, follow_symlinks=False)
+            info = os.stat(self.name(claim), dir_fd=self.fd, follow_symlinks=False)
         except FileNotFoundError:
-            return True  # gone already: the state the sweep wants
-        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+            return True
+        except OSError:
             return False
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(self.name(leaf), dir_fd=self.fd)
-        return True
+        if (
+            stat.S_ISREG(info.st_mode)
+            and (expected is None or (info.st_dev, info.st_ino) == expected)
+            and not (empty_only and info.st_size)
+        ):
+            try:
+                os.unlink(self.name(claim), dir_fd=self.fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
+            return True
+        if claim != leaf:
+            with contextlib.suppress(OSError):  # a newer file at `leaf` makes the link fail and the claim stay
+                os.link(claim, leaf, src_dir_fd=self.fd, dst_dir_fd=self.fd, follow_symlinks=False)
+                os.unlink(claim, dir_fd=self.fd)
+        return False
 
 
 @contextlib.contextmanager
@@ -313,7 +351,7 @@ def sweep(vault_root: Path) -> SweepReport:
     Run once at serving activation. A stage is removed only when its lock can be taken, which means the
     process that held it is dead. A held lock is a live stage and stays; a `.part` whose lock file is missing
     cannot be proven either way and stays too, reported as `unproven`. The directory is held open for the
-    whole sweep and each file is checked against what the scan saw before it is touched.
+    whole sweep, and a file is set aside and judged there before it is deleted (`_StageDirectory.discard`).
     """
     opened = _open_directory(stage_root(vault_root))
     if isinstance(opened, SweepReport):
@@ -326,8 +364,7 @@ def sweep(vault_root: Path) -> SweepReport:
 
 
 def _sweep(directory: _StageDirectory) -> SweepReport:
-    parts: dict[str, _FileId] = {}
-    locks: dict[str, _FileId] = {}
+    found: dict[str, dict[str, _FileId]] = {_PART_SUFFIX: {}, _LOCK_SUFFIX: {}, _CLAIM_SUFFIX: {}}
     truncated = False
     with directory.scan() as scanner:
         for index, entry in enumerate(scanner):
@@ -342,13 +379,19 @@ def _sweep(directory: _StageDirectory) -> SweepReport:
             except OSError:
                 continue  # removed since it was listed
             if stat.S_ISREG(info.st_mode):  # a link or a directory under a stage name is not a stage
-                (parts if named["kind"] == _PART_SUFFIX else locks)[named["stem"]] = (info.st_dev, info.st_ino)
+                found[named["kind"]][named["stem"]] = (info.st_dev, info.st_ino)
+    parts, locks, claims = found[_PART_SUFFIX], found[_LOCK_SUFFIX], found[_CLAIM_SUFFIX]
     removed = live = unproven = 0
-    for stem in sorted(parts.keys() | locks.keys()):
-        if stem in parts and stem not in locks:
-            unproven += 1
+    for stem in sorted(parts.keys() | locks.keys() | claims.keys()):
+        lock_leaf, part_leaf, claim_leaf = (f"{stem}{suffix}" for suffix in (_LOCK_SUFFIX, _PART_SUFFIX, _CLAIM_SUFFIX))
+        if stem not in locks:
+            # Nothing proves the owner gone. A claim alone is a lock that an earlier sweep set aside and never
+            # deleted: it holds no bytes, so it goes. A part, with or without a claim, stays.
+            if stem not in parts and directory.discard(claim_leaf, claims[stem], empty_only=True):
+                removed += 1
+            else:
+                unproven += 1
             continue
-        lock_leaf, part_leaf = f"{stem}{_LOCK_SUFFIX}", f"{stem}{_PART_SUFFIX}"
         with _probe_lock(directory, lock_leaf, locks[stem]) as free:
             if free is None:
                 unproven += 1
@@ -356,13 +399,15 @@ def _sweep(directory: _StageDirectory) -> SweepReport:
             if not free:
                 live += 1
                 continue
-            if stem in parts and not directory.remove(part_leaf, parts[stem]):
+            # A free lock proves its owner gone, so the part and any claim left by a crashed sweep are orphans.
+            # They are found by name, not by the scan: it may have stopped before them.
+            if not (directory.discard(claim_leaf, claims.get(stem)) and directory.discard(part_leaf, parts.get(stem))):
                 unproven += 1
                 continue
-        if not directory.remove(lock_leaf, locks[stem]):
+        if directory.discard(lock_leaf, locks[stem]):
+            removed += 1
+        else:
             unproven += 1
-            continue
-        removed += 1
     report = SweepReport(removed=removed, live=live, unproven=unproven, truncated=truncated)
     if removed or unproven or truncated:
         log.info(
