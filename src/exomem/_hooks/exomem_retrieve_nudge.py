@@ -209,10 +209,17 @@ _WORKING_SET_MAX_CHARS = 6000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in at most 1,320
-# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
-# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+# The server sends its live capture policy at most once per session or policy change. Its `say` text
+# renders in at most this many characters, above the longest the server sends today, so later server growth
+# within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
+# spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
+# text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
+# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus 1
+# (the separator) plus the rules allowance.
+# A longer text is omitted whole, never cut.
+_CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
@@ -1837,7 +1844,7 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
 
 
 def _capture_policy_text(block: object) -> str:
-    """The served capture policy under its own header, or `""` when the packet carries none.
+    """The served capture policy's `say` under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
     """
@@ -1845,14 +1852,27 @@ def _capture_policy_text(block: object) -> str:
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
-    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
-        return text
-    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
-    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
-    # with the live disposition as one sentence; its first sentence end is the cut.
-    lead = say.strip().split(". ", 1)[0]
-    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
-    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
+    if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+        # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+        # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+        # with the live disposition as one sentence; its first sentence end is the cut.
+        lead = say.strip().split(". ", 1)[0]
+        text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+        if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+            return ""
+    return text
+
+
+def _capture_rules_text(block: object) -> str:
+    """The served full capture rule, or `""` when there is none or it is over its own render budget.
+
+    It renders after `say` and is counted in no other budget: the working set is cut to leave room for `say`
+    alone. A text over the budget is omitted whole, never cut, and `say` is untouched.
+    """
+    rules = block.get("rules") if isinstance(block, dict) else None
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        return rules.strip()
+    return ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -3811,12 +3831,15 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         hit_count = len(packet.get("anchors") or ())
         delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
         delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-        policy_text = _capture_policy_text(packet.get("capture_policy"))
+        say_text = _capture_policy_text(packet.get("capture_policy"))
+        # The working set gives way to `say` and the delta; the rules follow `say` on their own budget.
         render_cap = max(
             0,
             _working_set_max_chars()
-            - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+            - sum(len(text) + 1 for text in (delta_text, say_text) if text),
         )
+        rules_text = _capture_rules_text(packet.get("capture_policy")) if say_text else ""
+        policy_text = f"{say_text}\n{rules_text}" if rules_text else say_text
         acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice

@@ -26,6 +26,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .prominence import CAPTURE_RULES_KEY
+
 log = logging.getLogger(__name__)
 
 #: The key a packet carries the block under.
@@ -46,8 +48,14 @@ class Policy:
 
 
 def size(block: dict[str, str]) -> int:
-    """The characters a block costs, as it travels."""
-    return len(json.dumps(block, ensure_ascii=False, separators=(",", ":")))
+    """The characters a block takes from the packet's `max_chars`: all of it but `rules`.
+
+    `rules` has its own bound (the hook's render budget for it), so it does not take map room, as the stance,
+    skills and positions blocks do not. `budget.serialized_chars` still counts it, because that field names
+    what is sent.
+    """
+    counted = {key: value for key, value in block.items() if key != CAPTURE_RULES_KEY}
+    return len(json.dumps(counted, ensure_ascii=False, separators=(",", ":")))
 
 
 def block() -> dict[str, str]:
@@ -90,7 +98,7 @@ def current(continuity: str | None, *, room: int) -> Policy | None:
 
 
 def for_packet(packet: dict[str, Any], policy: Policy | None) -> None:
-    """Attach the owed block to an activation packet, counted inside its `limit_chars`. Never raises."""
+    """Attach the owed block to an activation packet, counted inside its `limit_chars` but for `rules`. Never raises."""
     if policy is None or not policy.reserve:
         return
     try:
