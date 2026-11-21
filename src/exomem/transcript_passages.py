@@ -24,15 +24,35 @@ class TranscriptMatch(NamedTuple):
         return {"text": self.text, "part": 1, "offset": self.start, "length": self.end - self.start}
 
 
-def source_text(body: str, *, multipart: bool = False, legacy_sidecar: bool = False) -> str:
+def source_text(body: str, *, multipart: bool = False, media_sidecar: bool = False) -> str:
     """Return the stored text addressed by a transcript citation."""
-    from .preserve import extracted_body_text
+    from . import preserve
     from .source_coverage import CAPTURE_HEADING, fenced_capture
 
     body = body.replace("\r\n", "\n")
-    text = extracted_body_text(body, legacy_sidecar=legacy_sidecar)
-    if text or multipart or legacy_sidecar:
-        return text
+    marker = preserve._EXTRACTED_HEADING
+    start = body.find(marker)
+    if start >= 0:
+        # The citation must use the same extent as the existing extraction reader.
+        # Check its first literal marker against Markdown before trusting that extent.
+        from .markdown_relations import iter_headings
+
+        markdown = body.replace("\r", "\n")
+        if start and markdown[start - 1] != "\n":
+            return ""
+        end = markdown.find("\n", start)
+        if end < 0:
+            end = len(markdown)
+        if markdown[start:end].rstrip(" \t") != marker:
+            return ""
+        lines = markdown[:end].split("\n")
+        if any(line == len(lines) - 1 and level == 2 for line, level, _title in iter_headings(lines)):
+            text = preserve.extracted_text(body)
+            # An earlier OCR block would make this extent unsuitable for public citations.
+            return "" if preserve.SIDECAR_LOW_CONFIDENCE_SENTINEL in text else text
+        return ""
+    if multipart or media_sidecar or preserve.SIDECAR_LOW_CONFIDENCE_SENTINEL in body:
+        return ""
     if (text := fenced_capture(body)) is not None:
         return text
     _, heading, after = f"\n{body}".partition(f"\n{CAPTURE_HEADING}\n")

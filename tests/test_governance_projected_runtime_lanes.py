@@ -928,7 +928,6 @@ def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(m
         },
     )
     (source,) = item.variants
-    assert source.head is None
     runtime = _runtime((item,), vectors=(_vector(source, (1.0, 0.0)),))
     monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
 

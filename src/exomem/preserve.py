@@ -1613,8 +1613,6 @@ def ensure_artifact_page(
 #: The heading of the caption section of an Evidence page: the writer emits it and the duplicate lookup reads it back.
 DESCRIPTION_HEADING = "## Description"
 _EXTRACTED_HEADING = "## Extracted text"
-# This exact line is the sidecar's fixed extraction anchor. Markdown validates candidate lines.
-_EXTRACTED_ANCHOR_RE = re.compile(rf"(?m)^{re.escape(_EXTRACTED_HEADING)}[ \t]*$")
 #: The section after the extracted text that holds the OCR words under the confidence floor. It
 #: stays in the sidecar, and no search field reads it (`without_low_confidence_ocr`).
 LOW_CONFIDENCE_OCR_HEADING = "## Low-confidence OCR"
@@ -1639,7 +1637,7 @@ _END_LEGACY_NOTES = "legacy-notes"
 _END_OF_FILE = "end-of-file"
 
 
-def _extraction_end(content: str, start: int, *, legacy_notes: bool = True) -> tuple[int, str]:
+def _extraction_end(content: str, start: int) -> tuple[int, str]:
     """Where the extracted text that starts at `start` ends, and what ends it.
 
     The offset is that of the newline before the boundary, or the end of the content.
@@ -1654,10 +1652,9 @@ def _extraction_end(content: str, start: int, *, legacy_notes: bool = True) -> t
     legacy_artifact = _LEGACY_ARTIFACT_BLOCK_RE.search(content, start)
     if legacy_artifact is not None:
         return legacy_artifact.start() - 1, _END_LEGACY_ARTIFACT
-    if legacy_notes:
-        notes = content.find("\n## Preserved notes\n", start)
-        if notes != -1:
-            return notes, _END_LEGACY_NOTES
+    notes = content.find("\n## Preserved notes\n", start)
+    if notes != -1:
+        return notes, _END_LEGACY_NOTES
     return len(content), _END_OF_FILE
 
 
@@ -1668,78 +1665,36 @@ def low_confidence_block(words: str) -> str:
 
 def _low_confidence_start(content: str, start: int, end: int) -> int | None:
     """Where the low-confidence section begins inside the extraction that spans `[start, end)`."""
-    opening = f"\n{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}\n"
-    found = content.rfind(opening, start, end + 1)
+    found = content.rfind(f"\n{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n", start, end + 1)
     return None if found == -1 else found + 1
 
 
-def _extracted_heading(body: str, *, legacy_sidecar: bool = False) -> int:
-    """Locate the first top-level extraction heading in a normalized Markdown body."""
-    from .markdown_relations import iter_headings
-
-    # CommonMark accepts a lone CR as a line break. Each remains one stored character.
-    markdown = body.replace("\r", "\n")
-    first = _EXTRACTED_ANCHOR_RE.search(markdown)
-    if first is None:
-        return -1
-
-    def find_through(end: int) -> int:
-        lines = markdown[:end].split("\n")
-        for line, level, _title in iter_headings(lines):
-            if level == 2 and lines[line].rstrip(" \t") == _EXTRACTED_HEADING:
-                return sum(map(len, lines[:line])) + line
-        return -1
-
-    # The real anchor usually comes first. Parse the longer prefix only for earlier examples.
-    heading = find_through(first.end())
-    if heading >= 0:
-        return heading
-    owned_end = _extraction_end(body, 0, legacy_notes=False)[0] if legacy_sidecar else len(body)
-    later = _EXTRACTED_ANCHOR_RE.finditer(markdown, first.end(), owned_end)
-    last = max((candidate.end() for candidate in later), default=None)
-    if last is not None:
-        return find_through(last)
-    if legacy_sidecar and first.start() < owned_end:
-        # Old sidecar captions could leave a fence open before the one generated anchor.
-        return first.start()
-    return -1
-
-
 def extracted_text(content: str) -> str:
-    """Read the extraction from a complete stored document."""
-    from .vault import parse_frontmatter
+    """The text under `## Extracted text`, up to the sidecar's machine-owned boundary.
 
+    The low-confidence OCR section is not part of it: it is the words the extraction withheld.
+    """
     content = with_newline(content, "\n")
-    frontmatter, body, _ = parse_frontmatter(content)
-    return extracted_body_text(body, legacy_sidecar=bool(frontmatter.get("media_type")))
-
-
-def extracted_body_text(body: str, *, legacy_sidecar: bool = False) -> str:
-    """Read extraction text from a body that has already been split from frontmatter."""
-    body = with_newline(body, "\n")
-    heading = _extracted_heading(body, legacy_sidecar=legacy_sidecar)
+    heading = content.find(_EXTRACTED_HEADING)
     if heading == -1:
         return ""
     start = heading + len(_EXTRACTED_HEADING)
-    end = _extraction_end(body, start)[0]
-    section = _low_confidence_start(body, start, end)
-    return body[start : end if section is None else section].strip()
-
-
-def _low_confidence_bounds(text: str) -> tuple[int, int] | None:
-    """The machine-owned OCR block survives a malformed Markdown caption."""
-    owned_end = _extraction_end(text, 0, legacy_notes=False)[0]
-    section = _low_confidence_start(text, 0, owned_end)
-    return None if section is None else (section, _extraction_end(text, section)[0])
+    end = _extraction_end(content, start)[0]
+    section = _low_confidence_start(content, start, end)
+    return content[start : end if section is None else section].strip()
 
 
 def low_confidence_text(content: str) -> str:
     """The words under `## Low-confidence OCR`, or an empty string when the sidecar has none."""
     content = with_newline(content, "\n")
-    bounds = _low_confidence_bounds(content)
-    if bounds is None:
+    heading = content.find(_EXTRACTED_HEADING)
+    if heading == -1:
         return ""
-    section, end = bounds
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(content, start)[0]
+    section = _low_confidence_start(content, start, end)
+    if section is None:
+        return ""
     opening = f"{SIDECAR_LOW_CONFIDENCE_SENTINEL}\n{LOW_CONFIDENCE_OCR_HEADING}"
     return content[section:end].removeprefix(opening).strip()
 
@@ -1754,32 +1709,20 @@ def without_low_confidence_ocr(content: str) -> str:
     if SIDECAR_LOW_CONFIDENCE_SENTINEL not in content:
         return content
     text = with_newline(content, "\n")
-    bounds = _low_confidence_bounds(text)
-    if bounds is None:
+    heading = text.find(_EXTRACTED_HEADING)
+    if heading == -1:
         return content
-    section, end = bounds
+    start = heading + len(_EXTRACTED_HEADING)
+    end = _extraction_end(text, start)[0]
+    section = _low_confidence_start(text, start, end)
+    if section is None:
+        return content
     return text[:section] + text[end:].lstrip("\n")
-
-
-def _writable_extraction_heading(content: str) -> int:
-    from .vault import _FM_PATTERN
-
-    frontmatter = _FM_PATTERN.match(content)
-    body_start = frontmatter.start(2) if frontmatter is not None else 0
-    body = content[body_start:]
-    heading = _extracted_heading(body, legacy_sidecar=True)
-    if heading == -1 and _EXTRACTED_ANCHOR_RE.search(body.replace("\r", "\n")):
-        # Replacing could erase the caption. Appending could leave the old OCR words searchable.
-        raise PreserveError(
-            code="AMBIGUOUS_SIDECAR_BOUNDARY", missing=[],
-            reason="no unique extraction anchor outside the caption",
-        )
-    return body_start + heading if heading >= 0 else -1
 
 
 def _has_ambiguous_legacy_preserved_notes(content: str) -> bool:
     """Whether a nonempty legacy notes block lacks an ownership boundary."""
-    heading = _writable_extraction_heading(content)
+    heading = content.find(_EXTRACTED_HEADING)
     if heading == -1:
         return False
     start = heading + len(_EXTRACTED_HEADING)
@@ -2426,7 +2369,7 @@ def _set_extracted_text(content: str, text: str, low_confidence: str = "") -> st
     block = f"{_EXTRACTED_HEADING}\n\n{text}\n"
     if low_confidence:
         block += "\n" + low_confidence_block(low_confidence)
-    idx = _writable_extraction_heading(content)
+    idx = content.find(_EXTRACTED_HEADING)
     if idx == -1:
         return content.rstrip("\n") + "\n\n" + block
     start = idx + len(_EXTRACTED_HEADING)

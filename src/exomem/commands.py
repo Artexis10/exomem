@@ -8423,10 +8423,10 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     media_sidecar = bool(released.get("media_type"))
     timed = False
     if extraction_parts.count_of(released) == 1:
-        extracted = _preserve_module().extracted_body_text(body, legacy_sidecar=media_sidecar)
+        extracted = _preserve_module().extracted_text(body)
         if len(extracted) <= extraction_parts.WINDOW_CHARS:
             timed = offset is not None and transcript_passages.is_transcript(
-                extracted or transcript_passages.source_text(body, legacy_sidecar=media_sidecar),
+                transcript_passages.source_text(body, media_sidecar=media_sidecar),
             )
             if not timed:
                 return _refuse_unused_offset(result, offset)
@@ -8437,10 +8437,9 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
     frontmatter, stored, _ = parse_frontmatter(raw)
-    media_sidecar = bool(frontmatter.get("media_type"))
     first = (
-        transcript_passages.source_text(stored, legacy_sidecar=media_sidecar) if timed else
-        _preserve_module().extracted_body_text(stored, legacy_sidecar=media_sidecar)
+        transcript_passages.source_text(stored, media_sidecar=bool(frontmatter.get("media_type")))
+        if timed else _preserve_module().extracted_text(stored)
     )
     # A read whose hash is not the file's served something other than the stored page (a
     # projected collection summary, or a page that changed meanwhile): it passes through whole.

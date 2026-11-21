@@ -1,4 +1,4 @@
-from exomem import transcript_passages
+from exomem import preserve, transcript_passages
 
 
 def test_passage_addresses_the_timed_occurrence_that_matched():
@@ -66,6 +66,17 @@ def test_literal_query_can_match_the_continuation_of_a_crlf_capture():
     assert match is not None
     assert match.timestamp == 3
     assert text[match.start:match.end] == "[0:03] [Speaker A]: First line.\nContinued."
+
+
+def test_duplicate_ocr_blocks_have_no_verifiable_transcript_extent():
+    body = (
+        "## Extracted text\n\n[0:03] The gate opened.\n[0:18] The truck arrived.\n\n"
+        + preserve.low_confidence_block("first uncertain reading")
+        + "\n"
+        + preserve.low_confidence_block("second uncertain reading")
+    )
+
+    assert transcript_passages.source_text(body, media_sidecar=True) == ""
 
 
 

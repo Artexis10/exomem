@@ -290,21 +290,21 @@ def transcript_samples(
     head = variant.head
     if head is None:
         text = transcript_passages.source_text(
-            body, multipart=multipart, legacy_sidecar=bool(variant.search_fields.get("media_type")),
+            body, multipart=multipart, media_sidecar=bool(variant.search_fields.get("media_type")),
         )
         return (), timed_source_coverage(text, multipart=multipart) is not None
 
     partial = False
     samples = []
     for match in transcript_passages.bounded_turns(body[head.begin:head.end], max_chars=MAX_PASSAGE_CHARS):
+        if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
+            partial = True
+            break
         stored_start = _stored_position(match.start, head.carrier_spans)
         stored_end = _stored_position(match.end - 1, head.carrier_spans) + 1
         if stored_end - stored_start != match.end - match.start:
             partial = True
             continue
-        if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
-            partial = True
-            break
         samples.append((1, transcript_passages.TranscriptMatch(
             stored_start, stored_end, match.text, match.timestamp,
         )))
