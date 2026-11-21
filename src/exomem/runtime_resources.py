@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import sys
 import threading
@@ -132,6 +133,37 @@ def bootstrap() -> ComputePolicy:
     for name, fixed_value in _NATIVE_ENV.items():
         os.environ[name] = fixed_value or str(policy.cpu_threads)
     return policy
+
+
+#: CPython hands the GIL to a waiting thread only after the holder has run this long. A request
+#: thread that releases the GIL around each short SQLite or file call waits that long once per
+#: call while any CPU-bound Python thread runs. The served worker runs several such threads (whole-vault
+#: passes), so a save with tens of thousands of calls waited tens of seconds. Measured on a
+#: request-like thread beside three CPU-bound threads: median 3.7 s at the default 5 ms against 32 ms at 1 ms,
+#: at the cost of about a third of the background throughput.
+GIL_SWITCH_ENV = "EXOMEM_GIL_SWITCH_INTERVAL_MS"
+_GIL_SWITCH_DEFAULT_MS = 1.0
+#: Below this the interpreter spends its time switching, not running.
+_GIL_SWITCH_FLOOR_MS = 0.05
+
+
+def configure_gil_switch_interval() -> float:
+    """Shorten the GIL switch interval for a served worker; return the seconds now in force.
+
+    `EXOMEM_GIL_SWITCH_INTERVAL_MS` sets it. Unset, malformed or not finite and positive means the
+    default. A value of 5 restores CPython's own interval.
+    """
+    milliseconds = _GIL_SWITCH_DEFAULT_MS
+    raw = os.environ.get(GIL_SWITCH_ENV, "").strip()
+    if raw:
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = 0.0
+        if math.isfinite(parsed) and parsed > 0:
+            milliseconds = max(parsed, _GIL_SWITCH_FLOOR_MS)
+    sys.setswitchinterval(milliseconds / 1000.0)
+    return sys.getswitchinterval()
 
 
 def configure_torch(torch: Any | None = None) -> None:
