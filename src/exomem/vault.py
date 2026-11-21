@@ -5267,18 +5267,22 @@ def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
     absolute = root / relative
     from .vault_store import read
 
-    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
-    # A page that the store lacks raises FileNotFoundError, as the missing file does.
-    stored = read.owned_meta(root, relative.as_posix())
+    # Read the stored bytes and their guard in one snapshot. The disk copy can
+    # be absent or older than the stored page.
+    target = relative.as_posix()
+    stored = read.owned_page(root, target)
+    if stored is not None:
+        _require_read_limit(stored.meta.size)
+        return stored.body, _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
     try:
-        limit = absolute.lstat().st_size if stored is None else stored.size
+        limit = absolute.lstat().st_size
     except FileNotFoundError:
         raise
     except OSError as error:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
+    return read_bounded_guarded_bytes(root, target, limit=limit)
 
 
 @dataclass

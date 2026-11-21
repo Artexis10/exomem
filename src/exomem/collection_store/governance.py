@@ -1932,6 +1932,14 @@ class OperationAuthorization:
             return ()
         return catalog
 
+    def projection_present(self, path: str) -> bool:
+        """Which paths need the full projection release check, including unresolved paths."""
+        try:
+            return self.projection_subjects(path) is not None
+        except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
+                TypeError, KeyError, sqlite3.Error):
+            return True
+
     def projection_decision(self, path: str, *, content: bytes | None = None,
                             manifest_for=None) -> Decision | None:
         """Authorize canonical subjects, then prove any bytes are their current render."""
