@@ -3141,9 +3141,13 @@ class _BatchWorkspace:
                 if (
                     (before.identity.device, before.identity.inode) != (staged.device, staged.inode)
                     or before.identity.link_count != 1
-                    or (before.size, before.mtime_ns, before.change_time_ns) != staged.generation
                 ):
                     raise PathGuardError("PATH_GUARD_CONTENT", "staged upload changed after it was staged")
+                if (before.size, before.mtime_ns, before.change_time_ns) != staged.generation:
+                    # A touch that leaves the bytes alone (an xattr write, a timestamp reset by a sync client) moves the
+                    # generation too. The copy route hashes against `expected_hash`, so it commits those bytes and still
+                    # refuses an edited stage, the same trade `_WorkspaceArtifact.recheck` makes.
+                    raise _StageAdoptionUnavailable("the stage changed after it was staged")
                 moved = filesystem.rename(source, directory, name, replace=False)
                 if not moved.ok:
                     if moved.error is not None and moved.error.code == "CROSS_DEVICE":
@@ -6320,7 +6324,7 @@ def _stage_binary_artifact(
                 name, content.staged, expected_size=content.size, expected_hash=content.sha256
             )
         except _StageAdoptionUnavailable as unavailable:
-            # The copy runs under the boundary, so the holder status names why this commit moved bytes there.
+            # The copy runs under the boundary, so the log names why this commit moved bytes there.
             from .writer_lease import log_active_mutation_phase
 
             log.info("upload stage copied under the boundary: %s", unavailable.reason)

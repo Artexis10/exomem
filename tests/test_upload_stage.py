@@ -83,6 +83,20 @@ def test_a_stage_edited_after_staging_publishes_nothing(tmp_path: Path) -> None:
     assert _stage_entries(tmp_path) == []
 
 
+def test_a_stage_touched_without_a_byte_change_still_commits(tmp_path: Path) -> None:
+    destination = tmp_path / "Evidence" / "payload.bin"
+
+    with upload_stage.stage(tmp_path, io.BytesIO(PAYLOAD), limit=len(PAYLOAD), too_large=_too_large) as staged:
+        before = staged.path.stat()
+        # A sync client or an indexer resetting a timestamp moves the generation and leaves the bytes alone.
+        os.utime(staged.path, ns=(before.st_atime_ns, before.st_mtime_ns + 5_000_000_000))
+
+        vault.batch_atomic_write([_binary_write(destination, staged)], vault_root=tmp_path)
+
+    assert destination.read_bytes() == PAYLOAD
+    assert _stage_entries(tmp_path) == []
+
+
 def test_a_destination_that_appears_before_the_commit_keeps_its_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

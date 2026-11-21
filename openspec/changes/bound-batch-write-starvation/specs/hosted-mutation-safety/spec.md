@@ -110,7 +110,7 @@ A `process_media reprocess` request SHALL plan each path, including the hash of 
 
 ### Requirement: Upload commits hold the boundary only to plan and install
 
-An upload commit SHALL copy, hash and flush every payload byte into a private reserved stage on the vault's own filesystem before it acquires the vault mutation boundary. Inside the boundary it SHALL only re-plan against current state, revalidate the stage, install it by rename, write the pages and indexes, and run or hand off the fan-out. Post-upload provenance hashing SHALL run outside the boundary. A copy or a hash of the payload inside the boundary SHALL be a named fallback in the holder status. A reserved stage is not a vault or sidecar file for "Lock Acquisition Fails Closed Before Mutation": a refused acquisition leaves no canonical byte, only a stage that the owner or the sweep removes.
+An upload commit SHALL copy, hash and flush every payload byte into a private reserved stage on the vault's own filesystem before it acquires the vault mutation boundary. Inside the boundary it SHALL only re-plan against current state, revalidate the stage, install it by rename, write the pages and indexes, and run or hand off the fan-out. Post-upload provenance hashing SHALL run outside the boundary. A copy or a hash of the payload inside the boundary SHALL be a fallback that the service log names. A reserved stage is not a vault or sidecar file for "Lock Acquisition Fails Closed Before Mutation": a refused acquisition leaves no canonical byte, only a stage that the owner or the sweep removes.
 
 #### Scenario: A note save during a large upload commit does not wait on its bytes
 
