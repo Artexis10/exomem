@@ -140,6 +140,68 @@ def test_an_agent_names_pages_by_title_and_id_end_to_end(build) -> None:
     asyncio.run(run())
 
 
+def test_records_receipts_name_the_item_after_save_and_edit(build) -> None:
+    from lifecycle_fixtures import RECORDS_PATH, records_manifest
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            manifest = records_manifest(join=False).replace(
+                "  fields:\n", "  fields:\n    condition: {type: string}\n",
+            )
+            await _tool(client, "manage_memory", {"operation": "records.create", "arguments": {
+                "manifest_path": RECORDS_PATH, "manifest_text": manifest,
+                "why": "Track dispatch", "scaffold": True,
+            }})
+            selector = {"collection": RECORDS_PATH, "why": "Track dispatch"}
+            saved = await _tool(client, "add_record", {**selector, "item": {
+                "occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch",
+            }})
+            rows = (await _tool(client, "query_records", {"collection": RECORDS_PATH}))["rows"]
+            updated = await _tool(client, "edit_record", {
+                **selector, "record": rows[0]["id"], "changes": {"condition": "intact"},
+            })
+
+            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
+            assert updated["user_summary"].startswith("Updated -> Panel shipment (")
+            assert saved["paths"] == updated["paths"]
+
+    asyncio.run(run())
+
+
+def test_planning_receipt_names_the_item(build) -> None:
+    from lifecycle_fixtures import PLANNING_PATH, planning_manifest
+
+    async def run() -> None:
+        async with Client(build()) as client:
+            await _tool(client, "manage_memory", {"operation": "plans.create", "arguments": {
+                "manifest_path": PLANNING_PATH, "manifest_text": planning_manifest(),
+                "why": "Track the installation", "scaffold": True,
+            }})
+            saved = await _tool(client, "add_plan_item", {
+                "collection": PLANNING_PATH, "item": {"title": "Install the panel"},
+                "why": "Track the installation",
+            })
+
+            assert saved["user_summary"].startswith("Saved -> Install the panel (")
+            assert saved["paths"] and saved["paths"][0].endswith(".md")
+
+    asyncio.run(run())
+
+
+def test_episode_receipt_names_the_saved_source(build) -> None:
+    async def run() -> None:
+        async with Client(build()) as client:
+            saved = await _tool(client, "save_episode", {
+                "subject": "Panel installation",
+                "summary": "Checked the fit before fastening.",
+                "worked_on": ["Verified the panel alignment."],
+            })
+            assert saved["user_summary"].startswith("Saved -> Panel installation (")
+            assert saved["path"].endswith(".md")
+
+    asyncio.run(run())
+
+
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
     tmp_path: Path,
 ) -> None:

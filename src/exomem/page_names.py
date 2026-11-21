@@ -492,7 +492,7 @@ def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
     return identity.id
 
 
-def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
+def _name_write(root: Path, reply: dict[str, Any], *, summary_only: bool = False) -> dict[str, Any]:
     source = reply.get("source")
     path = reply.get("path")
     paths = reply.get("paths")
@@ -501,9 +501,19 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
         wanted += [item for item in paths if isinstance(item, str)]
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         wanted.append(source["path"])
+    summary = reply.get("user_summary")
+    if summary_only and isinstance(summary, str):
+        wanted = [item for item in wanted if item in summary]
     found = {item: read_identity(root, item) for item in dict.fromkeys(wanted)}
     named = {item: identity for item, identity in found.items() if identity is not None}
     if not named:
+        return reply
+    if isinstance(summary, str):
+        # Replace each exact reported path, longest first to avoid clipping one into another.
+        for item in sorted(named, key=len, reverse=True):
+            summary = summary.replace(item, named[item].title)
+        reply = {**reply, "user_summary": summary}
+    if summary_only:
         return reply
     swaps: dict[str, Mapping[str, Any]] = {}
     moved: dict[str, Any] = {}
@@ -533,13 +543,6 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
         swaps["source"] = {"source": {"title": picked.title, "id": picked.id}}
         moved["source_path"] = source["path"]
     out = _renamed(reply, swaps)
-    summary = out.get("user_summary")
-    if isinstance(summary, str):
-        # The summary names each page once, by the exact path `_user_summary` was given; the longest
-        # goes first so that no path is cut by another that is part of it.
-        for item in sorted(named, key=len, reverse=True):
-            summary = summary.replace(item, named[item].title)
-        out["user_summary"] = summary
     diagnostics = out.get("diagnostics")
     if moved and isinstance(diagnostics, Mapping):
         operational = diagnostics.get("operational")
@@ -548,6 +551,13 @@ def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
             "operational": {**(operational if isinstance(operational, Mapping) else {}), **moved},
         }
     return out
+
+
+def name_released_write_summary(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
+    """Name released Markdown pages in the summary while keeping receipt references."""
+    if isinstance(reply.get("user_summary"), str):
+        return _name_write(Path(root), reply, summary_only=True)
+    return reply
 
 
 def name_released_reply(

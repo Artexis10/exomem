@@ -1088,6 +1088,11 @@ def bind_vault(
                     result = page_names.name_released_reply(
                         injected[0], result, keep_paths=kwargs.get("detail") == "full"
                     )
+                elif tool_name in {"record_memory", "plan_memory", "episode_memory"} and isinstance(result, dict):
+                    from . import page_names
+
+                    # These fixed protocol commands keep their receipt references for later calls.
+                    result = page_names.name_released_write_summary(injected[0], result)
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
