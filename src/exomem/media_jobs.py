@@ -25,7 +25,7 @@ from . import cloud_cell, held_fs, media_brakes, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .capture_metadata import CaptureFacts
-from .ocr_facts import OcrFacts
+from .ocr_facts import MAX_EXTRACTION_ENGINE_BYTES, OcrFacts
 from .vault import parse_frontmatter
 
 PENDING = "pending"
@@ -189,7 +189,7 @@ def _validated_result_payload(kind: str, payload: object) -> dict[str, object] |
         return None
     if kind == "extraction":
         text = _bounded_text(payload.get("text"), _MAX_RESULT_TEXT_BYTES)
-        engine = _bounded_text(payload.get("engine"), 256)
+        engine = _bounded_text(payload.get("engine"), MAX_EXTRACTION_ENGINE_BYTES)
         if text is None or engine is None or not engine:
             return None
         result: dict[str, object] = {"text": text, "engine": engine}

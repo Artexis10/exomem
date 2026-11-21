@@ -1366,6 +1366,9 @@ def _ocr_image(path: Path) -> ExtractResult:
         reading = _ocr_png(source)
     # Words under the confidence floor stay in the sidecar, outside the text every search reads.
     text, low_confidence_text = reading.split(ocr_models.word_floor())
+    ocr = OcrFacts(
+        confidence=reading.confidence, low_confidence_text=low_confidence_text, text_available=bool(text.strip())
+    )
     # OPTIONAL frozen-model caption (EXOMEM_VISION_CAPTION, default OFF) prepended so
     # a photo with no on-image text is still findable. Soft-fails to OCR-only.
     text, engine = _maybe_caption(text, path)
@@ -1376,7 +1379,7 @@ def _ocr_image(path: Path) -> ExtractResult:
         text=text,
         media_type="image",
         engine=engine,
-        ocr=OcrFacts(confidence=reading.confidence, low_confidence_text=low_confidence_text),
+        ocr=ocr,
     )
 
 
