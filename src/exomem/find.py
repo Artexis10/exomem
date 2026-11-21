@@ -2759,6 +2759,7 @@ def find(
             hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,
@@ -6619,14 +6620,14 @@ def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
 
 def _transcript_match(
     vault_root: Path, page: ParsedPage, query: str, chunk: str | None,
-    *, type_basis: note_types.Basis | None = None,
+    *, type_basis: note_types.Basis,
 ):
     from . import extraction_parts, transcript_passages
     from .governance import egress
 
     if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
         return None
-    if not transcript_passages.allows_window(page.frontmatter.get("type"), type_basis or note_types.Basis(vault_root)):
+    if not transcript_passages.allows_window(page.frontmatter.get("type"), type_basis):
         return None
     text = transcript_passages.source_text(page.body, media_sidecar=bool(page.frontmatter.get("media_type")))
     return transcript_passages.match(
@@ -6677,7 +6678,7 @@ def _frame_image_page(frame_image: str) -> str:
 
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
-    *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+    *, type_basis: note_types.Basis, scene_frame: str | None = None, scene_frame_ts: float | None = None,
     part_match: dict[str, object] | None = None,
 ) -> Hit:
     """The keyword result projection, including its parent-first frame fallback."""
@@ -6688,7 +6689,7 @@ def _keyword_hit(
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
         snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
-    transcript = _transcript_match(vault_root, page, query_norm, None)
+    transcript = _transcript_match(vault_root, page, query_norm, None, type_basis=type_basis)
     if transcript is not None:
         hit.passage = transcript.passage()
         hit.matched_part = 1
@@ -6708,7 +6709,7 @@ def _keyword_hit(
 
 
 def _find_managed_keyword(
-    vault_root: Path, *, query_norm: str, scope: str, limit: int,
+    vault_root: Path, *, query_norm: str, scope: str, limit: int, type_basis: note_types.Basis,
     allowed_paths: set[str] | None, freshness_key: tuple | None, pending: Any | None,
     pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
@@ -6788,6 +6789,7 @@ def _find_managed_keyword(
         child = source.rel_path != page.rel_path
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt,
+            type_basis=type_basis,
             scene_frame=source.media_file if child else None,
             scene_frame_ts=source.frame_ts if child else None,
             part_match=_part_match(vault_root, page, source, query_norm),
@@ -6809,6 +6811,7 @@ def _find_keyword(
     vault_root: Path,
     *,
     query_norm: str,
+    type_basis: note_types.Basis,
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
@@ -6848,6 +6851,7 @@ def _find_keyword(
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             return _find_managed_keyword(
                 vault_root, query_norm=query_norm, scope=scope, limit=limit,
+                type_basis=type_basis,
                 allowed_paths=eligible_paths if eligible_paths is not None else admitted_paths,
                 freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
                 types=types, projects=projects, tags=tags, speakers=speakers,
@@ -6986,6 +6990,7 @@ def _find_keyword(
             continue
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt or "",
+            type_basis=type_basis,
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
             part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
@@ -7200,6 +7205,7 @@ def _find_semantic(
             fallback_hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,

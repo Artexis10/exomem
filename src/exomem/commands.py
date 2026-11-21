@@ -8445,11 +8445,10 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result
-    # The served body has normalised line endings; a CRLF page is still the stored page.
-    served = body.replace("\r\n", "\n")
-    if served != stored.replace("\r\n", "\n") and served != provenance_module.withheld_prose(
-        stored, owner_path=path
-    ).replace("\r\n", "\n"):
+    # The public reader and search both use CommonMark's physical line endings.
+    served = markdown_lf(body)
+    comparable_stored = markdown_lf(stored)
+    if served != comparable_stored and served != provenance_module.withheld_prose(comparable_stored, owner_path=path):
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result
