@@ -7,6 +7,7 @@ A passage request reads each selected Source page in full and hashes it, to bind
 - A passage request reuses the selected chunks of a Source that an earlier request verified, while the published corpus records the same page hash and the eligible-set proof still holds. That proof is the recall checkpoint, the catalogue identity and the retirement generation.
 - The request reads the page again when the published page hash or the proof changes. A Source edited and republished is read again, and an erased Source is withheld.
 - An edit that no file event reports does not move the proof. Until the proof moves, the request answers that Source at its published bytes.
+- A request that reads a page whose bytes do not hash to the published page hash withholds that Source's chunks. A fresh read and a reused one then both answer only from published bytes.
 - The reused chunks stay within a fixed count and byte bound, and release with the page cache.
 
 ## Capabilities

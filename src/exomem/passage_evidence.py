@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -293,21 +294,31 @@ class _VerifiedSource:
     """What a passage hit takes from one Source page: its identity fields and selected chunks."""
 
     exomem_id: str | None
-    #: The page's `source_identity` frontmatter: a mapping such as system, record id and revision.
-    source_identity: Mapping[str, Any] | str | None
+    #: The page's `source_identity` frontmatter as canonical JSON. A string cannot change, its size
+    #: is its weight, and each hit decodes its own copy, so no reply shares what memory holds.
+    identity_json: str | None
     #: Chunk number to chunk, for the selected numbers the Source's cut holds. Never changed after
     #: creation, so readers may share it.
     chunks: Mapping[int, PassageChunk]
+    #: The identity itself when JSON does not hold it as parsed (a YAML set, date or non-string
+    #: key). Such a Source is answered but never kept in memory.
+    unencoded_identity: Any = None
+
+    def source_identity(self) -> Any:
+        """The page's `source_identity`, as a copy that only one hit holds."""
+        if self.identity_json is None:
+            return copy.deepcopy(self.unencoded_identity)
+        return json.loads(self.identity_json)
 
 
-def _plain_size(value: Any) -> int:
-    """The bytes a frontmatter value keeps alive, its nested strings and containers included."""
-    weight = sys.getsizeof(value)
-    if isinstance(value, Mapping):
-        weight += sum(_plain_size(item) for pair in value.items() for item in pair)
-    elif isinstance(value, (list, tuple)):
-        weight += sum(_plain_size(item) for item in value)
-    return weight
+def _identity_json(identity: Any) -> str | None:
+    """`identity` as canonical JSON, or None when decoding that JSON would not give it back."""
+    try:
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):  # A YAML set, date or tag, or a recursive alias.
+        return None
+    # JSON turns a number key into a string key, so only an exact round trip is kept.
+    return encoded if json.loads(encoded) == identity else None
 
 
 def _weigh(key: tuple, source: _VerifiedSource) -> int:
@@ -319,8 +330,7 @@ def _weigh(key: tuple, source: _VerifiedSource) -> int:
     weight = sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key[2:])
     weight += sys.getsizeof((None, None))  # The entry's (proof, source) record.
     weight += sys.getsizeof(source) + sys.getsizeof(source.exomem_id)
-    # A Source identity comes from frontmatter and holds strings of any length, so weigh it deeply.
-    weight += _plain_size(source.source_identity) + sys.getsizeof(source.chunks)
+    weight += sys.getsizeof(source.identity_json) + sys.getsizeof(source.chunks)
     for number, chunk in source.chunks.items():
         weight += sys.getsizeof(number) + sys.getsizeof(chunk)
         weight += sum(sys.getsizeof(getattr(chunk, field.name)) for field in fields(chunk))
@@ -373,7 +383,7 @@ class _VerifiedSources:
                 held = self._entries.get(key)
                 if held is not None and held[0] == proof:
                     source = _VerifiedSource(
-                        source.exomem_id, source.source_identity, {**held[1].chunks, **source.chunks}
+                        source.exomem_id, source.identity_json, {**held[1].chunks, **source.chunks}
                     )
                 self._drop(key)
                 self._entries[key] = (proof, source)
@@ -410,7 +420,8 @@ def _verified_sources(
 ) -> dict[str, _VerifiedSource | None]:
     """Each selected Source's selected chunks, from memory while its proof holds, else read again.
 
-    None for a Source whose page is not admitted or cannot be read now.
+    None for a Source whose page is not admitted, cannot be read now, or no longer has the bytes the
+    published corpus holds for it.
     """
     from . import find as find_module
     from . import semantic_contract
@@ -436,21 +447,27 @@ def _verified_sources(
             entries = inventory[0].entries if inventory is not None else {}
         # Passage search admits no catalogue view, so this read checks no catalogue hash.
         page = find_module._resolve_page(vault_root, path)
-        if page is None:
+        # A passage answers only from published bytes, as the memory does, so other bytes are withheld.
+        if page is None or published is None or page.snapshot_hash != published:
             sources[path] = None
             _VERIFIED_SOURCES.forget(key)
             continue
         chunks = source_chunks(page, entries.get(path))
+        exomem_id = page.frontmatter.get("exomem_id")
+        identity = page.frontmatter.get("source_identity")
+        identity_json = _identity_json(identity)
         source = sources[path] = _VerifiedSource(
-            page.frontmatter.get("exomem_id"),
-            page.frontmatter.get("source_identity"),
+            exomem_id,
+            identity_json,
             {
                 number: chunks[number]
                 for number in numbers
                 if chunks is not None and 0 <= number < len(chunks)
             },
+            None if identity_json is not None else identity,
         )
-        if published is not None and page.snapshot_hash == published:
+        # Only a string id and an identity held as JSON have an exact weight; others are not kept.
+        if identity_json is not None and isinstance(exomem_id, str):
             verified[key] = source
         else:
             _VERIFIED_SOURCES.forget(key)
@@ -632,7 +649,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
             {
                 "ref": memory_refs.memory_ref(source.exomem_id),
                 "path": path,
-                "source_identity": source.source_identity,
+                "source_identity": source.source_identity(),
                 "passage_key": chunk.key,
                 "passage_ordinal": chunk.ordinal,
                 "passage_hash": chunk.passage_hash,

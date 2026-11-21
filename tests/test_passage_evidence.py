@@ -29,6 +29,7 @@ from exomem import (
     freshness,
     lexstore,
     memory_refs,
+    page_names,
     passage_evidence,
     readiness,
     reserved_paths,
@@ -39,9 +40,23 @@ from exomem import (
     server_runtime,
 )
 from exomem import vault as vault_module
+from exomem.governance.principal import owner_principal, request_scope
 
 # `install_encoder` replaces the encoder seam; a test of which model turn the query takes runs this one.
 REAL_EMBED_TEXTS = embeddings.embed_texts
+
+
+def bytes_kept_alive(holder, *owned_elsewhere):
+    """The size of every object `holder` reaches, once each, leaving out `owned_elsewhere`."""
+    seen, pending, kept = {id(item) for item in owned_elsewhere}, [holder], 0
+    while pending:
+        item = pending.pop()
+        if id(item) in seen or isinstance(item, type):
+            continue
+        seen.add(id(item))
+        kept += sys.getsizeof(item)
+        pending.extend(gc.get_referents(item))
+    return kept
 
 
 def publish_reference(vault):
@@ -1031,7 +1046,7 @@ def test_the_memory_of_verified_passages_stays_within_its_bound(
 def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
     """Weighing an entry by its frontmatter dict and chunk strings alone counted under half the bytes
     it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap. A
-    Source identity is a mapping whose strings have no length limit, so it is weighed deeply too."""
+    Source identity's strings have no length limit, so its weight must grow with them."""
     memory = passage_evidence._VerifiedSources(max_entries=1000, max_bytes=1 << 40)
     root, scope, proof = Path("/vault").absolute(), "kb", ("checkpoint", "catalogue", 7)
     for n in range(50):
@@ -1044,20 +1059,13 @@ def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
         }
         path = f"Knowledge Base/Sources/Sessions/2026-11-21-source-{n:03d}.md"
         identity = {"system": "example-video", "record_id": f"{n:04d}-" + "x" * 2000, "revision": "1"}
-        source = passage_evidence._VerifiedSource(f"lh{n:03d}gx.6h5l", identity, chunks)
+        source = passage_evidence._VerifiedSource(
+            f"lh{n:03d}gx.6h5l", passage_evidence._identity_json(identity), chunks
+        )
         memory.keep({(root, scope, path, hashlib.sha256(path.encode()).hexdigest()): source}, proof)
 
-    # Every object the memory keeps alive, once each; the root, scope and proof belong to the caller.
-    seen, pending, kept = {id(root), id(scope), id(proof)}, [memory._entries], 0
-    while pending:
-        item = pending.pop()
-        if id(item) in seen or isinstance(item, type):
-            continue
-        seen.add(id(item))
-        kept += sys.getsizeof(item)
-        pending.extend(gc.get_referents(item))
-
-    assert memory.held_bytes() >= kept
+    # The root, scope and proof belong to the caller.
+    assert memory.held_bytes() >= bytes_kept_alive(memory._entries, root, scope, proof)
 
 
 def test_a_later_search_for_another_passage_of_a_remembered_source_still_finds_it(vault, passage_tools):
@@ -1089,11 +1097,90 @@ def test_releasing_the_page_cache_releases_the_memory_of_verified_passages(monke
     memory = passage_evidence._VerifiedSources(max_entries=10, max_bytes=1 << 20)
     monkeypatch.setattr(passage_evidence, "_VERIFIED_SOURCES", memory)
     chunk = passage_evidence.PassageChunk("entry", 1, "0" * 64, 0, 22, "The lantern burns oil.")
-    memory.keep({("vault", "kb", "Source.md", "0" * 64): passage_evidence._VerifiedSource("id", None, {0: chunk})}, ())
+    memory.keep({("vault", "kb", "Source.md", "0" * 64): passage_evidence._VerifiedSource("id", "null", {0: chunk})}, ())
 
     find.unload_ram_caches(pages=True)
 
     assert len(memory) == 0
+
+
+def test_a_source_identity_holding_a_yaml_set_stays_within_the_memory_bound(vault, passage_tools, monkeypatch):
+    """`source_identity` is frontmatter, and YAML parses `!!set` there. Weighing skipped a set's
+    members, so a few such Sources held many times the memory's bound in a pod without swap."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    memory = passage_evidence._VerifiedSources(max_entries=10, max_bytes=4096)
+    monkeypatch.setattr(passage_evidence, "_VERIFIED_SOURCES", memory)
+    call, _encoder = passage_tools
+    saved = call("save_source", {"title": "Harbour log", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": {"system": "archive", "record_id": "ledger",
+                                                                 "revision": "one"},
+                                             "passages": [{"key": "entry", "text": "The lantern burns oil."}]}})
+    assert "error" not in saved, saved
+    path = vault / page_names.resolve_page(vault, saved["source"]["id"])
+    text = path.read_text()
+    assert '"revision": "one"}' in text, text
+    members = ", ".join(f"member-{n}-" + "x" * 1000 for n in range(20))
+    path.write_text(text.replace('"revision": "one"}', '"revision": !!set {' + members + "}}", 1))
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+
+    reply = call("search_memory", {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}})
+
+    assert [hit["passage_key"] for hit in reply["hits"]] == ["entry"], reply
+    # The vault root, the scope and the proof belong to the search, not to the memory.
+    shared = [part for key, (proof, _source) in memory._entries.items() for part in (key[0], key[1], proof)]
+    assert bytes_kept_alive(memory._entries, *shared) <= memory.max_bytes
+
+
+def test_changing_a_returned_source_identity_does_not_change_a_later_answer(vault, passage_tools, monkeypatch):
+    """An in-process caller that edits a reply in place, as one merging results may, changed the
+    identity that the memory of verified passages gave every later request."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    identity = {"system": "archive", "record_id": "ledger", "revision": "one"}
+    saved = call("save_source", {"title": "Harbour log", "source_kind": "session", "detail": "full",
+                                 "options": {"source_identity": identity,
+                                             "passages": [{"key": "entry", "text": "The lantern burns oil."}]}})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    with request_scope(owner_principal()):
+        first = commands.op_ask_memory(vault, query="lantern", result_level="passage", limit=1)
+        assert [hit["source_identity"] for hit in first["hits"]] == [identity], first
+        first["hits"][0]["source_identity"]["record_id"] = "invented"
+
+        later = commands.op_ask_memory(vault, query="lantern", result_level="passage", limit=1)
+
+    assert [hit["source_identity"] for hit in later["hits"]] == [identity], later
+
+
+def test_an_unpublished_key_edit_is_never_answered_from_memory_or_from_a_fresh_read(
+    vault, passage_tools, monkeypatch
+):
+    """A passage answer attests the bytes the corpus published. An edit that no file event reported
+    was withheld while the memory held the Source, but a fresh read answered it as evidence."""
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_SCHEDULING", "1")
+    call, _encoder = passage_tools
+    saved = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Harbour log", source_kind="session",
+        passages=[{"key": "published-key", "text": "The lantern burns oil."}],
+    )
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    request = {"query": "lantern", "limit": 1, "options": {"result_level": "passage"}}
+    first = call("search_memory", request)
+    assert [hit["passage_key"] for hit in first["hits"]] == ["published-key"], first
+    path = vault / saved["source"]["path"]
+    path.write_text(path.read_text().replace("published-key", "unpublished-key"))
+
+    remembered = call("search_memory", request)
+    passage_evidence._VERIFIED_SOURCES.clear()
+    fresh = call("search_memory", request)
+
+    assert [hit["passage_key"] for hit in remembered["hits"]] == ["published-key"], remembered
+    assert fresh["hits"] == [], fresh
+    assert fresh["withheld_chunks"] == 1
 
 
 def test_a_declared_capture_encodes_each_passage_chunk_once(vault, passage_tools, monkeypatch):
