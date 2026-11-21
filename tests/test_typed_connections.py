@@ -481,9 +481,8 @@ def test_a_governed_caller_keeps_a_graph_pointer_without_a_quote(
     assert [(item.path, item.why) for item in items] == [(report, "supersedes (inbound)")]
 
 
-def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
-    vault: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.fixture
+def graph_reason_pages(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
     seed = "Knowledge Base/Entities/People/Calibration Coordinator.md"
     _write(
         vault, seed,
@@ -496,6 +495,13 @@ def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
     _built(vault).close()
     lexstore.ensure_fresh(vault)
     _warm_resolver(monkeypatch)
+    return seed, report
+
+
+def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
+    vault: Path, graph_reason_pages: tuple[str, str],
+) -> None:
+    seed, report = graph_reason_pages
     turn = "Tell me about the Calibration Coordinator"
 
     def quote(packet):
@@ -512,3 +518,28 @@ def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
         assert guarded is None
         governed = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
         assert quote(governed) == "supersedes (inbound)"
+
+
+def test_a_policy_change_during_compile_leaves_the_unrestricted_cache_valid(
+    vault: Path, graph_reason_pages: tuple[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, report = graph_reason_pages
+    turn = "Tell me about the Calibration Coordinator"
+    compile_packet = working_set.compile_packet
+
+    def enable_governance(*args, **kwargs):
+        write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+        write_rule(vault, audience="owner", ceiling=egress.LEVEL_FULL)
+        return compile_packet(*args, **kwargs)
+
+    with request_scope(owner_principal(surface="library")):
+        with monkeypatch.context() as during_compile:
+            during_compile.setattr(working_set, "compile_packet", enable_governance)
+            working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        governance = vault / "Knowledge Base" / "_Governance"
+        (governance / "rules" / "patterns-external.yaml").unlink()
+        (governance / "scopes" / "patterns.yaml").unlink()
+        restored = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+
+    quote = next(pointer["why"] for pointer in restored["pointers"] if pointer["ref"] == report)
+    assert quote == "supersedes (inbound): supersedes Calibration Coordinator after review"

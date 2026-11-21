@@ -1972,6 +1972,20 @@ def packet_has_graph_quotes(packet: Mapping[str, Any]) -> bool:
     )
 
 
+def graph_quote_access(vault_root: Path, *, purpose: str | None) -> bool:
+    """Use one source-access decision for this invocation's cache and graph compilation."""
+    from .governance import egress, principal
+
+    record = principal.invocation_served()
+    who = principal.effective_principal()
+    key = ("graph_quote_access", Path(vault_root), who, purpose)
+    if record is None:
+        return egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    if key not in record:
+        record[key] = egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    return record[key]
+
+
 def read_connections(
     vault_root: Path,
     seeds: Sequence[str],
@@ -2046,7 +2060,7 @@ def read_connections(
         return {}
     # A reason can quote from anywhere in a body. Callers who need a page projection
     # get a pointer and the relation, and can open the page through its release boundary.
-    quote_prose = egress.unrestricted_source_access(vault_root, purpose=purpose)
+    quote_prose = graph_quote_access(vault_root, purpose=purpose)
     resolver = find.borrow_query_resolver(Path(vault_root), visible) if quote_prose else None
     seed_paths = set(seeds)
 

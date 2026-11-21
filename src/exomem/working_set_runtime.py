@@ -75,6 +75,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
+from .governance import principal
 
 log = logging.getLogger(__name__)
 
@@ -2685,6 +2686,7 @@ def _schedule_build(
             log.warning("%s background build could not start", label, exc_info=True)
 
 
+@principal.invocation_scope()
 def serve(
     vault_root: Path,
     *,
@@ -2942,7 +2944,7 @@ def serve(
     )
     # The band depends on audience. Graph quotes depend on unrestricted source access,
     # which can change while the same owner's anchor index and freshness key stay fixed.
-    quote_access = cacheable and egress.unrestricted_source_access(root, purpose=purpose)
+    quote_access = cacheable and working_set.graph_quote_access(root, purpose=purpose)
     cache_identity = (
         str(root.absolute()),
         key,
@@ -3034,9 +3036,6 @@ def serve(
     if working_set.ANCHORS_BUDGET_GAP in packet.get("missing", ()):
         return packet
     if not cacheable:
-        return packet
-    # If authority widened during compilation, a quoted packet cannot fill the bare-reason cache.
-    if not quote_access and working_set.packet_has_graph_quotes(packet):
         return packet
     with _CACHE_LOCK:
         _PACKET_CACHE[cache_identity] = (copy.deepcopy(packet), status_basis.dependency)
