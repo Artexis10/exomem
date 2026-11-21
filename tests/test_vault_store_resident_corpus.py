@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import types
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 import test_vault_store_read_write as read_write
@@ -243,6 +245,23 @@ def add_page(beside, mode):
     return added
 
 
+def resolver_follows_the_disk_across(root, change):
+    """Warm the corpus, apply ``change``, and check that the writer's resolver equals a build over the disk, before
+    and after the next build of the corpus."""
+    semantic_contract.reset_corpus_context_cache()
+    edit(root, create(root, "Rewarm"))
+    semantic_contract.build_corpus_context(root)
+    before = semantic_contract.current_store_writer_resolver(root)
+    assert before is not None, "the resident route was not live, so this proved nothing about its proof"
+    assert maps(before) == maps(vault_module.WikilinkResolver(root))
+    change()
+    assert maps(find.writer_resolver_snapshot(root)) == maps(vault_module.WikilinkResolver(root))
+    # The build that the save runs next reconciles the corpus with the change; the resolver that it leaves
+    # resident for the save after it is the disk's too.
+    semantic_contract.build_corpus_context(root)
+    assert maps(find.writer_resolver_snapshot(root)) == maps(vault_module.WikilinkResolver(root))
+
+
 def swap_for_a_link_to_a_copy(path):
     """Replace a file with a symbolic link to a copy that has the same size, mtime and mode."""
     copy = path.with_suffix(".bin")
@@ -279,20 +298,53 @@ def test_a_change_to_a_files_mode_or_links_reaches_the_writers_resolver(warm, re
     path = keep_file(warm, rel, "---\ntitle: Distinctive Manual\n---\n# Manual\n")
     path.chmod(mode_before)
     try:
-        semantic_contract.reset_corpus_context_cache()
-        edit(warm, create(warm, "Rewarm"))
-        semantic_contract.build_corpus_context(warm)
-        before = semantic_contract.current_store_writer_resolver(warm)
-        assert before is not None, "the resident route was not live, so this proved nothing about its proof"
-        assert maps(before) == maps(vault_module.WikilinkResolver(warm))
-        change(path)
-        assert maps(find.writer_resolver_snapshot(warm)) == maps(vault_module.WikilinkResolver(warm))
-        # The build that the save runs next reconciles the corpus with the change; the resolver that it leaves
-        # resident for the save after it is the disk's too.
-        semantic_contract.build_corpus_context(warm)
-        assert maps(find.writer_resolver_snapshot(warm)) == maps(vault_module.WikilinkResolver(warm))
+        resolver_follows_the_disk_across(warm, lambda: change(path))
     finally:
         path.chmod(0o644)
+
+
+class ListedWithAttributes:
+    """A directory entry as Windows lists it: ``stat(follow_symlinks=False)`` carries ``st_file_attributes``, with the
+    reparse bit set for a path in ``reparse`` (a junction is listed as a folder, and ``is_symlink()`` is false)."""
+
+    def __init__(self, entry, reparse):
+        self._entry = entry
+        self._reparse = reparse
+
+    def __getattr__(self, name):
+        return getattr(self._entry, name)
+
+    def stat(self, **kwargs):
+        info = self._entry.stat(**kwargs)
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        marked = stat.FILE_ATTRIBUTE_REPARSE_POINT if self._entry.path in self._reparse else 0
+        return types.SimpleNamespace(**{**fields, "st_file_attributes": marked})
+
+
+def test_a_folder_replaced_by_a_junction_reaches_the_writers_resolver(warm, monkeypatch):  # noqa: F811
+    """Defect that this guards: a census that enters a Windows junction, which the vault walk leaves out as a
+    reparse point, so that a folder replaced by a junction to a copy with the same file stats leaves the census
+    equal and the writer's resolver keeps a page that a build over the disk excludes. No Windows host runs this:
+    the Windows observations are modelled at the API boundary (a listing whose stats carry ``st_file_attributes``
+    and the ``lstat`` that the walk takes), with the folder marked as a reparse point after the corpus is warm."""
+    folder = keep_file(warm, "Reference/Folder/Manual.md", "---\ntitle: Distinctive Manual\n---\n# Manual\n").parent
+    junctions = set()
+    listing = types.SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    listing.stat_result = types.SimpleNamespace(st_file_attributes=0)
+    listing.scandir = lambda directory: (ListedWithAttributes(entry, junctions) for entry in os.scandir(directory))
+    monkeypatch.setattr(semantic_contract, "os", listing)
+    lstat = Path.lstat
+
+    def walk_lstat(self, *args, **kwargs):
+        info = lstat(self, *args, **kwargs)
+        if str(self) not in junctions:
+            return info
+        fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        return types.SimpleNamespace(**{**fields, "st_file_attributes": stat.FILE_ATTRIBUTE_REPARSE_POINT})
+
+    monkeypatch.setattr(Path, "lstat", walk_lstat)
+    resolver_follows_the_disk_across(warm, lambda: junctions.add(str(folder)))
+    assert "Reference/Folder/Manual" not in vault_module.WikilinkResolver(warm).full_paths, "the walk left the junction out"
 
 
 @pytest.mark.parametrize("imported", [True, False], ids=["importer-refresh-commit", "no-commit-yet"])

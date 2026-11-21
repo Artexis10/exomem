@@ -2698,6 +2698,18 @@ def _lstat_is_page_file(info: os.stat_result) -> bool:
     return stat.S_ISREG(info.st_mode) and not vault._is_reparse(info)
 
 
+def _listing_is_reparse_folder(child: os.DirEntry) -> bool:
+    """Whether a listed folder is a reparse point, which the vault walk leaves out as it does a link.
+
+    ``DirEntry.is_dir(follow_symlinks=False)`` reads a Windows junction as a folder, and ``is_symlink()`` is false
+    for it, so the listing's type alone would enter it. Only Windows stat results carry ``st_file_attributes``
+    (``os.stat_result`` has no such field elsewhere), and the listing supplies them with no further call; a POSIX
+    folder is judged by the listing's type alone, with no stat. The rule is the one that the walk and the page
+    check apply (``vault._is_reparse``).
+    """
+    return hasattr(os.stat_result, "st_file_attributes") and vault._is_reparse(child.stat(follow_symlinks=False))
+
+
 def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
     """Stat census of every Markdown file that ``build_corpus_context`` reads from the disk.
 
@@ -2759,15 +2771,15 @@ def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
             entries.add(_file_entry(rel, info, child.path))
 
     def loose_walk(directory: Path, directory_rel: str) -> None:
-        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies, and leave out every link, a
-        # folder or a page, as its `lstat` rule does. The listing says a link is one with no stat on POSIX.
+        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies, and leave out every link or reparse
+        # point, a folder or a page, as its `lstat` rule does. The listing says a link is one with no stat on POSIX.
         for child in os.scandir(directory):
             request_budget.checkpoint()
             rel = f"{directory_rel}/{child.name}" if directory_rel else child.name
             if owned is not None and owned(rel):
                 continue
             if child.is_dir(follow_symlinks=False):
-                if vault.in_excluded_scan_dir(rel):
+                if vault.in_excluded_scan_dir(rel) or _listing_is_reparse_folder(child):
                     continue
                 loose_walk(Path(child.path), rel)
             elif _markdown_name(child.name) and ".sync-conflict-" not in child.name:
