@@ -1926,6 +1926,7 @@ def planned_destination(
     return canonical_vault_rel(root, path.relative_to(root).as_posix())
 
 
+@semantic_contract.share_writer_disk_census()
 def note(
     vault_root: Path,
     *,
