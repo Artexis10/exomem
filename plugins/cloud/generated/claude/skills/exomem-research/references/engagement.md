@@ -60,10 +60,12 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   decision value are clear. Attach a facet or affiliation to a uniquely resolved
   Entity; otherwise save one concise compiled observation. Use Records only for an
   observed measurement accepted by a compatible existing collection. Fleeting
-  preferences, one-off activity, incidental associations, trivial metrics, and
-  tentative events stay quiet. Durable interpretations may be preserved with
-  explicit attribution and uncertainty; they are not established facts or
-  observed events. Eligibility never creates an Entity, collection, or
+  preferences, one-off activity, incidental associations, and trivial metrics get
+  no note. A tentative or unresolved claim never becomes a baseline: it gets no
+  facet and no affiliation. When later work could use it, save it as tentative,
+  attributed, with its uncertainty (see the landing below). Durable interpretations
+  may be preserved with explicit attribution and uncertainty; they are not
+  established facts or observed events. Eligibility never creates an Entity, collection, or
   schema: a new Entity or your own affiliation edge follows `proactive_capture`;
   accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
@@ -130,18 +132,25 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   canonical observation. It never changes Planning automatically. An explicit
   user intent may request a guarded transition; otherwise a
   propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
-  written as an event — say so in a note field if the manifest offers one — and
-  elapsed time is never an outcome.
-- A **held view, an open question, or a settled value** is a landing too, and the
-  baseline rule that tentative events stay quiet does not govern it. Save
-  a view someone holds attributed to its holder, with its uncertainty, not as fact;
-  a question the work leaves open, as an open question, including whether something
-  happened; the values a task settled (times, prices, terms, contacts, limits) in
-  full, never as a pointer to a working file. A person's unsure report of an event or
-  its details ("I think I posted it Tuesday") is not a question left open: it is a
-  tentative event, so the tentative-claim rule above applies and it stays unwritten
-  unless the manifest offers a note field for it. Mid-thought exploration still
-  stays quiet. A write never mentions what stays quiet, not even to say it was left out.
+  written as an event, and elapsed time is never an outcome. When later work could
+  use the claim, save it as unsure and attributed, in a note field if the manifest
+  offers one (see the landing below).
+- A **held view, an unsure report, an open question, or a settled value** is a
+  landing too. Save each at its true strength: never write a claim more certain,
+  more general, or more settled than its source made it.
+  - A view someone holds, or an interpretation or working hypothesis the evidence
+    does not settle, is saved attributed to its holder, with its uncertainty. A
+    remark made in passing is not a held view.
+  - A person's unsure report that later work could use ("I think I posted it
+    Tuesday") is saved as unsure and attributed, with its doubt, never as fact, as
+    an event, or as a baseline.
+  - A question the work leaves open is saved as open, including whether something
+    happened at all.
+  - The values a task settled (times, prices, terms, contacts, limits) are saved in
+    full, never as a pointer to a working file.
+
+  Mid-thought exploration gets no note. A write never mentions what stays unwritten,
+  not even to say it was left out.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 

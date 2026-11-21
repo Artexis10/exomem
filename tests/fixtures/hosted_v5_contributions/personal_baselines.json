@@ -72,12 +72,20 @@
       "expected": {"route": "accepted_relation", "expected_tools": ["connect_memory"], "operation": {"tool": "connect_memory", "arguments": {"operation": "accept-relation"}}, "authority": {"action_class": "link_acceptance", "disposition": "confirm-shortcut", "requires_confirmation": true}, "forbidden_routes": ["entity_facet", "compiled_observation", "records", "no_write"], "forbidden_tools": ["capture_source", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     },
     {
-      "id": "tentative-unresolved-affiliation-quiet",
+      "id": "incidental-association-quiet",
+      "class": "durable_affiliation",
+      "turn": "This person sat beside a member of the long-running group at one event, and nothing suggests a lasting tie.",
+      "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
+      "evidence": {"stability_or_recurrence": false, "reusable_comparison_value": false, "observed_measurement": false, "tentative_or_unresolved": false},
+      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
+    },
+    {
+      "id": "tentative-unresolved-affiliation-saved-as-tentative",
       "class": "durable_affiliation",
       "turn": "This person may still belong to the long-running group, but the identity and membership are not confirmed.",
       "starting_context": {"entity_resolution": "none", "entity_write_shape": null, "compatible_existing_records_collection": false, "exact_relation_confirmation": false},
       "evidence": {"stability_or_recurrence": true, "reusable_comparison_value": true, "observed_measurement": false, "tentative_or_unresolved": true},
-      "expected": {"route": "no_write", "expected_tools": [], "operation": null, "authority": {"action_class": null, "disposition": null, "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "compiled_observation", "records"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "remember", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": true}
+      "expected": {"route": "compiled_observation", "expected_tools": ["remember"], "operation": {"tool": "remember", "arguments": {}}, "authority": {"action_class": "proactive_capture", "disposition": "silent", "requires_confirmation": false}, "forbidden_routes": ["entity_facet", "accepted_relation", "records", "no_write"], "forbidden_tools": ["capture_source", "connect_memory", "edit_memory", "observe_memory", "plan_memory", "preserve_artifacts", "preserve_evidence", "record_memory", "replace_memory", "transfer_artifact"], "forbidden_operations": [{"tool": "connect_memory", "arguments": {"operation": "create-entity"}}], "require_explicit_request": false}
     }
   ],
   "separate_executed_method_cases": [
