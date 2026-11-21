@@ -265,7 +265,8 @@ def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_pa
     source = _item(path, "1" * 64, low, full)
     summary = _item("summary", "2" * 64, public)
     bank = transcript_banks.publish(
-        tmp_path, projected_retrieval.transcript_samples(full), ((0.0, 1.0), (1.0, 0.0)),
+        tmp_path, _namespace(source, summary).namespace_key,
+        projected_retrieval.transcript_samples(full), ((0.0, 1.0), (1.0, 0.0)),
     )
     index = projected_retrieval.ProjectedVectorIndex(
         _namespace(source, summary),
@@ -275,13 +276,48 @@ def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_pa
         model_version="test-model-v1",
     )
 
-    admitted = index.match_transcript(tmp_path, full, (1.0, 0.0), score=0)
-    assert admitted is not None
+    admitted, partial = index.match_transcript(tmp_path, full, (1.0, 0.0), score=0)
+    assert admitted is not None and not partial
     part, passage = admitted.transcript
     assert part == 1
     assert passage.start == text_start
     assert passage.text == "[0:09] The ranger shut it."
-    assert index.match_transcript(tmp_path, low, (1.0, 0.0), score=0) is None
+    assert index.match_transcript(tmp_path, low, (1.0, 0.0), score=0) == (None, False)
     restricted = index.search_vector(_map((source, low), (summary, public)), (1.0, 0.0), k=1)
     withheld = index.search_vector(_map((source, None), (summary, public)), (1.0, 0.0), k=1)
     assert restricted == withheld
+
+
+def test_collection_removes_one_bank_link_and_exact_republication_repairs_corruption(tmp_path) -> None:
+    from dataclasses import replace
+
+    import pytest
+
+    from exomem import state_paths
+    from exomem.governance import transcript_banks
+
+    text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
+    source = replace(
+        _variant("Knowledge Base/Sources/Session/gate-log.md", "1" * 64, level=6, text=text),
+        head=projections.ProjectionHead(0, len(text)),
+    )
+    before = _key()
+    after = replace(before, catalog_generation=before.catalog_generation + 1)
+    samples = projected_retrieval.transcript_samples(source)
+    vectors = ((0.0, 1.0), (1.0, 0.0))
+    bank = transcript_banks.publish(tmp_path, before, samples, vectors)
+    assert transcript_banks.carry(tmp_path, before, after, bank)
+
+    first = state_paths.vault_state_dir(tmp_path) / ".authorization-projections" / before.namespace_id
+    second = state_paths.vault_state_dir(tmp_path) / ".authorization-projections" / after.namespace_id
+    assert projection_store.collect_projection_namespaces(
+        tmp_path, eligible_namespace_ids=[before.namespace_id],
+    ) == (before.namespace_id,)
+    assert not first.exists()
+    assert transcript_banks.load(tmp_path, after, bank, samples, 2).tolist() == [[0.0, 1.0], [1.0, 0.0]]
+
+    (second / transcript_banks.DIRECTORY / f"{bank}.json").write_text("invalid")
+    with pytest.raises(transcript_banks.TranscriptBankUnavailable):
+        transcript_banks.load(tmp_path, after, bank, samples, 2)
+    assert transcript_banks.publish(tmp_path, after, samples, vectors) == bank
+    assert transcript_banks.load(tmp_path, after, bank, samples, 2).tolist() == [[0.0, 1.0], [1.0, 0.0]]

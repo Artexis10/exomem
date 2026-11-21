@@ -22,3 +22,10 @@ The importer SHALL receive the same governed receipt for the same input after re
 - **WHEN** two requests with the same scoped identifier supply different bytes
 - **THEN** at most one commits
 - **AND** the other receives a conflict
+
+
+#### Scenario: Container capture stays available
+
+- **WHEN** a caller supplies an import ID for a container that expands to other Sources
+- **THEN** the command returns `IMPORT_IDENTITY_COMPOUND_SOURCE` before canonical publication
+- **AND** ordinary capture still accepts the container under the existing rules

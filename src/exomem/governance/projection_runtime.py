@@ -285,6 +285,7 @@ class ProjectedFindResult:
     warming_components: tuple[str, ...] = ()
     declared_purpose: str | None = None
     continuation: str | None = None
+    incomplete_source_passages: bool = False
 
 
 class ProjectedContinuationUnavailable(ValueError):
@@ -1920,7 +1921,7 @@ def _find_projected_hits_pinned(
             hits=(),
             withheld_paths=withheld,
             warming_components=tuple(
-                lane for lane in ("vector", "clip", "graph", "rerank", "source_passages") if lane in warming
+                lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
             ),
             declared_purpose=declared_purpose,
         )
@@ -1934,6 +1935,7 @@ def _find_projected_hits_pinned(
         k=rank_config.rrf_k,
     )
     transcript_hits = {}
+    incomplete_passages = False
     neutral_prefix = ()
     if prefer_source_passages and mode == "hybrid" and query_vector is not None and vector_index is not None:
         from heapq import nsmallest
@@ -1957,12 +1959,13 @@ def _find_projected_hits_pinned(
             if identity not in scores:
                 continue
             try:
-                hit = vector_index.match_transcript(
+                hit, partial = vector_index.match_transcript(
                     Path(vault_root), selected_variants[identity], query_vector, scores[identity],
                 )
             except transcript_banks.TranscriptBankUnavailable:
-                warming.add("source_passages")
+                incomplete_passages = True
             else:
+                incomplete_passages |= partial
                 if hit is not None:
                     transcript_hits[identity] = hit
     fused = [
@@ -2201,10 +2204,11 @@ def _find_projected_hits_pinned(
         hits=tuple(hits),
         withheld_paths=withheld,
         warming_components=tuple(
-            lane for lane in ("vector", "clip", "graph", "rerank", "source_passages") if lane in warming
+            lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
         ),
         declared_purpose=declared_purpose,
         continuation=next_continuation,
+        incomplete_source_passages=incomplete_passages,
     )
 
 

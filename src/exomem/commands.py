@@ -3087,6 +3087,8 @@ def op_find(
         projected_continuation = projected.continuation
         projected_hits = list(projected.hits)
         degraded.extend(projected.warming_components)
+        if projected.incomplete_source_passages:
+            failed.append("source_passages")
         release = egress_module.annotate_projected_hits(
             Path(vault_root),
             projected_hits,

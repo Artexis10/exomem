@@ -5,15 +5,22 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import struct
+import threading
+from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 
 from .. import private_state, state_paths
 from ..transcript_passages import TranscriptMatch
+from .projections import ProjectionNamespaceKey
 
 _PROJECTIONS = ".authorization-projections"
-STORE = f"{_PROJECTIONS}/transcript-banks"
+DIRECTORY = "transcript-banks"
+_BAD_LIMIT = 256
+_bad: OrderedDict[tuple[Path, str], None] = OrderedDict()
+_bad_lock = threading.Lock()
 _BankLocations = Sequence[tuple[int, TranscriptMatch]]
 
 
@@ -21,7 +28,7 @@ class TranscriptBankUnavailable(RuntimeError):
     """An admitted variant's exact passage measurements could not be read."""
 
 
-def publish(root: Path, candidates: _BankLocations, vectors) -> str:
+def publish(root: Path, key: ProjectionNamespaceKey, candidates: _BankLocations, vectors) -> str:
     import numpy as np
 
     matrix = np.asarray(vectors, dtype=">f4")
@@ -30,27 +37,33 @@ def publish(root: Path, candidates: _BankLocations, vectors) -> str:
     locations = b"".join(struct.pack(">IQ", part, match.start) for part, match in candidates)
     payload = locations + matrix.tobytes()
     digest = hashlib.sha256(payload).hexdigest()
-    private_state.store(root, _PROJECTIONS)
-    directory = private_state.store(root, STORE)
+    directory = _directory(root, key, create=True)
+    record = {"data": base64.b64encode(payload).decode("ascii")}
     try:
-        private_state.write_record(
-            directory, digest, {"data": base64.b64encode(payload).decode("ascii")},
-            temp_suffix=".part", durable=True, create_only=True,
-        )
+        private_state.write_record(directory, digest, record, temp_suffix=".part", durable=True, create_only=True)
     except FileExistsError:
-        pass
+        try:
+            load(root, key, digest, candidates, int(matrix.shape[1]))
+        except TranscriptBankUnavailable:
+            # Replace the bad inode. A pinned namespace that still links to
+            # that inode will never see unverified bytes from this replacement.
+            private_state.write_record(directory, digest, record, temp_suffix=".part", durable=True)
     private_state.sync_directory(directory)
+    with _bad_lock:
+        _bad.pop((root, digest), None)
     return digest
 
 
-def load(root: Path, digest: str, candidates: _BankLocations, dimension: int):
+def load(
+    root: Path, key: ProjectionNamespaceKey, digest: str, candidates: _BankLocations, dimension: int,
+):
     """Read a single admitted bank and verify its root and published coordinates."""
     import numpy as np
 
     payload_size = len(candidates) * (12 + dimension * 4)
     location_size = len(candidates) * 12
     encoded_size = ((payload_size + 2) // 3) * 4
-    path = _bank_path(root, digest)
+    path = _directory(root, key) / f"{digest}.json"
     try:
         with path.open("rb") as source:
             raw = source.read(encoded_size + 33)
@@ -63,12 +76,43 @@ def load(root: Path, digest: str, candidates: _BankLocations, dimension: int):
             raise ValueError("bank binding changed")
         return np.frombuffer(payload, dtype=">f4", offset=location_size).reshape(len(candidates), dimension)
     except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        with _bad_lock:
+            _bad[(root, digest)] = None
+            _bad.move_to_end((root, digest))
+            if len(_bad) > _BAD_LIMIT:
+                _bad.popitem(last=False)
         raise TranscriptBankUnavailable("the projected transcript bank could not be verified") from None
 
 
-def _bank_path(root: Path, digest: str) -> Path:
-    return state_paths.vault_state_dir(root) / STORE / f"{digest}.json"
+def _directory(root: Path, key: ProjectionNamespaceKey, *, create: bool = False) -> Path:
+    parent = f"{_PROJECTIONS}/{key.namespace_id}"
+    name = f"{parent}/{DIRECTORY}"
+    if create:
+        private_state.store(root, _PROJECTIONS)
+        private_state.store(root, parent)
+        return private_state.store(root, name)
+    return state_paths.vault_state_dir(root) / name
 
 
-def available(root: Path, digest: str) -> bool:
-    return _bank_path(root, digest).is_file()
+def carry(root: Path, before: ProjectionNamespaceKey, after: ProjectionNamespaceKey, digest: str) -> bool:
+    """Reuse a bank's immutable bytes under the target namespace's own lifetime."""
+    with _bad_lock:
+        if (root, digest) in _bad:
+            return False
+    old = _directory(root, before) / f"{digest}.json"
+    target = _directory(root, after, create=True) / f"{digest}.json"
+    if old == target:
+        return old.is_file()
+    try:
+        os.link(old, target)
+    except FileNotFoundError:
+        return False
+    except FileExistsError:
+        pass
+    return True
+
+
+def sync(root: Path, key: ProjectionNamespaceKey) -> None:
+    directory = _directory(root, key)
+    if directory.is_dir():
+        private_state.sync_directory(directory)

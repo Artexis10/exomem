@@ -497,7 +497,7 @@ def catalog_item(
     same batch is about to write, by vault-relative path; `part_folder` is where the page's
     parts are now when the page is about to move away from them.
     """
-    from .. import extraction_parts, memory_refs, preserve, source_custody, transcript_passages
+    from .. import extraction_parts, preserve, transcript_passages
 
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -528,8 +528,7 @@ def catalog_item(
         if transcript_passages.is_source(path):
             text = head or transcript_passages.source_text(parsed.body)
             if parts or transcript_passages.is_transcript(text):
-                reference = memory_refs.ref_from_markdown(source)
-                if reference is not None and source_custody.read_manifest(vault_root, reference)[0] is not None:
+                if parsed.frontmatter.get("source_identity") is not None:
                     # These derivatives have independent retention. The Source
                     # eraser has no owner that can account for this bank.
                     fields["source_erasure"] = "managed"
@@ -878,23 +877,28 @@ def _target_vector_measurements(
                 "the target vector measurements cannot be rebuilt"
             ) from error
 
-    def bank_for(variant) -> str | None:
-        from . import transcript_banks
+    from . import transcript_banks
 
+    def bank_for(variant) -> str | None:
+        variant_id = variant.projection_variant_id
+        previous = active_by_id.get(variant_id)
+        old = active_variants.get(variant_id)
+        if (
+            old is not None and previous is not None and previous.transcript_bank is not None
+            and (old.head, old.parts) == (variant.head, variant.parts)
+            and transcript_banks.carry(
+                vault_root, active_namespace.namespace_key, target_namespace.namespace_key, previous.transcript_bank,
+            )
+        ):
+            return previous.transcript_bank
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            return None
         candidates = projected_retrieval.transcript_samples(variant)
         if not candidates:
             return None
-        variant_id = variant.projection_variant_id
-        previous = active_by_id.get(variant_id)
-        if (
-            previous is not None and previous.transcript_bank is not None
-            and transcript_banks.available(vault_root, previous.transcript_bank)
-            and candidates == projected_retrieval.transcript_samples(active_variants[variant_id])
-        ):
-            return previous.transcript_bank
         try:
             vectors = embeddings._embed_live_chunks([match.text for _, match in candidates])
-            return transcript_banks.publish(vault_root, candidates, vectors)
+            return transcript_banks.publish(vault_root, target_namespace.namespace_key, candidates, vectors)
         except Exception as error:
             raise CatalogPublicationError("the target transcript measurements cannot be built") from error
 
@@ -915,6 +919,7 @@ def _target_vector_measurements(
         )
         for variant in target_variants
     )
+    transcript_banks.sync(vault_root, target_namespace.namespace_key)
     target_dimensions = {len(row.vector) for row in target_rows}
     expected_dimension = (
         active_root.vector_dimension

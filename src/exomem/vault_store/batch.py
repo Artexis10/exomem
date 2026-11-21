@@ -91,6 +91,7 @@ def commit_batch(
     validate_prepared_bindings: Callable[[], None] | None = None,
     prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
     lifecycle: Lifecycle | None = None,
+    retained_original: vault.PathGuard | None = None,
     publish_originals: Callable[[], None] | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
@@ -154,6 +155,7 @@ def commit_batch(
             commit_point,
             vault._owner_writes(publish_originals, curation_witness.publication_hook(witness)),
             lifecycle,
+            retained_original,
         )
     except BaseException:
         working_set_heat.abandon_commit(heat)
@@ -376,6 +378,7 @@ def _commit(
     commit_point: bool,
     before_publication: Callable[[], None] | None,
     lifecycle: Lifecycle | None = None,
+    retained_original: vault.PathGuard | None = None,
 ) -> _Plan:
     from ..writer_lease import (
         log_active_mutation_phase,
@@ -386,6 +389,29 @@ def _commit(
     vault._require_distinct_destinations(writes)
     _validate(root, writes, vocabulary_auxiliaries, final=False)
     plan = _Plan(root, writes, required_guards, completion_guards, lifecycle)
+    if retained_original is not None:
+        from .. import vocabulary_auxiliaries as auxiliaries
+
+        manifests = (
+            vocabulary_auxiliaries.entries
+            if isinstance(vocabulary_auxiliaries, auxiliaries.DerivedAuxiliaryManifest) else ()
+        )
+        retained = [
+            write for rel, write in plan.binaries
+            if rel == retained_original.target and isinstance(write.content, vault.PreparedBinaryContent)
+            and retained_original.expected_content_hash == write.content.sha256
+            and retained_original.expected_content_size == write.content.size
+        ]
+        original_bound = any(
+            entry.role == auxiliaries.SOURCE_ORIGINAL and entry.path == retained_original.target
+            and entry.after_sha256 == retained_original.expected_content_hash
+            for entry in manifests
+        )
+        is_import = any(entry.role == auxiliaries.SOURCE_IMPORT_RECEIPT for entry in manifests)
+        if len(retained) != 1 or not original_bound or not is_import or retained_original.leaf_policy != "content":
+            raise ValueError("retained original differs from the sealed Source import")
+        plan.files.remove(retained[0])
+        plan.disk_completion.append(retained_original)
     # Before any file is published, so a stale expectation leaves no file behind. The commit checks
     # again inside its transaction, and that check is the one that binds.
     _check_held(plan)

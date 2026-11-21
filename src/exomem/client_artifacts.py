@@ -1765,7 +1765,13 @@ def _commit_staged_sources(
     A correction names its predecessor, so it never meets an earlier Source that holds the same bytes.
     """
     from . import add as add_module
-    from . import document_identity, source_capture, source_corrections, source_imports
+    from . import (
+        document_containers,
+        document_identity,
+        source_capture,
+        source_corrections,
+        source_imports,
+    )
 
     resolution: dict | None = None
     manager = active_manager()
@@ -1800,6 +1806,10 @@ def _commit_staged_sources(
                 ):
                     raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Use the held Source's import ID in a single-file capture.")
                 key = import_key or held_key
+                if key is not None and document_containers.is_container(artifact.filename):
+                    raise SafeFetchError(
+                        "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
+                    )
                 import_capture = (
                     source_imports.ImportCapture.bind(vault_root, key, artifact, title=item_title, source_fields=source_fields)
                     if key is not None else None
@@ -1810,8 +1820,9 @@ def _commit_staged_sources(
                     operation="capture_source_artifacts_commit",
                 ):
                     body_started = True
+                    resumed = None
                     if import_capture is not None:
-                        previous, repaired = import_capture.lookup(vault_root, artifact)
+                        previous, repaired, resumed = import_capture.lookup(vault_root, artifact)
                         if repaired:
                             wrote_import_receipt = True
                             mark_active_mutation_committed()
@@ -1820,10 +1831,19 @@ def _commit_staged_sources(
                                 artifact.sha256, previous.payload.artifact_path, previous.path, previous.ref,
                             )
                             outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
+                            if repaired:
+                                warnings: list[str] = []
+                                _schedule_media(
+                                    manager, vault_root, duplicate.path, warnings,
+                                    kept="the original", operation="capture_source_media",
+                                )
+                                if warnings:
+                                    outcomes[index]["warnings"] = warnings
+                                import_capture.finish(vault_root)
                             continue
                     # Looked up and committed under this one acquisition, so two identical hand-overs
                     # cannot both find nothing.
-                    if source_fields.get("correction") is not None:
+                    if source_fields.get("correction") is not None or resumed is not None:
                         duplicate, available = None, True
                     else:
                         duplicate, available = _earlier_source(
@@ -1842,6 +1862,7 @@ def _commit_staged_sources(
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
                             import_capture=import_capture,
+                            _import_resume=resumed,
                             **source_fields,
                         )
                     elif import_capture is not None:
@@ -1897,6 +1918,8 @@ def _commit_staged_sources(
                     # Stored with the row, so a replayed reply offers the same next step.
                     outcomes[index]["correctable"] = source_corrections.can_record(vault_root, payload["ref"])
                 source_result_attribution.bind(outcomes[index], (result.ref,))
+                if import_capture is not None:
+                    import_capture.finish(vault_root)
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except source_capture.SourceCaptureError as error:

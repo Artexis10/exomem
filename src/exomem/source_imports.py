@@ -57,6 +57,7 @@ class Receipt(BaseModel, frozen=True, extra="forbid"):
     ref: str
     artifact: str
     protected: bool
+    captured: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +87,12 @@ class ImportCapture:
     def _path(self, root: Path) -> Path:
         return receipt_root(root) / f"{self.key}.json"
 
-    def receipt(self, page: str, ref: str, artifact: str, source_hash: str) -> Receipt:
+    def receipt(
+        self, page: str, ref: str, artifact: str, source_hash: str, *, captured: str | None = None,
+    ) -> Receipt:
         return Receipt(
             key=self.key, input_digest=self.input_digest, original_sha256=self.original_sha256,
-            page=page, ref=ref, artifact=artifact, source_hash=source_hash, protected=self.protected,
+            page=page, ref=ref, artifact=artifact, source_hash=source_hash, protected=self.protected, captured=captured,
         )
 
     def planned_write(self, root: Path, receipt: Receipt) -> vault.PlannedWrite:
@@ -118,7 +121,9 @@ class ImportCapture:
                 "IMPORT_IDENTITY_CONFLICT: This import ID already names different bytes or capture metadata."
             )
 
-    def lookup(self, root: Path, artifact) -> tuple[duplicates.Duplicate | None, bool]:
+    def lookup(
+        self, root: Path, artifact,
+    ) -> tuple[duplicates.Duplicate | None, bool, tuple[Receipt, vault.PathGuard] | None]:
         """Verify one exact committed receipt, or reconcile an interrupted file publication."""
         rel = self._path(root).relative_to(root).as_posix()
         raw = None
@@ -132,32 +137,54 @@ class ImportCapture:
                     raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from error
         if raw is not None:
             receipt = self._read_receipt(raw)
+            if duplicates.withheld(root, receipt.page):
+                raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
             self._require_same_input(receipt)
             duplicate = self._verified_duplicate(root, receipt)
-            self.finish(root)
-            return duplicate, False
+            recovery_pending = self._pending_path(root).is_file()
+            if recovery_pending:
+                self._refresh_payload(root, receipt.page)
+            return duplicate, recovery_pending, None
 
         store = private_state.store(root, _PREPARED_STORE)
         try:
             with (store / f"{self.key}.json").open("rb") as pending:
                 raw = pending.read(_MAX_RECEIPT_BYTES + 1)
         except FileNotFoundError:
-            return None, False
+            return None, False, None
         if len(raw) > _MAX_RECEIPT_BYTES:
             raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
         receipt = self._read_receipt(raw)
         try:
             vault.PathGuard.capture(root, receipt.page, leaf_policy="absent")
-            vault.PathGuard.capture(root, receipt.artifact, leaf_policy="absent")
         except vault.PathGuardError:
+            if duplicates.withheld(root, receipt.page):
+                raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
             self._require_same_input(receipt)
             self._recover_original(root, receipt, artifact)
             duplicate = self._verified_duplicate(root, receipt)
+            self._refresh_payload(root, receipt.page)
             self.commit_duplicate(root, duplicate)
-            self.finish(root)
-            return duplicate, True
+            return duplicate, True, None
+        try:
+            vault.PathGuard.capture(root, receipt.artifact, leaf_policy="absent")
+        except vault.PathGuardError:
+            # Store batches publish the original before their SQLite page commit.
+            # Adopt its exact guarded bytes instead of deleting or overwriting it.
+            from .governance import connector_boundary
+            from .vault_store import availability
+
+            connector_boundary.require_write(root, receipt.page, content=None)
+            self._require_same_input(receipt)
+            if availability.page_writer(root) is None or receipt.captured is None:
+                raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
+            guard = vault.PathGuard.capture(
+                root, receipt.artifact, leaf_policy="content",
+                expected_content_hash=self.original_sha256, expected_content_size=artifact.size,
+            )
+            return None, False, (receipt, guard)
         self.finish(root)
-        return None, False
+        return None, False, None
 
     def _recover_original(self, root: Path, receipt: Receipt, artifact) -> None:
         """Complete only the missing original of the exact, already-installed Source."""
@@ -219,9 +246,18 @@ class ImportCapture:
         )
         private_state.sync_directory(store)
 
+    def _pending_path(self, root: Path) -> Path:
+        return private_state.store(root, _PREPARED_STORE) / f"{self.key}.json"
+
     def finish(self, root: Path) -> None:
-        store = private_state.store(root, _PREPARED_STORE)
-        private_state.remove(store / f"{self.key}.json")
+        private_state.remove(self._pending_path(root))
+
+    @staticmethod
+    def _refresh_payload(root: Path, path: str) -> None:
+        from . import due_state, lexstore
+
+        lexstore.record_payload_commit(root, [path])
+        due_state.refresh_after_writes(root, [due_state.PageWrite(path)])
 
     def commit_duplicate(self, root: Path, duplicate: duplicates.Duplicate) -> None:
         from . import source_custody

@@ -831,14 +831,17 @@ def test_import_retry_completes_the_original_after_source_publication_stops(
         with pytest.raises(Interrupted):
             invoke()
     [source] = source_paths
-    text = source.read_bytes()
+    before, text, _ = vault_module.parse_frontmatter(source.read_text(encoding="utf-8"))
     target = source.with_suffix("")
     assert not target.exists()
 
     [receipt] = invoke()["files"]
     assert receipt["state"] == "already_stored"
     assert receipt["hash"] == hashlib.sha256(original).hexdigest()
-    assert source.read_bytes() == text
+    after, recovered_text, _ = vault_module.parse_frontmatter(source.read_text(encoding="utf-8"))
+    assert recovered_text == text
+    assert after["evidence_file"] == before["evidence_file"]
+    assert after["exomem_id"] == before["exomem_id"]
     assert target.read_bytes() == original
     assert invoke()["files"][0]["ref"] == receipt["ref"]
 

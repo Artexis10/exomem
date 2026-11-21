@@ -818,8 +818,10 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
         fields={"type": "insight", "sources": "Sources/gate"},
     )
     offset = text.index("[00:19]")
+    baseline = _runtime((_item(source), _item(summary)))
     bank = transcript_banks.publish(
-        tmp_path, projected_retrieval.transcript_samples(source), ((0.0, 1.0), (1.0, 0.0)),
+        tmp_path, baseline.namespace.namespace_key,
+        projected_retrieval.transcript_samples(source), ((0.0, 1.0), (1.0, 0.0)),
     )
     vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
     rows = (vector, _vector(summary, (1.0, 0.0)))

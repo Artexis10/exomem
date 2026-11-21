@@ -257,7 +257,7 @@ def _passage_in(
 
 
 def transcript_samples(
-    variant: projections.ProjectionVariant,
+    variant: projections.ProjectionVariant, *, limit: int = MAX_PROJECTED_TRANSCRIPT_SAMPLES,
 ) -> tuple[tuple[int, transcript_passages.TranscriptMatch], ...]:
     """Return timed turns whose offsets map into the released Source."""
     from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
@@ -286,7 +286,7 @@ def transcript_samples(
                 samples.append((part, transcript_passages.TranscriptMatch(
                     base + stored_start, base + stored_end, text[start:end], timestamp,
                 )))
-                if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
+                if len(samples) == limit:
                     return tuple(samples)
     return tuple(samples) if len(samples) >= 2 else ()
 
@@ -952,16 +952,20 @@ class ProjectedVectorIndex:
 
     def match_transcript(
         self, root, variant: projections.ProjectionVariant, query_vector: tuple[float, ...], score: float,
-    ) -> ProjectedLexicalHit | None:
+    ) -> tuple[ProjectedLexicalHit | None, bool]:
         """Verify and score the bank of one already admitted, competitive Source."""
+        candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
+        if not candidates:
+            return None, False
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:
-            return None
+            raise transcript_banks.TranscriptBankUnavailable("projected transcript measurements are missing")
         import numpy as np
 
-        candidates = transcript_samples(variant)
+        partial = len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
+        candidates = candidates[:MAX_PROJECTED_TRANSCRIPT_SAMPLES]
         query = np.asarray(query_vector, dtype=np.float32)
-        matrix = transcript_banks.load(root, digest, candidates, len(query))
+        matrix = transcript_banks.load(root, self.namespace_key, digest, candidates, len(query))
         norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)
         if not len(norms) or not np.all(np.isfinite(norms) & (norms > 0)):
             raise transcript_banks.TranscriptBankUnavailable("invalid projected transcript bank")
@@ -969,8 +973,8 @@ class ProjectedVectorIndex:
         index = int(similarities.argmax())
         passage_score = float(similarities[index])
         if passage_score <= 0 or passage_score < score:
-            return None
-        return _projected_hit(variant, score, transcript=candidates[index])
+            return None, partial
+        return _projected_hit(variant, score, transcript=candidates[index]), partial
 
 
 class ProjectedClipIndex:

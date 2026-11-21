@@ -5989,6 +5989,7 @@ def batch_atomic_write(
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _publish_originals: Callable[[], None] | None = None,
+    _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
@@ -6024,8 +6025,10 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals,
+                publish_originals=_publish_originals, retained_original=_retained_original,
             )
+    if _retained_original is not None:
+        raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
