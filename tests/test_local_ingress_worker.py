@@ -926,7 +926,8 @@ def test_the_worker_entry_claims_the_proof_before_anything_can_inherit_it(
     from exomem import service_manager
 
     # The worker entry shortens the GIL switch interval for the whole process; later tests keep theirs.
-    request.addfinalizer(lambda previous=sys.getswitchinterval(): sys.setswitchinterval(previous))
+    previous_interval = sys.getswitchinterval()
+    request.addfinalizer(lambda: sys.setswitchinterval(previous_interval))
 
     if sys.platform != "linux":
         pytest.skip("Managed lifecycle is Linux-only")
