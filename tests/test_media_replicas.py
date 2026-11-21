@@ -3388,4 +3388,3 @@ def test_a_read_downloads_the_rest_of_the_ciphertext_after_age_stops_only_when_i
         list(media_store._decrypted_chunks(backend, reference, str(identity), prove=prove))
 
     assert (pulled[0] == len(data)) == pulled_all
-
