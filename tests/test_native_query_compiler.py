@@ -28,7 +28,7 @@ def native_rows(tmp_path):
                "bucket": "kept" if ordinal % 3 else "other", "amount": numbers[(ordinal - 1) % len(numbers)]}
               for ordinal in range(1, 21)]
     with closing(connection._connect(str(tmp_path / "native.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, {"amount": FieldSpec("number"), "bucket": FieldSpec("string")}, identity="uuid16")
         plan = build_projection_plan(CID, {"amount": {"type": "number"}, "bucket": {"type": "string"}},
@@ -39,7 +39,7 @@ def native_rows(tmp_path):
             conn.execute(statement)
         conn.execute("BEGIN")
         for row_id, row in enumerate(source, 1):
-            conn.execute("INSERT INTO item_rows VALUES(?)", (row_id,))
+            conn.execute("INSERT INTO items VALUES(?)", (row_id,))
             parameters = plan.parameters(conn, row_id, row["item_key"], 1, {name: value for name, value in row.items() if name != "item_key"})
             conn.execute(str(compiled), tuple(parameters[name] for name in compiled.positiontup))
         conn.commit()
@@ -130,7 +130,7 @@ def ordered_rows(tmp_path):
     """Twelve rows keyed by `ordered-v1` keys of a date, inserted out of order, in a native table with the ordered codec."""
     keys = [item_keys.spell(item_keys.ordered_key([("date", f"2024-03-{day:02d}")], lambda: "")) for day in range(1, 13)]
     with closing(connection._connect(str(tmp_path / "ordered.sqlite"))) as conn:
-        conn.execute("CREATE TABLE item_rows(row_id INTEGER PRIMARY KEY) STRICT")
+        conn.execute("CREATE TABLE items(row_id INTEGER PRIMARY KEY) STRICT")
         native_metadata.install(conn, canonical=False)
         layout = native_layout.build(CID, 7, {"bucket": FieldSpec("string")}, identity="ordered")
         plan = build_projection_plan(CID, {"bucket": {"type": "string"}}, (), generation=13, payload_layout=layout)
@@ -139,7 +139,7 @@ def ordered_rows(tmp_path):
             conn.execute(statement)
         conn.execute("BEGIN")
         for row_id in (5, 1, 12, 3, 9, 2, 11, 4, 8, 6, 10, 7):
-            conn.execute("INSERT INTO item_rows VALUES(?)", (row_id,))
+            conn.execute("INSERT INTO items VALUES(?)", (row_id,))
             parameters = plan.parameters(conn, row_id, keys[row_id - 1], 1, {"bucket": "kept"})
             conn.execute(str(compiled), tuple(parameters[name] for name in compiled.positiontup))
         conn.commit()
@@ -183,6 +183,6 @@ def test_an_ordered_table_refuses_a_key_outside_one_to_320_bytes(ordered_rows, s
     conn, plan, keys = ordered_rows
     compiled = plan.upsert.compile(dialect=dialect())
     parameters = {**plan.parameters(conn, 99, keys[0], 1, {"bucket": "kept"}), "item_key": stored}
-    conn.execute("INSERT INTO item_rows VALUES(99)")
+    conn.execute("INSERT INTO items VALUES(99)")
     with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
         conn.execute(str(compiled), tuple(parameters[name] for name in compiled.positiontup))

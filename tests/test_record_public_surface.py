@@ -26,7 +26,6 @@ RECORD_ACTIONS = (
     "append",
     "bulk_upsert",
     "update",
-    "retract",
     "revise",
     "rebaseline",
     "discard",
@@ -72,7 +71,7 @@ def test_record_command_exposes_the_lifecycle_arguments_and_selector_routing() -
     )
     assert all(
         not commands.invocation_is_read_only(command, {"action": action})
-        for action in ("create", "append", "bulk_upsert", "update", "retract", "revise", "rebaseline", "discard")
+        for action in ("create", "append", "bulk_upsert", "update", "revise", "rebaseline", "discard")
     )
 
 

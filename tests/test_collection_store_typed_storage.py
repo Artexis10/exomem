@@ -286,14 +286,14 @@ def test_encoding_discriminator_is_checked_and_view_path_may_be_null(store):
     bulk(store, {"title": "One", "amount": 1})
     conn = store.connection
     for statement, message in (
-        ("UPDATE item_rows SET values_json=NULL", "CHECK"),
-        ("UPDATE item_rows SET encoding='typed-v1',values_json=NULL", "encoding"),
-        ("UPDATE item_rows SET encoding='bson'", "encoding"),
+        ("UPDATE items SET values_json=NULL", "CHECK"),
+        ("UPDATE items SET encoding='typed-v1',values_json=NULL", "encoding"),
+        ("UPDATE items SET encoding='bson'", "encoding"),
     ):
         with pytest.raises(sqlite3.IntegrityError, match=message), store.handle.transaction() as tx:
             tx.execute(statement)
     with pytest.raises(RuntimeError, match="rolled back"), store.handle.transaction() as tx:
-        tx.execute("UPDATE item_rows SET view_path=NULL")
+        tx.execute("UPDATE items SET view_path=NULL")
         raise RuntimeError("rolled back")
     assert migrate(store) == "ready"
     with pytest.raises(sqlite3.IntegrityError, match="encoding"), store.handle.transaction() as tx:

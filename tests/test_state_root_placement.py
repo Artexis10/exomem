@@ -346,6 +346,7 @@ def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable()
 
     # Dropping a family from this set drops its owner decisions out of every backup, so the set is pinned.
     assert declared == {
+        "governance-store",
         "media-jobs-store",
         "voice-profile-store",
         "review-state",
