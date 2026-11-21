@@ -4653,8 +4653,10 @@ def _enum_choice_can_render(
     if tokens is not None:
         if len(members) == 1:
             changes_note = field == tokens.status_note_field
-            note = choice if changes_note else held_values.get(tokens.status_note_field)
-            derived = record_formats.log_derived_values(manifest, note)
+            try:
+                derived = record_formats.log_derived_values(manifest, {**held_values, field: choice})
+            except ValueError:
+                return False
             if field in derived:
                 expected = derived[field]
                 return not problems and type(choice) is type(expected) and choice == expected

@@ -2334,6 +2334,29 @@ def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path:
     assert [entry.values["status"] for entry in adapter.read().records] == ["partial", "partial"]
 
 
+def test_held_log_retry_refuses_a_heading_that_loses_its_note(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_file = fixture / "_collection.md"
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace('close: ")"', 'close: ") "'),
+        encoding="utf-8",
+    )
+    source = fixture / "Training Log.md"
+    before = source.read_bytes()
+    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note=" Partial ")
+    assert error.code == "SCHEMA_ENUM"
+    assert "allowed" not in error.details
+
+    with pytest.raises(collections.CollectionError, match="UNREPRESENTABLE_RECORD_VALUE"):
+        records.append_record(
+            tmp_path, _manifest(tmp_path, fixture).path, held=error.details["held"]["held_id"],
+            item={"status": "partial"}, why="correct the status",
+        )
+    assert source.read_bytes() == before
+
+
 def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:
     from exomem import records
 
