@@ -2320,6 +2320,8 @@ class _WorkspaceArtifact:
     installation_witness: held_fs.InstallationWitness | None = None
     requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
+    #: Renamed in from an upload stage: installing it renames it again and copies nothing.
+    adopted: bool = False
 
     @property
     def path(self) -> Path:
@@ -2455,6 +2457,14 @@ def _remove_created_workspace(
 
 def _batch_workspace_token(size: int) -> str:
     return secrets.token_hex(size)
+
+
+class _StageAdoptionUnavailable(Exception):
+    """A staged upload cannot be renamed into this workspace, so the batch copies it instead."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _after_batch_destination_published(_path: Path) -> None:
@@ -3091,6 +3101,155 @@ class _BatchWorkspace:
                     os.close(descriptor)
             raise
 
+    def adopt_staged_artifact(
+        self,
+        name: str,
+        staged: Any,
+        *,
+        expected_size: int,
+        expected_hash: str,
+    ) -> _WorkspaceArtifact:
+        """Rename a private upload stage into this workspace: no payload byte is read or written.
+
+        The stage was hashed and fsynced before the boundary, so this only proves that the file is still
+        the one that was staged, by its (dev, ino) and its (size, mtime, ctime) read after the fsync. A
+        stage that differs is refused without a hash, since reading it here is the cost this route removes.
+        Raises `_StageAdoptionUnavailable` when the workspace cannot take a rename; the caller then copies.
+        """
+        if (staged.size, staged.sha256) != (expected_size, expected_hash):
+            raise PathGuardError("PATH_GUARD_INVALID", "staged upload does not match the plan")
+        filesystem, directory = self.held_filesystem, self.held_directory
+        if filesystem is None or directory is None:
+            raise _StageAdoptionUnavailable("no held filesystem")
+        if not STAT_GENERATION_TRUSTED:
+            raise _StageAdoptionUnavailable("no trusted change witness")
+        try:
+            stage_relative = Path(os.path.abspath(staged.path)).relative_to(Path(os.path.abspath(staged.vault_root)))
+            Path(os.path.abspath(self.parent)).relative_to(Path(os.path.abspath(staged.vault_root)))
+        except ValueError as error:
+            raise PathGuardError("PATH_GUARD_TARGET", "staged upload is outside the vault") from error
+        self.recheck()
+        stage_directory = filesystem.parent(stage_relative.parent.as_posix())
+        if not stage_directory.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "upload stage directory is unavailable")
+        with stage_directory.require() as stage_parent:
+            opened = filesystem.file(stage_parent, stage_relative.name, access="mutate")
+            if not opened.ok:
+                raise PathGuardError("PATH_GUARD_CHANGED", "staged upload is unavailable")
+            with opened.require() as source:
+                before = source.version()
+                if (
+                    (before.identity.device, before.identity.inode) != (staged.device, staged.inode)
+                    or before.identity.link_count != 1
+                ):
+                    raise PathGuardError("PATH_GUARD_CONTENT", "staged upload changed after it was staged")
+                if (before.size, before.mtime_ns, before.change_time_ns) != staged.generation:
+                    # A touch that leaves the bytes alone (an xattr write, a timestamp reset by a sync client) moves the
+                    # generation too. The copy route hashes against `expected_hash`, so it commits those bytes and still
+                    # refuses an edited stage, the same trade `_WorkspaceArtifact.recheck` makes.
+                    raise _StageAdoptionUnavailable("the stage changed after it was staged")
+                moved = filesystem.rename(source, directory, name, replace=False)
+                if not moved.ok:
+                    if moved.error is not None and moved.error.code == "CROSS_DEVICE":
+                        raise _StageAdoptionUnavailable("the stage is on another filesystem")
+                    raise PathGuardError("PATH_GUARD_UNSAFE", "staged upload could not be adopted")
+        # The name is bound before anything else is checked, so a failure below leaves the file registered
+        # (not hashed: `content_bound` stays False) and the workspace cleanup still removes it.
+        reopened = filesystem.file(directory, name, access="read")
+        if not reopened.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage is unavailable")
+        held_file = reopened.require()
+        artifact: _WorkspaceArtifact | None = None
+        try:
+            descriptor = getattr(held_file, "descriptor", None)
+            if not isinstance(descriptor, int):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "adopted stage is unavailable")
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "adopted stage is unsafe")
+            artifact = _WorkspaceArtifact(
+                self, name, descriptor, _identity(name, info), expected_hash,
+                held_file=held_file, adopted=True,
+            )
+            self.artifacts[name] = artifact
+            # The rename moved the ctime, so size and mtime carry the proof that nothing wrote in between.
+            if (
+                (info.st_dev, info.st_ino) != (staged.device, staged.inode)
+                or (info.st_size, info.st_mtime_ns) != (staged.generation[0], staged.generation[1])
+            ):
+                raise PathGuardError("PATH_GUARD_CONTENT", "staged upload changed while it was adopted")
+            artifact.generation = artifact.current_generation(info)
+            artifact.content_bound = True
+            self.recheck()
+            return artifact
+        except Exception:
+            if artifact is None:
+                held_file.close()
+            raise
+
+    def install_adopted_artifact(
+        self,
+        artifact: _WorkspaceArtifact,
+        final: Path,
+        relative: str,
+        *,
+        inverse_recheck: Callable[[], None] | None,
+    ) -> PathIdentity:
+        """Rename an adopted stage onto its missing destination, reading nothing.
+
+        The identity comes from the descriptor already held. The rename also flushes the directories, and
+        that can fail once the stage is installed: the caller then binds the destination through
+        `_bind_adopted_installation`, which needs the artifact still open and still in the census.
+        """
+        absolute_final = Path(os.path.abspath(final))
+        filesystem, parent, directory = self.held_filesystem, self.held_parent, self.held_directory
+        if filesystem is None or parent is None or directory is None or absolute_final.parent != self.parent:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destination left the workspace parent")
+
+        def recheck_precondition() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self.recheck()
+            artifact.recheck()
+            current = filesystem.file(parent, absolute_final.name)
+            if current.ok:
+                current.require().close()
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch destination appeared")
+            if current.error is None or current.error.code != "MISSING":
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch destination changed")
+
+        recheck_precondition()
+        opened = filesystem.file(directory, artifact.name, access="mutate")
+        if not opened.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage is unavailable")
+        with opened.require() as source:
+            descriptor = getattr(source, "descriptor", None)
+            if not isinstance(descriptor, int) or not _same_identity(artifact.identity, os.fstat(descriptor)):
+                raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage changed")
+            before = source.version()
+            _before_batch_destination_published(final, restoring=False)
+            if inverse_recheck is not None:
+                inverse_recheck()
+            moved = filesystem.rename(source, parent, absolute_final.name, replace=False)
+            if not moved.ok:
+                refused = moved.error is not None and moved.error.code in {"DESTINATION_EXISTS", "IDENTITY_CHANGED"}
+                raise PathGuardError(
+                    "PATH_GUARD_CHANGED" if refused else "PATH_GUARD_UNSAFE",
+                    "batch destination publish was refused",
+                )
+            info = os.fstat(descriptor)
+            try:
+                installed = source.version()
+            except OSError:
+                installed = None
+            # Vouch for the installed bytes by their generation only when the rename left size and mtime
+            # alone; otherwise the batch hashes the installed file, as it does after a copy that moved.
+            if installed is not None and (installed.size, installed.mtime_ns) == (before.size, before.mtime_ns):
+                artifact.installed_generation = (installed.size, installed.mtime_ns, installed.change_time_ns)
+        artifact.close()
+        self.artifacts.pop(artifact.name, None)
+        return _identity(relative, info)
+
     def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
@@ -3146,6 +3305,16 @@ class _BatchWorkspace:
                 raise PathGuardError(
                     "PATH_GUARD_TARGET", "batch destination escaped the vault"
                 ) from error
+            if (
+                artifact.adopted
+                and expected_destination is None
+                and published_metadata is None
+                and custody is None
+                and custody_factory is None
+            ):
+                return self.install_adopted_artifact(
+                    artifact, final, relative.as_posix(), inverse_recheck=inverse_recheck
+                )
             # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
             content = held_fs.Chunks(functools.partial(_verified_chunks, artifact))
             acquired = held_fs.acquire(root)
@@ -3389,6 +3558,8 @@ class _BatchWorkspace:
             if absolute_final.parent != self.parent:
                 return None
             if self.held_filesystem is not None and self.held_parent is not None:
+                if artifact.adopted:
+                    return self._bind_adopted_installation(artifact, absolute_final)
                 self.recheck()
                 artifact.recheck()
                 current = self.held_filesystem.file(
@@ -3479,6 +3650,38 @@ class _BatchWorkspace:
             return artifact.identity
         except (OSError, PathGuardError):
             return None
+
+    def _bind_adopted_installation(
+        self, artifact: _WorkspaceArtifact, absolute_final: Path
+    ) -> PathIdentity | None:
+        """Record an adopted stage that the rename installed before the install call raised.
+
+        The rename consumed the stage's workspace name, so neither the artifact's name recheck nor the
+        workspace census can prove it any more. The artifact's open descriptor still holds the inode: a
+        destination that is that inode, with no other link and the bound bytes, is the installed stage.
+        The artifact leaves the census here so that the rollback's workspace recheck passes.
+        """
+        assert self.held_filesystem is not None and self.held_parent is not None
+        self.recheck_identity()
+        if artifact.closed or not _same_identity(artifact.identity, os.fstat(artifact.descriptor)):
+            return None
+        current = self.held_filesystem.file(self.held_parent, absolute_final.name)
+        if not current.ok:
+            return None
+        with current.require() as installed:
+            descriptor = getattr(installed, "descriptor", None)
+            if not isinstance(descriptor, int) or installed.identity.link_count != 1:
+                return None
+            info = os.fstat(descriptor)
+            if not _same_identity(artifact.identity, info):
+                return None
+            installed_identity = _identity(absolute_final.name, info)
+            if _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
+                return None
+        artifact.close()
+        self.artifacts.pop(artifact.name, None)
+        self.recheck()
+        return installed_identity
 
     def unlink_installed(
         self, final: Path, expected: _BatchArtifactGuard, *, inverse_recheck: Callable[[], None]
@@ -5080,11 +5283,16 @@ def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
 
 @dataclass
 class PreparedBinaryContent:
-    """One seekable binary payload with its exact precomputed identity."""
+    """One seekable binary payload with its exact precomputed identity.
+
+    `staged` is the same bytes already hashed and fsynced in a private upload stage (`upload_stage`). The
+    batch renames it in and installs it without reading a byte; `stream` is the copy it falls back to.
+    """
 
     stream: IO[bytes]
     size: int
     sha256: str
+    staged: Any | None = None
 
 
 @dataclass
@@ -6137,6 +6345,37 @@ def _require_distinct_destinations(writes: Iterable[PlannedWrite]) -> None:
         destinations.add(portable_destination)
 
 
+def _stage_binary_artifact(
+    workspace: _BatchWorkspace,
+    name: str,
+    content: PreparedBinaryContent,
+    *,
+    adoptable: bool,
+    custody: _ArtifactCustody | None = None,
+) -> _WorkspaceArtifact:
+    """Adopt a staged upload into the workspace by rename, or copy the stream when the stage cannot be adopted."""
+    if content.staged is not None:
+        try:
+            if not adoptable or custody is not None:
+                raise _StageAdoptionUnavailable("payload custody needs its own copy")
+            return workspace.adopt_staged_artifact(
+                name, content.staged, expected_size=content.size, expected_hash=content.sha256
+            )
+        except _StageAdoptionUnavailable as unavailable:
+            # The copy runs under the boundary, so the log names why this commit moved bytes there.
+            from .writer_lease import log_active_mutation_phase
+
+            log.info("upload stage copied under the boundary: %s", unavailable.reason)
+            log_active_mutation_phase("upload_stage_copy_fallback", reason=unavailable.reason.replace(" ", "_"))
+    return workspace.create_stream_artifact(
+        name,
+        content.stream,
+        expected_size=content.size,
+        expected_hash=content.sha256,
+        **({"custody": custody} if custody is not None else {}),
+    )
+
+
 def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite],
     *,
@@ -6426,11 +6665,8 @@ def _batch_atomic_write_locked(
                         "PATH_GUARD_INVALID",
                         "binary batch content requires an exact missing destination",
                     )
-                artifact = workspace.create_stream_artifact(
-                    f"stage-{index}.tmp",
-                    write.content.stream,
-                    expected_size=write.content.size,
-                    expected_hash=write.content.sha256,
+                artifact = _stage_binary_artifact(
+                    workspace, f"stage-{index}.tmp", write.content, adoptable=_payload_custody is None,
                     **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
