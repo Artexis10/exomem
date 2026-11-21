@@ -3050,8 +3050,7 @@ def index_incremental(
 
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
-    row_mtimes = index.file_mtimes()
-    verified_layout = index.transcript_layout_paths()
+    row_states = index.incremental_file_states()
     unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
@@ -3067,7 +3066,10 @@ def index_incremental(
         matching = index.verify_transcript_layout(
             {path: chunks for path, chunks, _ in legacy_batch}, remember=not dry_run,
         )
-        pending.extend(row for row in legacy_batch if row[0] not in matching)
+        for row in legacy_batch:
+            if row[0] not in matching:
+                pending.append(row)
+                transcript_paths.add(row[0])
         legacy_batch.clear()
 
     scanned = 0
@@ -3093,18 +3095,18 @@ def index_incremental(
             continue
         scanned += 1
         seen_on_disk.add(page.rel_path)
-        prior = row_mtimes.get(page.rel_path)
+        prior, verified_layout = row_states.get(page.rel_path, (None, False))
         row = (page.rel_path, chunks, page.mtime)
         timed = transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body)
-        if timed:
-            transcript_paths.add(page.rel_path)
         if prior is not None and page.mtime <= prior + 1.0:
             # Same-mtime Sources can still have legacy paragraph chunks.
-            if timed and page.rel_path not in verified_layout:
+            if timed and not verified_layout:
                 legacy_batch.append(row)
                 if len(legacy_batch) == 16:
                     queue_legacy_batch()
             continue
+        if timed:
+            transcript_paths.add(page.rel_path)
         pending.append(row)
 
     queue_legacy_batch()
@@ -3112,7 +3114,7 @@ def index_incremental(
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
     stale = sorted(
-        {rp for rp in row_mtimes if rp not in seen_on_disk}
+        {rp for rp in row_states if rp not in seen_on_disk}
         | {rp for rp in unit_parent_states if rp not in unit_seen_on_disk}
     )
 

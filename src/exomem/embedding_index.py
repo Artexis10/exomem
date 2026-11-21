@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _TRANSCRIPT_LAYOUT_PREFIX = "transcript-layout:"
-_TRANSCRIPT_LAYOUT_END = "transcript-layout;"
 _TRANSCRIPT_LAYOUT_VERSION = 1
+_FILE_MTIMES = "SELECT file_path, MAX(file_mtime) AS file_mtime FROM chunks GROUP BY file_path"
 
 
 def _remember_transcript_layout(conn: sqlite3.Connection, paths: AbstractSet[str]) -> None:
@@ -3835,9 +3835,7 @@ class EmbeddingIndex:
         conn = self._connect()
         try:
             if paths is None:
-                rows = conn.execute(
-                    "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
-                ).fetchall()
+                rows = conn.execute(_FILE_MTIMES).fetchall()
             else:
                 wanted = sorted(paths)
                 rows = []
@@ -3852,18 +3850,20 @@ class EmbeddingIndex:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
 
-    def transcript_layout_paths(self) -> set[str]:
-        """Read the current layout receipts without loading stored chunk text."""
+    def incremental_file_states(self) -> dict[str, tuple[float, bool]]:
+        """Join layout receipts into the existing scan of indexed file clocks."""
         if not self.path.exists():
-            return set()
+            return {}
         conn = self._connect()
         try:
             return {
-                key.removeprefix(_TRANSCRIPT_LAYOUT_PREFIX)
-                for (key,) in conn.execute(
-                    "SELECT key FROM meta WHERE key >= ? AND key < ? AND value = ?",
-                    (_TRANSCRIPT_LAYOUT_PREFIX, _TRANSCRIPT_LAYOUT_END, _TRANSCRIPT_LAYOUT_VERSION),
+                path: (mtime, value == _TRANSCRIPT_LAYOUT_VERSION)
+                for path, mtime, value in conn.execute(
+                    f"SELECT files.file_path, files.file_mtime, meta.value FROM ({_FILE_MTIMES}) AS files "
+                    "LEFT JOIN meta ON meta.key = ? || files.file_path",
+                    (_TRANSCRIPT_LAYOUT_PREFIX,),
                 )
+                if isinstance(path, str) and mtime is not None
             }
         finally:
             conn.close()

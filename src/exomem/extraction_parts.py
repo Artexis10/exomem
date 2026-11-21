@@ -592,14 +592,16 @@ class Window:
 
 
 def _window_end(text: str, start: int) -> int:
-    """Where a window that starts at `start` in `text` ends: at a paragraph or line break when it must be cut."""
+    """Prefer a break after enough text to include a complete search passage."""
+    from .find_parts import MAX_PASSAGE_CHARS
+
     end = start + WINDOW_CHARS
     if end >= len(text):
         return len(text)
     window = text[start:end]
     for mark in ("\n\n", "\n"):
         cut = window.rfind(mark)
-        if cut > 0:
+        if cut + len(mark) >= MAX_PASSAGE_CHARS:
             return start + cut + len(mark)
     return end
 

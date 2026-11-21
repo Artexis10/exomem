@@ -10,6 +10,7 @@ from governance_projection_support import verified_namespace
 
 from exomem import embeddings, lifecycle_statuses, readiness
 from exomem.governance import (
+    catalog_publication,
     principal,
     projected_graph,
     projected_retrieval,
@@ -809,20 +810,26 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("long_turn", [False, True], ids=["short-turn", "long-turn"])
-def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, long_turn):
-    background = "We went over the morning schedule. " * 130 if long_turn else ""
+@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "catalog-capacity"])
+def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, layout):
+    background = "We went over the morning schedule. " * 130 if layout == "long-turn" else ""
     quote = "Leave it open until the truck arrives."
     text = f"[00:03] We inspected the gate.\n[00:19] {background}{quote}"
     source = _variant(
         "Knowledge Base/Sources/gate.md", "1" * 64, text,
         fields={"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: "true"},
     )
-    (source,) = projections.with_parts((source,), (), head=text)
     summary = _variant(
         "Knowledge Base/Notes/gate.md", "2" * 64, "The truck can enter through the open gate.",
         fields={"type": "insight", "sources": "Sources/gate"},
     )
+    clipped = layout == "catalog-capacity"
+    parts = ((2, "[00:50] The meeting closed.", len(text)),) if clipped else ()
+    (source,) = projections.with_parts((source,), parts, head=text)
+    if clipped:
+        monkeypatch.setattr(projections, "MAX_GOVERNED_CATALOG_ITEMS", 2)
+        fitted, _ = catalog_publication.fit_parts((_item(source), _item(summary)))
+        (source,) = fitted.variants
     offset = text.index("[00:19]")
     baseline = _runtime((_item(source), _item(summary)))
     samples = projected_retrieval.transcript_samples(source)
@@ -858,7 +865,7 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     hit = default.hits[0]
     assert hit.path == source.item_identity
     assert hit.transcript_ts == 19
-    assert not default.incomplete_source_passages
+    assert default.incomplete_source_passages is clipped
     passage = hit.passage
     assert passage["part"] == 1 and quote in passage["text"]
     assert offset <= passage["offset"] and passage["length"] <= 4000

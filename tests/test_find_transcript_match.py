@@ -119,3 +119,22 @@ def test_non_media_page_never_localizes(vault: Path) -> None:
     hits = find(vault, query="quotes a transcript", mode="hybrid", scope="kb-only")
     assert len(hits) == 1
     assert "transcript_match_at" not in hits[0].as_dict()
+
+
+def test_read_at_a_transcript_offset_opens_the_whole_reported_passage(vault: Path) -> None:
+    from exomem import commands
+
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    source.parent.mkdir(parents=True, exist_ok=True)
+    quote = "Inspect the hinge on the west door."
+    body = f"[0:01] We arrived at the shop.\n[0:19] We began the review.\n{quote} {'The discussion continued. ' * 1500}"
+    source.write_text(f"---\ntitle: Workshop\ntype: source\n---\n\n## Capture\n\n{body}\n", encoding="utf-8")
+
+    hit = next(hit.as_dict() for hit in find(vault, query=quote, mode="keyword") if hit.path == path)
+    passage = hit["passage"]
+    opened = commands.op_read_memory(vault, path=path, offset=passage["offset"])
+
+    assert quote in passage["text"]
+    assert opened["window"]["offset"] == passage["offset"]
+    assert opened["body"].startswith(passage["text"])

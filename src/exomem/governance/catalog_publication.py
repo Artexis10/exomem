@@ -580,6 +580,18 @@ def fit_parts(
         budget -= kept[item.item_identity]
     from .. import extraction_parts
 
+    def fit_variant(variant: projections.ProjectionVariant, keep: int) -> projections.ProjectionVariant:
+        if len(variant.parts) <= keep:
+            return variant
+        if projected_retrieval.TIMED_SOURCE_FIELD in variant.search_fields:
+            # Part 1 lives in the Source body and uses no additional catalog identity.
+            fields = {
+                **variant.search_fields,
+                projected_retrieval.TIMED_SOURCE_FIELD: projected_retrieval.TIMED_SOURCE_PARTIAL,
+            }
+            return replace(variant, parts=variant.parts[:keep], search_fields=fields)
+        return replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
+
     fitted: list[projection_store.ProjectionItemVariants] = []
     left_out: list[str] = []
     for item in items:
@@ -593,12 +605,7 @@ def fit_parts(
             item = projection_store.ProjectionItemVariants(
                 item_identity=item.item_identity,
                 content_hash=item.content_hash,
-                variants=tuple(
-                    replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
-                    if len(variant.parts) > keep
-                    else variant
-                    for variant in item.variants
-                ),
+                variants=tuple(fit_variant(variant, keep) for variant in item.variants),
                 scope_ids=item.scope_ids,
             )
         fitted.append(item)
@@ -885,7 +892,7 @@ def _target_vector_measurements(
     from . import transcript_banks
 
     def bank_for(variant) -> str | None:
-        if variant.search_fields.get(projected_retrieval.TIMED_SOURCE_FIELD) != "true":
+        if projected_retrieval.TIMED_SOURCE_FIELD not in variant.search_fields:
             return None
         variant_id = variant.projection_variant_id
         previous = active_by_id.get(variant_id)

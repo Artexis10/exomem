@@ -26,6 +26,7 @@ _MAX_RESULTS = projections.MAX_GOVERNED_CATALOG_ITEMS
 _SNIPPET_CHARS = 320
 MAX_PROJECTED_TRANSCRIPT_SAMPLES = 512
 TIMED_SOURCE_FIELD = "timed_source"
+TIMED_SOURCE_PARTIAL = "partial"
 
 
 class ProjectedRetrievalUnavailable(RuntimeError):
@@ -265,7 +266,7 @@ def transcript_samples(
 
     # Members have an independent live authorization check at search time.
     if (
-        variant.decision_level != 6 or variant.search_fields.get(TIMED_SOURCE_FIELD) != "true"
+        variant.decision_level != 6 or TIMED_SOURCE_FIELD not in variant.search_fields
         or variant.search_fields.get("parent_media")
         or variant.search_fields.get("source_erasure") == "managed"
         or not transcript_passages.is_source(variant.item_identity)
@@ -957,14 +958,15 @@ class ProjectedVectorIndex:
     ) -> tuple[ProjectedLexicalHit | None, bool]:
         """Verify and score the bank of one already admitted, competitive Source."""
         candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
+        partial = variant.search_fields.get(TIMED_SOURCE_FIELD) == TIMED_SOURCE_PARTIAL
         if not candidates:
-            return None, False
+            return None, partial
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:
             raise transcript_banks.TranscriptBankUnavailable("projected transcript measurements are missing")
         import numpy as np
 
-        partial = len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
+        partial |= len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
         candidates = candidates[:MAX_PROJECTED_TRANSCRIPT_SAMPLES]
         query = np.asarray(query_vector, dtype=np.float32)
         matrix = transcript_banks.load(root, self.namespace_key, digest, candidates, len(query))
