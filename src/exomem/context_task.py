@@ -224,10 +224,7 @@ def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
     walk filter and by `quick_page_visible`, so a store outage withholds the pages the store owns. A failure
     to prove ownership still makes the walk filter raise, and the task context reports unavailable.
     """
-    policy, _active = egress.gate_state(root)
-    who = principal.effective_principal().with_purpose(caller.purpose)
-    return (provider is None and egress.policy_empty_without_writer(root, policy)
-            and egress.unrestricted_content_access(root, who))
+    return provider is None and egress.unrestricted_source_access(root, purpose=caller.purpose)
 
 
 def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None):
