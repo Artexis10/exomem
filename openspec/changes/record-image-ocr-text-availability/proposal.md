@@ -4,7 +4,7 @@ A completed image extraction can contain only tags or a caption. The page reader
 
 ## What Changes
 
-- Record `ocr_text_available` on the sidecar as a boolean measured before captions and tags are appended.
+- Return `ocr_text_available` on a page read as a boolean measured before captions and tags are appended.
 - Omit the field when no measurement exists, including in existing sidecars.
 - Keep the field with its extraction when reprocessing supersedes it.
 
@@ -16,4 +16,4 @@ A completed image extraction can contain only tags or a caption. The page reader
 
 ## Impact
 
-The image extraction worker carries one additional field through its durable result to the sidecar. The page reader already returns sidecar frontmatter.
+The image worker records the measurement in its existing durable engine label. The page reader derives the boolean from the released engine label.

@@ -78,7 +78,7 @@ from .media_jobs import (
     MediaJob as _Job,
 )
 from .media_worker_child import _reap_group
-from .ocr_facts import OcrFacts
+from .ocr_facts import OcrFacts, engine_with_ocr_text
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -1447,7 +1447,7 @@ class MediaWorker:
         if self._store is not None:
             payload: dict[str, object] = {
                 "text": text,
-                "engine": engine,
+                "engine": engine_with_ocr_text(engine, ocr),
                 "speakers": speakers or [],
                 "speaker_verification": speaker_verification or "unavailable",
             }

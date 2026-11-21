@@ -23,8 +23,8 @@ from exomem import (
     semantic_segments,
 )
 from exomem.find import find
-from exomem.governance import catalog_publication
-from exomem.ocr_facts import OcrFacts
+from exomem.governance import catalog_publication, egress
+from exomem.ocr_facts import MAX_EXTRACTION_ENGINE_BYTES, OcrFacts, engine_with_ocr_text, ocr_text_available
 from exomem.ocr_models import OcrReading, OcrWord
 from exomem.vault import parse_frontmatter
 
@@ -125,14 +125,22 @@ def test_page_read_reports_image_ocr_text_availability(
     assert job is not None
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     worker._process(job)
-    worker._publish_parent_results(store.pending_results())
+    [pending] = store.pending_results()
+    worker._publish_parent_results([pending])
 
-    page = commands.op_read_memory(vault, stored.sidecar_path)
+    options = {"path": stored.sidecar_path, "include_raw": True}
+    page = egress.postfilter("read_memory", commands.op_read_memory(vault, **options), vault, request_kwargs=options)
     assert page["frontmatter"]["processing_state"] == "completed"
     assert preserve.extracted_text(page["body"]) == extracted
     assert [hit.path for hit in find(vault, query="whiteboard", mode="keyword")] == [stored.sidecar_path]
     assert find(vault, query="blorft", mode="keyword") == []
-    assert page["frontmatter"].get("ocr_text_available") is available
+    assert page.get("ocr_text_available") is available
+    assert "text_available" not in pending.payload["ocr"]
+    raw = (vault / stored.sidecar_path).read_bytes()
+    assert page["content"].encode() == raw
+    assert page["content_hash"] == hashlib.sha256(raw).hexdigest()
+    assert page["frontmatter"] == parse_frontmatter(page["content"])[0]
+    assert "ocr_text_available" not in page["frontmatter"]
 
 
 def test_dropping_a_word_keeps_the_spacing_tesseract_measured_for_the_words_that_stay() -> None:
@@ -202,6 +210,7 @@ def test_a_sidecar_without_ocr_facts_is_unchanged_and_an_empty_one_drops_the_old
         ocr=OcrFacts(confidence=71.3, low_confidence_text="qz", text_available=True),
     )
     assert "ocr_confidence: 71.3" in doubtful
+    assert _frontmatter_of(doubtful)["extracted_by"] == "ocr-v1:1:tesseract"
     assert preserve.extracted_text(doubtful) == "steady"
     assert preserve.low_confidence_text(doubtful) == "qz"
 
@@ -210,6 +219,7 @@ def test_a_sidecar_without_ocr_facts_is_unchanged_and_an_empty_one_drops_the_old
     )
     assert preserve.LOW_CONFIDENCE_OCR_HEADING not in again
     assert preserve.low_confidence_text(again) == ""
+    assert _frontmatter_of(again)["extracted_by"] == "tesseract"
     assert "ocr_text_available" not in _frontmatter_of(again)
 
 
@@ -254,21 +264,22 @@ def test_a_prior_extraction_page_keeps_the_withheld_words_and_stays_out_of_searc
     assert preserve.extracted_text(prior) == "Tags: whiteboard"
     assert preserve.low_confidence_text(prior) == "qz"
     page = find_types.ParsedPage(Path("p.md"), "p.md", _frontmatter_of(prior), prior, "p", 0.0)
-    assert page.frontmatter["ocr_text_available"] is False
+    assert page.frontmatter["extracted_by"] == "ocr-v1:0:tesseract+tags"
+    assert "ocr_text_available" not in page.frontmatter
     assert "qz" not in page.search_body and "whiteboard" in page.search_body
 
 
 def test_the_ocr_facts_survive_the_job_store_and_a_malformed_one_voids_the_result() -> None:
-    facts = OcrFacts(confidence=64.25, low_confidence_text="qz", text_available=True)
+    facts = OcrFacts(confidence=64.25, low_confidence_text="qz")
     payload = {"text": "steady", "engine": "tesseract", "ocr": facts.as_payload()}
 
     kept = media_jobs._validated_result_payload("extraction", payload)
     voided = media_jobs._validated_result_payload("extraction", {**payload, "ocr": {"confidence": "high"}})
-    wrong_type = media_jobs._validated_result_payload("extraction", {**payload, "ocr": {"text_available": 1}})
+    unexpected = media_jobs._validated_result_payload("extraction", {**payload, "ocr": {"text_available": True}})
 
     assert kept is not None and OcrFacts.from_payload(kept["ocr"]) == facts
     assert voided is None
-    assert wrong_type is None
+    assert unexpected is None
 
 
 def test_pending_legacy_ocr_results_keep_their_canonical_payload() -> None:
@@ -277,6 +288,29 @@ def test_pending_legacy_ocr_results_keep_their_canonical_payload() -> None:
         "text": "steady", "engine": "tesseract", "ocr": {"confidence": 64.25, "low_confidence_text": "qz"},
     }
 
+    assert media_jobs._validated_result_payload("extraction", payload) == payload
+
+
+def test_a_configured_caption_basename_cannot_imitate_the_measurement() -> None:
+    engine = "tesseract+ocr-v1:1:tesseract"
+
+    marked = engine_with_ocr_text(engine, OcrFacts(text_available=False))
+
+    assert ocr_text_available(engine) is None
+    assert ocr_text_available(marked) is False
+    assert marked.endswith(engine)
+    assert ocr_text_available("ocr-v1:1:pymupdf+tesseract") is None
+
+
+def test_an_engine_at_the_byte_limit_keeps_its_valid_payload_without_a_measurement() -> None:
+    engine = "tesseract+" + "é" * ((MAX_EXTRACTION_ENGINE_BYTES - len("tesseract+")) // 2)
+    assert len(engine.encode()) == MAX_EXTRACTION_ENGINE_BYTES
+
+    packed = engine_with_ocr_text(engine, OcrFacts(text_available=True))
+    payload = {"text": "steady", "engine": packed}
+
+    assert packed == engine
+    assert ocr_text_available(packed) is None
     assert media_jobs._validated_result_payload("extraction", payload) == payload
 
 

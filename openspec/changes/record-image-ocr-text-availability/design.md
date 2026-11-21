@@ -2,16 +2,18 @@
 
 Measure text availability at the output of the existing confidence filter. The field describes what OCR retained before the extractor adds enrichment.
 
-Pass the optional boolean through the existing durable result and write it with the OCR facts. The public page reader already returns this frontmatter.
+Encode a measured value in the existing engine label at job packaging or direct sidecar rendering. Use `ocr-v1:1:` for true and `ocr-v1:0:` for false before the Tesseract label. Legacy Tesseract labels start with `tesseract`, so a configured caption basename cannot imitate the prefix.
+
+The page reader derives `ocr_text_available` from the released `extracted_by` label. It returns the boolean alongside the page fields and keeps raw content and its hash tied to the stored bytes.
 
 ## Compatibility
 
-Omit the field when no measurement exists. The job store checks the hash of the canonical payload, so pending results must keep their original payload shape.
+Leave the engine label unmarked when the measurement is unknown or the marker would exceed the existing engine byte limit. An unmarked label has no availability field on a read.
 
-Reprocessing replaces the current OCR fields and moves any old measurement to the prior extraction page. Existing sidecars retain their stored content.
+The nested OCR object keeps its existing fields and canonical serialization. The prior runtime accepts the marked engine as an ordinary label and can publish a queued result. The current runtime accepts unmarked results staged by the prior runtime.
 
-## Rollback
+## Rollout and rollback
 
-For a planned rollback, the release owner uses the existing quiesce-and-drain procedure. The upgraded runtime publishes queued media results while their producers are quiesced. The release owner verifies `result_publication.pending_count` is zero before starting the previous runtime.
+Use the existing release and rollback procedures. Both runtime versions can consume in-flight results, and committed sidecar bytes remain readable across the change.
 
-An emergency rollback can leave a queued result with `ocr.text_available`. The previous runtime discards that result and marks the matching running job failed with `media result payload rejected`. The original and any committed sidecar bytes survive. Retry an unfinished first extraction explicitly. For an unfinished reprocess, submit a new reprocess request. Both operations read the preserved original.
+Reprocessing atomically replaces the current engine label and archives the earlier label with its extraction. A reprocess on the prior runtime therefore clears the current measurement and preserves the archived measurement for a later release that can read it.

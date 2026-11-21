@@ -38,7 +38,7 @@ Image OCR, including OCR of video scene frames, SHALL keep in `## Extracted text
 
 ### Requirement: Image Sidecars Report Retained OCR Text Availability
 
-After image OCR completes, the sidecar SHALL expose `ocr_text_available` as a boolean in its page frontmatter. It SHALL be true when the retained OCR text contains a non-whitespace character before any caption or tags are added, and false otherwise. Reads that return page frontmatter SHALL expose the field. The sidecar SHALL omit it when availability is unknown.
+After image OCR completes, the page read SHALL derive `ocr_text_available` from the released extraction provenance. It SHALL be true when the retained OCR text contains a non-whitespace character before captions or tags, and false otherwise. The page read SHALL omit the field when availability is unknown. The raw content and content hash SHALL still describe the stored page.
 
 #### Scenario: An image supplies OCR text
 
@@ -53,7 +53,7 @@ After image OCR completes, the sidecar SHALL expose `ocr_text_available` as a bo
 
 #### Scenario: OCR text availability is unknown
 
-- **WHEN** a sidecar or a pending extraction result predates the field
+- **WHEN** a sidecar or pending extraction result predates the measurement, or the measurement would exceed the engine label's byte limit
 - **THEN** the page read omits `ocr_text_available`
 
 #### Scenario: Reprocessing supersedes an extraction
