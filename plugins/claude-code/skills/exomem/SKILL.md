@@ -1,8 +1,8 @@
 ---
 name: exomem
-description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed Knowledge Base stays read-only.
+description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: 322d0b88ef8ad7d95ce124ffb0d7f64833e1e33a7cb16a72da306b450ebf00db
+  skill_contract: a0cc2a22996b5b5742b0d6b17bb0fbd3d942616c6af6806a81d4e4e802b8d296
   version: "0.32.0"
 ---
 
@@ -26,8 +26,9 @@ Raw inputs go to `Sources/`; proof-bearing artifacts to `Evidence/`; conclusions
 to `Notes/`; stable reusable identities to `Entities/`. Sources/Evidence are
 append-only: their content never changes, and their links and registered pointer
 fields such as `project` change only through governed moves and pointer
-corrections. Everything outside `Knowledge Base/` is read-only input, and
-in-vault readonly/excluded paths remain protected. Prefer supersession over
+corrections. Vault content outside `Knowledge Base/` is read-only input, and
+in-vault readonly/excluded paths remain protected. Ordinary workspace files
+are not the vault: write them with your own file tools. Prefer supersession over
 removal; never invent IDs, sources, relations, or numeric confidence scores.
 A degree of belief is a `## Belief` unit that records what its holder stated, with
 `credence_holder`, `credence` and an `assesses` relation, never a frontmatter
@@ -108,8 +109,9 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
-read-only. Before a compiled write: reuse current relevant search/read results,
+moves and pointer corrections. Vault content outside the managed Knowledge Base is
+read-only; ordinary workspace files are not the vault, so write them with your own
+file tools. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
