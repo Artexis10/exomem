@@ -158,12 +158,21 @@ def initialize(conn: sqlite3.Connection) -> None:
     # costs nothing to find again.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version) "
                  f"WHERE state <> '{QUARANTINED}'")
+    # The filings of one stored version that a plaintext finding quarantined, which a sample that decrypts the version
+    # lifts together (`_released`): a version has few filings, so that release reads only them, however many other
+    # replicas are quarantined.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_reproof_version ON media_replicas(object, version, store) "
+                 f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'")
     # A stored version that a check, a sample or eviction found damaged, whichever filings list it: what eviction asks
     # before it drops an original's local bytes. Damage is a fact of the version, so it outlives any filing's row: a row
     # that a rebuild writes late, or that a lost write never made, is gated by it and quarantined by `rebuild`.
+    # `generation` is the version's one authority: every write that records or renews damage gives it a new random
+    # value, and an operation that acts on the damage state commits only if the generation it read is still current
+    # (none, for a version that was not damaged). Filings' rows and requests are projections of this record.
     conn.execute("CREATE TABLE IF NOT EXISTS media_damaged_versions ("
                  "store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, level TEXT NOT NULL, "
-                 "failure TEXT NOT NULL, repair_via TEXT, PRIMARY KEY (store, object, version)) WITHOUT ROWID")
+                 "failure TEXT NOT NULL, repair_via TEXT, generation INTEGER NOT NULL, "
+                 "PRIMARY KEY (store, object, version)) WITHOUT ROWID")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
     if existed is None or healed:
@@ -277,8 +286,9 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
     """
     now, changed = time.time(), False
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure) VALUES (?, ?, ?, ?, ?) "
-                     "ON CONFLICT(store, object, version) DO UPDATE SET level = excluded.level, failure = excluded.failure",
+        conn.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure, generation) "
+                     "VALUES (?, ?, ?, ?, ?, random()) ON CONFLICT(store, object, version) DO UPDATE SET "
+                     "level = excluded.level, failure = excluded.failure, generation = excluded.generation",
                      (replica.store, replica.object, replica.version, level, failure))
         for binary_rel in binary_rels:
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
@@ -1440,9 +1450,10 @@ _SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas 
            f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`.
-#: It also reads the token of the request that the quarantine queued, which names that quarantine (see `_released`).
-_REPROOF = ("SELECT binary_rel, store, object, version, size, (SELECT token FROM media_replica_queue AS q "
-            "WHERE q.store = media_replicas.store AND q.binary_rel = media_replicas.binary_rel) AS token "
+#: It also reads the generation of the version's damage record (see `_released`).
+_REPROOF = ("SELECT binary_rel, store, object, version, size, (SELECT generation FROM media_damaged_versions AS d "
+            "WHERE d.store = media_replicas.store AND d.object = media_replicas.object "
+            "AND d.version = media_replicas.version) AS generation "
             f"FROM media_replicas WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' "
             f"AND failure = '{PLAINTEXT_MISMATCH}' AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: A new month gives the replicas that the last one skipped for size another chance, a bounded batch at a time.
@@ -1480,34 +1491,37 @@ def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, stor
 def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) -> None:
     """A quarantined replica whose download decrypted to the binding was a false alarm: it leaves quarantine, unchecked.
 
-    Its check proofs are reset, so the scheduled check proves it again, and the copy again that its finding queued is dropped.
-    The quarantine that the sample picked is the one released: the request's token names it, because each quarantine
-    renews that token, so a finding recorded since, of any cause on the same version, stands with its request.
+    The proof answers the damage that the sample picked, and the version's record names that damage by its generation:
+    every finding on the version, of any cause and from any filing, gives the record a new one (`quarantine_all`). Only
+    a record that is still the one the sample read is released, in one transaction, with the filings that its plaintext
+    finding quarantined and the copies again they queued; a newer finding leaves all of it, this replica included,
+    quarantined with its request. Released rows are unchecked, so the scheduled check proves them again.
     """
     now = time.time()
+    store, name, version = row["store"], replica.object, replica.version
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        released = conn.execute(
-            "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
-            "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
-            f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (SELECT token FROM "
-            "media_replica_queue WHERE store = ? AND binary_rel = ?) IS ?",
-            (UPLOAD_VERIFIED, now, now, row["binary_rel"], row["store"], replica.object, replica.version,
-             row["store"], row["binary_rel"], row["token"])).rowcount
-        if released:
-            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND token = ?",
-                         (row["store"], row["binary_rel"], row["token"]))
-            # The ciphertext decrypted to the binding, so the version is no damage for any filing of equal bytes: the record
-            # goes, and so do the other filings' plaintext findings and the copies they queued, or each would upload a copy
-            # of a version just proven good. A record that a finding of another cause took over stays, with its filings.
-            if conn.execute("DELETE FROM media_damaged_versions WHERE store = ? AND object = ? AND version = ? "
-                            "AND failure = ?", (row["store"], replica.object, replica.version, PLAINTEXT_MISMATCH)).rowcount:
-                same = ("WHERE store = ? AND key_version = ? AND object = ? AND version = ? "
-                        f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'")
-                held = (row["store"], replica.key_version, replica.object, replica.version)
-                conn.execute("DELETE FROM media_replica_queue WHERE kind = ? AND (store, binary_rel) IN "
-                             f"(SELECT store, binary_rel FROM media_replicas {same})", (RECOPY, *held))
-                conn.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, "
-                             f"check_from = 0, decrypted_at = ?, sample_from = ? {same}", (UPLOAD_VERIFIED, now, now, *held))
+        if not conn.execute(
+                "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
+                "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+                f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (SELECT generation FROM "
+                "media_damaged_versions WHERE store = ? AND object = ? AND version = ?) IS ?",
+                (UPLOAD_VERIFIED, now, now, row["binary_rel"], store, name, version, store, name, version,
+                 row["generation"])).rowcount:
+            return
+        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
+                     (store, row["binary_rel"], RECOPY))
+        # The ciphertext decrypted to the binding, so the version is no damage for any filing of equal bytes: the record
+        # goes, and so do the other filings' plaintext findings and the copies they queued, or each would upload a copy
+        # of a version just proven good. A record that holds another cause stays, with its filings.
+        if conn.execute("DELETE FROM media_damaged_versions WHERE store = ? AND object = ? AND version = ? "
+                        "AND failure = ?", (store, name, version, PLAINTEXT_MISMATCH)).rowcount:
+            same = ("WHERE object = ? AND version = ? AND store = ? "
+                    f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'")
+            held = (name, version, store)
+            conn.execute("DELETE FROM media_replica_queue WHERE kind = ? AND (store, binary_rel) IN "
+                         f"(SELECT store, binary_rel FROM media_replicas {same})", (RECOPY, *held))
+            conn.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, "
+                         f"check_from = 0, decrypted_at = ?, sample_from = ? {same}", (UPLOAD_VERIFIED, now, now, *held))
 
 
 def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
