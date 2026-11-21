@@ -841,12 +841,13 @@ An item of `task_context.methods` SHALL carry an `approval` field only when the 
 Activation SHALL read a page's connections through one batched read of the graph owner's
 neighbour API in both directions, under the caller's view, and SHALL serve each connection with
 its relation key, its direction relative to the page, the target's canonical ref and title, and a
-`why`. The `why` SHALL state the relation and direction. It SHALL quote the prose that
-accompanies the link in the authoring sentence or bullet when egress permits that quote.
-Otherwise it SHALL use the target's opening clause when egress permits that quote.
-If neither supplies releasable prose, the relation and direction stand alone. Each quote
-requires full release of its page without a release strip and SHALL pass the egress rules
-that govern unit text. A quote SHALL show a wikilink by its display name only when the
+`why`. The `why` SHALL state the relation and direction. When the caller has unrestricted
+source access, it SHALL quote the prose that accompanies the link in the authoring
+sentence or bullet when egress permits that quote. Otherwise it SHALL use the target's
+opening clause when egress permits it. If neither supplies releasable prose, the relation
+and direction stand alone. Callers whose source reads require a release projection receive
+the relation and direction as the `why`. Each quote SHALL pass the egress rules that govern
+unit text. A quote SHALL show a wikilink by its display name only when the
 link resolves to a page the caller can see. If any link fails that check, the quote is
 unavailable. The `why` SHALL contain no wikilink and SHALL NOT exceed 140 characters.
 Connections SHALL be ranked only by closed relation attributes, in this order: a relation
