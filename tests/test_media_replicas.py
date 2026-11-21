@@ -1889,6 +1889,36 @@ def test_a_replica_quarantined_for_damaged_ciphertext_stays_quarantined_through_
     assert [item[:2] for item in _queued(vault) if item[0] == MIRROR] == [(MIRROR, media_replicas.RECOPY)]
 
 
+@pytest.mark.parametrize(("level", "failure"), [
+    pytest.param(media_replicas.CONTENT, "digest_mismatch", id="the-ciphertext-is-found-damaged"),
+    pytest.param(media_replicas.DECRYPTED, media_replicas.PLAINTEXT_MISMATCH, id="the-plaintext-is-found-wrong-again"),
+])
+def test_a_sample_that_decrypts_leaves_a_quarantine_recorded_after_it_was_picked(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, level: str, failure: str) -> None:
+    """The sample picks a plaintext-mismatch quarantine and decrypts it; a finding on the same version recorded before the
+    sample settles is newer than the proof. Lifting it would drop a replica now known bad, with its copy again unqueued."""
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    _unproven(vault)
+    sample_replica = media_store.sample_replica
+
+    def sample_then_find_it_bad(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead):
+        damage = sample_replica(root, entry, head)
+        if entry.store == MIRROR:
+            media_replicas.quarantine(root, relative, entry, level=level, failure=failure)
+        return damage
+
+    monkeypatch.setattr(media_store, "sample_replica", sample_then_find_it_bad)
+
+    media_replicas.sample(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, level, failure)
+    assert [item[:3] for item in _queued(vault) if item[0] == MIRROR] == [
+        (MIRROR, media_replicas.RECOPY, media_replicas.PENDING)]
+
+
 def test_one_unreadable_row_does_not_stop_the_checks_of_the_rows_behind_it(
         vault: Path, selected_store, mirrored: Path) -> None:
     """A row that always fails and always comes first would starve every other replica of its store of a check."""
@@ -2018,6 +2048,38 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
 
     assert checked == share == 116
     assert clock[0] < limit  # the whole share, at the cap, fits the round with the margin that sizes it
+
+
+def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_again(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round that ends before it can wait out a huge read must hand the wait on: a fresh cap each round forgave it, and
+    two such reads ten minutes apart ran at several times the configured rate."""
+    gib = 1024**3
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
+                     (MIRROR, 500_000, 25 * 10**12))
+        for number in range(2):
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
+                         "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
+                         (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", 100 * gib,
+                          media_replicas.UPLOAD_VERIFIED))
+    clock, reads = [0.0], []
+    monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
+        1, row["store"], "1", row["object"], row["version"], 100 * gib, "0" * 64)))
+    monkeypatch.setattr(media_store, "check_replica", lambda _vault, replica: reads.append(
+        (clock[0], replica.ciphertext_size)))
+
+    for _round in range(8):  # the worker's check interval is ten minutes
+        media_replicas.check(vault)
+        clock[0] += 600.0
+
+    assert len(reads) == 2
+    rate = media_replicas.check_read_rate()
+    for number, (started, _size) in enumerate(reads):
+        assert sum(size for _started, size in reads[:number]) <= rate * started  # what was read before is paid for
 
 
 def test_a_store_that_the_last_round_left_waiting_is_checked_first_in_the_next(

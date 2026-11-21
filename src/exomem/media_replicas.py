@@ -1098,14 +1098,29 @@ def check_read_rate() -> float:
     return original_fixity.setting("EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND", DEFAULT_CHECK_READ_MIB_PER_SECOND) * 1024**2
 
 
-class _ReadCap:
-    """Keeps a round's reads under the read-rate cap: each read earns its own time, and time spent elsewhere earns no burst.
+#: What each vault's reads still owe their cap, as the monotonic instant that they are paid for, by kind of round.
+#: A read too large for one round's time leaves its wait to the next round: a fresh cap each round would forgive it.
+#: It lives in this process only, so a restart starts clean.
+_owed: dict[tuple[Path, str], float] = {}
 
-    A store's `head` and a sample read whole objects, so the cap applies per object, after its read.
+
+class _ReadCap:
+    """Keeps reads under the read-rate cap: each read earns its own time, and time spent elsewhere earns no burst.
+
+    A store's `head` and a sample read whole objects, so the cap applies per object, after its read. A round gives its
+    `key` (vault and kind) to take up the wait that the rounds before it left owing, and to leave its own.
     """
 
-    def __init__(self, rate: float, limit: float) -> None:
-        self.rate, self.limit, self.due = rate, limit, 0.0
+    def __init__(self, rate: float, limit: float, key: tuple[Path, str] | None = None) -> None:
+        self.rate, self.limit, self.key = rate, limit, key
+        self.due = _owed.get(key, 0.0) if key is not None else 0.0
+
+    def ready(self) -> bool:
+        """False when the wait that earlier rounds left owing outlasts this round; else waits it out, and the read may go."""
+        if self.due >= self.limit:
+            return False
+        foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
+        return True
 
     def spend(self, size: int, started: float) -> bool:
         """Account for a read of `size` bytes that began at `started`; False when its time would pass the round's end.
@@ -1114,6 +1129,8 @@ class _ReadCap:
         wait added after the read would hold the average rate below the cap and stretch the cycle.
         """
         self.due = max(self.due, started) + size / self.rate
+        if self.key is not None:
+            _owed[self.key] = self.due
         if self.due >= self.limit:
             return False
         foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
@@ -1246,7 +1263,7 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
               if (level := scheduled_level(entry)) is not None}
     content = [name for name, level in levels.items() if level == CONTENT]
     limit = time.monotonic() + _round_seconds(ledger, content, cycle, rate) if deadline is None else deadline
-    cap = _ReadCap(rate, limit)
+    cap = _ReadCap(rate, limit, (vault, "check"))
     return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit)
                for name in _longest_waiting_first(ledger, list(levels), cycle))
 
@@ -1267,7 +1284,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
         if not picked:
             break
         for row in picked:
-            if time.monotonic() >= limit or (level == CONTENT and spent >= budget):
+            if time.monotonic() >= limit or (level == CONTENT and (spent >= budget or not cap.ready())):
                 return attempted
             foreground_priority.yield_to_foreground()
             attempted += 1
@@ -1320,9 +1337,11 @@ _SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas 
            f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`.
-_REPROOF = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
-            f"WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' "
-            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
+#: It also reads the token of the request that the quarantine queued, which names that quarantine (see `_released`).
+_REPROOF = ("SELECT binary_rel, store, object, version, size, (SELECT token FROM media_replica_queue AS q "
+            "WHERE q.store = media_replicas.store AND q.binary_rel = media_replicas.binary_rel) AS token "
+            f"FROM media_replicas WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' "
+            f"AND failure = '{PLAINTEXT_MISMATCH}' AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: A new month gives the replicas that the last one skipped for size another chance, a bounded batch at a time.
 _SAMPLE_RESET = ("UPDATE media_replicas SET sample_month = 0 WHERE (binary_rel, store) IN ("
                  "SELECT binary_rel, store FROM media_replicas WHERE store = ? AND key_version = ? "
@@ -1359,17 +1378,21 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
     """A quarantined replica whose download decrypted to the binding was a false alarm: it leaves quarantine, unchecked.
 
     Its check proofs are reset, so the scheduled check proves it again, and the copy again that its finding queued is dropped.
+    The quarantine that the sample picked is the one released: the request's token names it, because each quarantine
+    renews that token, so a finding recorded since, of any cause on the same version, stands with its request.
     """
     now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
         released = conn.execute(
             "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
             "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
-            f"AND state = '{QUARANTINED}'", (UPLOAD_VERIFIED, now, now, row["binary_rel"], row["store"], replica.object,
-                                             replica.version)).rowcount
+            f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (SELECT token FROM "
+            "media_replica_queue WHERE store = ? AND binary_rel = ?) IS ?",
+            (UPLOAD_VERIFIED, now, now, row["binary_rel"], row["store"], replica.object, replica.version,
+             row["store"], row["binary_rel"], row["token"])).rowcount
         if released:
-            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
-                         (row["store"], row["binary_rel"], RECOPY))
+            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND token = ?",
+                         (row["store"], row["binary_rel"], row["token"]))
 
 
 def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
@@ -1397,7 +1420,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
         return 0
     ledger = MediaJobStore(vault)
     limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
-    cap, cycle = _ReadCap(check_read_rate(), limit), check_cycle()
+    cap, cycle = _ReadCap(check_read_rate(), limit, (vault, "sample")), check_cycle()
     month, key_version, sampled = _month(time.time()), str(config.get("key_version")), 0
     for name, entry in originals.store_entries(config).items():
         if (_unscheduled_reason(entry) is not None or entry.sample_bytes_per_month <= 0
@@ -1447,6 +1470,8 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     _mark_sample(vault, row, month, attempted=replica)
                     skips += 1
                 continue
+            if not cap.ready():
+                break  # an earlier round's read is not yet paid for: nothing is charged or read until it is
             with closing(ledger._connect()) as conn, conn:
                 _charge(conn, name, month, replica.ciphertext_size)
             reads += 1
