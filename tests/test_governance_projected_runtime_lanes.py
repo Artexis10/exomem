@@ -809,9 +809,15 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
     ]
 
 
-def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path):
-    text = "[00:03] We inspected the gate.\n[00:19] Leave it open until the truck arrives."
-    source = _variant("Knowledge Base/Sources/gate.md", "1" * 64, text, fields={"type": "source"})
+@pytest.mark.parametrize("long_turn", [False, True], ids=["short-turn", "long-turn"])
+def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, long_turn):
+    background = "We went over the morning schedule. " * 130 if long_turn else ""
+    quote = "Leave it open until the truck arrives."
+    text = f"[00:03] We inspected the gate.\n[00:19] {background}{quote}"
+    source = _variant(
+        "Knowledge Base/Sources/gate.md", "1" * 64, text,
+        fields={"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: "true"},
+    )
     (source,) = projections.with_parts((source,), (), head=text)
     summary = _variant(
         "Knowledge Base/Notes/gate.md", "2" * 64, "The truck can enter through the open gate.",
@@ -819,9 +825,11 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     )
     offset = text.index("[00:19]")
     baseline = _runtime((_item(source), _item(summary)))
+    samples = projected_retrieval.transcript_samples(source)
+    assert any(quote in match.text for _, match in samples)
     bank = transcript_banks.publish(
         tmp_path, baseline.namespace.namespace_key,
-        projected_retrieval.transcript_samples(source), ((0.0, 1.0), (1.0, 0.0)),
+        samples, [(1.0, 0.0) if quote in match.text else (0.0, 1.0) for _, match in samples],
     )
     vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
     rows = (vector, _vector(summary, (1.0, 0.0)))
@@ -850,7 +858,11 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     hit = default.hits[0]
     assert hit.path == source.item_identity
     assert hit.transcript_ts == 19
-    assert hit.passage == {"part": 1, "offset": offset, "length": len(text) - offset, "text": text[offset:]}
+    assert not default.incomplete_source_passages
+    passage = hit.passage
+    assert passage["part"] == 1 and quote in passage["text"]
+    assert offset <= passage["offset"] and passage["length"] <= 4000
+    assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
 
 
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):

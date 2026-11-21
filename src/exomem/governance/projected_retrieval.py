@@ -265,7 +265,8 @@ def transcript_samples(
 
     # Members have an independent live authorization check at search time.
     if (
-        variant.decision_level != 6 or variant.search_fields.get("parent_media")
+        variant.decision_level != 6 or variant.search_fields.get(TIMED_SOURCE_FIELD) != "true"
+        or variant.search_fields.get("parent_media")
         or variant.search_fields.get("source_erasure") == "managed"
         or not transcript_passages.is_source(variant.item_identity)
     ):
@@ -280,16 +281,16 @@ def transcript_samples(
     )
     samples = []
     for part, text, base, cuts in parts:
-        for start, end, timestamp in transcript_passages.turns(text, minimum=1):
-            stored_start = _stored_position(start, cuts)
-            stored_end = _stored_position(end - 1, cuts) + 1
-            if stored_end - stored_start == end - start <= MAX_PASSAGE_CHARS:
+        for match in transcript_passages.bounded_turns(text, max_chars=MAX_PASSAGE_CHARS):
+            stored_start = _stored_position(match.start, cuts)
+            stored_end = _stored_position(match.end - 1, cuts) + 1
+            if stored_end - stored_start == match.end - match.start:
                 samples.append((part, transcript_passages.TranscriptMatch(
-                    base + stored_start, base + stored_end, text[start:end], timestamp,
+                    base + stored_start, base + stored_end, match.text, match.timestamp,
                 )))
                 if len(samples) == limit:
                     return tuple(samples)
-    return tuple(samples) if len(samples) >= 2 else ()
+    return tuple(samples)
 
 
 @dataclass(frozen=True, slots=True)

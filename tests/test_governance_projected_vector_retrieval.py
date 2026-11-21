@@ -23,6 +23,7 @@ def _variant(
     *,
     level: int,
     text: str,
+    timed: bool = False,
 ) -> projections.ProjectionVariant:
     option_key = {1: "notice", 2: "constraint", 3: "abstract"}.get(level)
     variant = projections.build_projection_variant(
@@ -33,7 +34,10 @@ def _variant(
             options={} if option_key is None else {option_key: text},
         ),
         projector_schema_version=1,
-        full_search_fields={"body": text, "title": item_identity},
+        full_search_fields={
+            "body": text, "title": item_identity,
+            **({projected_retrieval.TIMED_SOURCE_FIELD: "true"} if timed else {}),
+        },
     )
     assert variant is not None
     return variant
@@ -258,7 +262,7 @@ def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_pa
     text_start = text.index("[0:09]")
     low = _variant(path, "1" * 64, level=2, text="A permitted constraint")
     full = replace(
-        _variant(path, "1" * 64, level=6, text=text),
+        _variant(path, "1" * 64, level=6, text=text, timed=True),
         head=projections.ProjectionHead(0, len(text)),
     )
     public = _variant("summary", "2" * 64, level=6, text="Gate summary")
@@ -298,7 +302,7 @@ def test_collection_removes_one_bank_link_and_exact_republication_repairs_corrup
 
     text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
     source = replace(
-        _variant("Knowledge Base/Sources/Session/gate-log.md", "1" * 64, level=6, text=text),
+        _variant("Knowledge Base/Sources/Session/gate-log.md", "1" * 64, level=6, text=text, timed=True),
         head=projections.ProjectionHead(0, len(text)),
     )
     before = _key()

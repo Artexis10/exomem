@@ -3051,13 +3051,25 @@ def index_incremental(
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
     row_mtimes = index.file_mtimes()
+    verified_layout = index.transcript_layout_paths()
     unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
-    unchanged_transcripts: list[tuple[str, list[str], float]] = []
+    legacy_batch: list[tuple[str, list[str], float]] = []
+    transcript_paths: set[str] = set()
     pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
     unit_seen_on_disk: set[str] = set()
+
+    def queue_legacy_batch() -> None:
+        if not legacy_batch:
+            return
+        matching = index.verify_transcript_layout(
+            {path: chunks for path, chunks, _ in legacy_batch}, remember=not dry_run,
+        )
+        pending.extend(row for row in legacy_batch if row[0] not in matching)
+        legacy_batch.clear()
+
     scanned = 0
     for md in index_paths.iter_index_markdown(vault_root):
         if not index_paths.is_embeddable_path(md):
@@ -3083,22 +3095,19 @@ def index_incremental(
         seen_on_disk.add(page.rel_path)
         prior = row_mtimes.get(page.rel_path)
         row = (page.rel_path, chunks, page.mtime)
+        timed = transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body)
+        if timed:
+            transcript_paths.add(page.rel_path)
         if prior is not None and page.mtime <= prior + 1.0:
             # Same-mtime Sources can still have legacy paragraph chunks.
-            if transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body):
-                unchanged_transcripts.append(row)
+            if timed and page.rel_path not in verified_layout:
+                legacy_batch.append(row)
+                if len(legacy_batch) == 16:
+                    queue_legacy_batch()
             continue
         pending.append(row)
 
-    for start in range(0, len(unchanged_transcripts), 16):
-        batch = unchanged_transcripts[start:start + 16]
-        texts = index._texts_for([(path, at) for path, chunks, _ in batch for at in range(len(chunks) + 1)])
-        pending.extend(
-            (path, chunks, stamp) for path, chunks, stamp in batch
-            if (path, len(chunks)) in texts or any(
-                texts.get((path, at)) != chunk for at, chunk in enumerate(chunks)
-            )
-        )
+    queue_legacy_batch()
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
@@ -3146,7 +3155,7 @@ def index_incremental(
             n = len(chs)
             replacements.append((rp, chs, vectors[offset : offset + n], m))
             offset += n
-        index.upsert_batch(replacements, identity=producer)
+        index.upsert_batch(replacements, identity=producer, transcript_layout=transcript_paths)
         done_files += len(group)
         stats["chunks_embedded"] += len(flat)
         log_fn(

@@ -91,3 +91,26 @@ def test_out_of_range_timestamps_stay_ordinary_text():
     text = f"{invalid}\n[0:03] First report.\n[0:18] Second report."
 
     assert transcript_passages.chunks(text) == [invalid, "[0:03] First report.", "[0:18] Second report."]
+
+
+def test_repeated_literal_keeps_the_turn_proved_by_a_continuation():
+    quote = "Wait by the gate."
+    text = f"[0:03] {quote}\n[0:19] {quote}\nBring the blue clipboard."
+
+    match = transcript_passages.match(
+        text, chunk="Meeting\n\nBring the blue clipboard.", title="Meeting", query=quote,
+    )
+
+    assert match is not None and match.timestamp == 19
+    assert match.text == "[0:19] Wait by the gate.\nBring the blue clipboard."
+
+
+def test_exact_phrase_near_the_end_of_a_long_turn_keeps_its_timestamp():
+    quote = "Inspect the hinge on the west door."
+    text = f"[0:03] {'We discussed the building plan. ' * 150}{quote}\n[0:19] The meeting ended."
+
+    match = transcript_passages.match(text, chunk=None, title="Meeting", query=quote)
+
+    assert match is not None and match.timestamp == 3
+    assert len(match.text) <= 4000 and match.text.endswith(quote)
+    assert text[match.start:match.end] == match.text

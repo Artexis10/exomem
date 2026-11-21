@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import NamedTuple
 
 from . import semantic_segments
@@ -81,6 +81,22 @@ def chunks(text: str) -> list[str]:
     return ([prefix] if prefix else []) + [text[start:end] for start, end, _ in spans]
 
 
+def bounded_turns(text: str, *, max_chars: int) -> Iterator[TranscriptMatch]:
+    """Split long turns into openable slices with the original turn timestamp."""
+    from .embeddings import _hard_cut_point
+
+    for start, end, timestamp in turns(text, minimum=1):
+        while end - start > max_chars:
+            stop = start + _hard_cut_point(text[start:start + max_chars + 1], max_chars)
+            piece = text[start:stop].rstrip()
+            yield TranscriptMatch(start, start + len(piece), piece, timestamp)
+            start = stop
+            while start < end and text[start].isspace():
+                start += 1
+        if start < end:
+            yield TranscriptMatch(start, end, text[start:end], timestamp)
+
+
 def match(
     text: str,
     *,
@@ -88,38 +104,46 @@ def match(
     title: str,
     query: str,
     withheld: Sequence[tuple[int, int]] = (),
-    max_chars: int = 4000,
 ) -> TranscriptMatch | None:
     """Locate a literal quote or a verified vector chunk in the stored text."""
+    from .find_parts import CONTEXT_CHARS, MAX_PASSAGE_CHARS
+
+    max_chars = MAX_PASSAGE_CHARS
     spans = turns(text)
     if not spans:
         return None
     query = query.strip().strip('"')
     # Normalize literal whitespace without interpreting the user's intent.
     dense = _locate(text, chunk.removeprefix(f"{title}\n\n"), unique=True) if chunk else None
+    dense_turn = (
+        next((turn for turn in spans if turn[0] <= dense[0] and dense[1] <= turn[1]), None)
+        if dense is not None else None
+    )
     exact = None
-    if query and dense is not None:
-        low, high = dense
-        if inside := _locate(text[low:high], query, ignore_case=True):
-            exact = low + inside[0], low + inside[1]
+    if query and dense_turn is not None:
+        start, end, _ = dense_turn
+        if inside := _locate(text[start:end], query, ignore_case=True):
+            exact = start + inside[0], start + inside[1]
     if query and exact is None:
-        exact = _locate(text, query, ignore_case=True)
+        exact = _locate(text, query, ignore_case=True, unique=True)
 
-    for anchor, literal in ((exact, True), (dense, False)):
+    # A legacy vector may cover several turns. Only a literal can then choose one.
+    for anchor in (exact, dense if dense_turn is not None else None):
         if anchor is None:
             continue
         low, high = anchor
         matched = [(start, end, ts) for start, end, ts in spans if start < high and end > low]
-        if not matched or (not literal and len(matched) != 1):
-            # A legacy vector can name a block with several timed turns.
-            # Its score cannot establish which one contains the answer.
+        if not matched:
             continue
-        start, end, timestamp = matched[0]
-        for _, turn_end, _ in matched[1:]:
-            if turn_end - start > max_chars:
-                break
-            end = turn_end
-        if end <= start + max_chars and not any(begin < end and stop > start for begin, stop in withheld):
+        start, _, timestamp = matched[0]
+        end = matched[-1][1]
+        if end - start > max_chars:
+            low, high = max(start, low), min(end, high)
+            if high - low > max_chars:
+                continue
+            start = max(start, high - max_chars, min(low - CONTEXT_CHARS, end - max_chars))
+            end = start + max_chars
+        if not any(begin < end and stop > start for begin, stop in withheld):
             return TranscriptMatch(start, end, text[start:end], timestamp)
     return None
 
