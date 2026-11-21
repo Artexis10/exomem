@@ -8657,27 +8657,22 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     )
 
 
-def schedule_inbound_rebuild(vault_root: Path) -> bool:
-    """Accept a miss when the watcher can patch or immediately rebuild the index."""
+def schedule_inbound_rebuild(vault_root: Path, *, stop: threading.Event | None = None) -> None:
+    """Schedule one background inbound build when the watcher cannot patch the miss."""
     from . import readiness
     from . import vault as vault_module
 
-    stop = vault_module.inbound_recovery_stop(vault_root)
-    if stop is not None and freshness.external_pending(vault_root):
-        return True  # the watcher owns pending events, even if an immediate build must wait
-    if (
-        stop is None
-        or os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM")
-        or readiness.is_warming()
+    if stop is not None and (
+        readiness.is_warming()
         or freshness.generation(vault_root, "vault") is None
+        or freshness.external_pending(vault_root)
+        or not vault_module.inbound_rebuild_needed(vault_root, check_patch_chain=True)
     ):
-        return False
-    if not vault_module.inbound_rebuild_needed(vault_root):
-        return True  # an incremental publication can finish a resident checkpoint
-    return _schedule_resolver_warm(
+        return
+    _schedule_resolver_warm(
         vault_root,
         _INBOUND_INDEX_REBUILDS,
-        lambda root: vault_module.prime_inbound_index(root, defer_to_patch=True),
+        lambda root: vault_module.prime_inbound_index(root, defer_to_patch=stop is not None),
         "exomem-inbound-index-warm",
         stop=stop,
     )
@@ -8690,14 +8685,14 @@ def _schedule_resolver_warm(
     thread_name: str,
     *,
     stop: threading.Event | None = None,
-) -> bool:
+) -> None:
     """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
-        return False
+        return
     key = Path(root)
     with _RECALL_REBUILD_LOCK:
         if key in inflight:
-            return True
+            return
         inflight.add(key)
 
     def _run() -> None:
@@ -8722,8 +8717,6 @@ def _schedule_resolver_warm(
     except RuntimeError:
         with _RECALL_REBUILD_LOCK:
             inflight.discard(key)
-        return False
-    return True
 
 
 def await_recall_resolver_warm(timeout: float = 30.0) -> bool:

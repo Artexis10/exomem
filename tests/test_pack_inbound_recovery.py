@@ -71,7 +71,7 @@ def served(tmp_path: Path) -> Path:
     freshness.seed(vault, "kb", entries)
     freshness.seed(vault, "vault", entries)
     lexstore.ensure_fresh(vault)
-    vault_module.register_inbound_index(vault, threading.Event())
+    vault_module.register_inbound_index(vault)
     find_module._get_query_resolver(vault)  # a warm server holds the link resolver
     return vault
 

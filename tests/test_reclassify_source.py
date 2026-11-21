@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import ANY
 
@@ -68,7 +67,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
     from test_agent_tool_surface import _call
     from test_collection_store_s1_gate import _until
 
-    from exomem import file_watcher, find, freshness, readiness, server
+    from exomem import file_watcher, find, freshness, move_file, readiness, request_budget, server
     from exomem import vault as vault_module
 
     monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
@@ -134,6 +133,23 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
             assert warm["preview_digest"]
 
+            expired = threading.Event()
+            plan = move_file.plan_inbound_rewrites
+
+            class Budget(request_budget.RequestBudget):
+                def remaining(self):
+                    return 0.0 if expired.is_set() else super().remaining()
+
+            def expire_during_planning(*args, **kwargs):
+                expired.set()
+                return plan(*args, **kwargs)
+
+            monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+            monkeypatch.setattr(move_file, "plan_inbound_rewrites", expire_during_planning)
+            timed_out = await call("manage_memory_file", **preview)
+            assert timed_out["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+            assert "references" not in timed_out and "preview_digest" not in timed_out
+
     try:
         assert watcher.wait_until_seeded(10)
         watcher.arm_optional_recovery()
@@ -144,168 +160,9 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
-def test_a_stopped_watchers_preview_fallback_builds_once_from_disk(
-    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from exomem import freshness
-    from exomem import vault as vault_module
-    from exomem.cli_ops import OpError
-    from exomem.governance.principal import owner_principal, request_scope
-
-    captured = _capture(vault, source_schema, title="River measurements")
-    entries = [
-        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
-    ]
-    freshness.seed(vault, "vault", entries)
-    stop = threading.Event()
-    vault_module.register_inbound_index(vault, stop)
-    assert vault_module.prime_inbound_index(vault, eager=True)
-    stop.set()
-    # A referrer arrives after the watcher stops. Its registry cannot vouch for the old cache.
-    referrer = f"{KB}/Notes/updated.md"
-    (vault / referrer).write_text(f"# Updated\n\n[[{captured.path}]]\n", encoding="utf-8")
-    started, release = threading.Event(), threading.Event()
-    original_build = vault_module._build_inbound_index
-
-    def paused_build(root: Path, **kwargs):
-        started.set()
-        assert release.wait(5)
-        return original_build(root, **kwargs)
-
-    def preview():
-        with request_scope(owner_principal(surface="mcp")):
-            return rc.propose(vault, captured.path, source_kind="dataset-export")
-
-    monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(preview)
-        try:
-            assert started.wait(5)
-            with pytest.raises(OpError) as busy:
-                pool.submit(preview).result(timeout=2)
-            assert busy.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
-            assert busy.value.details["retry_after_ms"] > 0
-        finally:
-            release.set()
-        assert referrer in first.result(timeout=5).rewritten
-
-
-def test_observer_handover_cancels_a_disk_preview_without_waiting(vault, source_schema, monkeypatch):
-    from exomem import file_watcher
-    from exomem import vault as vault_module
-    from exomem.cli_ops import OpError
-    from exomem.governance.principal import owner_principal, request_scope
-
-    source = _capture(vault, source_schema, title="Water quality samples").path
-    watcher = file_watcher.FileWatcher(vault)
-    assert watcher.start()
-    try:
-        assert watcher.wait_until_seeded(10)
-        started, release = threading.Event(), threading.Event()
-        opened = []
-        original = vault_module.read_guarded_text
-
-        def hold_first_read(root, path):
-            opened.append(path)
-            if len(opened) == 1:
-                started.set()
-                assert release.wait(5)
-            return original(root, path)
-
-        def preview():
-            with request_scope(owner_principal(surface="mcp")):
-                return rc.propose(vault, source, source_kind="dataset-export")
-
-        monkeypatch.setattr(vault_module, "read_guarded_text", hold_first_read)
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            reading = pool.submit(preview)
-            try:
-                assert started.wait(5)
-                pool.submit(watcher.arm_optional_recovery).result(timeout=2)
-                assert vault_module.inbound_recovery_stop(vault, observing=True) is not None
-            finally:
-                release.set()
-            with pytest.raises(OpError) as retry:
-                reading.result(timeout=5)
-        assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
-        assert len(opened) == 1
-    finally:
-        watcher.stop()
-
-
-@pytest.mark.parametrize("fault", ["unreadable", "changed", "unchanged-metadata", "new-checkpoint", "interrupted"])
-def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schema, monkeypatch, fault):
-    from exomem import freshness, request_budget
-    from exomem import vault as vault_module
-    from exomem.cli_ops import OpError
-    from exomem.governance.principal import owner_principal, request_scope
-
-    source = _capture(vault, source_schema, title="Lake water measurements").path
-    referrer = vault / KB / "Notes/sampling.md"
-    linked = f"# Sampling\n\n[[{source}]]\n"
-    referrer.write_text(linked, encoding="utf-8")
-    read_text = vault_module.read_guarded_text
-    signature = freshness.stat_signature(referrer)
-    stat_signature = freshness.stat_signature
-
-    def unstable_read(root, path):
-        text, guard = read_text(root, path)
-        if path == referrer:
-            if fault == "unreadable":
-                raise PermissionError("temporarily unreadable")
-            if fault == "changed":
-                referrer.write_text("# Sampling changed\n", encoding="utf-8")
-            if fault == "unchanged-metadata":
-                referrer.write_text(" " * len(linked), encoding="utf-8")
-            if fault == "new-checkpoint":
-                freshness.on_files_changed(vault, changed=[referrer])
-            if fault == "interrupted":
-                raise request_budget.ReadBudgetExhausted()
-        return text, guard
-
-    if fault == "new-checkpoint":
-        freshness.seed(vault, "vault", [])
-    if fault == "unchanged-metadata":
-        monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", False)
-        monkeypatch.setattr(freshness, "stat_signature", lambda path: signature if path == referrer else stat_signature(path))
-    with request_scope(owner_principal(surface="mcp")):
-        monkeypatch.setattr(vault_module, "read_guarded_text", unstable_read)
-        with pytest.raises(OpError) as retry:
-            rc.propose(vault, source, source_kind="dataset-export")
-        assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
-        monkeypatch.setattr(vault_module, "read_guarded_text", read_text)
-        referrer.write_text(linked, encoding="utf-8")
-        assert f"{KB}/Notes/sampling.md" in rc.propose(vault, source, source_kind="dataset-export").rewritten
-
-
-def test_polling_watcher_does_not_serve_stale_preview_between_sweeps(vault, source_schema, monkeypatch):
-    from exomem import file_watcher
-    from exomem import vault as vault_module
-    from exomem.governance.principal import owner_principal, request_scope
-
-    source = _capture(vault, source_schema, title="Rain gauge measurements").path
-
-    def missing_watchdog():
-        raise ImportError("watchdog unavailable")
-
-    monkeypatch.setattr(file_watcher, "_import_watchdog", missing_watchdog)
-    watcher = file_watcher.FileWatcher(vault)
-    assert watcher.start()
-    try:
-        assert watcher.wait_until_seeded(10)
-        watcher.arm_optional_recovery()
-        assert vault_module.prime_inbound_index(vault, eager=True)
-        referrer = f"{KB}/Notes/sampling.md"
-        (vault / referrer).write_text(f"# Sampling\n\n[[{source}]]\n", encoding="utf-8")
-        with request_scope(owner_principal(surface="mcp")):
-            assert referrer in rc.propose(vault, source, source_kind="dataset-export").rewritten
-    finally:
-        watcher.stop()
-
-
-@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "pending-during-scheduling", "declined"])
+@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])
 def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
-    from exomem import find, freshness
+    from exomem import file_watcher, find, freshness
     from exomem import vault as vault_module
     from exomem.cli_ops import OpError
     from exomem.governance.principal import owner_principal, request_scope
@@ -314,21 +171,22 @@ def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source
     source = _capture(vault, source_schema, title="Stream flow measurements").path
     entries = [(str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)]
     freshness.seed(vault, "vault", entries)
-    vault_module.register_inbound_index(vault, threading.Event(), observer_alive=lambda: True)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: None if stop.is_set() else stop)
     assert vault_module.prime_inbound_index(vault, eager=True)
     if gap == "external-pending":
         freshness.mark_external_pending(vault)
     elif gap == "new-seed":
         freshness.seed(vault, "vault", entries)
     else:
-        vault_module.evict_inbound_index(vault)
+        lookup = vault_module.cached_inbound_wikilinks
 
-        def decline_after_event(root):
-            if gap == "pending-during-scheduling":
-                freshness.mark_external_pending(root)
-            return False
+        def stop_during_lookup(*args, **kwargs):
+            inbound = lookup(*args, **kwargs)
+            stop.set()
+            return inbound
 
-        monkeypatch.setattr(find, "schedule_inbound_rebuild", decline_after_event)
+        monkeypatch.setattr(vault_module, "cached_inbound_wikilinks", stop_during_lookup)
 
     builds = []
     original_build = vault_module._build_inbound_index

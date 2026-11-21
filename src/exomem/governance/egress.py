@@ -2717,18 +2717,13 @@ def pending_identity_candidates(
         if not lifecycle.is_tombstoned_in(tombstones, path)
         if _identity_path_accessible(root, path)
     )
-    who = principal if principal is not None else effective_principal()
-    return _possibly_visible_without_bytes(root, candidates, who, purpose, minimum_level)
-
-
-def _possibly_visible_without_bytes(
-    root: Path, paths: Iterable[str], who: RequestPrincipal, purpose: str | None, minimum_level: int,
-) -> tuple[str, ...]:
-    """Keep paths whose content could contribute to this caller's release."""
     policy = policy_module.load(root)
-    candidates = raw_protection.possibly_released_without_bytes(root, paths, who, policy=policy)
-    if not candidates:
-        return ()
+    who = principal if principal is not None else effective_principal()
+    candidates = tuple(
+        path
+        for path in candidates
+        if raw_protection.permits(root, path, who, resolve_bytes=False) is not False
+    )
     if policy.blocked or not who.resolved or bound_writer(root) is not None:
         # File membership cannot prove a canonical projection hidden.
         return candidates
@@ -2775,7 +2770,6 @@ def _possibly_visible_without_bytes(
                 connection.close()
     retained: list[str] = []
     for path in candidates:
-        request_budget.checkpoint()
         try:
             scope_ids = membership_module.evaluate_path_only(
                 root, path, policy, resolve_bytes=False
@@ -8579,14 +8573,6 @@ class ReaderView:
                 self._root, principal=self._principal, purpose=self._purpose,
                 unit_identity_only=self._unit_identity_only, withheld=withheld,
             )
-
-    def possibly_visible_without_bytes(self, paths: Iterable[str]) -> tuple[str, ...]:
-        """Retain paths whose current metadata cannot prove withholding."""
-        who = self._principal if self._principal is not None else effective_principal()
-        tombstones = lifecycle.tombstoned_paths(self._root)
-        candidates = (path for path in paths if not lifecycle.is_tombstoned_in(tombstones, path))
-        with policy_module.outside_request_policy_snapshot():
-            return _possibly_visible_without_bytes(self._root, candidates, who, self._purpose, RELEASE_FLOOR)
 
     def project_pack(self, bundle: Mapping[str, Any]) -> dict[str, Any]:
         """Project one actual clipped bundle before it spends a compiler slot."""

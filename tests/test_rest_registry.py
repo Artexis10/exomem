@@ -117,45 +117,13 @@ def _auth() -> dict:
     return {"Authorization": "Bearer sekret"}
 
 
-def test_rest_preview_that_exhausts_its_disk_budget_returns_warming(vault, monkeypatch):
-    from exomem import request_budget
-
-    source = "Knowledge Base/Sources/Other/field-samples.md"
-    page = vault / source
-    page.parent.mkdir(parents=True, exist_ok=True)
-    page.write_text("---\nsource_type: other\n---\n# Field samples\n", encoding="utf-8")
-    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
-    scans = []
-    read_guarded_text = vault_module.read_guarded_text
-
-    class Budget(request_budget.RequestBudget):
-        def remaining(self):
-            return 0.0 if scans else super().remaining()
-
-    def read_until_expired(root, path):
-        result = read_guarded_text(root, path)
-        scans.append(path)
-        return result
-
-    monkeypatch.setattr(request_budget, "RequestBudget", Budget)
-    monkeypatch.setattr(vault_module, "read_guarded_text", read_until_expired)
-    answer = client.post("/api/manage_memory_file", headers=_auth(), json={
-        "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
-    })
-
-    assert answer.status_code == 503, answer.json()
-    assert len(scans) == 1
-    error = answer.json()["error"]
-    assert error["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
-    assert error["retry_after_ms"] > 0
-
-
-@pytest.mark.parametrize("stage", ["admission", "planning", "response"])
+@pytest.mark.parametrize("stage", ["admission", "planning", "response", "no-observer"])
 def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, monkeypatch, stage):
+    import threading
     import time
     from types import SimpleNamespace
 
-    from exomem import move_file, request_budget, server_rest
+    from exomem import file_watcher, freshness, move_file, request_budget, server_rest
     from exomem.governance import authorization_request
 
     source = "Knowledge Base/Sources/Other/field-samples.md"
@@ -163,6 +131,13 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text("---\nsource_type: other\n---\n# Field samples\n", encoding="utf-8")
     (vault / "Knowledge Base/Notes/sampling-log.md").write_text(f"[[{source}]]\n", encoding="utf-8")
+    if stage != "no-observer":
+        freshness.seed(vault, "vault", (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
+        ))
+        assert vault_module.prime_inbound_index(vault, eager=True)
+        stop = threading.Event()
+        monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     elapsed = 0.0
     clock = SimpleNamespace(monotonic=lambda: elapsed, time=time.time, perf_counter=time.perf_counter)
@@ -173,12 +148,13 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
         "admission": (authorization_request, "verify_authorization_context"),
         "planning": (move_file, "plan_inbound_rewrites"),
         "response": (server_rest.RestJSONResponse, "render"),
+        "no-observer": (move_file, "plan_inbound_rewrites"),
     }[stage]
     original = getattr(target, operation)
 
     def expire_after(*args, **kwargs):
         nonlocal elapsed
-        if stage == "planning":
+        if stage in ("planning", "no-observer"):
             elapsed = 2.0  # expire before the planner reaches the first referrer
         result = original(*args, **kwargs)
         elapsed = 2.0
@@ -189,9 +165,13 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
         "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
     })
 
-    assert answer.status_code == 503, answer.json()
-    assert answer.json()["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
-    assert "data" not in answer.json() or answer.json()["data"] is None
+    if stage == "no-observer":
+        assert answer.status_code == 200, answer.json()
+        assert answer.json()["data"]["referrers"]["rewritten"] == ["Knowledge Base/Notes/sampling-log.md"]
+    else:
+        assert answer.status_code == 503, answer.json()
+        assert answer.json()["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+        assert "data" not in answer.json() or answer.json()["data"] is None
 
 
 def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> None:

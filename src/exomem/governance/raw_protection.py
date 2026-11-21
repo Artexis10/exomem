@@ -8,15 +8,12 @@ import re
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterable
-from functools import cache
 from pathlib import Path
-from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 import yaml
 
-from .. import memory_refs, request_budget, reserved_paths, vault
+from .. import memory_refs, reserved_paths, vault
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -24,9 +21,6 @@ from . import (
     store,
 )
 from .principal import OWNER_AUDIENCE, RequestPrincipal
-
-if TYPE_CHECKING:
-    from .policy import Policy, ReleaseGrant
 
 PREFIX = "__exomem_raw_v1__"
 COMPATIBILITY_ID = "raw-protection-v1"
@@ -161,34 +155,6 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
     return True, trusted_purpose
 
 
-def _matching_grants(policy: Policy, who: RequestPrincipal, purpose: str | None) -> tuple[ReleaseGrant, ...]:
-    return tuple(grant for grant in policy.release_grants
-                 if grant.raw_protection is not None and grant.to_audience == who.audience_id
-                 and grant.raw_protection["surface"] == who.surface
-                 and grant.raw_protection["issuer_family"] == who.issuer_family
-                 and grant.raw_protection["purpose"] == purpose)
-
-
-def possibly_released_without_bytes(
-    root: Path, paths: Iterable[str], who: RequestPrincipal, *, policy: Policy,
-) -> tuple[str, ...]:
-    """Keep possible releases, verifying RAW session authority once for this batch."""
-    @cache
-    def grant_paths() -> frozenset[str] | None:
-        valid, purpose = _authority(root, who)
-        if not valid or is_owner(who) or policy.blocked or policy.conflicted:
-            return None  # this authority cannot prove withholding without bytes
-        return frozenset(grant.path for grant in _matching_grants(policy, who, purpose))
-
-    retained = []
-    for path in paths:
-        request_budget.checkpoint()
-        grants = grant_paths() if marked(path) else None
-        if grants is None or grants.intersection(_binding_candidates(path)):
-            retained.append(path)
-    return tuple(retained)
-
-
 def permits(
     root: Path, path: str, who: RequestPrincipal, *,
     snapshot: bytes | None = None, derived: bool = False,
@@ -215,7 +181,11 @@ def permits(
     current = policy.load(root)
     if current.blocked or current.conflicted:
         return False if resolve_bytes else None
-    grants = _matching_grants(current, who, trusted_purpose)
+    grants = [grant for grant in current.release_grants
+              if grant.raw_protection is not None and grant.to_audience == who.audience_id
+              and grant.raw_protection["surface"] == who.surface
+              and grant.raw_protection["issuer_family"] == who.issuer_family
+              and grant.raw_protection["purpose"] == trusted_purpose]
     if not grants:
         return False
     if not resolve_bytes:

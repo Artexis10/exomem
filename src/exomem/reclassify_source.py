@@ -34,11 +34,13 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from types import MappingProxyType
 from typing import Any, Literal
 
-from . import move_file as move_file_module
 from . import (
+    file_watcher,
+    foreground_priority,
     originals,
     page_lineage,
     path_mentions,
@@ -51,6 +53,7 @@ from . import (
     vault,
     vocabulary_resolution,
 )
+from . import move_file as move_file_module
 from .cli_ops import OpError
 from .governance import egress
 from .kbdir import managed_form, managed_join, managed_split
@@ -579,7 +582,6 @@ def _introduction_warnings(plan: source_taxonomy.TaxonomyPlan) -> tuple[str, ...
     )
 
 
-@egress.proven_withheld_scope(reuse=True)
 def propose(
     vault_root: Path,
     path: str,
@@ -606,7 +608,39 @@ def propose(
     value that would be refused is refused here rather than after the user has
     approved it. The report names only pages the caller may see.
     """
+    from .governance.principal import effective_principal
+
     vault_root = Path(vault_root)
+    surface = effective_principal().surface
+    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
+    owner = file_watcher.observing_inbound_recovery_stop(vault_root) if surface in ("mcp", "rest") else None
+    check = request_budget.current_checkpoint()
+    if surface == "rest" and (owner is None) != (check is None):
+        # The REST handler selected its deadline before the leaf. Retry a handover.
+        raise preview_warming()
+    if owner is None:
+        return _propose(vault_root, path, source_kind=source_kind, domain=domain)
+
+    if check is None and (budget := request_budget.current()) is not None:
+        check = request_budget.ReadCheckpoint(budget)
+    try:
+        with (
+            request_budget.checking(check),
+            foreground_priority.cancellable(owner),
+            egress.proven_withheld_scope(reuse=True),
+        ):
+            result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner)
+            foreground_priority.check_cancelled()
+            if file_watcher.observing_inbound_recovery_stop(vault_root) is not owner:
+                raise preview_warming()
+            return result
+    except foreground_priority.BulkCancelled:
+        raise preview_warming() from None
+
+
+def _propose(
+    vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
+) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
     text, _ = read_guarded_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
@@ -677,9 +711,15 @@ def propose(
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
-    inbound = _preview_inbound(vault_root, rel)
+    inbound = (
+        _visible_inbound(vault_root, rel) if owner is None
+        else _managed_preview_inbound(vault_root, rel, owner)
+    )
     outcome = (
-        _referrer_outcome(vault_root, rel, text, destination, inbound, check=request_budget.current_checkpoint())
+        _referrer_outcome(
+            vault_root, rel, text, destination, inbound,
+            check=foreground_priority.check_cancelled if owner is not None else None,
+        )
         if destination is not None
         else _ReferrerOutcome()
     )
@@ -747,27 +787,15 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     ]
 
 
-def _preview_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
+def _managed_preview_inbound(vault_root: Path, rel: str, owner: Event) -> list[InboundLink]:
     from . import find
-    from .governance.principal import effective_principal
-    from .vault_store.mode import store_mode_for_reads
 
-    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
-    if effective_principal().surface not in ("mcp", "rest") or store_mode_for_reads(vault_root):
-        return _visible_inbound(vault_root, rel)
-
-    owner = vault.inbound_recovery_stop(vault_root, observing=True)
-    if owner is not None:
-        reader = egress.reader_view(vault_root)
-        inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader)
-        if inbound is not None and vault.inbound_recovery_stop(vault_root, observing=True) is owner:
-            return inbound
-        find.schedule_inbound_rebuild(vault_root)
-    else:
-        reader = egress.reader_view(vault_root, withheld=frozenset())
-        inbound = vault.checked_disk_inbound_wikilinks(vault_root, rel, visible=reader)
+    reader = egress.reader_view(vault_root)
+    inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader)
+    if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
             return inbound
+        find.schedule_inbound_rebuild(vault_root, stop=owner)
     raise preview_warming()
 
 

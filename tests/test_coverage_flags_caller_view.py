@@ -86,7 +86,7 @@ def served(vault: Path) -> Path:
     vault_module.clear_inbound_index()
     _seed_live_recall(vault)
     lexstore.ensure_fresh(vault)
-    vault_module.register_inbound_index(vault, threading.Event(), observer_alive=lambda: True)
+    vault_module.register_inbound_index(vault)
     assert vault_module.prime_inbound_index(vault, eager=True)
     find_module._get_query_resolver(vault)
     return vault
@@ -134,8 +134,11 @@ def test_a_withheld_write_leaves_the_restricted_inbound_field_as_it_was(served: 
 def test_a_withheld_referrer_does_not_delay_reclassification_preview(
     served: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from exomem import file_watcher
     from exomem.cli_ops import OpError
 
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     source = "Knowledge Base/Sources/Other/coverage-source.md"
     _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
     _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
@@ -151,69 +154,6 @@ def test_a_withheld_referrer_does_not_delay_reclassification_preview(
         preview = commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
     assert preview["references"] == 0
     assert preview["preview_digest"]
-
-
-def test_unreadable_withheld_referrer_does_not_change_disk_preview(served, monkeypatch):
-    source = "Knowledge Base/Sources/Other/coverage-source.md"
-    _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
-    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
-    owner = vault_module.inbound_recovery_stop(served)
-    assert owner is not None
-    owner.set()
-    read_guarded_text = vault_module.read_guarded_text
-
-    def read_visible(root, path):
-        if path == served / HIDDEN:
-            raise PermissionError("this withheld page is unreadable")
-        return read_guarded_text(root, path)
-
-    with request_scope(replace(_external(), administrative_ingress=True)):
-        arguments = {"path": source, "source_kind": "dataset-export"}
-        before = commands.op_propose_reclassification(served, **arguments)
-        monkeypatch.setattr(vault_module, "read_guarded_text", read_visible)
-        assert commands.op_propose_reclassification(served, **arguments) == before
-
-
-def test_an_unreadable_replacement_cannot_inherit_a_historical_withholding_pin(served, monkeypatch):
-    from exomem.cli_ops import OpError
-
-    source = "Knowledge Base/Sources/Other/coverage-source.md"
-    _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
-    owner = vault_module.inbound_recovery_stop(served)
-    assert owner is not None
-    owner.set()
-    _write_as_the_service_does(served, BACKLINKER, f"# Public replacement\n\n[[{source}]]\n")
-    read_guarded_text = vault_module.read_guarded_text
-
-    def read_visible(root, path):
-        if path == served / BACKLINKER:
-            raise PermissionError("the replacement is unreadable")
-        return read_guarded_text(root, path)
-
-    monkeypatch.setattr(vault_module, "read_guarded_text", read_visible)
-    with request_scope(replace(_external(), administrative_ingress=True)), egress.proven_withheld_scope():
-        assert egress.pin_proven_withheld(frozenset({BACKLINKER}))
-        with pytest.raises(OpError) as retry:
-            commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
-        assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
-
-
-def test_withholding_proof_checks_raw_session_authority_once(served, monkeypatch):
-    from exomem.governance import raw_protection
-
-    calls = []
-
-    def authority(*args):
-        calls.append(True)
-        return True, None
-
-    monkeypatch.setattr(raw_protection, "_authority", authority)
-    with _caller(restricted=True):
-        reader = egress.reader_view(served)
-        assert reader is not None
-        paths = [f"Knowledge Base/Notes/{raw_protection.PREFIX}{name}.md" for name in ("first", "second")]
-        assert reader.possibly_visible_without_bytes(paths) == ()
-    assert len(calls) == 1
 
 
 def test_a_withheld_write_leaves_the_restricted_pack_complete(served: Path) -> None:

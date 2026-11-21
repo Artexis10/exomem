@@ -203,6 +203,32 @@ _WATCHERS_LOCK = threading.Lock()
 _WATCHERS: dict[str, weakref.WeakSet[FileWatcher]] = {}
 
 
+def observing_inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
+    """The stop signal for a seeded file watcher with live event delivery."""
+    from .vault_store.mode import store_mode_for_reads
+
+    if not freshness.event_indexes_enabled() or store_mode_for_reads(vault_root):
+        return None
+    root = _canon_root(vault_root)
+    with _WATCHERS_LOCK:
+        watchers = tuple(_WATCHERS.get(root, ()))
+    for watcher in watchers:
+        stop = watcher._stop
+        dispatch = watcher._thread
+        reconcile = watcher._reconcile_thread
+        observer_alive = getattr(watcher._observer, "is_alive", None)
+        if (
+            watcher._importer is None and watcher._optional_recovery_armed
+            and watcher._seed_complete.is_set() and watcher._seed_succeeded
+            and dispatch is not None and dispatch.is_alive()
+            and reconcile is not None and reconcile.is_alive()
+            and observer_alive is not None and observer_alive()
+            and not stop.is_set()
+        ):
+            return stop
+    return None
+
+
 def _canon_root(vault_root: Path) -> str:
     try:
         return str(vault_root.resolve())
@@ -1811,7 +1837,7 @@ class FileWatcher:
                     self._seed_succeeded = False
                     log.exception("file watcher: startup event catch-up failed")
                 finally:
-                    self._complete_seed()
+                    self._seed_complete.set()
         while not self._stop.is_set():
             self._wake.wait(timeout=self._held_publication_intent_timeout())
             if self._stop.is_set():
@@ -2009,33 +2035,7 @@ class FileWatcher:
 
     def arm_optional_recovery(self) -> None:
         """Permit optional metadata work only after runtime workers have started."""
-        from . import vault
-
         self._optional_recovery_armed = True
-        if (
-            self._importer is None
-            and self._seed_succeeded
-            and self._seed_complete.is_set()
-            and self._reconcile_thread is not None
-            and self._reconcile_thread.is_alive()
-        ):
-            observer_alive = getattr(self._observer, "is_alive", None)
-            dispatch = self._thread
-
-            def observing() -> bool:
-                return (
-                    observer_alive is not None and observer_alive()
-                    and dispatch is not None and dispatch.is_alive()
-                )
-
-            vault.register_inbound_index(
-                self._vault_root, self._stop, observer_alive=observing,
-            )
-
-    def _complete_seed(self) -> None:
-        self._seed_complete.set()
-        if self._optional_recovery_armed and not self._stop.is_set():
-            self.arm_optional_recovery()
 
     def _prime_inbound_if_needed(self) -> None:
         from . import foreground_priority, readiness, vault
@@ -2819,7 +2819,7 @@ class FileWatcher:
             self._seed_succeeded = succeeded
             self._seed_published.set()
             if not self._dispatch_waits_for_seed:
-                self._complete_seed()
+                self._seed_complete.set()
         while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
             try:
@@ -3007,10 +3007,8 @@ class FileWatcher:
         self._seed_published.set()
         self._seed_complete.set()
         # No owner keeps the published census current once the watcher stops.
-        from . import vault
         from .governance import artifact_census
 
-        vault.unregister_inbound_index(self._vault_root, self._stop)
         artifact_census.withdraw(self._vault_root)
         if self._observer is not None:
             try:

@@ -66,7 +66,6 @@ from .kbdir import (
 from .log_events import log_event
 
 if TYPE_CHECKING:
-    from .governance.egress import ReaderView
     from .graph_sync import GraphSyncCheckpoint
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
@@ -8033,7 +8032,7 @@ def yaml_flow_list(values: Iterable[Any]) -> str:
     return "[" + ", ".join(yaml_scalar(value) for value in values) + "]"
 
 
-def _walk_vault_md_entry(vault_root: Path, child: Path, *, strict: bool = False) -> str | None:
+def _walk_vault_md_entry(vault_root: Path, child: Path) -> str | None:
     """Return the scanner protocol's "dir", "md", or None for one entry."""
     try:
         relative = relative_posix(child, vault_root)
@@ -8044,8 +8043,6 @@ def _walk_vault_md_entry(vault_root: Path, child: Path, *, strict: bool = False)
     try:
         info = child.lstat()
     except OSError:
-        if strict:
-            raise
         return None
     if stat.S_ISLNK(info.st_mode) or _is_reparse(info):
         return None
@@ -8085,9 +8082,7 @@ def relative_posix(path: Path, anchor: Path) -> str:
     return path.relative_to(anchor).as_posix()
 
 
-def walk_vault_md(
-    vault_root: Path, *, skip: Callable[[Path], bool] | None = None, strict: bool = False,
-):
+def walk_vault_md(vault_root: Path, *, skip: Callable[[Path], bool] | None = None):
     """Yield every .md path under vault_root, skipping config/cruft dirs.
 
     Walks the FULL vault, not just Knowledge Base/. Used by Tier 2 inbound-
@@ -8103,14 +8098,12 @@ def walk_vault_md(
         try:
             children = list(d.iterdir())
         except OSError:
-            if strict:
-                raise
             return
         for child in children:
             foreground_priority.check_cancelled()
             if skip is not None and child.suffix.lower() == ".md" and skip(child):
                 continue
-            kind = _walk_vault_md_entry(vault_root, child, strict=strict)
+            kind = _walk_vault_md_entry(vault_root, child)
             if kind == "dir":
                 yield from walk(child)
             elif kind == "md":
@@ -8389,19 +8382,10 @@ def _plan_inbound_edit(
 class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
-    owner: tuple[threading.Event, Callable[[], bool] | None] | None = None
-    disk_preview_stop: threading.Event | None = None
-    # Reconcile, request-triggered recovery and exact preview fallback share this slot.
+    owned: bool = False  # a watcher owner is registered to recover this vault's index
+    # Held by the one owner pass building this vault's index: the reconcile pass and a
+    # pack-demanded background build both call `prime_inbound_index` and must not overlap.
     building: threading.Lock = field(default_factory=threading.Lock)
-
-    def recovery_stop(self, *, observing: bool) -> threading.Event | None:
-        owner = self.owner
-        if owner is None:
-            return None
-        stop, observer_alive = owner
-        if stop.is_set() or (observing and (observer_alive is None or not observer_alive())):
-            return None
-        return stop
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
@@ -8410,41 +8394,11 @@ _INBOUND_INDEX_LOCK = threading.Lock()
 _INBOUND_PATCH_LOCK = threading.Lock()
 
 
-def register_inbound_index(
-    vault_root: Path, stop: threading.Event | None = None, *,
-    observer_alive: Callable[[], bool] | None = None,
-) -> None:
-    """Prepare the stable demand signal and, once running, bind the owner's shutdown signal."""
+def register_inbound_index(vault_root: Path) -> None:
+    """Prepare a stable demand signal before the existing watcher serves a vault."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
-        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-        if stop is not None and not stop.is_set():
-            state.owner = (stop, observer_alive)
-            if (
-                state.disk_preview_stop is not None
-                and freshness.event_indexes_enabled()
-                and state.recovery_stop(observing=True) is not None
-            ):
-                state.disk_preview_stop.set()
-
-
-def unregister_inbound_index(vault_root: Path, stop: threading.Event) -> None:
-    """Withdraw the stopped owner and keep the demand signal and resident evidence."""
-    root = str(vault_root.resolve())
-    with _INBOUND_INDEX_LOCK:
-        state = _INBOUND_INDEX_GENERATIONS.get(root)
-        if state is not None and state.owner is not None and state.owner[0] is stop:
-            state.owner = None
-
-
-def inbound_recovery_stop(
-    vault_root: Path, *, observing: bool = False,
-) -> threading.Event | None:
-    """The recovery owner's stop signal, with live observation when requested."""
-    if not freshness.event_indexes_enabled() or _store_inbound_mode(vault_root):
-        return None
-    state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
-    return state.recovery_stop(observing=observing) if state is not None else None
+        _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration()).owned = True
 
 
 def inbound_recovery_available(vault_root: Path) -> bool:
@@ -8455,26 +8409,10 @@ def inbound_recovery_available(vault_root: Path) -> bool:
     process, or event-maintained indexes disabled) nothing would ever recover
     the index, so such a caller keeps the synchronous lookup.
     """
-    return inbound_recovery_stop(vault_root) is not None
-
-
-@contextmanager
-def _disk_inbound_build_slot(vault_root: Path) -> Iterator[threading.Event | None]:
-    """Admit one disk preview only while no live observer owns recovery."""
-    root = str(vault_root.resolve())
-    with _INBOUND_INDEX_LOCK:
-        state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
-        observing = freshness.event_indexes_enabled() and state.recovery_stop(observing=True) is not None
-        stop = threading.Event() if not observing and state.building.acquire(blocking=False) else None
-        if stop is not None:
-            state.disk_preview_stop = stop
-    try:
-        yield stop
-    finally:
-        if stop is not None:
-            with _INBOUND_INDEX_LOCK:
-                state.disk_preview_stop = None
-                state.building.release()
+    if _store_inbound_mode(vault_root):
+        return False  # the store's rows need no recovery: a read is complete at its snapshot
+    state = _INBOUND_INDEX_GENERATIONS.get(str(vault_root.resolve()))
+    return state is not None and state.owned and freshness.event_indexes_enabled()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -8508,7 +8446,7 @@ def inbound_rows(rel: str, text: str) -> tuple[str, list[tuple[int, str, str, st
     ]
 
 
-def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = None) -> _InboundIndexData:
+def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     from . import foreground_priority
 
     buckets: dict[str, list[_InboundEntry]] = {}
@@ -8516,8 +8454,7 @@ def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = Non
     sources: dict[str, str] = {}
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
-    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root) if paths is None else paths):
-        foreground_priority.check_cancelled()
+    for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root)):
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -8548,70 +8485,6 @@ def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = Non
         file_targets=file_targets,
         next_seq=seq,
     )
-
-
-def checked_disk_inbound_wikilinks(
-    vault_root: Path, target_rel_path: str, *, visible: ReaderView | None,
-) -> list[InboundLink] | None:
-    """Read literal links from a stable disk scan without publishing the result to the cache."""
-    from . import foreground_priority
-    from .governance import egress
-
-    def inventory() -> dict[Path, freshness.FileSignature]:
-        return {path: freshness.stat_signature(path) for path in walk_vault_md(vault_root, strict=True)}
-
-    def epoch() -> tuple[str, int | None, int | None]:
-        return (
-            freshness.consumer_checkpoint_instance(), freshness.generation(vault_root, "vault"),
-            freshness.external_pending_epoch(vault_root),
-        )
-
-    with _disk_inbound_build_slot(vault_root) as stop:
-        if stop is None:
-            return None
-        check = request_budget.current_checkpoint()
-        if check is None and (budget := request_budget.current()) is not None:
-            check = request_budget.ReadCheckpoint(budget)
-        try:
-            with request_budget.checking(check), foreground_priority.cancellable(stop):
-                start = epoch()
-                started_ns = time.time_ns()
-                before = inventory()
-                data = _build_inbound_index(vault_root, paths=before)
-                after = inventory()
-                unproven = {
-                    relative_posix(path, vault_root) for path in before.keys() | after.keys()
-                    if before.get(path) != after.get(path) or relative_posix(path, vault_root) not in data.sources
-                }
-                for path, (mtime, ctime, size) in before.items():
-                    foreground_priority.check_cancelled()
-                    rel = relative_posix(path, vault_root)
-                    if rel in unproven or (STAT_GENERATION_TRUSTED and started_ns - max(mtime, ctime) > GENERATION_RACY_WINDOW_NS):
-                        continue
-                    try:
-                        read_bounded_guarded_bytes(vault_root, rel, limit=size, expected_hash=data.sources[rel])
-                    except PathGuardError:
-                        unproven.add(rel)
-                keep: Callable[[str], bool] | None = visible
-                if unproven:
-                    if visible is None or visible.possibly_visible_without_bytes(unproven):
-                        return None
-                    if not egress.pin_proven_withheld(frozenset(unproven)):
-                        return None
-
-                    def proven_visible(path: str) -> bool:
-                        return path not in unproven and visible(path)
-
-                    keep = proven_visible
-                snapshot = _snapshot_inbound(data, target_rel_path)
-                result = _select_inbound_wikilinks(snapshot, target_rel_path, keep)
-                foreground_priority.check_cancelled()
-                if start != epoch():
-                    return None
-        except (OSError, request_budget.ReadBudgetExhausted, foreground_priority.BulkCancelled):
-            return None
-    # Releasing the slot retires its signal under the same lock that publishes an owner.
-    return None if stop.is_set() else result
 
 
 def _vault_freshness_key(vault_root: Path):
@@ -8721,17 +8594,25 @@ def _catch_up_inbound(
     return False
 
 
-def inbound_rebuild_needed(vault_root: Path) -> bool:
+def inbound_rebuild_needed(vault_root: Path, *, check_patch_chain: bool = False) -> bool:
     """Whether only an owner build can restore this vault's index.
 
-    A resident checkpoint can wait for an incremental patch while retained
-    history reaches it. A reseed or an expired history needs a new build.
+    A managed preview checks without waiting for the index lock. A reseed or
+    expired history needs a build even when a prior checkpoint is resident.
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
-    cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
-    checkpoint = cached[1].checkpoint if cached is not None else None
-    return checkpoint is None or not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
+    root = str(vault_root.resolve())
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=not check_patch_chain):
+        return False
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        checkpoint = cached[1].checkpoint if cached is not None else None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return checkpoint is None or (
+        check_patch_chain and not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
+    )
 
 
 def prime_inbound_index(
@@ -8756,7 +8637,7 @@ def prime_inbound_index(
     if not state.building.acquire(blocking=False):
         return False
     try:
-        if defer_to_patch and not inbound_rebuild_needed(vault_root):
+        if defer_to_patch and not inbound_rebuild_needed(vault_root, check_patch_chain=True):
             return False
         data = _inbound_index(vault_root, require_current=True)
     finally:

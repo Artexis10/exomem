@@ -1267,7 +1267,7 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (object, object))
     w = file_watcher.FileWatcher(tmp_path)
     assert w.start() is False
-    assert not vault_module.inbound_recovery_available(tmp_path)
+    assert file_watcher.observing_inbound_recovery_stop(tmp_path) is None
 
 
 def test_file_watcher_dispatch_thread_restarts_after_stop(
@@ -1323,7 +1323,7 @@ def test_restart_waits_for_the_previous_run_to_exit(vault):
     try:
         assert watcher.wait_until_seeded(10)
         watcher.arm_optional_recovery()
-        assert vault_module.inbound_recovery_stop(vault, observing=True) is not None
+        assert file_watcher.observing_inbound_recovery_stop(vault) is not None
     finally:
         watcher.stop()
 

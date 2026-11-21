@@ -25,6 +25,7 @@ from . import (
     cf_access,
     cli_ops,
     edit_operations,
+    file_watcher,
     local_ingress,
     request_budget,
     runtime_resources,
@@ -467,7 +468,11 @@ def register_rest_facade(
                         _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                     )
                     check = None
-                    if _cmd.name == "manage_memory_file" and kwargs.get("operation") == "propose-reclassification":
+                    if (
+                        _cmd.name == "manage_memory_file"
+                        and kwargs.get("operation") == "propose-reclassification"
+                        and file_watcher.observing_inbound_recovery_stop(vault_root) is not None
+                    ):
                         check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
                             seconds=request_budget.budget_seconds(), entry=entered,
                         ))
