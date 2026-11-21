@@ -4628,7 +4628,10 @@ def _issue_refusal(
             renderable = []
             for choice in allowed:
                 problems: list[_Issue] = []
-                _collect_round_trip_issues(manifest, {first.field: choice}, problems)
+                try:
+                    _collect_round_trip_issues(manifest, {first.field: choice}, problems)
+                except vault.MALFORMED_FRONTMATTER_ERRORS:
+                    continue
                 if not problems:
                     renderable.append(choice)
             allowed = renderable

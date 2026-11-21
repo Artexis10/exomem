@@ -296,10 +296,14 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
 def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_vault) -> None:
     """An enum refusal used to leave an agent without values it could use to resume the held write."""
     declaration = "[42, true, 1.0e+20, low, high]"
+    declared = [42, True, 1.0e20, "low", "high"]
     offered = [42, True, "low", "high"]
     if agent_vault == "sqlite":
         declaration = declaration[:-1] + ", " + "x" * 17_000 + "]"
-        offered = [42, True, 1.0e20, "low", "high"]
+        offered = declared
+    else:
+        declaration = '["2026-02-30", ' + declaration[1:]
+        declared = ["2026-02-30", *declared]
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    severity: {{type: enum, enum: {declaration}}}\n",
@@ -316,11 +320,11 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_va
         inspection = await _call(client, "inspect_memory", {"operation": "records.inspect", "arguments": target})
         assert inspection["contract"]["storage"]["strategy"] == agent_vault
         assert inspection["contract"]["declared_enums"] == {
-            "values": {"severity": [42, True, 1.0e20, "low", "high"]},
+            "values": {"severity": declared},
             "truncated": agent_vault == "sqlite",
         }
         refusal = await _call(client, "add_record", {**target, "why": "Log a published entry", "item": item})
-        assert refusal["error"]["code"] == "SCHEMA_ENUM", refusal
+        assert refusal.get("error", {}).get("code") == "SCHEMA_ENUM", refusal
         assert refusal["error"]["candidates"] == offered
         suggested = refusal["error"]["candidates"][1]
         assert type(suggested) is bool
