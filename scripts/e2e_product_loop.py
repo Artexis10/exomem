@@ -152,62 +152,10 @@ class _StoreRig:
     """What the store-mode arm adds to every process it starts."""
 
     coordinator_url: str
-    #: A directory holding the `sitecustomize.py` that opens the rollout guards, see below.
-    rollout_dir: Path
 
 
 _STORE_RIG: _StoreRig | None = None
 _STORE_OPERATOR_TOKEN = "e2e-store-operator-token"
-
-#: Store mode is fenced twice while it rolls out: `vault-store-v1` is not in
-#: `capability.RELEASED`, so `store-mode migrate` refuses, and `availability.require_servable`
-#: refuses to start a service on a store-mode vault. The 7.4 switch lifts both. This module is
-#: imported at interpreter start through PYTHONPATH and opens them in the harness's own
-#: processes only, without changing the installed wheel, as the repository's store-mode
-#: fixtures do. A fence that is already open is a no-op, so the arm keeps working after 7.4.
-_ROLLOUT_OVERRIDE = '''\
-import importlib.abc
-import importlib.util
-import sys
-
-
-class _Opener(importlib.abc.MetaPathFinder):
-    def find_spec(self, name, path, target=None):
-        if name not in _OPENERS:
-            return None
-        sys.meta_path.remove(self)
-        try:
-            spec = importlib.util.find_spec(name)
-        finally:
-            sys.meta_path.insert(0, self)
-        if spec is None or spec.loader is None:
-            return spec
-        loader = spec.loader
-        execute = loader.exec_module
-
-        def exec_module(module):
-            execute(module)
-            _OPENERS[name](module)
-
-        loader.exec_module = exec_module
-        return spec
-
-
-def _release(module):
-    module.RELEASED = module.RELEASED | {module.VAULT_STORE_V1}
-
-
-def _serve(module):
-    module.require_servable = lambda _root: None
-
-
-_OPENERS = {
-    "exomem.collection_store.capability": _release,
-    "exomem.vault_store.availability": _serve,
-}
-sys.meta_path.insert(0, _Opener())
-'''
-
 
 def _store_mode_env(home: Path, rig: _StoreRig) -> dict[str, str]:
     """The writer lease that store mode needs, on the arm's loopback coordinator."""
@@ -219,12 +167,11 @@ def _store_mode_env(home: Path, rig: _StoreRig) -> dict[str, str]:
         "EXOMEM_WRITER_LEASE_TOKEN": _LEASE_TOKEN,
         "EXOMEM_WRITER_LEASE_TTL": str(_LEASE_TTL),
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(home / "lease"),
-        "PYTHONPATH": str(rig.rollout_dir),
     }
 
 
 def _without_rig(env: dict[str, str]) -> dict[str, str]:
-    """The environment as the shipped product sees it: no writer lease, no rollout override."""
+    """Remove the store arm's writer lease for its initial file-mode session."""
     if _STORE_RIG is None:
         return env
     rigged = _store_mode_env(Path(env["HOME"]), _STORE_RIG)
@@ -2199,7 +2146,7 @@ def _owner_cli(
             check=False,
             stdin=stdin,
         )
-        # The coordinator documents this code for a lease that another holder has not released.
+        # The owner CLI prints this fixed error code when another holder has not released the lease.
         held = "COLLECTION_STORE_SERVICE_ACTIVE" in done.stderr
         if not (wait_for_lease and held and time.monotonic() < deadline):
             break
@@ -2226,34 +2173,21 @@ def _owner_json(done: subprocess.CompletedProcess[str], what: str) -> dict[str, 
 def _prepare_store_mode(
     executable: Path, env: dict[str, str], vault: Path, work: Path, *, timeout: float
 ) -> None:
-    """Move the journey's vault into store mode the way its owner does, each step on record.
-
-    The two release fences are probed first, with the shipped wheel and no override: a probe
-    passes when the fence refuses with its named code, or when the fence is already open.
-    Every later step runs with the override that the rig adds to ``env``.
-    """
+    """Move the journey's vault into store mode through the installed owner CLI."""
     _section("store-mode preparation")
-    shipped = {name: value for name, value in env.items() if name != "PYTHONPATH"}
     vault_args = ("--vault", str(vault))
     slow = max(120.0, timeout * 6)
-    # The fences answer with these product error codes, a closed set the CLI documents.
-    with _step("as shipped: store-mode status"):
-        done = _owner_cli(executable, shipped, work, "store-mode", "status", *vault_args,
+    with _step("new vault starts in file mode", fatal=True):
+        done = _owner_cli(executable, env, work, "store-mode", "status", *vault_args,
                           timeout=timeout)
-        _note(f"{_owner_json(done, 'store-mode status')}")
-    with _step("as shipped: store-mode migrate --dry-run meets the release fence or passes"):
-        done = _owner_cli(executable, shipped, work, "store-mode", "migrate", "--dry-run",
-                          *vault_args, timeout=timeout)
-        if done.returncode != 0 and "VAULT_STORE_NOT_RELEASED" not in done.stderr:
-            raise RuntimeError(
-                f"preflight refused for another reason ({done.returncode}): {done.stderr[-2000:]}"
-            )
-        _note(f"exit {done.returncode}: {(done.stderr or done.stdout).strip()[-600:]}")
+        result = _owner_json(done, "store-mode status")
+        if result.get("mode") != "file":
+            raise RuntimeError(f"the vault already switched modes: {result!r}")
     with _step("owner enrols the collection store: exomem collections create"):
         manifest = work / "store-enrolment.md"
         manifest.write_text(_STORE_ENROLMENT_MANIFEST, encoding="utf-8")
         done = _owner_cli(
-            executable, shipped, work, "collections", "create",
+            executable, env, work, "collections", "create",
             "--manifest-path", _STORE_ENROLMENT_PATH, "--manifest-file", str(manifest),
             "--why", "enrol the vault's collection store", *vault_args,
             timeout=slow, operator=True, wait_for_lease=True,
@@ -2263,7 +2197,7 @@ def _prepare_store_mode(
             raise RuntimeError(f"enrolment did not admit the store: {result!r}")
     with _step("owner builds the sidecars: exomem maintain --reconcile"):
         done = _owner_cli(
-            executable, shipped, work, "maintain", "--reconcile", "--json", timeout=slow
+            executable, env, work, "maintain", "--reconcile", "--json", timeout=slow
         )
         result = _owner_json(done, "maintain --reconcile")
         if not result.get("success"):
@@ -2289,16 +2223,6 @@ def _prepare_store_mode(
         if result.get("mode") != "store":
             raise RuntimeError(f"the vault is not in store mode after migration: {result!r}")
         _note(f"{result}")
-    with _step("as shipped: a service start on the store-mode vault meets the serve fence"):
-        # With stdin closed, a service that starts reads end-of-file and exits cleanly.
-        done = _owner_cli(executable, shipped, work, "--transport", "stdio",
-                          timeout=slow, stdin=subprocess.DEVNULL)
-        if done.returncode != 0 and "VAULT_STORE_NOT_SERVED" not in done.stderr:
-            raise RuntimeError(
-                f"service start failed for another reason ({done.returncode}): "
-                f"{done.stderr[-2000:]}"
-            )
-        _note(f"exit {done.returncode}: {done.stderr.strip()[-600:]}")
 
 
 def _require_store_mode(args: argparse.Namespace, env: dict[str, str]) -> None:
@@ -3400,14 +3324,11 @@ def _publish_parent_phase_timings(
 
 
 @contextlib.contextmanager
-def _store_mode_rig(tmp: Path, home: Path, vault: Path, python: Path, work: Path, timeout: float):
+def _store_mode_rig(home: Path, vault: Path, python: Path, work: Path, timeout: float):
     """Start the loopback writer-lease coordinator that store mode needs, and stop it on exit.
 
     Yields the rig that every child process of the arm receives.
     """
-    rollout = tmp / "rollout"
-    rollout.mkdir()
-    (rollout / "sitecustomize.py").write_text(_ROLLOUT_OVERRIDE, encoding="utf-8")
     reservation = _reserve_port_reservations(1)[0]
     port = int(reservation.getsockname()[1])
     url = f"http://127.0.0.1:{port}"
@@ -3439,7 +3360,7 @@ def _store_mode_rig(tmp: Path, home: Path, vault: Path, python: Path, work: Path
                 log=log_path,
                 label="store-mode lease coordinator",
             )
-            yield _StoreRig(coordinator_url=url, rollout_dir=rollout)
+            yield _StoreRig(coordinator_url=url)
         finally:
             _terminate(coordinator, timeout)
 
@@ -3656,7 +3577,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 )
 
         rig_manager = (
-            _store_mode_rig(tmp, home, vault, python, work, args.request_timeout)
+            _store_mode_rig(home, vault, python, work, args.request_timeout)
             if args.store_mode
             else contextlib.nullcontext(None)
         )
@@ -3667,7 +3588,6 @@ def _orchestrate(args: argparse.Namespace) -> int:
                 common.extend([
                     "--store-mode",
                     "--coordinator-url", rig.coordinator_url,
-                    "--rollout-dir", str(rig.rollout_dir),
                 ])  # fmt: skip
             if args.store_mode:
                 generic_branch()
@@ -3753,7 +3673,6 @@ def main() -> int:
         "at the end, and exit 1 when a step failed or was blocked",
     )
     parser.add_argument("--coordinator-url", default="", help=argparse.SUPPRESS)
-    parser.add_argument("--rollout-dir", default="", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.store_mode and not args.step_report:
         parser.error("--store-mode needs --step-report, which holds its results")
@@ -3767,7 +3686,7 @@ def main() -> int:
         )  # fmt: skip
         _JOURNAL = _Journal(Path(args.step_report), keep_going=args.store_mode, phase=phase)
     if args.coordinator_url:
-        _STORE_RIG = _StoreRig(args.coordinator_url, Path(args.rollout_dir))
+        _STORE_RIG = _StoreRig(args.coordinator_url)
     if args.installed_stdio:
         return _installed_stdio(args)
     if args.installed_http:

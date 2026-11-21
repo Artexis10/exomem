@@ -292,6 +292,8 @@ In store mode, every reader of graph rows SHALL read the store's rows through th
 ### Requirement: A store-mode vault says so beside the vault
 Activation SHALL record its store-mode claim in the collection store's `store_meta` and publish it before the transaction that installs the store's rows, and rollback SHALL remove it in the transaction that records file mode. Every decision to enter or leave store mode SHALL carry a number that is one above the largest number that the deciding root sees, under the lease, in its own store and in the replica under the vault; the larger number SHALL be the newer decision, a tie SHALL go to the replica's copy, and the marker SHALL follow the newest decision. A takeover SHALL decide nothing: it SHALL merge the replica's decision into the new tenure's store so that the newest decision wins whichever root made it, it SHALL carry a replica decision that it cannot read as it stands, and it SHALL keep the claim of the root that it runs on, never the replica's. A root SHALL force the hand-back to copy the replica under the vault when its own decision is newer than the replica's, because store mode changes no collection head. `exomem store-mode migrate` SHALL check, after it takes the lease and merges the replica, that no other root's store claim stands, SHALL record and publish its claim and read it back from the replica before it installs any row, and SHALL leave the vault in file mode and remove its claim when the replica does not carry it. `exomem store-mode release --apply --claim ID --why TEXT` SHALL decide file mode over the named claim of another root, on a file-mode root while no service holds the lease, and SHALL refuse when this root holds the claim, when no store claim stands or when the id is not the standing claim; a store marker with no decision SHALL be the claim `legacy`. A holder whose claim was released or superseded SHALL read as displaced and SHALL NOT reassert it. A file-mode service on another state root SHALL read the marker from the replica, whatever store schema wrote it, when it starts and SHALL refuse with a named code, the reason and the remediation, which names the release command and the claim id, when the replica says store. An absent or unreadable replica SHALL NOT block a file-mode start, and a vault that never migrated SHALL start as before. A state root whose own store carries a newer decision than the replica's, or whose claim the replica carries, SHALL start. A decision that cannot be read, or that disagrees with the marker, SHALL leave the order unknown: it SHALL refuse on a store marker, SHALL NOT force a copy, and a takeover SHALL carry an unknown replica decision as it stands, so no publication drops it. `exomem store-mode status` and the doctor SHALL show the standing decision and whether this root holds, is displaced from or is refused by it.
 
+A store-mode root SHALL refuse to serve when its claim is displaced or the decision order is unknown. The refusal SHALL name the offline rollback with `--export-held`. An unknown decision SHALL direct the owner to a compatible build first.
+
 #### Scenario: Another state root refuses a store-mode vault
 - **WHEN** a vault is migrated into store mode and a file-mode service starts on another state root over the same vault
 - **THEN** the service refuses to start with `VAULT_STORE_ELSEWHERE` and names the rollback and the release command with the claim id
@@ -329,8 +331,13 @@ Activation SHALL record its store-mode claim in the collection store's `store_me
 - **THEN** the replica says file, the root starts, and a wrong claim id refuses without a change
 
 #### Scenario: A holder that returns after a release is displaced
-- **WHEN** the released holder takes the lease again
-- **THEN** the replica stays clear, status shows it displaced, and its rollback decides nothing over the release
+- **WHEN** the released holder starts or reports its status
+- **THEN** the service refuses with `VAULT_STORE_CLAIM_DISPLACED` and status shows it displaced
+- **AND** its offline rollback decides nothing over the release
+
+#### Scenario: The active store cannot read the standing decision
+- **WHEN** a store-mode root starts and either decision cannot be ordered
+- **THEN** the service refuses with `VAULT_STORE_CLAIM_UNKNOWN` and names a compatible build
 
 #### Scenario: A replica that has the marker and no decision is released as the legacy claim
 - **WHEN** the replica says store without a decision, the root has none, and the owner runs `exomem store-mode release --apply --claim legacy`
