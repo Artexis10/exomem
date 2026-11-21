@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; content outside the managed Knowledge Base stays read-only.
 metadata:
-  skill_contract: 2599a3be6252a403dabb5c088df1ae7b819d3e86492b8eab75a3c058fcc6a653
+  skill_contract: 13f2f3bdccbc02af2645d3ea2f636eb2e292eebf666aa0332c115dfe23ed82d8
   version: "0.32.0"
 ---
 
@@ -196,9 +196,11 @@ A landing includes a durable conclusion, a recurring entity with reusable facts,
 a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
 and diagnosed failure route respectively to a how-to note, experiment, and failure.
-A landing also includes a held view (attributed, with its uncertainty, not as fact), a
-question left open (as an open question, not a person's unsure report of an event),
-and settled values (in full, not file pointers). Mid-thought exploration, tentative events, and incidental names stay unwritten, and no write mentions them.
+A landing also includes, saved at its true strength (never more certain, more general
+or more settled than its source made it), a held view or an unsure report (attributed,
+with its uncertainty, never as fact), a question left open (as an open question,
+including whether something happened), and settled values (in full, not file pointers).
+Mid-thought exploration and incidental names get no note, and no write mentions them.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a

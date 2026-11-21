@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 2599a3be6252a403dabb5c088df1ae7b819d3e86492b8eab75a3c058fcc6a653
+  skill_contract: 13f2f3bdccbc02af2645d3ea2f636eb2e292eebf666aa0332c115dfe23ed82d8
   version: "0.1.0"
 ---
 
@@ -77,9 +77,11 @@ is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative events stay quiet. Durable interpretations retain explicit
-attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
+collection. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Durable
+interpretations retain explicit attribution and uncertainty rather than becoming
+established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
@@ -90,11 +92,13 @@ Before choosing a destination, partition the exchange into independently reusabl
 objects by retrieval question, subject/domain, temporal episode, and epistemic
 role. Reuse current relevant recall and resolve each meaningful cluster against
 canonical homes. The open note has no priority; keep details within one coherent
-scope together. Preserve durable hypotheses and held views as attributed, uncertain
-claims, not as fact; at a stepping stone also save a question the work leaves open (as
-an open question, including whether something happened) and settled values (in full,
-not file pointers). A person's unsure report of an event is a tentative event,
-unwritten unless a collection offers a note field for it; no write mentions what stays unwritten.
+scope together. Save each claim at its true strength, never more certain, more general
+or more settled than its source made it. A held view, interpretation or working hypothesis
+the evidence does not settle is saved attributed to whoever holds it, with its uncertainty,
+never as fact; a remark made in passing is not a held view. A person's unsure report that
+later work could use is saved as unsure and attributed, never as an event, fact or baseline.
+Also save a question the work leaves open (as an open question, including whether something
+happened) and settled values (in full, not file pointers). No write mentions what stays unwritten.
 Perform one completeness/destination review for the whole write plan, not a new
 review after every write. During development, repository/specification artifacts
 carry transient progress; capture reusable decisions and verified milestones.

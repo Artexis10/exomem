@@ -204,10 +204,15 @@ _WORKING_SET_MAX_CHARS = 6000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in at most 1,320
-# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
-# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+# The server sends its live capture policy at most once per session or policy change. Its `say` text
+# renders in at most this many characters, above the longest the server sends today, so later server growth
+# within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
+# spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say` as one
+# product block. The server's text was about 800 characters when this was set; this is 25% above that. A
+# longer text is omitted whole, never cut, and never takes room from `say`.
+_CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
@@ -1790,19 +1795,25 @@ def _capture_policy_text(block: object) -> str:
     """The served capture policy under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
+    `say` renders first and alone within its cap; `rules`, the full capture rule, follows it when it fits
+    its own cap.
     """
     say = block.get("say") if isinstance(block, dict) else None
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
-    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
-        return text
-    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
-    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
-    # with the live disposition as one sentence; its first sentence end is the cut.
-    lead = say.strip().split(". ", 1)[0]
-    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
-    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
+    if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+        # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+        # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+        # with the live disposition as one sentence; its first sentence end is the cut.
+        lead = say.strip().split(". ", 1)[0]
+        text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+        if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+            return ""
+    rules = block.get("rules")
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        text += f"\n{rules.strip()}"
+    return text
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
