@@ -3522,12 +3522,13 @@ class EpistemicGraphIndex:
                 return None
             if residue and not self.apply_adopted_residue(residue):
                 return None
-            sealed: _GraphStartupState | None = initial
+            sealed = initial
             if residue:
                 freshness.mark_external_pending(self.vault_root, paths=residue)
-                sealed = self._startup_state()
-                if sealed is None:
+                refreshed = self._startup_state()
+                if refreshed is None:
                     return None
+                sealed = refreshed
             observation = freshness.external_observation_stamp()
             _admit_startup_source(self.vault_root)
         # The completed cold proof can bind a current marker or a held topology.
