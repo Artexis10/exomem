@@ -33,7 +33,7 @@ provenance ref that produced it, whole items only under
 `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 6,000) with trailing items dropped
 rather than one cut in half. The stance and skills blocks have their own bounds
 beside that ceiling, and each renders whole once a session. The recorded positions
-block has its own bound too, and renders on each turn that carries it. An `ambiguous` abstention is the one abstention it
+block has its own bound too, renders on each turn that carries it, and leads the rest. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -2674,7 +2674,10 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     skills_text = _format_skills_block(packet.get("skills"))
     profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
     positions_text = _format_positions_block(packet.get("positions"))
-    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, positions_text, turn, action)
+    # The positions lead, after the fixed protocol reset, as they lead the service's response. Replays of that response
+    # on a leading yes/no question opened every first answer with the person's position when its block came first,
+    # and in 1 of 8 when it came last. Do not move it back.
+    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
     return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 
