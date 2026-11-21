@@ -208,7 +208,8 @@
 - [x] 4.2 Turn the watcher into the manifest importer: hash the touched file on each event and every stored file on a periodic sweep; import a rename whose bytes match as a governed move.
   - Evidence (served): in a served process the importer imports an outside edit of a page, an outside rename of a binary and an outside picture, which gains its sidecar page (`tests/test_vault_store_served.py::test_the_importer_settles_outside_edits_renames_and_media_in_a_served_process`). A busy boundary leaves a path unjudged for the next event or sweep (`BOUNDARY_BUSY`). One hold settles units until `projector.HOLD_BUDGET_SECONDS` (0.25 s) has passed: an outside edit of 32 pages took 7 or 8 holds of 306 ms (median of three runs, 294 to 311 ms; longest 347 ms).
 - [x] 4.3 Import clean outside edits behind the base-revision check; hold concurrent edits and outside deletes as corrections for review. Record each held item once per path.
-- [ ] 4.4 List held items in the review tool and resolve each with keep-mine or keep-store in the repair tool: keep-mine adopts the person's current file behind a store-revision check; keep-store saves the person's bytes to a dated folder outside the vault first; one audit row per resolution; ship before 4.2 and 4.3 import.
+- [x] 4.4 List held items in the review tool and resolve each with keep-mine or keep-store in the repair tool: keep-mine adopts the person's current file behind a store-revision check; keep-store saves the person's bytes to a dated folder outside the vault first; one audit row per resolution; ship before 4.2 and 4.3 import.
+  - Done (#2616): `vault_store/held.py` lists held items through `read_review mode=held` and resolves each with keep-mine or keep-store through `repair_memory held-resolve`. keep-mine checks the store revision first, keep-store exports the person's bytes outside the vault first, and each resolution writes one audit row (`tests/test_vault_store_held.py`).
 
 ## 5. Stage 2: semantic units and canonicity
 
@@ -238,6 +239,18 @@
   - Done: the startup media pass gives a media file that arrived on disk its companion page in a served store-mode process. Its commit guard held the vault boundary on the starting thread around the sidecar commit, which then hopped from under it and refused with `HopUnderBoundary`, so the file got no page. `media_processing._committing` now runs each guarded unit that commits a sidecar (`reconcile_media`, `process_container`, `mark_processing_unavailable`) on the store thread there (`vault_store.media.holding_boundary`), and a busy boundary holds the pass's cursor as other contention does. Evidence: `tests/test_vault_store_served.py::test_a_served_start_gives_a_media_file_dropped_on_disk_its_companion_page`, which fails on the earlier code with that refusal.
 
 ## 7. Acceptance and switch
+
+Switch path (owner decision, 2026-11-21). The owner's vault switches (7.4) when all of these hold:
+- 7.1 passes on a disposable copy of the owner's vault, including the hard kills that close 2.4;
+- 7.2 passes on an installed wheel, and 7.3 passes against the store-mode build;
+- on that copy, a store-mode save is no slower than a file-mode save (2.2), measured on the same instrument; the work toward the one-second save continues after the switch;
+- a release lifts the gate: `VAULT_STORE_V1` joins the released capabilities, and `availability.require_servable` serves a released store-mode vault. Store mode is still entered only by the explicit `exomem store-mode migrate`, file mode stays the default, and migrate refuses on Windows until 6.3 passes.
+
+These do not gate the owner's switch:
+- the restricted-caller read budgets in 3.2, because no restricted caller reads the owner's vault; they gate store mode as a default for other vaults;
+- 6.3 (native Windows), because the owner's vault runs on Linux;
+- 5.1 to 5.4 (stage 2), 6.2 (Cloud cells), 8.1 and 8.2;
+- the Left items of 2.5 and 3.1, which are old debt or affect neither the owner's vault nor its served answers.
 
 - [ ] 7.1 Rehearse on a disposable copy of a real vault: the replayed write stream, hard kills, the recall canary cases and the graph-lane cases.
   - Progress (2026-11-16): on a copy of about 14,500 pages, `store-mode migrate` applied and the whole-table check against a fresh derivation found 0 differences across 15 tables, with integrity `ok`. No run has yet reached the store-mode answers, the kills or the rollback. Those runs led to the driver's replica adoption, its release of a copy's standing store claim, its 30 s lease term and its `--long-step-seconds` bound.
