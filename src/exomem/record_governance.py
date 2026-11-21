@@ -184,18 +184,20 @@ def _bounded_enum_fields(
     declarations: Iterable[tuple[list[str], list[Any] | tuple[Any, ...]]],
 ) -> tuple[list[dict[str, Any]], bool]:
     fields: list[dict[str, Any]] = []
-    truncated = False
     remaining = collections.ENUM_CHOICES_WIRE_BYTES
-    for path, choices in declarations:
-        if len(fields) >= collections._MAX_SCHEMA_FIELDS:
+    for index, (path, choices) in enumerate(declarations):
+        if index >= collections._MAX_SCHEMA_FIELDS:
             return fields, True
         overhead = len(json.dumps(path)) + len('{"path":,"choices":},')
         selected, size = collections.enum_choices_for_wire(choices, remaining - overhead)
         if selected:
             fields.append({"path": path, "choices": selected})
             remaining -= size + overhead
-        truncated |= len(selected) != len(choices)
-    return fields, truncated
+        # Stop at the first partial declaration. An omitted value may cost more
+        # to encode than the remaining budget and may recur through YAML aliases.
+        if len(selected) != len(choices):
+            return fields, True
+    return fields, False
 
 
 def _inspection_enum_fields(value: Any) -> dict[str, Any] | None:

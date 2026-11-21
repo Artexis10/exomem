@@ -2278,6 +2278,39 @@ def _log_held_files(tmp_path: Path) -> list[Path]:
     return sorted(directory.glob("*.md")) if directory.is_dir() else []
 
 
+def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_file = fixture / "_collection.md"
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace(
+            "      items:\n        type: object\n",
+            '      items:\n        type: object\n        properties:\n'
+            '          band: {type: enum, enum: [blue short, green short, "needs\\nreview", "red|blue", 42]}\n',
+        ),
+        encoding="utf-8",
+    )
+    _activity_log(tmp_path)
+    manifest = _manifest(tmp_path, fixture)
+    row = {"movement": "Row", "band": "not\ndeclared", "repetitions": "18"}
+    with pytest.raises(collections.CollectionError) as caught:
+        records.append_record(
+            tmp_path, manifest.path, why="record a training session",
+            item={"occurred_on": "2026-08-03", "title": "Pull", "status": "completed", "movements": [row]},
+            expected_container_hash=record_formats.load_adapter(tmp_path, manifest).read().source_versions[-1].hash,
+        )
+
+    error = caught.value
+    assert error.code == "SCHEMA_ENUM"
+    assert error.details["field"] == "movements[0].band"
+    assert error.details["allowed"] == ["blue short", "green short"]
+    arguments = records.resume_with("append", error.details["held"]["held_id"], error.details["issues"])
+    assert list(arguments["item"]) == ["movements"]
+    arguments["item"]["movements"] = [{**row, "band": error.details["allowed"][1]}]
+    assert records.append_record(tmp_path, manifest.path, why="correct the band", **arguments)["outcome"] == "committed"
+
+
 def test_a_child_row_carrying_the_row_delimiter_is_addressed_and_held(tmp_path: Path) -> None:
     """A grammar token is a representability failure of that strategy.
 
