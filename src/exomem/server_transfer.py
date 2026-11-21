@@ -142,12 +142,31 @@ def _preserve_under_guard(
         raw_protection=bool(kwargs.get("raw_protection")),
     )
     limit = kwargs["max_bytes"]
-    with upload_stage.stage(
-        vault_root, stream, limit=limit, too_large=lambda: preserve_module.too_large(limit),
-        pooled=preserve_module.pools_evidence_original(vault_root, artifact.name),
-    ) as staged:
-        with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
-            return preserve_stream(vault_root, staged=staged, **kwargs)
+
+    def attempt() -> Any:
+        with upload_stage.stage(
+            vault_root, stream, limit=limit, too_large=lambda: preserve_module.too_large(limit),
+            pooled=preserve_module.pools_evidence_original(vault_root, artifact.name),
+        ) as staged:
+            with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
+                return preserve_stream(vault_root, staged=staged, **kwargs)
+
+    return _restaged_once(attempt, stream)
+
+
+def _restaged_once(attempt: Any, stream: Any) -> Any:
+    """Run one stage-and-commit attempt; when an identical upload published the shared original first, run it once more.
+
+    The second stage confirms that winner before the boundary, so nothing hashes under it. One rerun is enough:
+    once a winner exists, a later stage confirms it instead of racing it.
+    """
+    from . import add as add_module
+
+    try:
+        return attempt()
+    except add_module.PooledOriginalRaceLost:
+        stream.seek(0)
+        return attempt()
 
 
 def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
@@ -186,27 +205,31 @@ def _capture_source_under_guard(
     kind is recorded as `unclassified` rather than refused.
     """
     source_type = add_module.capture_kind(vault_root, source_type, unattended=True)
-    with upload_stage.stage(
-        vault_root, stream, limit=max_bytes,
-        too_large=lambda: ValueError("TOO_LARGE: upload exceeds the configured limit"),
-        pooled=_source_pools_original(add_module, vault_root, filename),
-    ) as staged:
-        with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
-            return add_module.add(
-                vault_root,
-                source_schema,
-                content="",
-                title=title,
-                source_type=source_type,
-                domain=domain,
-                artifact=add_module.SourceArtifact(
-                    staged_path=staged.path,
-                    filename=filename,
-                    content_type=content_type,
-                    staged=staged,
-                ),
-                raw_protection=raw_protection,
-            )
+
+    def attempt() -> Any:
+        with upload_stage.stage(
+            vault_root, stream, limit=max_bytes,
+            too_large=lambda: ValueError("TOO_LARGE: upload exceeds the configured limit"),
+            pooled=_source_pools_original(add_module, vault_root, filename),
+        ) as staged:
+            with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
+                return add_module.add(
+                    vault_root,
+                    source_schema,
+                    content="",
+                    title=title,
+                    source_type=source_type,
+                    domain=domain,
+                    artifact=add_module.SourceArtifact(
+                        staged_path=staged.path,
+                        filename=filename,
+                        content_type=content_type,
+                        staged=staged,
+                    ),
+                    raw_protection=raw_protection,
+                )
+
+    return _restaged_once(attempt, stream)
 
 
 def _source_pools_original(add_module: Any, vault_root: Path, filename: str) -> bool:

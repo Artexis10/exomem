@@ -195,6 +195,13 @@ class AddError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+class PooledOriginalRaceLost(AddError):
+    """An identical upload published the shared original first, so this filing's stage is no longer the winner.
+
+    A fresh stage confirms that winner before the boundary; the upload doors run it once more.
+    """
+
+
 @dataclass(frozen=True)
 class SourceArtifact:
     """Bytes being captured as a Source, already staged on readable disk.
@@ -370,8 +377,8 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
         try:
             prepared.publish()
         except original_pool.PublicationRace:
-            raise AddError(code="MUTATION_BUSY", missing=[],
-                           reason="an identical upload was stored at the same moment; retry") from None
+            raise PooledOriginalRaceLost(code="MUTATION_BUSY", missing=[],
+                                         reason="an identical upload was stored at the same moment; retry") from None
 
     return publish
 
