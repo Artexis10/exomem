@@ -303,7 +303,8 @@ def _record_damage(conn: sqlite3.Connection, replica: originals.StoredObject, le
     that is quarantined moves to the new cause in the same transaction. A row that kept the old cause would outlive the
     record that a release of the new one removes, and no gate would then see it. A repeated finding changes nothing, so
     it reads no row. A wrong plaintext also records the ciphertext digest, which a later finding of another cause on the
-    version keeps, and renews the digest's own generation, the one that a release of the ciphertext compares.
+    version keeps, and renews the digest's own generation, the one that a release of the ciphertext compares. The caller
+    holds the write lock: the cause read here is the one the upsert replaces, and no finding lands between the two.
     """
     before = conn.execute("SELECT level, failure FROM media_damaged_versions WHERE store = ? AND object = ? "
                           "AND version = ?", (replica.store, replica.object, replica.version)).fetchone()
@@ -335,6 +336,7 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
     """
     now, changed = time.time(), False
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")  # a read does not begin a transaction: `_record_damage` reads, then writes, under it
         _record_damage(conn, replica, level, failure)
         for binary_rel in binary_rels:
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
