@@ -607,14 +607,16 @@ def load_editable(
 
     append_only = in_append_only_tree(rel_path)
     if append_only is not None:
+        from . import source_corrections
+
+        # A captured Source has a governed correction; other append-only material keeps the general advice.
+        route = source_corrections.correction_route(vault_root, rel_path) or (
+            "Add a corrective source instead, or compile a downstream note that supersedes the framing."
+        )
         raise EditError(
             code="INVALID_EDIT",
             missing=["path"],
-            reason=(
-                f"{rel_path} is in {append_only}/, which is append-only "
-                "(SKILL.md rule 2). Add a corrective source instead, or compile "
-                "a downstream note that supersedes the framing."
-            ),
+            reason=f"{rel_path} is in {append_only}/, which is append-only (SKILL.md rule 2). {route}",
         )
 
     try:
