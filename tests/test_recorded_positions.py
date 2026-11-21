@@ -428,6 +428,25 @@ def test_a_policy_that_tightens_before_terminal_egress_does_not_serve_more_than_
     assert all(view not in json.dumps(packet) for view in views)
 
 
+def test_a_count_of_units_left_out_of_a_page_the_policy_then_withholds_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit counted but not named has no served line, so the terminal recheck skipped its page and `omitted: 1` still said it existed.
+
+    The one position here is longer than the guest's 600-character excerpt bound; the page's ceiling then drops to none.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. " * 12
+    _lead, page = _lead_linking_to_a_long_page(vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n")
+    _withhold(vault, page, ceiling=egress.LEVEL_EXCERPT)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page, after_compile=lambda: _withhold(vault, page, ceiling=0))
+
+    packet = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert len(long_view) > egress.PAGE_EXCERPT_MAX
+    assert packet["positions"]["state"] == "unavailable"
+    assert packet["positions"]["omitted"] == 0
+
+
 def test_the_positions_block_leads_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A later refactor that puts the block back at the end or mid-packet loses the first-answer effect measured in replays."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")

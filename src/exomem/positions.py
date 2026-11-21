@@ -113,26 +113,27 @@ def compile_block(
     Every outcome is pinned for terminal egress, so an empty or unavailable block reaches the wire with its own
     state and reason.
     """
-    block, served = _compile(root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today())
-    _pin(root, caller, block, served)
+    block, served, counted = _compile(root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today())
+    _pin(root, caller, block, served, counted)
     return block
 
 
 def _compile(
     root: Path, caller: Any, *, reach: Collection[str], query: str, snapshot: Any, today: date,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
+    """The block, the units it serves in full, and the pages of the units it only counts."""
     limit = _limit(root)
     if limit == 0:
-        return _empty(reason="disabled"), []
+        return _empty(reason="disabled"), [], set()
     parents = {path for path in reach if caller.sees(path)}
     if not parents:
-        return _empty(), []
+        return _empty(), [], set()
     registry = semantic_language_registry.load_admitted(root) or semantic_language_registry.core_registry()
     categories, kinds = registry.categories_with(TRAIT), registry.kinds_with(TRAIT)
     if not categories and not kinds:
-        return _empty(), []
+        return _empty(), [], set()
     if working_set.budget_exhausted("working_set.positions"):
-        return _empty("unavailable", "budget"), []
+        return _empty("unavailable", "budget"), [], set()
     from . import context_task
     from .structured_filters import IndexCandidateClause
 
@@ -157,9 +158,9 @@ def _compile(
         )
     if result.readiness.status == lexstore.DEADLINE_STATUS:
         working_set.note_stopped("working_set.positions")
-        return _empty("unavailable", "budget"), []
+        return _empty("unavailable", "budget"), [], set()
     if not result.readiness.complete:
-        return _empty("unavailable", "lane_failed"), []
+        return _empty("unavailable", "lane_failed"), [], set()
     hits = list(result.value or ())
     page_dates = {hit.parent_path: hit.parent_updated for hit in hits}
     types = note_types.Basis(root)
@@ -179,7 +180,7 @@ def _compile(
         )
     except working_set_currency.CurrencyUnavailable:
         # A page resolution changed while the units were read; the turn may retry, so say so rather than empty.
-        return _empty("unavailable", "currency"), []
+        return _empty("unavailable", "currency"), [], set()
     order = {item.ref: index for index, item in enumerate(admitted)}
     current = session_units.current(admitted, basis, today=today)
     # `read_page` serves a restricted caller at most the page's excerpt bound of the page's text, so the units served
@@ -192,7 +193,7 @@ def _compile(
     block = _empty()
     served: list[dict[str, Any]] = []
     leftover: list[working_set.LaneItem] = []
-    unreadable = 0
+    unreadable: list[working_set.LaneItem] = []
     for item, review_due in _ranked(current.items, query, page_dates, order):
         page_bound = page_bounds.get(item.path)
         if page_bound == 0:
@@ -215,20 +216,22 @@ def _compile(
             leftover.append(item)
         else:
             # An excerpt-level caller cannot read a unit by ref, so a ref would be a dead end: the unit is only counted.
-            unreadable += 1
+            unreadable.append(item)
     # The references share the bound, after every line that fits.
     for item in leftover:
         refs = [*block["overflow_refs"], item.ref]
         if chars({**block, "overflow_refs": refs}) <= limit:
             block["overflow_refs"] = refs
             served.append(working_set._served_unit(item))  # noqa: SLF001 - a ref names the unit, so egress decides it
-    block["omitted"] = len(leftover) - len(block["overflow_refs"]) + unreadable
+    block["omitted"] = len(leftover) - len(block["overflow_refs"]) + len(unreadable)
+    # A count says a unit exists, so the pages of the units only counted are decided at the terminal too.
+    counted = {item.path for item in (*leftover, *unreadable) if item.ref not in block["overflow_refs"]}
     if block["items"] or block["overflow_refs"] or block["omitted"]:
         # The framing leads the block: a model reads the items in the light of what it read first.
         block = {"about": ABOUT, **block, "state": "ready"}
     if len(hits) > ROWS_PER_RECALL:
         block.update(state="partial", reason="truncated")
-    return block, served
+    return block, served, counted
 
 
 def _ranked(
@@ -256,10 +259,10 @@ def _descending(day: str) -> tuple[int, ...]:
     return tuple(-part for part in digits) if len(digits) == 3 else (1,)
 
 
-def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]]) -> None:
+def _pin(root: Path, caller: Any, block: dict[str, Any], served: list[dict[str, Any]], counted: set[str]) -> None:
     held = principal.invocation_served()
     if held is not None:
-        held[("positions", str(root), caller.binding, _digest(block))] = (copy.deepcopy(block), copy.deepcopy(served))
+        held[("positions", str(root), caller.binding, _digest(block))] = (copy.deepcopy(block), copy.deepcopy(served), set(counted))
 
 
 def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any]:
@@ -270,23 +273,28 @@ def guard_block(root: Path, caller: Any, block: dict[str, Any]) -> dict[str, Any
     )
     if pinned is None:
         return _empty("unavailable")
-    block, served = pinned
+    block, served, counted = pinned
     if any(verdict != egress.UNIT_KEPT for verdict in egress.classify_units(root, copy.deepcopy(served), purpose=caller.purpose)):
         return _empty("unavailable")
-    if not _within_page_bounds(root, caller, block, served):
+    if not _within_page_bounds(root, caller, block, served, counted):
         return _empty("unavailable")
     return copy.deepcopy(block)
 
 
-def _within_page_bounds(root: Path, caller: Any, block: Mapping[str, Any], served: Sequence[Mapping[str, Any]]) -> bool:
+def _within_page_bounds(
+    root: Path, caller: Any, block: Mapping[str, Any], served: Sequence[Mapping[str, Any]], counted: Collection[str],
+) -> bool:
     """Whether the page bounds that hold now still admit what `_compile` served: a policy may tighten in between.
 
     `served` lists the lines first, then the refs. A page text bound of 0 admits neither, and any other bound admits
-    lines only, up to the bound in total: the compile-time rule, decided again at the terminal.
+    lines only, up to the bound in total: the compile-time rule, decided again at the terminal. A page of which a unit
+    is only counted has no served line, yet a bound of 0 there means the count would reveal that the unit exists.
     """
-    if not served:
+    if not served and not counted:
         return True
-    bounds = egress.page_text_bounds(root, {unit["provenance"]["path"] for unit in served}, purpose=caller.purpose)
+    bounds = egress.page_text_bounds(root, {unit["provenance"]["path"] for unit in served} | set(counted), purpose=caller.purpose)
+    if any(bounds[path] == 0 for path in counted):
+        return False
     spent: dict[str, int] = {}
     lines = len(block.get("items", ()))
     for index, unit in enumerate(served):
