@@ -396,7 +396,7 @@ def test_inventory_rejects_corrupt_row_authority_before_releasing_counts(vault, 
     metadata = json.loads(vault.connection.execute(
         "SELECT governance_json FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0])
     metadata["projects"] = ["different"]
-    vault.connection.execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+    vault.connection.execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                              (json.dumps(metadata), CID, KEY))
 
     with (preview_store(vault.root, vault.handle), request_scope(owner_principal()),
@@ -484,7 +484,7 @@ def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault
 
 
 def _leave_a_view_older_than_its_row(vault, monkeypatch):
-    vault.connection.execute("UPDATE items SET body='Changed in the store.' WHERE item_key=?", (KEY,))
+    vault.connection.execute("UPDATE item_rows SET body='Changed in the store.' WHERE item_key=?", (KEY,))
 
 
 def _tombstone_a_row(vault, monkeypatch):

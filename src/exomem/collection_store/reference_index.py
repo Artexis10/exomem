@@ -135,6 +135,12 @@ def maintain_many(conn, manifest, rows) -> None:
                 )
 
 
+def forget(conn, row_id: int) -> None:
+    """Drop every index entry of a retracted row, so no reference lookup finds it."""
+    if _present(conn):
+        conn.execute("DELETE FROM item_references WHERE row_id=?", (row_id,))
+
+
 def revise(conn, collection_id: str, *, dropped: tuple[str, ...],
            added: tuple, retargeted: tuple[str, ...]) -> None:
     """Keep state rows in step with a revise: removed, added and retargeted declarations."""
