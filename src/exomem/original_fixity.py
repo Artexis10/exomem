@@ -730,35 +730,37 @@ def _replica_copies(vault: Path, row: Row) -> list[dict[str, str]]:
     return found
 
 
-def _listed(vault: Path, row: Row, copy: dict[str, str]) -> originals.StoredObject | None:
-    """The replica that a candidate names, as the binding lists it now; None when the binding no longer lists it.
+def _repair_replicas(
+    vault: Path, row: Row,
+) -> tuple[dict[tuple[str, str, str] | None, tuple[originals.StoredObject, bool]], str]:
+    """Read the current binding and the damage records once before trying stored copies.
 
-    The replica and the digest that it must hash to come from one reading of the binding: a binding that names another
-    digest than the row was rebound since the row was read, and its replicas hold other bytes, so nothing here may
-    judge them against the row.
+    None is the lookup key for the eviction pointer. All candidates must come from the binding that holds the
+    row's digest. A binding with a different digest would make a good copy look damaged.
     """
-    snapshot = originals.original_state(vault, row.path)
-    if snapshot.binary_sha256 != row.sha256:
-        raise _Changed
-    if copy["source"] == MEDIA_STORE:
-        return snapshot.reference
-    return next((replica for replica in snapshot.replicas
-                 if (replica.store, replica.object, replica.version) == (copy["store"], copy["object"], copy["version"])),
-                None)
-
-
-def _replica_unusable(vault: Path, row: Row, copy: dict[str, str]) -> str | None:
-    """Why a restore does not read this replica: a reason token, or None when it may."""
-    from . import media_store
-
     from . import media_replicas
 
     try:
-        replica = _listed(vault, row, copy)
-        if replica is None:
-            return "no_longer_listed"
-        if media_replicas.has_quarantined(vault, (replica,)):
-            return "quarantined"  # a check or an earlier repair found its bytes damaged: it is not read again
+        snapshot = originals.original_state(vault, row.path)
+        if snapshot.binary_sha256 != row.sha256:
+            raise _Changed
+        versions: dict[tuple[str, str, str] | None, originals.StoredObject] = {
+            (replica.store, replica.object, replica.version): replica for replica in snapshot.replicas
+        }
+        if snapshot.reference is not None:
+            versions[None] = snapshot.reference
+        damaged = media_replicas.damaged_among(vault, versions.values())
+    except (ValueError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
+        return {}, "unreadable"
+    return {key: (replica, (replica.store, replica.object, replica.version) in damaged)
+            for key, replica in versions.items()}, "no_longer_listed"
+
+
+def _replica_unusable(vault: Path, replica: originals.StoredObject) -> str | None:
+    """Why a restore does not read this replica: a reason token, or None when it may."""
+    from . import media_store
+
+    try:
         return media_store.replica_unusable(vault, replica)
     except (ValueError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
         return "unreadable"
@@ -836,7 +838,8 @@ def _copy_parts(vault: Path, copy: dict[str, str]) -> Iterator[Iterable[bytes]]:
         yield _parts(copy_row, source.stream)
 
 
-def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | str:
+def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace, *,
+           reference: originals.StoredObject | None = None) -> Path | str:
     """Write one candidate into private state as the row's file bytes; keep it only if it hashes to the binding.
 
     Returns the staged file, or the token that says why the candidate did not verify.
@@ -846,15 +849,11 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
     if copy["source"] == KEPT_COPY:
         return _rehash_kept(vault, row, pace)
     staged = private_state.store(vault, STORE_DIRNAME) / f"{secrets.token_hex(16)}.part"
-    reference = None
     damage = None
     try:
         with open(staged, "xb") as sink:
             with archive_members.blob_writer(sink) if row.kind == BLOB else _plain(sink) as target:
-                if copy["source"] in (MEDIA_STORE, REPLICA):
-                    reference = _listed(vault, row, copy)
-                    if reference is None:
-                        raise _Unreadable("no stored version")
+                if reference is not None:
                     head = media_store.write_stored_original(
                         vault, reference, target, store=copy["store"] if copy["source"] == REPLICA else None, prove=True)
                     sha256, size = head.sha256, head.size
@@ -971,18 +970,36 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         copies = [{"source": KEPT_COPY}, *copies]  # verified by an earlier attempt: it costs no download
     # The replicas this pass named and did not restore from, with why: the route records them (D8).
     tried: list[dict[str, str]] = []
+    replica_inputs = None
+    damaged_digests: set[str] = set()
     for copy in copies:
         replica = copy["source"] in (MEDIA_STORE, REPLICA)
         downloaded = replica or copy["source"] == KEPT_COPY  # a copy that cost a download, now or before
         try:
-            if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
-                tried.append({**copy, "failed": reason})
-                continue
-            staged = _stage(vault, row, copy, pace)
+            reference = None
+            if replica:
+                if replica_inputs is None:
+                    replica_inputs = _repair_replicas(vault, row)
+                versions, unreadable = replica_inputs
+                key = None if copy["source"] == MEDIA_STORE else (copy["store"], copy["object"], copy["version"])
+                if (entry := versions.get(key)) is None:
+                    tried.append({**copy, "failed": unreadable})
+                    continue
+                reference, quarantined = entry
+                if quarantined or reference.ciphertext_sha256 in damaged_digests:
+                    tried.append({**copy, "failed": "quarantined"})
+                    continue
+                if (reason := _replica_unusable(vault, reference)) is not None:
+                    tried.append({**copy, "failed": reason})
+                    continue
+            staged = _stage(vault, row, copy, pace, reference=reference)
         except _Changed:
             result.rescheduled += 1  # The binding was rebound since the row was read: the next pass decides afresh.
             return
         if isinstance(staged, str):
+            if reference is not None and staged == "hash_mismatch":
+                # This pass already proved that this ciphertext decrypts to the wrong bytes.
+                damaged_digests.add(reference.ciphertext_sha256)
             if downloaded:
                 tried.append({**copy, "failed": staged})
             continue

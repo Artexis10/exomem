@@ -1034,7 +1034,7 @@ def _guard(vault: Path, operation: str):
 
 
 def _publishing(vault: Path, operation: str, unit: Callable[[], None], *,
-                publishing: Sequence[StoredObject] = ()) -> None:
+                publishing: Sequence[StoredObject] = (), copied_from: StoredObject | None = None) -> None:
     """Run a unit that publishes a reference (``_publish_reference``) under the vault boundary.
 
     Its sidecar commit runs on the store thread in a store-mode vault, so the unit runs there
@@ -1042,18 +1042,19 @@ def _publishing(vault: Path, operation: str, unit: Callable[[], None], *,
     reported as ``STORE_BUSY_CODE``, which returns an offload job to the queue without spending an
     attempt.
 
-    `publishing` is the stored version that the unit is about to list. The unit runs only if no finding recorded it as
-    damaged, by its name or by its ciphertext, since it was chosen; else the publication stops as busy with nothing
-    written, so the request waits for a new choice. A finding that lands after this check reaches the version through
-    its row write (`media_replicas.record`).
+    Check the versions the unit will list and the version it copied. A finding stops publication with nothing written,
+    so the request waits for a new choice. A plaintext finding that lands after the check reaches the new version
+    through its row write (`media_replicas.record`).
     """
     from . import media_replicas
     from .vault_store import media as store_media
     from .vault_store import projector
 
+    versions = (*publishing, copied_from) if copied_from is not None else publishing
+
     def checked() -> None:
-        if publishing and media_replicas.has_quarantined(vault, publishing):
-            raise MediaStoreError(STORE_BUSY_CODE, "the version to publish was found damaged")
+        if versions and media_replicas.has_quarantined(vault, versions):
+            raise MediaStoreError(STORE_BUSY_CODE, "a version needed for publication was found damaged")
         unit()
 
     try:
@@ -1800,8 +1801,8 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
             job: MediaJob | None = None) -> StoredObject | None:
     """Protect, encrypt, confirm and durably publish a bound original.
 
-    None means that the original stays local: notes and datasets are never
-    offloaded. Quota refusals raise so that the worker retains retryable demand (D10).
+    None means that offload published no copy. Notes and datasets stay local, and a damaged pointer goes to repair.
+    Quota refusals raise so that the worker retains retryable demand (D10).
     A `batch` shares its census with this member's checks; without one, each check reads its own.
     """
     if batch is not None:
@@ -1835,41 +1836,32 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
         if not snapshot.offloadable:
             return None
         if snapshot.reference is not None:
-            head = _verified_head(backend, snapshot.reference)
-            if head is not None and not head.condemned:
-                with ExitStack() as stack:
-                    source = (stack.enter_context(_open_local_original(vault, ledger._relative(path), snapshot))
-                              if snapshot.state == "cached" else None)
-                    if source is not None:
-                        _bind_pin(ledger, token, snapshot, source, job=job)
-                    if source is not None and _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+            reference = snapshot.reference
+            # A replay after a lost acknowledgement can reach a bound version. Keep it bound so repair can share
+            # one replacement across all its filings without charging the allowance for a second version.
+            if media_replicas.has_quarantined(vault, (reference,)):
+                return None
+            if (failure := _head_failure(backend, reference)) is not None:
+                _quarantine_found(vault, [ledger._relative(path)], reference, failure)
+                return None
+            with ExitStack() as stack:
+                source = (stack.enter_context(_open_local_original(vault, ledger._relative(path), snapshot))
+                          if snapshot.state == "cached" else None)
+                if source is not None:
+                    _bind_pin(ledger, token, snapshot, source, job=job)
+                    if _digest(source.stream) != ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
                         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original differs from its binding")
-                    def confirm() -> None:
-                        if source is not None:
-                            source.require_current()
-                        if original_state(vault, path) != snapshot:
-                            raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                        _publish_reference(vault, snapshot, snapshot.reference)
-                        _finish_reference(ledger, original_state(vault, path), source)
 
-                    _publishing(vault, "media_store_confirm_reference", confirm)
-                return snapshot.reference
-            # Only a definitive missing version permits removal, or a condemned one whose bytes are still here,
-            # which then go up again under a new name. Unknown, denied or timed-out HEADs propagate and retain the
-            # canonical reference, and so does a condemned version that is the only copy: it still hydrates.
-            if head is not None and snapshot.state != "cached":
-                raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the stored version is condemned and the bytes are absent")
-            absent = snapshot
+                def confirm() -> None:
+                    if source is not None:
+                        source.require_current()
+                    if original_state(vault, path) != snapshot:
+                        raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+                    _publish_reference(vault, snapshot, reference)
+                    _finish_reference(ledger, original_state(vault, path), source)
 
-            def release() -> None:
-                if original_state(vault, path) != absent:
-                    raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                assert absent.reference is not None
-                _release_name(ledger, absent.reference.object)
-                _publish_reference(vault, absent, None)
-
-            _publishing(vault, "media_store_absent_version", release)
-            snapshot = original_state(vault, path)
+                _publishing(vault, "media_store_confirm_reference", confirm, publishing=(reference,))
+            return reference
         if snapshot.state != "local":
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original bytes are absent")
         if _resident(vault, snapshot, config):
@@ -2114,6 +2106,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
                 raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
             name = _upload_name(ledger, snapshot, store_name)
             _protect(ledger, snapshot, name, uploadable=True, replica_store=store_name)
+        copied = None
         if source is not None:
             key_version = str(config["key_version"])
             head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream, snapshot.binary_size)
@@ -2135,7 +2128,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?",
                      (ledger._relative(path), name))
 
-        _publishing(vault, "media_store_replica_publish", publish)
+        _publishing(vault, "media_store_replica_publish", publish, publishing=(replica,), copied_from=copied)
     return replica
 
 
@@ -2172,10 +2165,14 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
 
     relative = ledger._relative(snapshot.path)
     outage: MediaStoreError | None = None
-    for candidate in (snapshot.reference, *snapshot.replicas):
-        if candidate is None or candidate.store == target or media_replicas.has_quarantined(vault, (candidate,)):
+    candidates = tuple(candidate for candidate in (snapshot.reference, *snapshot.replicas)
+                       if candidate is not None and candidate.store != target)
+    damaged = media_replicas.damaged_among(vault, candidates)
+    stores = originals.store_entries(config)
+    for candidate in candidates:
+        if (candidate.store, candidate.object, candidate.version) in damaged:
             continue
-        holder = originals.store_entry(config, candidate.store)
+        holder = stores.get(candidate.store)
         if holder is None or not holder.available or holder.retrieval_class != originals.IMMEDIATE:
             continue  # a retrieval that is not immediate is the owner's to ask for, never a background read
         try:
@@ -2289,6 +2286,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             name = sibling.reference.object if sibling is not None else _upload_name(ledger, snapshot, scope)
             _drop_stale_holds(ledger, snapshot, name, scope)
             _protect(ledger, snapshot, name, uploadable=sibling is None, replica_store=scope)
+        copied = None
         if sibling is not None:
             def drop_hold(failure: type[BaseException] | None, *_unused: object) -> None:
                 # A reuse that stops before it publishes must not leave this filing holding the sibling's version, which
@@ -2336,7 +2334,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             _note_replica(vault, path, replica, None if sibling is not None else time.time())
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
 
-        _publishing(vault, "media_store_replica_recopy", publish, publishing=(replica,))
+        _publishing(vault, "media_store_replica_recopy", publish, publishing=(replica,), copied_from=copied)
     return replica
 
 

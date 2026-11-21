@@ -311,7 +311,7 @@ def _descriptor(entry: dict[str, object], *, require_adapter: bool) -> tuple[dic
             invalid.append("adapter")
     if SAMPLE_BYTES_FIELD in entry:  # optional: absent is the default, a wrong value makes the store unavailable
         budget = entry[SAMPLE_BYTES_FIELD]
-        if type(budget) is int and budget >= 0:
+        if type(budget) is int and 0 <= budget < 2**63:  # SQLite binds the budget as a signed 64-bit integer.
             given[SAMPLE_BYTES_FIELD] = budget
         else:
             invalid.append(SAMPLE_BYTES_FIELD)

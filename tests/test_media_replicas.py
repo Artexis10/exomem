@@ -989,6 +989,8 @@ def test_a_store_that_spent_its_monthly_budget_is_not_sampled_until_the_next_mon
     pytest.param(None, 1024**3, True, id="absent-is-the-default-of-1-GiB"),
     pytest.param(0, 0, True, id="zero-turns-sampling-off-and-is-not-the-default"),
     pytest.param(5_000_000, 5_000_000, True, id="the-owners-figure"),
+    pytest.param(2**63 - 1, 2**63 - 1, True, id="largest-ledger-byte-count"),
+    pytest.param(2**63, 1024**3, False, id="byte-count-overflows-the-ledger"),
     pytest.param(-1, 1024**3, False, id="negative-makes-the-store-unavailable"),
     pytest.param("1GiB", 1024**3, False, id="text-makes-the-store-unavailable"),
     pytest.param(True, 1024**3, False, id="a-boolean-is-not-a-byte-count"),
@@ -1595,8 +1597,9 @@ def test_a_replica_that_went_bad_since_its_last_check_is_not_copied_it_is_quaran
     assert [item[2:] for item in _queued(vault) if item[0] == MIRROR] == [(media_replicas.REFUSED, "no_verified_source")]
 
 
+@pytest.mark.parametrize("failure", ["absent", media_replicas.PLAINTEXT_MISMATCH])
 def test_a_copy_again_publishes_nothing_when_the_replica_it_copied_was_found_damaged_meanwhile(
-        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, failure: str) -> None:
     """The copy trusted its source when it chose it: a finding since then must not reach a filing that eviction trusts."""
     relative, damaged = _replicated(vault)
     pointer = originals.original_state(vault, relative).reference
@@ -1604,21 +1607,43 @@ def test_a_copy_again_publishes_nothing_when_the_replica_it_copied_was_found_dam
     _damage_a_byte(_stored_file(mirrored, damaged))
     _due_again(vault)
     media_replicas.check(vault)
-    copy = media_store._copy_ciphertext
+    upload = media_store.FilesystemStore.upload
 
-    def source_found_wrong_after_the_copy(*arguments):
-        copied = copy(*arguments)
-        media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
-                                  failure=media_replicas.PLAINTEXT_MISMATCH)
-        return copied
+    def source_found_wrong_after_the_upload(store, *args, **kwargs):
+        version = upload(store, *args, **kwargs)
+        level = media_replicas.DECRYPTED if failure == media_replicas.PLAINTEXT_MISMATCH else media_replicas.CONTENT
+        media_replicas.quarantine(vault, relative, pointer, level=level, failure=failure)
+        return version
 
-    monkeypatch.setattr(media_store, "_copy_ciphertext", source_found_wrong_after_the_copy)
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", source_found_wrong_after_the_upload)
 
     _recopy_all(vault)
 
     assert _entry(vault, relative, MIRROR) == damaged  # the binding is the one the finding named
     [(_store, kind, state, _code)] = [item for item in _queued(vault) if item[0] == MIRROR]
     assert (kind, state) == (media_replicas.RECOPY, media_replicas.PENDING)
+
+
+def test_first_replica_is_not_published_when_its_source_is_quarantined_after_upload(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = _preserved(vault)
+    pointer = _offload(vault, path)
+    assert media_store.evict(vault, path)
+    upload = media_store.FilesystemStore.upload
+
+    def source_found_wrong_after_the_upload(store, *args, **kwargs):
+        version = upload(store, *args, **kwargs)
+        media_replicas.quarantine(vault, path.relative_to(vault).as_posix(), pointer,
+                                  level=media_replicas.DECRYPTED, failure=media_replicas.PLAINTEXT_MISMATCH)
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", source_found_wrong_after_the_upload)
+
+    with pytest.raises(media_store.MediaStoreError) as stopped:
+        media_store.replicate(vault, path, MIRROR)
+
+    assert stopped.value.code == media_store.STORE_BUSY_CODE
+    assert originals.original_state(vault, path).replicas == ()
 
 
 def test_a_copy_that_its_source_was_found_wrong_under_while_it_was_published_is_published_quarantined(
@@ -1785,10 +1810,14 @@ def test_a_copy_again_of_a_version_that_two_filings_share_uploads_it_once_and_ke
 
 
 def test_eviction_recovers_an_absent_shared_version_at_the_existing_allowance(vault: Path, selected_store) -> None:
-    """Eviction must leave the resident filing's pointer available to repair its evicted sibling."""
+    """Eviction and a replayed offload must both leave the resident pointer available for shared repair."""
     resident = _preserved(vault, category="resident")
     source = resident.read_bytes()
-    lost = _offload(vault, resident)
+    ledger = media_jobs.MediaJobStore(vault)
+    claimed = ledger.claim_next()
+    assert claimed is not None and claimed.binary_path == resident and claimed.do_offload
+    lost = media_store.offload(vault, resident, job=claimed)
+    assert lost is not None  # Publication succeeded, but the worker stopped before acknowledging this job.
     sibling = _preserved(vault, category="sibling")
     assert _offload(vault, sibling) == lost
     assert media_store.evict(vault, sibling)
@@ -1802,6 +1831,13 @@ def test_eviction_recovers_an_absent_shared_version_at_the_existing_allowance(va
         [replica] = media_replicas.original_view(vault, filing.relative_to(vault).as_posix())["replicas"]
         assert replica["state"] == media_replicas.QUARANTINED
         assert replica["finding"]["failure"] == "absent"
+
+    assert ledger.recover_interrupted() == 1
+    replayed = ledger.claim_next()
+    assert replayed is not None and replayed.binary_path == resident
+    assert media_store.offload(vault, resident, batch=media_store.OffloadBatch(vault), job=replayed) is None
+    ledger.complete_offload(replayed)
+    ledger.complete(replayed)
 
     _recopy_all(vault)
 

@@ -240,7 +240,7 @@ A replica whose binding cannot be read, that its binding no longer lists, or who
 
 ### Requirement: A sampled check decrypts a replica within a monthly budget
 
-The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL compare the plaintext with the binding's `binary_sha256` and `binary_size`. Each store's sampled checks SHALL stay within a monthly byte budget. The descriptor MAY give it as `sample_bytes_per_month`. The default SHALL be 1 GiB, and zero SHALL turn sampling off. The media ledger SHALL record the bytes spent per store and calendar month in UTC. A sample SHALL take the replica whose sample turn came longest ago, never-sampled first, among those that fit the remaining budget, and the status SHALL count the replicas skipped for size. A sample SHALL charge a replica's bytes to the month before it downloads them, so that a sample that stops part-way is still paid for, and the charge SHALL be one write that adds the bytes only while the month's spend stays within the budget, so that two runtimes cannot spend one remainder; a replica whose charge is refused SHALL be skipped for the month and not downloaded; a sample that the store refuses before it reads anything, because it cannot address the version, SHALL NOT be charged. A sample SHALL run only where checks are scheduled, by the same rule, and only for a replica that repair could read: a store whose retrieval class is `immediate`, and a key version whose identity this install can read. The status SHALL give the reason for any other replica, a store whose checks are not scheduled included. No sampled plaintext SHALL be written to disk.
+The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL compare the plaintext with the binding's `binary_sha256` and `binary_size`. Each store's sampled checks SHALL stay within a monthly byte budget. The descriptor MAY give it as `sample_bytes_per_month`. The value SHALL be an integer from 0 through 9223372036854775807. The default SHALL be 1 GiB, and zero SHALL turn sampling off. The media ledger SHALL record the bytes spent per store and calendar month in UTC. A sample SHALL take the replica whose sample turn came longest ago, never-sampled first, among those that fit the remaining budget, and the status SHALL count the replicas skipped for size. A sample SHALL charge a replica's bytes to the month before it downloads them, so that a sample that stops part-way is still paid for, and the charge SHALL be one write that adds the bytes only while the month's spend stays within the budget, so that two runtimes cannot spend one remainder; a replica whose charge is refused SHALL be skipped for the month and not downloaded; a sample that the store refuses before it reads anything, because it cannot address the version, SHALL NOT be charged. A sample SHALL run only where checks are scheduled, by the same rule, and only for a replica that repair could read: a store whose retrieval class is `immediate`, and a key version whose identity this install can read. The status SHALL give the reason for any other replica, a store whose checks are not scheduled included. No sampled plaintext SHALL be written to disk.
 
 A sample that cannot complete, or that the key refuses, SHALL be recorded as a finding that is not damage and SHALL NOT quarantine the replica. A binding that cannot be read now SHALL NOT mark the replica as one that no sample can read. A sample SHALL be tried again after a bounded delay.
 
@@ -284,6 +284,12 @@ A quarantine whose ciphertext matched its record and whose plaintext differed (`
 - **WHEN** a replica in the store serving eviction is damaged while the local original is intact, and eviction or a check reads it
 - **THEN** the pointer is quarantined and the status reports the finding
 - **AND** the worker uploads a new version from the local original, and the binding's pointer names it
+
+#### Scenario: An interrupted offload still has a pointer
+
+- **WHEN** an offload resumes after publishing a version that a check or eviction has since found damaged
+- **THEN** offload leaves the pointer in place for the repair worker
+- **AND** it does not charge the allowance for a second copy
 
 #### Scenario: An evicted original with a second replica
 
@@ -354,7 +360,7 @@ A quarantine whose ciphertext matched its record and whose plaintext differed (`
 
 #### Scenario: The source of a copy is found damaged before it publishes
 
-- **WHEN** a copy again has copied a replica, or chosen a replacement, and a finding records that version before the publication
+- **WHEN** a first replica or a repair has copied a replica, or a repair has chosen a replacement, and a finding records that version before publication
 - **THEN** the publication stops as busy, the binding is unchanged, and the request stays pending
 
 #### Scenario: The source of a copy is found wrong while the copy publishes

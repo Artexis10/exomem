@@ -1638,7 +1638,7 @@ def _charge(conn: sqlite3.Connection, store: str, month: int, size: int, budget:
         "INSERT INTO media_replica_samples(store, month, bytes) SELECT :store, :month, :size "
         "WHERE :budget IS NULL OR :size <= :budget "
         "ON CONFLICT(store, month) DO UPDATE SET bytes = bytes + excluded.bytes "
-        "WHERE :budget IS NULL OR bytes + excluded.bytes <= :budget",
+        "WHERE :budget IS NULL OR bytes <= :budget - excluded.bytes",
         {"store": store, "month": month, "size": size, "budget": budget}).rowcount)
 
 

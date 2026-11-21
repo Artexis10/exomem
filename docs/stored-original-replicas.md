@@ -44,7 +44,8 @@ Set these two environment variables on the service to change them:
 Each store has a monthly byte budget for sampled decrypt checks.
 Set `sample_bytes_per_month` in the store's entry of the `stores` list.
 The default is 1 GiB (1073741824). The value `0` turns sampling off for that store.
-A negative value, or text, makes the store unavailable and the status names the field.
+Use an integer from 0 through 9223372036854775807, the media ledger's largest byte count.
+An invalid value makes the store unavailable and the status names the field.
 
 1. Open the media store configuration of your vault.
 2. In the entry of the store, add the field. For example: `"sample_bytes_per_month": 5000000000`.
