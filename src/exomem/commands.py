@@ -8434,7 +8434,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
         raw, _guard = read_guarded_text(vault_root, page)
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
-    frontmatter, stored, _ = parse_frontmatter(markdown_lf(raw) if timed else raw)
+    frontmatter, stored, _ = parse_frontmatter(markdown_lf(raw))
     first = (
         transcript_passages.source_text(stored, media_sidecar=bool(frontmatter.get("media_type")))
         if timed else _preserve_module().extracted_text(stored)
@@ -8447,8 +8447,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
         return result
     # The public reader and search both use CommonMark's physical line endings.
     served = markdown_lf(body)
-    comparable_stored = markdown_lf(stored)
-    if served != comparable_stored and served != provenance_module.withheld_prose(comparable_stored, owner_path=path):
+    if served != stored and served != provenance_module.withheld_prose(stored, owner_path=path):
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result

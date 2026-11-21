@@ -36,6 +36,7 @@ from .vault import (
     MISSING_CONTENT_HASH,
     PlannedWrite,
     content_hash,
+    markdown_lf,
     parse_frontmatter,
     read_frontmatter_header,
     read_guarded_text,
@@ -488,7 +489,7 @@ def _by_stat(memo: dict[Path, tuple[tuple[int, int, int], int]], path: Path, mea
 
 def _part_text(vault_root: Path, page: Path, number: int) -> str:
     raw, _guard = read_guarded_text(vault_root, part_path(page, number))
-    return text_of_part(raw)
+    return text_of_part(markdown_lf(raw))
 
 
 def _part_length(vault_root: Path, page: Path, number: int) -> int:
@@ -531,21 +532,21 @@ def _bounds(vault_root: Path, page: Path, first: str, count: int) -> list[int]:
 def stored_parts(
     vault_root: Path,
     page: str,
-    content: str,
     *,
+    first: str,
+    count: int,
     pending: Mapping[str, str] = MappingProxyType({}),
     folder: str | None = None,
 ) -> tuple[tuple[int, str, int], ...]:
     """`(number, text, start)` of each further part of the extraction on `page`, for a catalog.
 
-    `page` is the vault-relative path of the Source page and `content` its text. A part is
-    one the page lists (2 up to its `extraction_parts`) that carries `part_of`, the rule every
+    `page` is the vault-relative Source path, `first` its normalized first extraction part,
+    and `count` the declared part count. A part is one the page lists that carries `part_of`, the rule every
     reader that folds parts applies; the run stops at the first part that is missing or is not
     one, so no part after a gap gets in. `start` is where the part starts in the whole stored
     text. `pending` holds the text of the pages a batch is about to write, by vault-relative
     path; `folder` is where the parts are now when the page is about to move away from them.
     """
-    count = count_of(parse_frontmatter(content)[0])
     if count < 2:
         return ()
     location = Path(folder) if folder is not None else folder_for(Path(page))
@@ -558,10 +559,11 @@ def stored_parts(
                 raw, _guard = read_guarded_text(vault_root, vault_root / relative)
             except (OSError, ValueError):  # a guard refusal or bad UTF-8 is a part that does not read
                 break
+        raw = markdown_lf(raw)
         if "part_of" not in parse_frontmatter(raw)[0]:
             break
         texts.append(text_of_part(raw))
-    starts = bounds_of(len(preserve.extracted_text(content)), (len(text) for text in texts))
+    starts = bounds_of(len(first), (len(text) for text in texts))
     return tuple((number, text, starts[number - 1]) for number, text in enumerate(texts, 2))
 
 

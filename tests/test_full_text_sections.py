@@ -451,6 +451,31 @@ def test_a_multipart_source_offset_opens_after_a_carriage_return_in_the_preamble
     assert opened["window"]["part"] == 1 and opened["body"] == quote
 
 
+def test_a_part_two_search_offset_ignores_preserved_notes_after_a_carriage_return(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    first = "[0:03] We inspected the gate."
+    quote = "The cerulean forklift needs a wider turn."
+    source.write_bytes((
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n## Extracted text\n\n"
+        f"{first}\r{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\r"
+        "## Preserved notes\r\rThe reader should skip this long caption when placing part two.\r"
+    ).encode())
+    part.write_text(
+        f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{quote}\n",
+        encoding="utf-8",
+    )
+
+    hit = next(hit for hit in find_module.find(vault, query=quote, mode="keyword") if hit.path == path)
+    opened = commands.op_read_memory(vault, path=path, offset=hit.passage["offset"])
+
+    assert hit.passage["offset"] == len(first)
+    assert hit.matched_part == opened["window"]["part"] == 2
+    assert hit.passage["text"] == opened["body"] == quote
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path

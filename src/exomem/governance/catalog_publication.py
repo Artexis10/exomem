@@ -520,20 +520,20 @@ def catalog_item(
                 )
             )
         )
+        part_count = extraction_parts.count_of(parsed.frontmatter)
+        multipart = part_count > 1
+        first = preserve.extracted_text(parsed.body) if multipart else ""
         parts = extraction_parts.stored_parts(
-            vault_root, path, source, pending=pending, folder=part_folder
+            vault_root, path, first=first, count=part_count, pending=pending, folder=part_folder
         )
-        head = preserve.extracted_text(source) if parts else ""
+        head = first if parts else ""
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
-            part_count = extraction_parts.count_of(parsed.frontmatter)
-            multipart = part_count > 1
             text = transcript_passages.source_text(
                 parsed.body, multipart=multipart, media_sidecar=bool(parsed.frontmatter.get("media_type")),
             )
             coverage = projected_retrieval.timed_source_coverage(text, multipart=multipart)
-            # Multipart offsets must agree with the document reader that placed later parts.
-            if coverage is not None and (not multipart or text == (head if parts else preserve.extracted_text(source))):
+            if coverage is not None:
                 if parsed.frontmatter.get("source_identity") is not None:
                     # The existing Source eraser cannot account for this bank.
                     fields["source_erasure"] = "managed"
