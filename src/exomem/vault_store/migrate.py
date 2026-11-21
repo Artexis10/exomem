@@ -258,11 +258,11 @@ def preflight(vault_root: Path) -> dict:
     mode, the vault marker and the sidecars before staging any changes.
     """
     admission.require_owner(vault_root, "store-mode migrate")
-    if not capability.vault_store_migration_platform_supported():
+    if platform_refusal := capability.vault_store_migration_platform_refusal():
         raise OpError(
-            "VAULT_STORE_WINDOWS_UNSUPPORTED",
-            "store-mode migration is not yet supported on Windows. A file-mode vault stays in file mode.",
-            "To switch, run `exomem store-mode migrate --dry-run` on Linux or macOS with the vault and its store.",
+            platform_refusal,
+            "store-mode migration is not yet supported on Windows",
+            "Keep using this vault in file mode. Windows migration support follows NTFS acceptance.",
         )
     if not capability.vault_store_enabled():
         raise OpError(

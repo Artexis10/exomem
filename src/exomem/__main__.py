@@ -2513,7 +2513,7 @@ def _store_mode_main(argv: list[str]) -> int:
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
             "collection store and back. File mode is the default. The explicit migrate command "
-            "enables store mode on Linux and macOS without rewriting vault files. "
+            "enables store mode without rewriting vault files. "
             "`relayout --plan` reads the vault and writes nothing."
         ),
     )
@@ -2521,7 +2521,7 @@ def _store_mode_main(argv: list[str]) -> int:
     status = subcommands.add_parser("status", help="report the mode and, in store mode, the store's counts")
     migrate = subcommands.add_parser(
         "migrate",
-        help="stage, verify and install the store (Linux and macOS); run --apply with the service stopped "
+        help="stage, verify and install the store. Run --apply with the service stopped "
         "and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
     )
     migrate_step = migrate.add_mutually_exclusive_group(required=True)

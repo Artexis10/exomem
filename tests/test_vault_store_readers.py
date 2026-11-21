@@ -63,7 +63,7 @@ from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.kbdir import managed_join
-from exomem.vault_store import availability, importer, ownership, read, write
+from exomem.vault_store import importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
@@ -1503,8 +1503,6 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
-    # The session past the rollout fence, which refuses a store-mode vault on this build.
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))

@@ -2146,7 +2146,7 @@ def _owner_cli(
             check=False,
             stdin=stdin,
         )
-        # The coordinator documents this code for a lease that another holder has not released.
+        # The owner CLI prints this fixed error code when another holder has not released the lease.
         held = "COLLECTION_STORE_SERVICE_ACTIVE" in done.stderr
         if not (wait_for_lease and held and time.monotonic() < deadline):
             break

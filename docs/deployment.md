@@ -914,13 +914,14 @@ not turn the vault's summary collections back on.
 
 ### Store mode for vault pages
 
-New vaults start in file mode. On Linux or macOS, an owner can move a vault's
-pages and indexes into its existing collection store. The service reads the
-pages from SQLite and projects them back to Markdown. Native Windows
-migration is unavailable. An existing store-mode vault can still serve reads
-or roll back there.
+New vaults start in file mode. An owner can opt in with `exomem store-mode migrate`.
+Store mode uses SQLite as the source for vault pages and indexes. The service
+projects the stored pages back to Markdown. Migration has been tested on
+Linux. Windows migration awaits NTFS acceptance.
 
-Use a loopback lease coordinator with `EXOMEM_WRITER_LEASE_TOPOLOGY=single-host`.
+Use an existing collection store and a loopback lease coordinator with
+`EXOMEM_WRITER_LEASE_TOPOLOGY=single-host`. Upgrade every host that can open the
+vault to a build that checks the vault's store-mode marker before migration.
 Keep the service's vault, state root, and lease environment in your shell.
 Start the service once to build the indexes, then stop it and set
 `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`.
@@ -929,6 +930,10 @@ Start the service once to build the indexes, then stop it and set
 2. Run `exomem store-mode migrate --apply --why 'Enable store mode'` to move the vault.
 3. Run `exomem store-mode status` and check for `mode=store`.
 4. Start the service on the same state root so it serves the stored pages.
+
+CLI subcommands that read or write vault pages directly, such as
+`collections adopt-local`, refuse with `VAULT_STORE_CLI_REFUSED`
+in store mode. Use the service operation named in the refusal when available.
 
 To return to files, stop the service. From a directory outside the vault, run
 `exomem store-mode rollback --apply --export-to ./store-mode-export --why 'Return to file mode'`.

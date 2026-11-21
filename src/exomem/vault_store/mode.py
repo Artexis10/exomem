@@ -230,7 +230,8 @@ def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
     A file-mode vault reports the mode, migration gate and vault-side marker. The gate says
-    whether this build and platform allow migration. Migration preflight checks the vault. A crash
+    whether this build and platform allow migration. ``migration_refusal`` names a platform refusal
+    when present. Migration preflight checks the vault. A crash
     window reports its own state. A store-mode vault adds the figures that an operator checks before
     a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
     queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
@@ -255,10 +256,11 @@ def status(vault_root: Path) -> dict:
     """
     from . import marker
 
-    can_migrate = (
-        capability.vault_store_enabled() and capability.vault_store_migration_platform_supported()
-    )
+    platform_refusal = capability.vault_store_migration_platform_refusal()
+    can_migrate = capability.vault_store_enabled() and platform_refusal is None
     report: dict = {"gate": "on" if can_migrate else "off"}
+    if platform_refusal:
+        report["migration_refusal"] = platform_refusal
     # A damaged manifest raises here, so the command refuses and names it.
     recorded = state_migration.vault_store_recorded(vault_root)
     try:

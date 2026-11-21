@@ -113,7 +113,9 @@ ACCESS: dict[str, Declaration] = {
     # `collections` is one parser whose subcommands differ in what they touch, so each declares its own access.
     "collections backup": _NONE,
     "collections adopt-local": _pages(
-        "Call `inspect_memory` with operation `maintenance.adopt_local` to preview recovery."),
+        "Call `inspect_memory` with operation `maintenance.adopt_local` to preview recovery. "
+        "Call `manage_memory` with the same operation to apply it.",
+    ),
     "collections create": _pages(),
     "collections rollback": _pages(),
     "collections migrate": _pages(),
