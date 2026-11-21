@@ -16,6 +16,7 @@ NOT raise.
 - **WHEN** `EXOMEM_DIARIZE` is set and the diarizer sidecar venv is provisioned
 - **THEN** the extraction process gives the isolated sidecar the audio path and an output-file path
 - **AND** the sidecar writes `{"turns": [{"start", "end", "label"}, …]}` JSON to the output file
+- **AND** each turn has finite, ordered timestamps and a nonempty string label
 - **AND** the main process parses it into `[(start, end, raw_label)]` and feeds it to the unchanged
   named-attribution path
 

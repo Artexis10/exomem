@@ -38,6 +38,7 @@ import functools
 import itertools
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -1075,6 +1076,22 @@ def _diarizer_child_env() -> dict[str, str]:
     return env
 
 
+def _read_diarizer_turns(path: Path) -> list[tuple[float, float, str]]:
+    data = json.loads(path.read_text(encoding="utf-8"))["turns"]
+    if not isinstance(data, list):
+        raise ValueError("diarizer turns must be an array")
+    turns = []
+    for turn in data:
+        start, end = _seconds(turn["start"]), _seconds(turn["end"])
+        label = turn["label"]
+        if start is None or end is None or not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
+            raise ValueError("diarizer turn must have finite, ordered timestamps")
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError("diarizer turn must have a speaker label")
+        turns.append((start, end, label))
+    return turns
+
+
 def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
     """Read speaker turns from the isolated sidecar, or return None for a plain transcript."""
     py = _diarizer_sidecar_python()
@@ -1122,8 +1139,7 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
             )
             return None
         try:
-            turns = json.loads(out_path.read_text(encoding="utf-8"))["turns"]
-            return [(float(t["start"]), float(t["end"]), str(t["label"])) for t in turns]
+            return _read_diarizer_turns(out_path)
         except Exception:  # noqa: BLE001 — missing/garbled output must soft-fail to plain ASR
             if session is not None:
                 session.close()
