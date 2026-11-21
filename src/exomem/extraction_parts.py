@@ -479,7 +479,7 @@ def text_with_gaps(vault_root: Path, page: Path, content: str) -> str:
 
 
 #: Cache part lengths only while the file generation or canonical stored hash verifies the bytes.
-_LENGTHS: dict[Path, tuple[PathGuard, int]] = {}
+_LENGTHS: dict[tuple[Path, str], tuple[PathGuard, int]] = {}
 #: Part counts used for ordinary search candidate folding, keyed by the Source file's stat.
 _COUNTS: dict[Path, tuple[tuple[int, int, int], int]] = {}
 #: Each memo is emptied once it holds this many pages.
@@ -515,11 +515,12 @@ def _require_part_text(raw: str) -> str:
     return part[1]
 
 
-def _part_length(vault_root: Path, path: Path, ancestors: set[PathIdentity]) -> int:
+def _part_length(vault_root: Path, relative: str, ancestors: set[PathIdentity]) -> int:
     """Measure the part or recheck the guard that authenticated its cached length."""
     from .vault_store import read
 
-    cached = _LENGTHS.get(path)
+    key = (vault_root, relative)
+    cached = _LENGTHS.get(key)
     if cached is not None:
         guard, length = cached
         if read.serves(vault_root, guard.target) == (guard.leaf_policy == "store"):
@@ -529,16 +530,16 @@ def _part_length(vault_root: Path, path: Path, ancestors: set[PathIdentity]) -> 
                 pass  # A new guarded read decides whether the replacement is a valid part.
             else:
                 return length
-        _LENGTHS.pop(path, None)
+        _LENGTHS.pop(key, None)
     try:
-        raw, guard = read_guarded_text_for_cache(vault_root, path)
+        raw, guard = read_guarded_text_for_cache(vault_root, vault_root / relative)
     except (PathGuardError, UnicodeError) as error:
         raise OSError("a declared extraction part is unreadable") from error
     length = len(_require_part_text(raw))
     if guard is not None:
         if len(_LENGTHS) >= _MEMO_MAX:
             _LENGTHS.clear()
-        _LENGTHS[path] = (guard, length)
+        _LENGTHS[key] = (guard, length)
     return length
 
 
@@ -584,7 +585,8 @@ def _bounds(vault_root: Path, page: Path, first: str, count: int, *, prefix: boo
             read.prime_page_metadata(root, (part_path(page, n).relative_to(vault_root).as_posix() for n in numbers))
             for number in numbers:
                 try:
-                    yield _part_length(root, root / part_path(page, number).relative_to(vault_root), ancestors)
+                    relative = part_path(page, number).relative_to(vault_root).as_posix()
+                    yield _part_length(root, relative, ancestors)
                 except OSError:
                     if not prefix:
                         raise
