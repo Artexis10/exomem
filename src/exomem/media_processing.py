@@ -785,11 +785,16 @@ def reconcile_all_media(
     Each artifact is independent: one unreadable or racing file is logged and
     does not prevent later candidates from converging.
     """
+    from . import media_previews
     from .vault_store.projector import BoundaryBusy
 
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
+    try:
+        media_previews.reconcile(vault)
+    except (OSError, ValueError) as error:
+        log.warning("preview reconciliation deferred (%s)", type(error).__name__)
     if originals.binding_for(vault) is not None:
         from . import media_store
 

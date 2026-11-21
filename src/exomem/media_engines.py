@@ -1,10 +1,9 @@
 """Per-engine media switches (`cloud-multimodal-processing`, "off by default on Cloud").
 
 `EXOMEM_MEDIA_ENGINES` holds the comma-separated engines this deployment runs. Unset,
-a Cloud cell runs none and every other install runs all of them, which keeps a
-personal install's behaviour. cellctl renders the variable into the cells an operator
-selects, so an engine turns on one cell at a time, and into every cell for an engine
-the operator has made the fleet default.
+a Cloud cell runs none and every other install runs the personal defaults.
+Previews require explicit selection on every install. cellctl renders the variable
+into the cells an operator selects, or into every cell for a fleet-default engine.
 
 A media kind whose extractor needs no engine (plain text, email, calendar) runs on
 the standard library and is never switched off.
@@ -30,7 +29,9 @@ DOCUMENTS = "documents"
 OCR = "ocr"
 SPEECH = "speech"
 FRAMES = "frames"
-ENGINES = (DOCUMENTS, OCR, SPEECH, FRAMES)
+PREVIEWS = "previews"
+_PERSONAL_DEFAULTS = (DOCUMENTS, OCR, SPEECH, FRAMES)
+ENGINES = (*_PERSONAL_DEFAULTS, PREVIEWS)
 #: The engines that run a model. Their text takes minutes to produce again, so a repair
 #: never reruns them (`extraction_parts.sweep`).
 MODEL_ENGINES = frozenset({OCR, SPEECH})
@@ -76,7 +77,7 @@ def _deployed_engines(env: Mapping[str, str] | None) -> frozenset[str]:
     values = os.environ if env is None else env
     raw = values.get(ENGINES_ENV)
     if raw is None:
-        return frozenset() if cloud_cell.cloud_mode_enabled(values) else frozenset(ENGINES)
+        return frozenset() if cloud_cell.cloud_mode_enabled(values) else frozenset(_PERSONAL_DEFAULTS)
     named = {part.strip().lower() for part in raw.split(",") if part.strip()}
     unknown = named.difference(ENGINES)
     if unknown:
@@ -110,11 +111,12 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
         kinds = [kind for kind in sorted(media_types.KINDS) if engine_for(kind) == engine]
         if engine not in enabled:
             out[engine] = DISABLED
-        elif engine == FRAMES:
+        elif engine in (FRAMES, PREVIEWS):
             from importlib.util import find_spec
 
             # These are the codec modules of the shipped frame reader, not model engines.
-            out[engine] = ENABLED if find_spec("av") and find_spec("PIL") else UNAVAILABLE
+            available = find_spec("PIL") and (engine == PREVIEWS or find_spec("av"))
+            out[engine] = ENABLED if available else UNAVAILABLE
         elif kinds and all(extract.dependencies_present(kind) for kind in kinds):
             out[engine] = ENABLED
         else:

@@ -47,6 +47,7 @@ ORIGINAL_POOL_OWNER = "original_pool"
 # An upload's bytes wait here, on the vault's own filesystem, between their one copy and the commit that renames them in.
 UPLOAD_STAGE_DIRNAME = "_UploadStage"
 UPLOAD_STAGE_DESCRIPTOR_ID = "upload-stage"
+MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -624,6 +625,13 @@ _REGISTRY = (
         ),
         migrates_from_vault=True,
         rebuildable=False,
+    ),
+    InternalStateDescriptor(
+        "media-previews",
+        "media_previews",
+        StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
+        trees=(MEDIA_PREVIEWS_DIRNAME,),
     ),
     InternalStateDescriptor(
         "maintenance-jobs-store",
@@ -1858,18 +1866,7 @@ def _hold_binary_file(vault_root: Path, value: object, open_source, *,
     finished = False
     try:
         with open_source as source:
-            try:
-                version = source.version
-                descriptor = source.stream.fileno()
-                digest = recorded_sha256(version)
-                if digest is None:
-                    digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
-                    if size != version.size or source.current_version() != version:
-                        raise ReservedPathLeafError("IO_REFUSED")
-                held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
-                                       digest, version.size, None, version, deadline, None, source)
-            except (OSError, held_fs.HeldFsError) as error:
-                raise ReservedPathLeafError("IO_REFUSED") from error
+            held = prove_held_binary(vault_root, value, source, recorded_sha256=recorded_sha256, deadline=deadline)
             yield held
             finished = True
     except ReservedPathLeafError:
@@ -1878,6 +1875,24 @@ def _hold_binary_file(vault_root: Path, value: object, open_source, *,
         # last byte changes nothing that was delivered and must not fail a complete response.
         if not finished:
             raise
+
+
+def prove_held_binary(vault_root: Path, value: object, source: GenericBinarySource, *,
+                      recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                      deadline: float | None = None) -> GenericFileCopy:
+    """Prove bytes through an original handle the caller already holds."""
+    try:
+        version = source.version
+        descriptor = source.stream.fileno()
+        digest = recorded_sha256(version)
+        if digest is None:
+            digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
+            if size != version.size or source.current_version() != version:
+                raise ReservedPathLeafError("IO_REFUSED")
+        return GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
+                               digest, version.size, None, version, deadline, None, source)
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
 
 
 def read_held(held: GenericFileCopy, offset: int, length: int) -> bytes:

@@ -39,7 +39,7 @@ def test_selected_cloud_cell_lists_video_and_status(vault, monkeypatch):
         tools = asyncio.run(mcp.list_tools())
         reads = next(tool for tool in tools if tool.name == "inspect_memory")
         operations = set(reads.parameters["properties"]["operation"]["enum"])
-        assert {"media.video", "media.status"} <= operations
+        assert {"media.video", "media.preview", "media.status"} <= operations
         assert "media.image" not in operations
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()

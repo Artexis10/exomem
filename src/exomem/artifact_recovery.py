@@ -9,6 +9,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
@@ -216,7 +217,8 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
 
 
 def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict,
-             allow_capture: bool) -> tuple:
+             allow_capture: bool, selected: str | None = None,
+             additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None) -> tuple:
     def fresh():
         for proof in byte_proofs.values():
             reserved_paths.require_generic_copy_source_version(proof)
@@ -225,6 +227,14 @@ def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_pr
             allowed = egress.release_allows_download(
                 root, copied.relative_path, principal=who, artifact_copy=copied
             )
+            if allowed and additional_release is not None:
+                allowed = additional_release(copied)
+            if allowed and selected is not None:
+                path, metadata = ((selected, _companion(root, selected)[1]) if selected == copied.relative_path
+                                  else _resolve(root, selected))
+                if path != copied.relative_path:
+                    raise RecoveryUnavailable
+                _descriptor(path, metadata, copied)
         after = _admission_revision(root, who, copied)
         for proof in byte_proofs.values():
             reserved_paths.require_generic_copy_source_version(proof)
@@ -250,12 +260,17 @@ def require_revision(
         raise RecoveryUnavailable
 
 
-def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict | None = None) -> tuple:
+def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict | None = None,
+                    selected: str | None = None,
+                    additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None) -> tuple:
     try:
         reserved_paths.require_current_generic_copy(copied)
     except (reserved_paths.ReservedPathLeafError, OSError) as error:
         raise RecoveryUnavailable from error
-    return _release(root, copied, who, byte_proofs={} if byte_proofs is None else byte_proofs, allow_capture=True)
+    return _release(
+        root, copied, who, byte_proofs={} if byte_proofs is None else byte_proofs, allow_capture=True,
+        selected=selected, additional_release=additional_release,
+    )
 
 
 @contextmanager
@@ -268,6 +283,7 @@ def stage(
     expected: dict | None = None,
     byte_proofs: dict | None = None,
     materialize: bool = True,
+    additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
@@ -321,7 +337,7 @@ def stage(
                     and descriptor != expected
                 ):
                     raise RecoveryUnavailable
-                require_current(root, held, who, byte_proofs=byte_proofs)
+                require_current(root, held, who, byte_proofs=byte_proofs, additional_release=additional_release)
                 if _resolve(root, selected) != (path, metadata):
                     raise RecoveryUnavailable
                 yield held, descriptor

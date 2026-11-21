@@ -2139,17 +2139,22 @@ def upsert_after_write(
 
 
 def drop_media_residue(vault_root: Path, removed_rel_paths: list[str]) -> None:
-    """Drop the speech progress and the scene frames of recordings that left these paths.
+    """Drop previews, speech progress and scene frames for filings that left these paths.
 
     A removed video drops its scene-frame derivatives: clear_scene_frames deletes the
     `<video>.frames/` jpg+sidecar pairs and their rows (recursive, idempotent). No-op (guarded
     inside clear_scene_frames) when the video never had persisted frames. Each step is
     best-effort: the removal it follows already happened.
     """
-    from . import media_types, scene_frames
+    from . import media_previews, media_types, scene_frames
 
     for rel in removed_rel_paths:
         media_type = media_types.media_type_for(rel)
+        if media_previews.supports(rel):
+            try:
+                media_previews.retire(vault_root, rel)
+            except Exception as error:  # noqa: BLE001 - preview cleanup is best-effort
+                log.warning("preview cleanup deferred (%s)", type(error).__name__)
         if media_type in {"audio", "video"}:
             # A removed recording must not leave its partial transcript in vault state.
             from . import onnx_asr_runtime

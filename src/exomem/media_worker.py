@@ -712,10 +712,20 @@ class MediaWorker:
                             if pinned else contextlib.nullcontext())
                 with contextlib.ExitStack() as held:
                     try:
-                        held.enter_context(original)
+                        source = held.enter_context(original)
                     except media_store.MediaStoreError as error:
                         outcome = _hydration_outcome(error)
                     else:
+                        if _previews_enabled(job):
+                            from . import media_previews
+
+                            try:
+                                media_previews.generate(
+                                    self._vault_root, job, source,
+                                    lambda install: self._holding_boundary("background_media_preview", install),
+                                )
+                            except Exception as error:  # noqa: BLE001 - previews cannot block extraction
+                                log.warning("media preview unavailable (%s)", type(error).__name__)
                         outcome = self._process_original(job)
             elif job.do_reembed:
                 self._run_reembed(job)
@@ -3152,6 +3162,13 @@ class MediaWorker:
 def _speech_job(job: _Job) -> bool:
     """Whether the job's extraction stage runs the speech engine, which resumes a stopped run."""
     return job.do_ocr and media_engines.engine_for(job.media_type) == media_engines.SPEECH
+
+
+def _previews_enabled(job: _Job) -> bool:
+    from . import media_previews
+
+    return (media_engines.PREVIEWS in media_engines.enabled_engines()
+            and media_previews.supports(job.binary_path))
 
 
 def _engines_loaded(job: _Job) -> list[str | None]:
