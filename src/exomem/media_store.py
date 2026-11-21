@@ -2029,7 +2029,14 @@ def unreadable_reason(vault: Path, store: str, key_version: str) -> str | None:
     check both read a replica only where this is None.
     """
     config = _settings(vault)
-    entry = originals.store_entry(config, store)
+    return replica_readability(config, originals.store_entry(config, store), key_version)
+
+
+IDENTITY_UNREADABLE = "identity_unreadable"
+
+
+def replica_readability(config: dict[str, object], entry: originals.StoreEntry | None, key_version: str) -> str | None:
+    """The read refusal, from an already read vault configuration and store descriptor."""
     if entry is None or not entry.available or connection_refusal(entry) is not None:
         return "store_unavailable"
     if entry.retrieval_class != originals.IMMEDIATE:
@@ -2037,7 +2044,7 @@ def unreadable_reason(vault: Path, store: str, key_version: str) -> str | None:
     identity = config.get("identity_path")
     if key_version != str(config.get("key_version")) or not isinstance(identity, str) \
             or not os.access(identity, os.R_OK):
-        return "identity_unreadable"
+        return IDENTITY_UNREADABLE
     return None
 
 

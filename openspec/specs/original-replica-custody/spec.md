@@ -160,14 +160,14 @@ The owner status SHALL report these values, per store and in aggregate:
 - recoverable replicas;
 - distinct failure domains, unknown when a store that holds replicas declares none;
 - the oldest verification time;
-- the replicas whose last check proved `presence`, `content` or `decrypted`, and the oldest time of each;
+- one level per replica with a successful check: the latest `presence`, `content` or `decrypted` proof, and the oldest time of each level;
 - the replicas never checked since upload or since the last rebuild that lost their history;
 - the quarantined replicas;
 - the replicas whose last check or sample attempt could not complete and found no damage, by what it found (`binding_unreadable`, `binding_lists_no_replica`, `record_invalid`, `store_read_failed`, `key_refused`);
 - the replicas of a store whose checks are not scheduled, with the reason;
 - the sampled bytes spent this month against the budget, and the replicas skipped for size.
 
-A per-original view SHALL page through results by path, and SHALL show each replica's last check, its level, any finding and any failed attempt. A paged list of findings SHALL name each quarantined replica's original, store, failed level, time and re-copy state. The aggregate SHALL be one bounded query over indexed verification state, and SHALL NOT walk the bindings. A value that the status cannot read SHALL show as unknown, never as zero. The status SHALL NOT read a store: it reports whether each store answered as itself as the background worker last observed it, with the time of that observation. A replica that is known not to survive and a replica whose custody is unstated SHALL be reported apart. A replica that a rebuild restored from its binding has no recorded upload time, and the status SHALL count it as verification time unknown. A replica that passed only a presence check SHALL NOT be reported as content-verified. The status is for the vault owner and SHALL NOT reach another audience.
+A per-original view SHALL page through results by path, and SHALL show each replica's last check, its level, any finding and any failed attempt. A paged list of findings SHALL name each quarantined replica's original, store, failed level, time and re-copy state. The aggregate SHALL read one ledger snapshot from indexed state. Its work SHALL be bounded by the stores and returned dimensions, independent of the number of replicas, queued copies and historical keys. The aggregate SHALL NOT walk the bindings. A rebuild in progress SHALL show as unknown. A completed rebuild that skipped unreadable bindings SHALL show as partial and report how many it skipped. A value that the status cannot read SHALL show as unknown, never as zero. The status SHALL NOT read a store: it reports whether each store answered as itself as the background worker last observed it, with the time of that observation. A replica that is known not to survive and a replica whose custody is unstated SHALL be reported apart. A replica that a rebuild restored from its binding has no recorded upload time, and the status SHALL count it as verification time unknown. A replica that passed only a presence check SHALL NOT be reported as content-verified. The status is for the vault owner and SHALL NOT reach another audience.
 
 #### Scenario: A lost verification table
 
@@ -175,6 +175,18 @@ A per-original view SHALL page through results by path, and SHALL show each repl
 - **THEN** the status shows every count and time as unknown
 - **AND** a background rebuild restores the table from the bindings, and the status reports the counts once it finishes
 - **AND** every replica then reads never checked until its next check
+
+#### Scenario: A newer proof replaces an earlier proof
+
+- **WHEN** a successful HEAD check follows a successful decrypt check of the same replica
+- **THEN** the status counts that replica once at the level of the HEAD check
+- **AND** when the successful proofs have the same time, the status counts the decrypt proof
+- **AND** a failed attempt leaves the last successful proof in place
+
+#### Scenario: A publication lands during a rebuild
+
+- **WHEN** a publication replaces a replica after the rebuild read its binding
+- **THEN** the rebuild keeps the published version and includes it in the counts it finalizes
 
 #### Scenario: A finding reaches the owner
 

@@ -321,25 +321,27 @@ def test_the_status_counts_protection_from_the_table_and_reads_unknown_when_the_
     assert (by_name[MIRROR]["replicas"], by_name[MIRROR]["verified_at_upload"]) == (2, 2)
     assert by_name["test-store"]["serves_eviction"] and not by_name[MIRROR]["serves_eviction"]
 
-    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as ledger, ledger:
+        [schema] = ledger.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_replicas'").fetchone()
         ledger.execute("DROP TABLE media_replicas")
     unknown = media_replicas.status(vault)
     assert (unknown["state"], unknown["stores"], unknown["totals"]) == ("unknown", None, None)
+    with closing(sqlite3.connect(path)) as ledger, ledger:
+        ledger.execute(schema)  # a legacy process can recreate the table without the projection's triggers
+    assert media_replicas.status(vault)["state"] == "unknown"
     assert media_replicas.work(vault)  # the background rebuild
     rebuilt = media_replicas.status(vault)["totals"]
     assert rebuilt["replicas"] == 4
     assert (rebuilt["never_checked"], rebuilt["checks"][media_replicas.CONTENT]["replicas"]) == (4, 0)  # no history to trust
 
 
-def test_the_status_reads_one_index_and_the_page_returns_originals_by_path(vault: Path, selected_store, mirrored: Path) -> None:
+def test_the_page_returns_originals_by_path(vault: Path, selected_store, mirrored: Path) -> None:
     for category in ("a", "b", "c"):
         _offload(vault, _preserved(vault, category=category))
     _replicate_all(vault)
     _measured(vault)
 
-    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-        plan = " ".join(row[3] for row in ledger.execute("EXPLAIN QUERY PLAN " + media_replicas._GROUPS, (202611,)))
-    assert "COVERING INDEX media_replicas_status" in plan and "TEMP B-TREE" not in plan
     first = media_replicas.page(vault, limit=2)
     second = media_replicas.page(vault, after=first["next_after"], limit=2)
     paths = [row["path"] for row in (*first["originals"], *second["originals"])]
@@ -848,6 +850,8 @@ def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_row
         7.0, media_replicas.UPLOAD_VERIFIED, 0, None, 0)
     assert media_replicas.status(vault)["state"] == "unknown"  # no sizes until the next rebuild writes them
     assert media_replicas.drain(vault) == 0  # the queue table gained its `kind` and `token` columns
+    rebuilt = _measured(vault)["totals"]
+    assert (rebuilt["replicas"], rebuilt["verification_time_unknown"]) == (2, 1)
     assert row["ciphertext_sha256"] is None  # the digest of the stored ciphertext waits for the rebuild too
 
     media_replicas.rebuild(vault)
@@ -2397,7 +2401,9 @@ def test_the_status_keeps_each_proof_level_apart_and_never_calls_a_presence_chec
         vault: Path, selected_store, tmp_path: Path) -> None:
     """A store that only echoes the digest it was given must not raise the owner's count of content-verified copies."""
     _declare(vault, selected_store, tmp_path / "mirror", head_recomputes=False)
-    _replicated(vault)
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_store.replicate(vault, original, MIRROR)
     media_replicas.rebuild(vault)
     media_replicas.check(vault)
 
@@ -2409,6 +2415,219 @@ def test_the_status_keeps_each_proof_level_apart_and_never_calls_a_presence_chec
     assert levels["test-store"][media_replicas.CONTENT] == 1  # the eviction store recomputes, so its check is content
     assert status["totals"]["checks"][media_replicas.CONTENT]["replicas"] == 1
     assert status["totals"]["never_checked"] == 0
+
+
+def test_the_status_counts_only_each_replicas_latest_successful_proof(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_store.replicate(vault, original, MIRROR)
+    media_replicas.rebuild(vault)
+
+    assert media_replicas.sample(vault) == 2
+    stats = _mirror_stats(vault)
+    assert stats["never_checked"] == 0
+    assert stats["checks"][media_replicas.DECRYPTED]["replicas"] == 1
+
+    media_replicas.check(vault)
+    stats = _mirror_stats(vault)
+    [mirror] = [item for item in media_replicas.original_view(vault, original.relative_to(vault).as_posix())["replicas"]
+                if item["store"] == MIRROR]
+    assert mirror["last_check"]["level"] == media_replicas.CONTENT
+    assert stats["checks"][media_replicas.CONTENT] == {"replicas": 1, "oldest_at": mirror["last_check"]["at"]}
+    assert stats["checks"][media_replicas.DECRYPTED] == {"replicas": 0, "oldest_at": None}
+
+    # A failed attempt changes the finding but keeps the latest successful proof. A later sample replaces that proof.
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET sample_from = 0, failure = ?", (media_replicas.READ_FAILED,))
+    assert _mirror_stats(vault)["checks"] == stats["checks"]
+    assert _mirror_stats(vault)["failed_attempts"] == [{"failure": media_replicas.READ_FAILED, "replicas": 1}]
+    assert media_replicas.sample(vault) == 2
+    stats = _mirror_stats(vault)
+    assert stats["checks"][media_replicas.CONTENT] == {"replicas": 0, "oldest_at": None}
+    assert stats["checks"][media_replicas.DECRYPTED]["replicas"] == 1
+    assert stats["failed_attempts"] == []
+
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET checked_at = decrypted_at")
+    assert _mirror_stats(vault)["checks"] == stats["checks"]  # a tie keeps the decrypt proof
+
+
+def test_the_status_tracks_current_sampling_and_key_exports_while_filings_and_jobs_change(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    media_replicas.rebuild(vault)
+    month = media_replicas._month(time.time())
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.executemany(
+            "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, state, seen, sample_month, verified_at) "
+            "VALUES (?, ?, 'object', '1', ?, ?, 0, ?, ?)",
+            [
+                ("older", MIRROR, "0", media_replicas.UPLOAD_VERIFIED, month, 2),
+                ("skipped", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, month, 3),
+                ("no-digest", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, -1, None),
+                ("prior-month", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, 200001, 4),
+                ("damaged", MIRROR, "1", media_replicas.QUARANTINED, month, 5),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?)",
+            [(MIRROR, "job", media_replicas.PENDING, media_replicas.REPLICATE),
+             (MIRROR, "repair", media_replicas.PENDING, media_replicas.RECOPY)],
+        )
+    media_replicas.confirm_key_export(vault, "1")
+    stats = _mirror_stats(vault)
+    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"]) == (5, 3, 2)
+    assert stats["verification_time_unknown"] == 1
+    assert stats["oldest_verified_at"] == "1970-01-01T00:00:02+00:00"
+    assert stats["sample"]["skipped_for_size"] == 1
+    assert stats["sample"]["not_sampled"] == [
+        {"reason": media_store.IDENTITY_UNREADABLE, "replicas": 1},
+        {"reason": media_replicas.NO_EXACT_DIGEST, "replicas": 1},
+    ]
+    assert stats["copy"] == {"queued": 1, "copied": 0, "refused": 0, "remaining": 1}
+
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("DELETE FROM media_replicas WHERE binary_rel = 'older'")
+        conn.execute("UPDATE media_replicas SET sample_month = 0 WHERE binary_rel IN ('no-digest', 'skipped')")
+        conn.execute("UPDATE media_replica_queue SET state = 'done' WHERE binary_rel = 'job'")
+        conn.execute("UPDATE media_replica_queue SET kind = 'replicate', state = 'refused' WHERE binary_rel = 'repair'")
+    stats = _mirror_stats(vault)
+    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"]) == (4, 3, 1)
+    assert stats["oldest_verified_at"] == "1970-01-01T00:00:03+00:00"
+    assert stats["sample"]["skipped_for_size"] == 0
+    assert stats["sample"]["not_sampled"] == []
+    assert stats["copy"] == {"queued": 2, "copied": 1, "refused": 1, "remaining": 0}
+    progress = media_replicas.progress(vault, MIRROR)
+    assert {key: progress[key] for key in stats["copy"]} == stats["copy"]
+
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("DELETE FROM media_key_exports WHERE key_version = '1'")
+        conn.execute("DELETE FROM media_replica_queue WHERE binary_rel = 'job'")
+    stats = _mirror_stats(vault)
+    assert (stats["recoverable"], stats["not_recoverable"]) == (0, 4)
+    assert stats["copy"] == {"queued": 1, "copied": 0, "refused": 1, "remaining": 0}
+
+
+def test_a_status_projection_upgrade_keeps_existing_proofs_exports_and_pending_copies(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, _replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault)
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET level = 'content', checked_at = 44, decrypted_at = 0 WHERE store = ?",
+                     (MIRROR,))
+        conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state) VALUES (?, 'next', 'pending')", (MIRROR,))
+    measured = _mirror_stats(vault)
+    assert measured["copy"]["remaining"] == 1
+    assert measured["checks"][media_replicas.CONTENT]["replicas"] == measured["recoverable"] == 1
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as conn, conn:
+        triggers = conn.execute("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name IN "
+                                "('media_replicas','media_key_exports','media_replica_queue')").fetchall()
+        for (trigger,) in triggers:
+            conn.execute(f"DROP TRIGGER {trigger}")
+        for table in ("media_replica_counts", "media_replica_buckets"):
+            conn.execute(f"DROP TABLE {table}")
+
+    assert media_replicas.status(vault)["state"] == "unknown"
+    assert not media_replicas.rebuild_due(vault)  # the schema upgrade backfills from the ledger; it does not walk bindings
+    assert _mirror_stats(vault) == measured
+    assert media_replicas.original_view(vault, relative)["replicas"][-1]["last_check"]["level"] == media_replicas.CONTENT
+
+
+def test_rebuild_keeps_a_replacement_published_after_it_read_the_old_binding(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, old = _replicated(vault)
+    assert media_replicas.status(vault)["state"] == "measured"
+    walk = media_store.bound_originals
+    replacement = None
+
+    def publish_during_walk(root, **options):
+        nonlocal replacement
+        for snapshot in walk(root, **options):
+            assert media_replicas.status(vault)["state"] == "unknown"
+            media_replicas.quarantine(vault, relative, old, level=media_replicas.CONTENT, failure="digest_mismatch")
+            replacement = media_store.recopy(vault, snapshot.path, MIRROR)
+            yield snapshot  # the in-flight rebuild still holds the earlier binding and its quarantined version
+
+    monkeypatch.setattr(media_store, "bound_originals", publish_during_walk)
+    media_replicas.rebuild(vault)
+
+    assert replacement is not None and replacement.version != old.version
+    assert _replica_row(vault)["version"] == replacement.version
+    stats = _mirror_stats(vault)
+    assert (stats["replicas"], stats["quarantined"], stats["verification_time_unknown"]) == (1, 0, 0)
+    assert stats["oldest_verified_at"] is not None
+
+
+def test_a_superseded_rebuild_cannot_publish_counts_over_the_newer_partial_census(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_replicas.rebuild(vault)
+    walk = media_store.bound_originals
+
+    def newer_walk(root, *, unconfirmed):
+        unconfirmed(originals.RetirementUnconfirmed(original.relative_to(root).as_posix()))
+        return iter(())
+
+    def older_walk(root, **options):
+        for snapshot in walk(root, **options):
+            with monkeypatch.context() as concurrent:
+                concurrent.setattr(media_store, "bound_originals", newer_walk)
+                media_replicas.rebuild(vault)
+            yield snapshot
+
+    monkeypatch.setattr(media_store, "bound_originals", older_walk)
+    media_replicas.rebuild(vault)
+
+    status = media_replicas.status(vault)
+    assert (status["state"], status["unread_originals"], status["totals"]["replicas"]) == ("partial", 1, 0)
+
+
+def test_owner_status_work_stays_bounded_as_the_replica_and_copy_ledgers_grow(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    media_replicas.rebuild(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    connect = ledger._connect
+
+    def add_rows(start: int, stop: int) -> None:
+        with closing(connect()) as conn, conn:
+            conn.executemany(
+                "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, state, seen, "
+                "verified_at, checked_at, level, failure) VALUES (?, ?, 'object', '1', ?, ?, 0, ?, 100, 'content', ?)",
+                [(f"filing-{i}", MIRROR, str(i), media_replicas.UPLOAD_VERIFIED, i, media_replicas.READ_FAILED)
+                 for i in range(start, stop)],
+            )
+            conn.executemany("INSERT INTO media_replica_queue(store, binary_rel, state) VALUES (?, ?, 'pending')",
+                             [(MIRROR, f"filing-{i}") for i in range(start, stop)])
+
+    steps = 0
+
+    def count() -> int:
+        nonlocal steps
+        steps += 1
+        return 0
+
+    original_connect = media_jobs.MediaJobStore._connect
+
+    def measured_connect(self, *, readonly=False):
+        conn = original_connect(self, readonly=readonly)
+        if readonly:
+            conn.set_progress_handler(count, 20)
+        return conn
+
+    monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", measured_connect)
+    add_rows(1, 11)
+    assert _mirror_stats(vault)["replicas"] == 10
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 10
+    small = steps
+
+    add_rows(11, 5011)
+    steps = 0
+    stats = _mirror_stats(vault)
+    assert stats["replicas"] == stats["copy"]["remaining"] == stats["checks"][media_replicas.CONTENT]["replicas"] == 5010
+    assert stats["failed_attempts"] == [{"failure": media_replicas.READ_FAILED, "replicas": 5010}]
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 5010
+    assert steps <= small + 10
 
 
 def test_the_status_reports_a_replica_of_an_unscheduled_store_with_the_reason_and_not_as_never_checked(
