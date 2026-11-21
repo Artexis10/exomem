@@ -6416,9 +6416,11 @@ def _postfilter(
                 purpose=(request_kwargs or {}).get("purpose"),
             )
         if "positions" in cleaned:
-            # Every other field is in place, so the block can end the response: real-model replays used the
-            # positions when they were read last and mostly passed over them mid-packet.
-            cleaned["positions"] = cleaned.pop("positions")
+            # The block leads the response. Real-model replays of two incident conversations, on a leading yes/no
+            # question that presupposes a default cause: mid-packet, the block was passed over, and last it opened
+            # the first answer in 1 of 8 replays. First, every first answer opened with the person's position
+            # (4 of 4), with no "Yes" before it. Do not move it back to the end or the middle.
+            cleaned = {"positions": cleaned.pop("positions"), **cleaned}
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):
