@@ -896,8 +896,9 @@ def preserve(
 
         effect_admitted = connector_boundary.effect_admission(vault_root)
         top_index = kb / "index.md"
-        if top_index.exists() and not raw_protection and effect_admitted(top_index):
-            current_top, _guard = read_guarded_text(vault_root, top_index)
+        top_held = store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
+        if top_held and not raw_protection and effect_admitted(top_index):
+            current_top, top_guard = read_guarded_text(vault_root, top_index)
             new_top, _trim_note = indexes._prepend_recent_activity(
                 with_newline(current_top, "\n"),
                 date_iso=date_iso,
@@ -917,11 +918,13 @@ def preserve(
                 PlannedWrite(
                     path=top_index,
                     content=new_top,
+                    # Keep the existing content-conflict exception before the guard checks.
                     expected_hash=content_hash(current_top),
+                    guard=top_guard,
                 )
             )
             writes.extend(sub_writes)
-        elif not raw_protection and not top_index.exists():
+        elif not raw_protection and not top_held:
             warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
