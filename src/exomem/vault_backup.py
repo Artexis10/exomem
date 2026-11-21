@@ -450,8 +450,10 @@ def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, 
     if not pending:
         return 0
     try:
+        # The protocol is ASCII: JSON escapes every other character of a path, and the answers are fixed tokens.
         helper = subprocess.Popen([sys.executable, "-I", "-c", _PLAIN_COPIER, _SQLITE_MAGIC.hex()], text=True,
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                  encoding="utf-8", errors="strict", stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         findings.extend({"kind": "state", "path": name, "code": "state_copy_failed"} for _, _, name in pending)
         return 0
