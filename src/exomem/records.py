@@ -4578,7 +4578,7 @@ def _validate_values(
     if not issues and manifest.storage.strategy == "markdown-items" and not manifest.derived:
         _collect_round_trip_issues(manifest, value, issues)
     if issues:
-        raise _issue_refusal(manifest, issues)
+        raise _issue_refusal(manifest, value, issues)
     return value
 
 
@@ -4614,7 +4614,9 @@ class _Issue:
         return detail
 
 
-def _issue_refusal(manifest: collections.CollectionManifest, issues: list[_Issue]) -> collections.CollectionError:
+def _issue_refusal(
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue],
+) -> collections.CollectionError:
     first = issues[0]
     details: dict[str, Any] = {}
     if first.field:
@@ -4624,7 +4626,10 @@ def _issue_refusal(manifest: collections.CollectionManifest, issues: list[_Issue
     if first.enum_choices:
         allowed, _ = collections.enum_choices_for_wire(first.enum_choices)
         tokens = record_formats.log_grammar_tokens(manifest)
-        allowed = [choice for choice in allowed if _enum_choice_can_render(manifest, tokens, first.enum_members, choice)]
+        allowed = [
+            choice for choice in allowed
+            if _enum_choice_can_render(manifest, tokens, values, first.enum_members, choice)
+        ]
         if allowed:
             details["allowed"] = allowed
     details["issues"] = [issue.as_detail() for issue in issues]
@@ -4633,15 +4638,28 @@ def _issue_refusal(manifest: collections.CollectionManifest, issues: list[_Issue
 
 def _enum_choice_can_render(
     manifest: collections.CollectionManifest, tokens: record_formats.LogGrammarTokens | None,
-    members: tuple[str, ...], choice: Any,
+    held_values: Mapping[str, Any], members: tuple[str, ...], choice: Any,
 ) -> bool:
     field = members[0]
     problems: list[_Issue] = []
     _collect_value_representation(field, field, choice, manifest.storage.item_rows, problems)
     if tokens is not None:
         if len(members) == 1:
-            if (field in tokens.heading_string_fields or field == tokens.note_field) and not isinstance(choice, str):
-                return False
+            if field == tokens.note_field:
+                if not isinstance(choice, str) or choice != choice.strip():
+                    return False
+                if any(
+                    held_values.get(name) != expected
+                    for name, expected in record_formats.log_derived_values(manifest, choice).items()
+                ):
+                    return False
+            else:
+                derived = record_formats.log_derived_values(manifest, held_values.get(tokens.note_field))
+                if field in derived:
+                    expected = derived[field]
+                    return not problems and type(choice) is type(expected) and choice == expected
+                if field not in tokens.heading_string_fields or not isinstance(choice, str):
+                    return False
             values = {field: choice}
         elif len(members) == 2 and field == tokens.container_field:
             if members[1] in tokens.child_fields and (not isinstance(choice, str) or choice != choice.strip()):

@@ -3169,6 +3169,11 @@ def log_grammar_tokens(
     )
 
 
+def log_derived_values(manifest: collections.CollectionManifest, note: object) -> dict[str, Any]:
+    """Values that the log reads from its defaults and heading note."""
+    return _status_values(manifest.storage.descriptor, note)
+
+
 def _heading_grammar(value: Mapping[str, Any]) -> _HeadingGrammar:
     if set(value) != {"level", "fields", "separator", "note"} and set(value) != {
         "level",

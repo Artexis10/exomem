@@ -2308,7 +2308,9 @@ def _declared_enum_fields(
     def visit(
         spec: collections.FieldSpec, path: list[str], members: tuple[str, ...],
     ) -> Iterator[tuple[list[str], tuple[Any, ...]]]:
-        if spec.enum and (admits is None or admits(members)):
+        if admits is not None and not admits(members):
+            return
+        if spec.enum:
             yield path, spec.enum
         if spec.type == "array" and spec.items is not None:
             yield from visit(spec.items, [*path, "items"], members)
@@ -2322,9 +2324,9 @@ def _declared_enum_fields(
 def _inspection_contract(
     manifest: collections.CollectionManifest,
     *,
-    admits_enum_path: Callable[[tuple[str, ...]], bool] | None = None,
+    admits_enum_branch: Callable[[tuple[str, ...]], bool] | None = None,
 ) -> dict[str, Any]:
-    enum_values, truncated = _bounded_enum_fields(_declared_enum_fields(manifest, admits_enum_path))
+    enum_values, truncated = _bounded_enum_fields(_declared_enum_fields(manifest, admits_enum_branch))
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,

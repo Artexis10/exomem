@@ -259,16 +259,23 @@ class FieldPlan:
 
     def admits_member_path(self, names):
         """Whether every value at a declared path is admitted, an array being walked through member by member."""
+        return whole_value(self._member_selection(names))
+
+    def intersects_member_path(self, names):
+        """Whether a declared path has any visible values or descendants."""
+        return self._member_selection(names) is not None
+
+    def _member_selection(self, names):
         chosen = self.fields
         for name in names:
             if chosen is WHOLE_SUBTREE:
-                return True
+                return chosen
             while isinstance(chosen, tuple):
                 chosen = chosen[0]
             chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
             if chosen is None:
-                return False
-        return whole_value(chosen)
+                return None
+        return chosen
 
     def binding(self, paths):
         requested = [(path,) if path in self.fields else tuple(path.split(".")) for path in paths]

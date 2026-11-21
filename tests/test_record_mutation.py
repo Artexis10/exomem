@@ -2278,6 +2278,13 @@ def _log_held_files(tmp_path: Path) -> list[Path]:
     return sorted(directory.glob("*.md")) if directory.is_dir() else []
 
 
+def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_path: Path) -> None:
+    error = _refuse_log_append(tmp_path, status="pending", note="Partial")
+
+    assert error.code == "SCHEMA_ENUM"
+    assert error.details["allowed"] == ["partial"]
+
+
 def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:
     from exomem import records
 
