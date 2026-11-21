@@ -25,7 +25,6 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from functools import partial
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, BinaryIO, Protocol
@@ -1064,12 +1063,12 @@ class OffloadBatch:
     on offload and the copy again of a damaged pointer (`recopy`) being the only writers that bind a
     version the census has not seen while the runtime serves; design.md D10 lists every writer of a
     stored reference (task 5.4.9). `charge` adds each version that a member publishes. A copy again
-    may run in another thread or process, so it cannot charge: it replaces a version in every filing
-    that holds it, which leaves the total as it was, and it notes the replacement in the ledger before
-    its first write, so that the next `usage` reads the census again. `end` drops the census so that
-    the next member reads it again, and `failed` does so only for a member that reached `charge`: a
-    refused member bound nothing, so the next one reuses the census. A stale census can wrongly refuse
-    a member, which the next scan releases, because refusals are read again from a fresh census.
+    may run in another thread or process, so it cannot charge: when it publishes a new version, it
+    notes that in the ledger before its first write, so that the next `usage` reads the census again.
+    `end` drops the census so that the next member reads it again, and `failed` does so only for a
+    member that reached `charge`: a refused member bound nothing, so the next one reuses the census.
+    A stale census can wrongly refuse a member, which the next scan releases, because refusals are
+    read again from a fresh census.
     """
 
     def __init__(self, vault: Path) -> None:
@@ -2097,52 +2096,31 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
     raise MediaStoreError(NO_VERIFIED_SOURCE, "no copy of the original verifies now")
 
 
-def _holders(ledger: MediaJobStore, reference: StoredObject) -> Iterator[str]:
-    """The filings that the replica table lists as holding `reference`, in path order, a page at a time and at most `_ALIAS_ROWS`.
+def _repaired_sibling(vault: Path, snapshot: OriginalSnapshot, damaged: StoredObject, backend: Store,
+                      config: dict[str, object]) -> OriginalSnapshot | None:
+    """The filing that already holds a replacement for `damaged`, if one stands for this filing's bytes, else None.
 
-    Read from `media_replicas_held`, so that the cost follows the filings of one version and not the table. A row can
-    lag its binding, so a caller edits only what it re-reads from the binding itself.
+    Offload's reuse rule, for a pointer of the store serving eviction: equal bytes, a live binding, a version that is not
+    quarantined, and one that the store confirms and has not condemned. The table names the filing that published the
+    replacement (`note_repair`); what it records is read again from that filing's binding and trusted no further. The caller
+    reads the binding again under the vault boundary, as offload does at its protection commit.
     """
-    after = ""
-    for _page in range(_ALIAS_ROWS // _ALIAS_PAGE):
-        with closing(ledger._connect(readonly=True)) as conn:
-            page = [row[0] for row in conn.execute(
-                "SELECT binary_rel FROM media_replicas WHERE object = ? AND version = ? AND store = ? "
-                "AND binary_rel > ? ORDER BY binary_rel LIMIT ?",
-                (reference.object, reference.version, reference.store, after, _ALIAS_PAGE))]
-        yield from page
-        if len(page) < _ALIAS_PAGE:
-            return
-        after = page[-1]
+    from . import media_replicas
 
-
-def _repoint_one(vault: Path, ledger: MediaJobStore, path: Path, damaged: StoredObject, replica: StoredObject) -> None:
-    """The guarded edit of one filing: it names `replica` instead of `damaged` if its binding still lists `damaged`."""
+    via = media_replicas.repaired_via(vault, snapshot.path.relative_to(vault).as_posix(), damaged)
+    if via is None:
+        return None
     try:
-        held = original_state(vault, path)
-    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
-        return
-    if _entry_in(held, damaged.store) != damaged:
-        return
-    _commit_reference(vault, prepare_reference(vault, held, replica))
-    _repoint_cache(vault, ledger, held, damaged, replica)
-    _note_replica(vault, path, replica, time.time())
-
-
-def _repoint_sharing(vault: Path, ledger: MediaJobStore, damaged: StoredObject, replica: StoredObject,
-                     owner: str) -> None:
-    """Replace `damaged` by `replica` in every other filing that holds it, so that one new version serves them all.
-
-    Each filing is its own guarded edit under its own hold of the vault boundary, so a repair never holds the vault
-    for the filings of one version together. A filing whose binding no longer lists `damaged`, or cannot be read, is
-    left as it is. One that the sweep does not reach keeps the damaged pointer, which the next check or eviction
-    finds and quarantines for its own copy again; the allowance counts it as the version it is, because the census
-    reads each binding, and an active batch read its census again before the first write (`_note_replacement`).
-    """
-    for relative in _holders(ledger, damaged):
-        if relative != owner:
-            _publishing(vault, "media_store_replica_recopy",
-                        partial(_repoint_one, vault, ledger, vault / relative, damaged, replica))
+        sibling = original_state(vault, vault / via)
+        reference = sibling.reference
+        if (reference is None or reference == damaged or reference.store != damaged.store
+                or reference.key_version != str(config["key_version"])
+                or (sibling.binary_sha256, sibling.binary_size) != (snapshot.binary_sha256, snapshot.binary_size)
+                or media_replicas.has_quarantined(vault, (reference,)) or not _confirmed(backend, reference)):
+            return None
+    except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, ReplicaMismatch):
+        return None
+    return sibling
 
 
 def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
@@ -2154,9 +2132,11 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
     write replaced is never overwritten. The damaged version stays in its store. Returns None when the binding no longer lists
     the entry that the table quarantined: that finding is stale and nothing is written.
 
-    A pointer of the store that serves eviction may be listed by several filings, which share one stored version and
-    count once against the allowance. The one new version then replaces it in every filing (`_repoint_sharing`), so the
-    total that the allowance counts stays as it was. A replica store has no allowance and no sharing: one filing, one copy.
+    Several filings may list one pointer of the store serving eviction, and the allowance counts that version once. They
+    are quarantined together before anything is written (`quarantine_holders`), each with its own request. A request
+    whose original names a replacement that a sibling already published points to it and uploads nothing
+    (`_repaired_sibling`), so a version is uploaded once for the filings that share it. A replica store has no allowance
+    and no sharing: one filing, one copy.
     """
     from . import media_replicas
 
@@ -2180,8 +2160,12 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             if entry.serves_eviction and snapshot.state == "cached" and not cache_matches(vault, path, snapshot=snapshot):
                 recover_cache(vault, path, snapshot)
             return None
+        sibling = None
+        if entry.serves_eviction:
+            media_replicas.quarantine_holders(vault, relative, damaged)
+            sibling = _repaired_sibling(vault, snapshot, damaged, backend, config)
         source = None
-        if snapshot.state in ("local", "cached"):  # the binding states whose bytes are on this volume: `originals` fixes them
+        if sibling is None and snapshot.state in ("local", "cached"):  # the binding states whose bytes are on this volume: `originals` fixes them
             try:
                 # Every byte is hashed here, so a source of the wrong size is judged by its digest, not refused at the open.
                 local = held.enter_context(_open_local_original(vault, relative, snapshot, check_size=False))
@@ -2197,15 +2181,21 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 source.require_current()
             if original_state(vault, path) != snapshot:
                 raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-            name = _upload_name(ledger, snapshot, scope)
-            _protect(ledger, snapshot, name, uploadable=True, replica_store=scope)
-        if source is not None:
-            key_version = str(config["key_version"])
-            head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream, snapshot.binary_size)
+            if sibling is not None and original_state(vault, sibling.path) != sibling:
+                raise MediaStoreError(STORE_BUSY_CODE, "the filing that holds the replacement changed")
+            name = sibling.reference.object if sibling is not None else _upload_name(ledger, snapshot, scope)
+            _protect(ledger, snapshot, name, uploadable=sibling is None, replica_store=scope)
+        if sibling is not None:
+            replica = sibling.reference
         else:
-            head, version, key_version = _copy_from_replica(vault, ledger, token, config, backend, name, snapshot,
-                                                            store_name)
-        replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
+            if source is not None:
+                key_version = str(config["key_version"])
+                head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream,
+                                                  snapshot.binary_size)
+            else:
+                head, version, key_version = _copy_from_replica(vault, ledger, token, config, backend, name, snapshot,
+                                                                store_name)
+            replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
         if not _confirmed(backend, replica):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
 
@@ -2221,17 +2211,19 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 # replica store collects.
                 if damaged.object != name:  # a retried copy that reuses the damaged name must not release its own
                     _release_name(ledger, damaged.object)
-                _note_replacement(ledger)  # before the write, as `OffloadBatch.charge` is: a failed write over-counts, never under
+                if sibling is None:
+                    # A new version, which the census has not seen and the filings that still list `damaged` reuse. Both
+                    # are noted before the write, as `OffloadBatch.charge` is: a failed write over-counts, never under.
+                    _note_replacement(ledger)
+                    media_replicas.note_repair(vault, relative, damaged)
                 _commit_reference(vault, prepare_reference(vault, snapshot, replica))
                 _repoint_cache(vault, ledger, snapshot, damaged, replica)
             else:
                 _commit_reference(vault, prepare_replica(vault, snapshot, replica))
-            _note_replica(vault, path, replica, time.time())
+            _note_replica(vault, path, replica, None if sibling is not None else time.time())
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
 
         _publishing(vault, "media_store_replica_recopy", publish)
-    if entry.serves_eviction:
-        _repoint_sharing(vault, ledger, damaged, replica, relative)
     return replica
 
 
@@ -3043,8 +3035,7 @@ def _evict_one(vault: Path, path: Path) -> str:
 
 
 #: The filings of a shared object that one eviction attempt looks at when its pointer is damaged: a page of this many
-#: to a transaction, for at most `_ALIAS_ROWS` filings and `_ALIAS_SECONDS` seconds. A copy again reads its filings
-#: (`_holders`) by the same page and row bounds, and has no time bound: it writes each one, so it ends only when it has.
+#: to a transaction, for at most `_ALIAS_ROWS` filings and `_ALIAS_SECONDS` seconds.
 _ALIAS_PAGE = 64
 _ALIAS_ROWS = 1024
 _ALIAS_SECONDS = 2.0

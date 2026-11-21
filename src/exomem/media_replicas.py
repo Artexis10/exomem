@@ -111,6 +111,9 @@ _ADDED_COLUMNS = (
     # because a failed attempt proves nothing and must not read as a proof.
     ("check_from", "REAL NOT NULL DEFAULT 0"),
     ("sample_from", "REAL NOT NULL DEFAULT 0"),
+    # For a quarantined row: the original that last published a new version in place of this row's, where a copy again of
+    # this row looks for it (`note_repair`). A reader re-reads that original's binding and trusts nothing recorded here.
+    ("repair_via", "TEXT"),
 )
 _STATUS_INDEX_COLUMNS = ("store", "key_version", "state", "level", "verified_at", "checked_at", "decrypted_at",
                          "sample_month")
@@ -156,8 +159,8 @@ def initialize(conn: sqlite3.Connection) -> None:
     # The same rows by the stored version, which eviction asks about before it drops an original's local bytes.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_damaged ON media_replicas(object, version) "
                  f"WHERE state = '{QUARANTINED}'")
-    # The filings that list one stored version, in path order: a copy again replaces the version in each of them.
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version, binary_rel)")
+    # The filings that list one stored version, which a copy again quarantines together (`quarantine_holders`).
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version)")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_census ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), rebuilt_at REAL NOT NULL, unread INTEGER NOT NULL)")
     if existed is None or healed:
@@ -227,7 +230,7 @@ def _upsert(seen: str) -> str:
             "ELSE excluded.verified_at END, "
             + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
             + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0") + ", "
-            + keep("check_from", "0") + ", " + keep("sample_from", "0"))
+            + keep("check_from", "0") + ", " + keep("sample_from", "0") + ", " + keep("repair_via", "NULL"))
 
 
 #: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
@@ -277,6 +280,50 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
                 changed = True
     if changed:
         wake()
+
+
+#: The rows that list one stored version in one store, bar the owner's and those already quarantined: `media_replicas_held`.
+_SHARING = "WHERE object = ? AND version = ? AND store = ? AND binary_rel <> ? AND state <> ?"
+
+
+def quarantine_holders(vault: Path, owner: str, replica: originals.StoredObject) -> None:
+    """Quarantine every other filing that lists `replica` with the owner's finding, and queue each one's copy again.
+
+    Filings of equal bytes share one stored version, so the damage is theirs too. Recording it before the owner's copy
+    publishes keeps eviction's gate, the status and a queued request for each of them across a busy boundary, a restart
+    and a rebuild. It is two statements in one transaction, each one indexed read of the filings that share the version.
+    A filing that is already quarantined keeps its own request; one that the table does not list is found by its own check.
+    """
+    now = time.time()
+    held = (replica.object, replica.version, replica.store, owner, QUARANTINED)
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        found = conn.execute(
+            "SELECT level, failure FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+            "AND state = ?", (owner, replica.store, replica.object, replica.version, QUARANTINED)).fetchone()
+        if found is None:
+            return
+        conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
+                     f"SELECT store, binary_rel, ?, ?, random() FROM media_replicas {_SHARING} "
+                     "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
+                     "code = NULL, attempts = 0, retry_at = 0, token = excluded.token", (PENDING, RECOPY, *held))
+        conn.execute("UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
+                     f"{_SHARING}", (QUARANTINED, found["level"], found["failure"], now, now, *held))
+
+
+def note_repair(vault: Path, owner: str, replica: originals.StoredObject) -> None:
+    """Name `owner` as the original that published a new version for `replica`, on every filing still quarantined for it."""
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute(f"UPDATE media_replicas SET repair_via = ? WHERE state = '{QUARANTINED}' AND object = ? "
+                     "AND version = ? AND store = ?", (owner, replica.object, replica.version, replica.store))
+
+
+def repaired_via(vault: Path, binary_rel: str, replica: originals.StoredObject) -> str | None:
+    """The original that a quarantined entry of this filing was last replaced through, or None when none is named."""
+    with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
+        row = conn.execute("SELECT repair_via FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? "
+                           "AND version = ? AND state = ?",
+                           (binary_rel, replica.store, replica.object, replica.version, QUARANTINED)).fetchone()
+    return None if row is None else row[0]
 
 
 #: Whether any of the (object, version) pairs of one JSON array is quarantined: a probe of `media_replicas_damaged`, which

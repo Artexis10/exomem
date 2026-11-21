@@ -1339,6 +1339,12 @@ def _queued(vault: Path) -> list[tuple[str, str, str, str | None]]:
         return list(ledger.execute("SELECT store, kind, state, code FROM media_replica_queue ORDER BY store"))
 
 
+def _requests(vault: Path) -> list[tuple[str, str]]:
+    """The original and the kind of each request in the copy queue."""
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        return list(ledger.execute("SELECT binary_rel, kind FROM media_replica_queue ORDER BY binary_rel"))
+
+
 def _entry(vault: Path, path: Path | str, store: str) -> originals.StoredObject:
     snapshot = originals.original_state(vault, path)
     return next(entry for entry in (snapshot.reference, *snapshot.replicas) if entry is not None and entry.store == store)
@@ -1645,9 +1651,9 @@ def _two_filings_of_one_version(vault: Path, selected_store) -> tuple[Path, Path
     return first, second, pointer
 
 
-def test_a_copy_again_of_a_version_that_two_filings_share_replaces_it_in_both_and_keeps_the_allowance(
+def test_a_copy_again_of_a_version_that_two_filings_share_uploads_it_once_and_keeps_the_allowance(
         vault: Path, selected_store) -> None:
-    """One new version for the object, not one for each filing: two would count twice against an allowance that fits one."""
+    """The second filing reuses the first's replacement: two uploads would count twice against an allowance that fits one."""
     first, second, pointer = _two_filings_of_one_version(vault, selected_store)
     size = first.stat().st_size
     _configure(selected_store, vault, allowance_bytes=size)
@@ -1662,33 +1668,92 @@ def test_a_copy_again_of_a_version_that_two_filings_share_replaces_it_in_both_an
     assert len(_objects(Path(selected_store[0]["root"]))) == 2  # the damaged version and its one replacement
 
 
-def test_a_copy_again_that_leaves_a_filing_on_the_damaged_version_ends_the_census_of_an_active_batch(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A batch keeps its census across members: a version that a copy again binds meanwhile must reach its next admission."""
+def test_a_copy_again_that_stops_after_its_first_filing_keeps_the_other_quarantined_and_ends_an_active_census(
+        vault: Path, selected_store) -> None:
+    """The record of the damage must outlive the copy that found it, and a batch's census must see the new version."""
     first, second, pointer = _two_filings_of_one_version(vault, selected_store)
     one, another = _filed(vault, 2)
-    _configure(selected_store, vault, allowance_bytes=2 * first.stat().st_size + one.stat().st_size)  # fits both versions and one member
+    size = first.stat().st_size
+    _configure(selected_store, vault, allowance_bytes=2 * size + one.stat().st_size)  # fits both versions and one member
     batch = media_store.OffloadBatch(vault)
     media_store.offload(vault, one, batch=batch)  # the batch reads its census here: one version of the shared bytes, and this member
-    publishing = media_store._publishing
-    edits = []
 
-    def boundary_busy_for_the_second_filing(root: Path, operation: str, unit) -> None:
-        edits.append(operation)
-        if len(edits) == 2:
-            raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE, "the vault boundary is busy")
-        publishing(root, operation, unit)
+    media_store.recopy(vault, first, pointer.store)  # the worker stops here: the second filing is still on the damaged version
 
-    monkeypatch.setattr(media_store, "_publishing", boundary_busy_for_the_second_filing)
-    with pytest.raises(media_store.MediaStoreError):
-        media_store.recopy(vault, first, pointer.store)
-    monkeypatch.setattr(media_store, "_publishing", publishing)
-    assert _entry(vault, second, pointer.store) == pointer  # the sweep stopped before it: two versions are bound now
-
+    assert _entry(vault, second, pointer.store) == pointer
+    assert media_replicas.has_quarantined(vault, (pointer,))  # eviction of the second filing is still refused
+    assert (second.relative_to(vault).as_posix(), "recopy") in _requests(vault)
     with pytest.raises(media_store.MediaStoreError) as refused:
         media_store.offload(vault, another, batch=batch)
-
     assert refused.value.code == media_allowance.MEDIA_ALLOWANCE_EXCEEDED
+
+    _recopy_all(vault)  # the retry: the second filing reuses the replacement and the damaged version is bound by no one
+
+    assert _entry(vault, second, pointer.store) == _entry(vault, first, pointer.store)
+    assert media_allowance.reference_usage(vault).used_bytes == size + one.stat().st_size
+
+
+@pytest.mark.parametrize("deleted", [
+    pytest.param(True, id="the-filing-of-the-replacement-was-deleted"),
+    pytest.param(False, id="the-store-condemned-it-while-it-was-bound"),
+])
+def test_a_copy_again_does_not_reuse_a_replacement_that_no_live_filing_confirms(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, deleted: bool) -> None:
+    """A condemned version is deleted by the bucket rule: a filing that took it would lose its original."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    media_store.recopy(vault, first, pointer.store)
+    replacement = _entry(vault, first, pointer.store)
+    if deleted:
+        media_store.forget_original(vault, first)
+    head = media_store.FilesystemStore.head
+
+    def condemned_replacement(self, name: str, version: str):
+        found = head(self, name, version)
+        return found if found is None or name != replacement.object else dataclasses.replace(found, condemned=True)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", condemned_replacement)
+
+    media_store.recopy(vault, second, pointer.store)
+
+    fresh = _entry(vault, second, pointer.store)
+    assert fresh.object not in {pointer.object, replacement.object}
+    assert media_store.check_replica(vault, fresh) is None  # it reads back
+
+
+def test_a_copy_again_does_not_reuse_the_version_of_a_filing_that_holds_other_bytes(
+        vault: Path, selected_store) -> None:
+    """A hint is only a place to look: the filing that it names may have been given other content since."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    stranger = _filed(vault, 1)[0]
+    stranger_pointer = _offload(vault, stranger)
+    media_replicas.quarantine_holders(vault, first.relative_to(vault).as_posix(), pointer)
+    media_replicas.note_repair(vault, stranger.relative_to(vault).as_posix(), pointer)
+
+    media_store.recopy(vault, second, pointer.store)
+
+    fresh = _entry(vault, second, pointer.store)
+    assert fresh.object not in {pointer.object, stranger_pointer.object}
+
+
+def test_a_copy_again_stops_when_the_filing_of_the_replacement_changes_before_it_publishes(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The binding is read again under the vault boundary, as offload does for the version that it reuses."""
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    media_store.recopy(vault, first, pointer.store)
+    chosen = media_store._repaired_sibling
+
+    def deleted_after_it_was_chosen(*arguments):
+        sibling = chosen(*arguments)
+        media_store.forget_original(vault, first)
+        return sibling
+
+    monkeypatch.setattr(media_store, "_repaired_sibling", deleted_after_it_was_chosen)
+
+    with pytest.raises(media_store.MediaStoreError) as stopped:
+        media_store.recopy(vault, second, pointer.store)
+
+    assert stopped.value.code == media_store.STORE_BUSY_CODE
+    assert _entry(vault, second, pointer.store) == pointer
 
 
 # --- verify-stored-replicas: what the owner sees ----------------------------------------------------------

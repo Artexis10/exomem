@@ -105,7 +105,7 @@ The `recopy` value says what the worker does about the finding:
 
 The worker writes a new version, from the local original when it still hashes to the binding, or else from another replica that is not quarantined.
 The damaged version stays in its store as an orphan. For the store that serves eviction, its name is also released for collection, unless a retried copy reuses it.
-Filings of equal bytes can share one version in the store that serves eviction, and the media allowance counts it once. The worker then writes one new version and puts it in every filing that shared the damaged one, so the allowance counts the same bytes as before.
+Filings of equal bytes can share one version in the store that serves eviction, and the media allowance counts it once. The status reports every filing that shares a damaged version as a finding. The worker writes one new version for the first of them, and the others point to it. Until each has moved, the allowance counts both versions.
 Eviction and fixity never read a quarantined replica.
 A `plaintext_mismatch` finding gets one more sample per cycle, and a sample that decrypts to the original lifts it and drops the queued copy.
 Any other finding stays until a new copy replaces the entry.
