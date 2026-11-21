@@ -82,6 +82,12 @@ def release_document(basis, who=GUEST):
 
 
 def test_inspection_only_shows_enum_choices_for_released_members(store):
+    from exomem.governance.policy import governance_root
+    from exomem.init import _SCAFFOLD
+
+    initialize_vault_state_offline(store.root, source="enum release fixture")
+    governance_root(store.root).mkdir(parents=True, exist_ok=True)
+    (governance_root(store.root) / "README.md").write_bytes((_SCAFFOLD / "_Governance/README.md").read_bytes())
     front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
     front["item_schema"]["fields"]["count"]["items"] = {
         "type": "enum", "enum": ["unused"], "classification": "location",
@@ -91,6 +97,13 @@ def test_inspection_only_shows_enum_choices_for_released_members(store):
         "properties": {
             "state": {"type": "enum", "enum": ["complete", "awaiting"]},
             "room": {"type": "enum", "enum": ["north", "south"], "classification": "location"},
+        },
+    }
+    front["item_schema"]["fields"]["visits"] = {
+        "type": "array",
+        "items": {
+            "type": "object", "classification": "location",
+            "properties": {"zone": {"type": "enum", "enum": ["near", "far"]}},
         },
     }
     text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
@@ -105,8 +118,19 @@ def test_inspection_only_shows_enum_choices_for_released_members(store):
 
     state = {"path": ["update", "properties", "state"], "choices": ["complete", "awaiting"]}
     room = {"path": ["update", "properties", "room"], "choices": ["north", "south"]}
-    assert owner["contract"]["enum_fields"] == {"values": [state, room], "truncated": False}
+    zone = {"path": ["visits", "items", "properties", "zone"], "choices": ["near", "far"]}
+    assert owner["contract"]["enum_fields"] == {"values": [state, room, zone], "truncated": False}
     assert guest["contract"]["enum_fields"] == {"values": [state], "truncated": False}
+
+    basis = owner["field_release_basis"]
+    document = yaml.safe_load(release_document(basis))
+    document["field_release"]["paths"] = [{"path": "visits", "subtree": True}]
+    proposal = govern(store, operation="propose", intent="Release the reviewed visit information",
+        documents={"grants/visit-fields.yaml": yaml.safe_dump(document)},
+        selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+    released = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
+    assert released["contract"]["enum_fields"] == {"values": [state, zone], "truncated": False}
 
 
 def test_recipient_queries_metrics_and_nested_projection_before_hidden_value_decoding(store, monkeypatch):

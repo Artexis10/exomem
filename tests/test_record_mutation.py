@@ -2247,11 +2247,12 @@ def test_the_whole_journey_runs_through_the_record_memory_surface(tmp_path: Path
 _LOG_HELD_DIRECTORY = "Knowledge Base/Records/Health/X3/Held"
 
 
-def _refuse_log_append(tmp_path: Path, **overrides: object):
+def _refuse_log_append(tmp_path: Path, *, fixture: Path | None = None, **overrides: object):
     """Refuse one X3 (Markdown-log) append and return the error."""
     from exomem import records
 
-    fixture = copy_x3_fixture(tmp_path)
+    if fixture is None:
+        fixture = copy_x3_fixture(tmp_path)
     _activity_log(tmp_path)
     manifest = _manifest(tmp_path, fixture)
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
@@ -2279,10 +2280,27 @@ def _log_held_files(tmp_path: Path) -> list[Path]:
 
 
 def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_path: Path) -> None:
-    error = _refuse_log_append(tmp_path, status="pending", note="Partial")
+    from exomem import records
+
+    fixture = copy_x3_fixture(tmp_path)
+    manifest_file = fixture / "_collection.md"
+    manifest_file.write_text(
+        manifest_file.read_text(encoding="utf-8").replace("field: note\n", "field: annotation\n"),
+        encoding="utf-8",
+    )
+    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", annotation="Partial")
 
     assert error.code == "SCHEMA_ENUM"
     assert error.details["allowed"] == ["partial"]
+    manifest = _manifest(tmp_path, fixture)
+    result = records.append_record(
+        tmp_path, manifest.path, held=error.details["held"]["held_id"],
+        item={"status": "partial"}, why="correct the derived status",
+    )
+    assert result["outcome"] == "committed"
+    readback = record_formats.load_adapter(tmp_path, manifest).read()
+    recent = next(row for row in readback.records if row.values["occurred_on"] == "2026-08-03")
+    assert recent.values["status"] == "partial"
 
 
 def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:

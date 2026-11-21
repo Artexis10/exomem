@@ -4658,15 +4658,15 @@ def _enum_choice_can_render(
                 if field in derived:
                     expected = derived[field]
                     return not problems and type(choice) is type(expected) and choice == expected
-                if field not in tokens.heading_string_fields or not isinstance(choice, str):
+                if field not in tokens.heading_string_fields or not isinstance(choice, str) or choice != choice.strip():
                     return False
             values = {field: choice}
         elif len(members) == 2 and field == tokens.container_field:
-            if members[1] in tokens.child_fields and (not isinstance(choice, str) or choice != choice.strip()):
+            if members[1] not in tokens.child_fields or not isinstance(choice, str) or choice != choice.strip():
                 return False
             values = {field: [{members[1]: choice}]}
         else:
-            values = {}
+            return False
         _collect_log_grammar_issues(tokens, values, problems)
     return not problems
 

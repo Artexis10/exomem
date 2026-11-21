@@ -2326,7 +2326,9 @@ def _inspection_contract(
     *,
     admits_enum_branch: Callable[[tuple[str, ...]], bool] | None = None,
 ) -> dict[str, Any]:
-    enum_values, truncated = _bounded_enum_fields(_declared_enum_fields(manifest, admits_enum_branch))
+    enum_values, truncated = ([], False)
+    if manifest.semantic_profile == "records":
+        enum_values, truncated = _bounded_enum_fields(_declared_enum_fields(manifest, admits_enum_branch))
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,

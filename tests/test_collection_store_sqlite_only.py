@@ -173,7 +173,10 @@ def test_plan_memory_create_makes_a_summary_collection_whose_hierarchy_and_saved
                          manifest_text=manifest_text("planning").replace(CID, ROADMAP), why="items roadmap"),
             "SQLITE_STORAGE_REQUIRED")
 
-    call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH, manifest_text=ROADMAP_TEXT,
+    roadmap_text = ROADMAP_TEXT.replace(
+        "    area: {type: string}\n", "    area: {type: string}\n    release_ring: {type: enum, enum: [pilot, general]}\n",
+    )
+    call(root, "plan_memory", action="create", manifest_path=ROADMAP_PATH, manifest_text=roadmap_text,
          why="new roadmap")
     inspected = call(root, "plan_memory", action="inspect", collection=ROADMAP_PATH)
     assert inspected["contract"]["view_mode"] == "summary"

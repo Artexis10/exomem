@@ -268,10 +268,10 @@ class FieldPlan:
     def _member_selection(self, names):
         chosen = self.fields
         for name in names:
-            if chosen is WHOLE_SUBTREE:
-                return chosen
             while isinstance(chosen, tuple):
                 chosen = chosen[0]
+            if chosen is WHOLE_SUBTREE:
+                return chosen
             chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
             if chosen is None:
                 return None
