@@ -268,34 +268,20 @@ def _vector_payload(vector: tuple[float, ...]) -> bytes:
 
 def _text_payload(measurement: projected_retrieval.ProjectionVectorMeasurement) -> bytes:
     vector = _vector_payload(measurement.vector)
-    if not measurement.passages:
-        return vector
-    output = bytearray(_TEXT_PASSAGES_PREFIX + vector)
-    for row in measurement.passages:
-        output.extend(struct.pack(">IQ", row.part, row.offset))
-        output.extend(_vector_payload(row.vector))
-    return bytes(output)
+    return (
+        _TEXT_PASSAGES_PREFIX + vector + bytes.fromhex(measurement.transcript_bank)
+        if measurement.transcript_bank is not None else vector
+    )
 
 
-def _decode_text(payload: bytes, dimension: int):
+def _decode_text(payload: bytes, dimension: int) -> tuple[tuple[float, ...], str | None]:
     size = dimension * 8
     if len(payload) == size:
-        return _decode_vector(payload, dimension=dimension), ()
+        return _decode_vector(payload, dimension=dimension), None
     prefix = len(_TEXT_PASSAGES_PREFIX)
-    row_size = 12 + size
-    span_bytes = len(payload) - prefix - size
-    if (
-        not payload.startswith(_TEXT_PASSAGES_PREFIX) or span_bytes % row_size
-        or not 1 <= span_bytes // row_size <= projected_retrieval.MAX_PROJECTED_TRANSCRIPT_SAMPLES
-    ):
-        raise MeasurementStoreMismatch("transcript measurements do not verify")
-    samples = []
-    for at in range(prefix + size, len(payload), row_size):
-        part, offset = struct.unpack_from(">IQ", payload, at)
-        samples.append(projected_retrieval.ProjectionTranscriptSample(
-            part, offset, _decode_vector(payload[at + 12:at + row_size], dimension=dimension),
-        ))
-    return _decode_vector(payload[prefix:prefix + size], dimension=dimension), tuple(samples)
+    if not payload.startswith(_TEXT_PASSAGES_PREFIX) or len(payload) != prefix + size + 32:
+        raise MeasurementStoreMismatch("transcript bank reference does not verify")
+    return _decode_vector(payload[prefix:prefix + size], dimension=dimension), payload[-32:].hex()
 
 
 def _clip_payload(
@@ -685,9 +671,9 @@ def _decode_measurement(
     try:
         if family.lane == "vector":
             assert manifest.vector_dimension is not None
-            vector, passages = _decode_text(payload, manifest.vector_dimension)
+            vector, transcript_bank = _decode_text(payload, manifest.vector_dimension)
             return projected_retrieval.ProjectionVectorMeasurement(
-                measurement_key=key, vector=vector, passages=passages,
+                measurement_key=key, vector=vector, transcript_bank=transcript_bank,
             )
         if family.lane == "clip":
             assert manifest.vector_dimension is not None

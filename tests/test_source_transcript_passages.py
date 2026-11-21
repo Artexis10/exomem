@@ -66,3 +66,12 @@ def test_literal_query_can_match_the_continuation_of_a_crlf_capture():
     assert match is not None
     assert match.timestamp == 3
     assert text[match.start:match.end] == "[0:03] [Speaker A]: First line.\nContinued."
+
+
+
+def test_legacy_block_vector_cannot_choose_one_of_multiple_turns():
+    text = "[0:03] First report.\n[0:18] Second report."
+
+    assert transcript_passages.match(
+        text, chunk=f"Meeting\n\n{text}", title="Meeting", query="what was discussed",
+    ) is None

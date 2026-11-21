@@ -1485,7 +1485,7 @@ def _find_projected_hits_pinned(
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
 
-    from .. import find_results, readiness, transcript_passages, vault
+    from .. import find_results, readiness, transcript_passages
 
     if not isinstance(runtime, ActiveProjectionRuntime):
         raise ProjectionRuntimeUnavailable(
@@ -1658,6 +1658,8 @@ def _find_projected_hits_pinned(
     lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]] = {}
     warming: set[str] = set()
     embeddings_module = None
+    query_vector = None
+    vector_index = runtime.vector_index
 
     if mode == "keyword":
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
@@ -1678,7 +1680,6 @@ def _find_projected_hits_pinned(
         )
 
     if mode in {"hybrid", "vector"}:
-        vector_index = runtime.vector_index
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             lane_hits["vector"] = ()
         elif readiness.should_defer("embeddings"):
@@ -1919,7 +1920,7 @@ def _find_projected_hits_pinned(
             hits=(),
             withheld_paths=withheld,
             warming_components=tuple(
-                lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
+                lane for lane in ("vector", "clip", "graph", "rerank", "source_passages") if lane in warming
             ),
             declared_purpose=declared_purpose,
         )
@@ -1932,12 +1933,16 @@ def _find_projected_hits_pinned(
         [weights_by_lane[lane] for lane in active_lanes],
         k=rank_config.rrf_k,
     )
-    transcript_hits = {
-        hit.item_identity: hit for hit in lane_hits.get("vector", ()) if hit.transcript is not None
-    }
+    transcript_hits = {}
     neutral_prefix = ()
-    if prefer_source_passages and mode == "hybrid" and transcript_hits:
-        candidates = sorted(
+    if prefer_source_passages and mode == "hybrid" and query_vector is not None and vector_index is not None:
+        from heapq import nsmallest
+
+        from . import transcript_banks
+
+        scores = {hit.item_identity: hit.score for hit in lane_hits.get("vector", ())}
+        candidates = nsmallest(
+            3,
             (
                 (identity, score * _projected_rank_multiplier(
                     selected_variants[identity].search_fields, rank_config, prefer_compiled=False,
@@ -1947,7 +1952,19 @@ def _find_projected_hits_pinned(
             ),
             key=lambda row: (-row[1], row[0]),
         )
-        neutral_prefix = tuple(identity for identity, _ in candidates[:3])
+        neutral_prefix = tuple(identity for identity, _ in candidates)
+        for identity in neutral_prefix:
+            if identity not in scores:
+                continue
+            try:
+                hit = vector_index.match_transcript(
+                    Path(vault_root), selected_variants[identity], query_vector, scores[identity],
+                )
+            except transcript_banks.TranscriptBankUnavailable:
+                warming.add("source_passages")
+            else:
+                if hit is not None:
+                    transcript_hits[identity] = hit
     fused = [
         (
             identity,
@@ -2184,7 +2201,7 @@ def _find_projected_hits_pinned(
         hits=tuple(hits),
         withheld_paths=withheld,
         warming_components=tuple(
-            lane for lane in ("vector", "clip", "graph", "rerank") if lane in warming
+            lane for lane in ("vector", "clip", "graph", "rerank", "source_passages") if lane in warming
         ),
         declared_purpose=declared_purpose,
         continuation=next_continuation,

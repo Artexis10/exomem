@@ -17,7 +17,7 @@ from numbers import Real
 from types import MappingProxyType
 
 from .. import bm25, transcript_passages
-from . import projection_store, projections
+from . import projection_store, projections, transcript_banks
 
 _HEX = frozenset("0123456789abcdef")
 _BM25_K1 = 1.5
@@ -263,7 +263,11 @@ def transcript_samples(
     from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
 
     # Members have an independent live authorization check at search time.
-    if variant.decision_level != 6 or variant.search_fields.get("parent_media"):
+    if (
+        variant.decision_level != 6 or variant.search_fields.get("parent_media")
+        or variant.search_fields.get("source_erasure") == "managed"
+        or not transcript_passages.is_source(variant.item_identity)
+    ):
         return ()
     parts = []
     if variant.head is not None:
@@ -275,7 +279,7 @@ def transcript_samples(
     )
     samples = []
     for part, text, base, cuts in parts:
-        for start, end, timestamp in transcript_passages.turns(text):
+        for start, end, timestamp in transcript_passages.turns(text, minimum=1):
             stored_start = _stored_position(start, cuts)
             stored_end = _stored_position(end - 1, cuts) + 1
             if stored_end - stored_start == end - start <= MAX_PASSAGE_CHARS:
@@ -284,24 +288,7 @@ def transcript_samples(
                 )))
                 if len(samples) == MAX_PROJECTED_TRANSCRIPT_SAMPLES:
                     return tuple(samples)
-    return tuple(samples)
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectionTranscriptSample:
-    part: int
-    offset: int
-    vector: tuple[float, ...]
-
-    def __post_init__(self) -> None:
-        if type(self.part) is not int or not 1 <= self.part <= _MAX_RESULTS:
-            raise projections.ProjectionCanonicalizationError("invalid projected transcript part")
-        if type(self.offset) is not int or not 0 <= self.offset < 1 << 48:
-            raise projections.ProjectionCanonicalizationError("invalid projected transcript offset")
-        vector = _vector(self.vector, "transcript measurement")
-        if not any(vector):
-            raise projections.ProjectionCanonicalizationError("empty projected transcript vector")
-        object.__setattr__(self, "vector", vector)
+    return tuple(samples) if len(samples) >= 2 else ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +297,7 @@ class ProjectionVectorMeasurement:
 
     measurement_key: projections.MeasurementKey
     vector: tuple[float, ...]
-    passages: tuple[ProjectionTranscriptSample, ...] = ()
+    transcript_bank: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.measurement_key, projections.MeasurementKey):
@@ -327,16 +314,8 @@ class ProjectionVectorMeasurement:
                 "projection vector must have non-zero magnitude"
             )
         object.__setattr__(self, "vector", vector)
-        if (
-            not isinstance(self.passages, tuple)
-            or len(self.passages) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
-            or any(not isinstance(row, ProjectionTranscriptSample) or len(row.vector) != len(vector)
-                   for row in self.passages)
-        ):
-            raise projections.ProjectionCanonicalizationError("invalid projected transcript measurements")
-        keys = tuple((row.part, row.offset) for row in self.passages)
-        if keys != tuple(sorted(set(keys))):
-            raise projections.ProjectionCanonicalizationError("projected transcript measurements are out of order")
+        if self.transcript_bank is not None:
+            _digest(self.transcript_bank, "projected transcript bank digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -627,7 +606,8 @@ def projection_text(variant: projections.ProjectionVariant) -> str:
 
 
 def searchable_text(fields: Mapping[str, str]) -> str:
-    return " ".join(fields[key] for key in sorted(fields, key=_sort_key) if key != "sources")
+    # Source attribution and custody fields affect eligibility, never search tokens.
+    return " ".join(fields[key] for key in sorted(fields, key=_sort_key) if key not in {"sources", "source_erasure"})
 
 
 def clip_variant_applicable(variant: projections.ProjectionVariant) -> bool:
@@ -903,20 +883,11 @@ class ProjectedVectorIndex:
                 raise projections.ProjectionCanonicalizationError(
                     "projected vector measurements have inconsistent dimensions"
                 )
-            if measurement.passages:
-                candidates = transcript_samples(catalog_variants[key.projection_variant_id])
-                coordinates = tuple((part, match.start) for part, match in candidates)
-                if coordinates != tuple((sample.part, sample.offset) for sample in measurement.passages):
-                    raise projections.ProjectionCanonicalizationError("transcript vectors differ from the projected Source")
-                import numpy as np
-
-                matrix = np.asarray([sample.vector for sample in measurement.passages], dtype=np.float32)
-                norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-                if not np.all(np.isfinite(norms) & (norms > 0)):
-                    raise projections.ProjectionCanonicalizationError("transcript vector magnitude is invalid")
-                matrix /= norms
-                matrix.flags.writeable = False
-                self._transcripts[key.projection_variant_id] = (candidates, matrix)
+            if measurement.transcript_bank is not None:
+                variant = catalog_variants[key.projection_variant_id]
+                if variant.decision_level != 6 or not transcript_passages.is_source(variant.item_identity):
+                    raise projections.ProjectionCanonicalizationError("transcript bank is outside its Source")
+                self._transcripts[key.projection_variant_id] = measurement.transcript_bank
             by_variant[key.projection_variant_id] = measurement.vector
         self._measurements = MappingProxyType(by_variant)
         self._dimension = dimension
@@ -965,14 +936,7 @@ class ProjectedVectorIndex:
                 left * right
                 for left, right in zip(query, measurement, strict=True)
             ) / (query_magnitude * measurement_magnitude)
-            transcript = None
-            if passage_bank := self._transcripts.get(variant.projection_variant_id):
-                candidates, matrix = passage_bank
-                similarities = matrix @ query
-                index = int(similarities.argmax())
-                score = max(score, float(similarities[index]) / query_magnitude)
-                transcript = candidates[index]
-            scored.append((variant, score, transcript))
+            scored.append((variant, score))
         scored.sort(
             key=lambda item: (
                 -item[1],
@@ -981,9 +945,32 @@ class ProjectedVectorIndex:
             )
         )
         return tuple(
-            _projected_hit(variant, score, transcript=transcript)
-            for variant, score, transcript in scored[:limit]
+            _projected_hit(variant, score)
+            for variant, score in scored[:limit]
         )
+
+
+    def match_transcript(
+        self, root, variant: projections.ProjectionVariant, query_vector: tuple[float, ...], score: float,
+    ) -> ProjectedLexicalHit | None:
+        """Verify and score the bank of one already admitted, competitive Source."""
+        digest = self._transcripts.get(variant.projection_variant_id)
+        if digest is None:
+            return None
+        import numpy as np
+
+        candidates = transcript_samples(variant)
+        query = np.asarray(query_vector, dtype=np.float32)
+        matrix = transcript_banks.load(root, digest, candidates, len(query))
+        norms = np.linalg.norm(matrix, axis=1) * np.linalg.norm(query)
+        if not len(norms) or not np.all(np.isfinite(norms) & (norms > 0)):
+            raise transcript_banks.TranscriptBankUnavailable("invalid projected transcript bank")
+        similarities = (matrix @ query) / norms
+        index = int(similarities.argmax())
+        passage_score = float(similarities[index])
+        if passage_score <= 0 or passage_score < score:
+            return None
+        return _projected_hit(variant, score, transcript=candidates[index])
 
 
 class ProjectedClipIndex:

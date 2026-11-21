@@ -20,6 +20,7 @@ from exomem.governance import (
     projection_timing,
     projections,
     schema_v4,
+    transcript_banks,
 )
 from exomem.governance.decisions import Decision
 from exomem.governance.policy import Policy
@@ -817,17 +818,23 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
         fields={"type": "insight", "sources": "Sources/gate"},
     )
     offset = text.index("[00:19]")
-    vector = replace(
-        _vector(source, (0.2, 0.8)),
-        passages=(
-            projected_retrieval.ProjectionTranscriptSample(1, 0, (0.0, 1.0)),
-            projected_retrieval.ProjectionTranscriptSample(1, offset, (1.0, 0.0)),
-        ),
+    bank = transcript_banks.publish(
+        tmp_path, projected_retrieval.transcript_samples(source), ((0.0, 1.0), (1.0, 0.0)),
     )
-    runtime = _runtime(
-        (_item(source), _item(summary)),
-        vectors=(vector, _vector(summary, (1.0, 0.0))),
+    vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
+    rows = (vector, _vector(summary, (1.0, 0.0)))
+    runtime = _runtime((_item(source), _item(summary)), vectors=rows)
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=runtime.namespace.namespace_key,
+        lane="vector", extractor_version=_VECTOR_EXTRACTOR, model_version=embeddings.MODEL_NAME,
     )
+    manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path, namespace=runtime.namespace, family=family, measurements=rows,
+    )
+    _, stored_index = projection_measurement_store.load_vector_index(
+        tmp_path, namespace=runtime.namespace, family=family, expected_rows_digest=manifest.rows_digest,
+    )
+    runtime = replace(runtime, vector_index=stored_index)
     monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
     kwargs = dict(
         query="How can the truck enter?", limit=2, mode="hybrid", rerank=False, graph=False,

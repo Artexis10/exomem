@@ -6632,10 +6632,11 @@ def _transcript_match(vault_root: Path, page: ParsedPage, query: str, chunk: str
 
 def _cites_source(vault_root: Path, page: ParsedPage, source_path: str) -> bool:
     from . import epistemic_graph, transcript_passages
+    from .vault import kb_root
 
     targets = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
     targets.extend(find_results.wikilink_targets(page.search_body))
-    return transcript_passages.cites_path(targets, source_path, kb_name=vault_module.kb_root(vault_root).name)
+    return transcript_passages.cites_path(targets, source_path, kb_name=kb_root(vault_root).name)
 
 
 def _part_match(

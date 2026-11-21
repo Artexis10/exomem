@@ -769,6 +769,9 @@ def test_import_id_survives_a_new_hosted_upload_and_stays_scoped_to_the_importer
     assert repeated["state"] == "already_stored"
     conflict = capture(b"different file\r\n")
     assert conflict["code"] == "IMPORT_IDENTITY_CONFLICT"
+    from exomem import lexstore
+
+    lexstore.get_store(vault).rebuild_atomic()
     reused = capture(original, import_identity="same-meeting-in-a-second-feed")
     assert reused["ref"] == first["ref"] and reused["state"] == "already_stored"
     replayed_reuse = capture(original, import_identity="same-meeting-in-a-second-feed")
@@ -776,3 +779,113 @@ def test_import_id_survives_a_new_hosted_upload_and_stays_scoped_to_the_importer
     active = caller("different-agent")
     second = capture(b"different file\r\n")
     assert second["outcome"] == "stored" and second["ref"] != first["ref"]
+
+    from exomem import source_custody
+
+    # This duplicate has a managed erasure obligation. A new import ID must
+    # leave no durable pointer to it, while a different file can bind that ID.
+    original_read_manifest = source_custody.read_manifest
+    monkeypatch.setattr(
+        source_custody, "read_manifest",
+        lambda root, ref: (object(), None) if ref == first["ref"] else original_read_manifest(root, ref),
+    )
+    lexstore.get_store(vault).rebuild_atomic()
+    retirement_bound = capture(original, import_identity="retirement-check")
+    assert retirement_bound["code"] == "IMPORT_RECEIPT_UNAVAILABLE"
+    available = capture(b"another file\r\n", import_identity="retirement-check")
+    assert available["outcome"] == "stored"
+
+
+def test_import_retry_completes_the_original_after_source_publication_stops(
+    upload_env, source_schema, monkeypatch,
+):
+    from exomem import commands
+    from exomem import vault as vault_module
+
+    vault, who, *_ = upload_env
+    original = b"Record bytes\x00\xff"
+    source_paths = []
+
+    class Interrupted(BaseException):
+        pass
+
+    def stop_at_source(path):
+        if path.name.endswith(".txt.md") and path.is_relative_to(vault) and (
+            vault_module.in_append_only_tree(path.relative_to(vault).as_posix()) == "Sources"
+        ):
+            source_paths.append(path)
+            raise Interrupted()
+
+    def invoke():
+        handoff = _prepare(upload_env, original, import_identity="repeatable-file")
+        uploaded = _post(upload_env, handoff, original)
+        assert uploaded.status_code == 201, uploaded.text
+        with principal.request_scope(who):
+            return commands.op_capture_source(
+                vault, source_schema=source_schema, title="Gate district records", source_kind="session",
+                files=[uploaded.json()["file"]],
+            )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, "_after_batch_destination_published", stop_at_source)
+        with pytest.raises(Interrupted):
+            invoke()
+    [source] = source_paths
+    text = source.read_bytes()
+    target = source.with_suffix("")
+    assert not target.exists()
+
+    [receipt] = invoke()["files"]
+    assert receipt["state"] == "already_stored"
+    assert receipt["hash"] == hashlib.sha256(original).hexdigest()
+    assert source.read_bytes() == text
+    assert target.read_bytes() == original
+    assert invoke()["files"][0]["ref"] == receipt["ref"]
+
+
+def test_concurrent_held_uploads_with_the_same_import_id_file_once(upload_env, source_schema):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from exomem import commands
+
+    vault, who, *_ = upload_env
+    original = b"The gate survey is complete.\r\n"
+    uploads = []
+    for _ in range(2):
+        handoff = _prepare(upload_env, original, import_identity="parallel-survey")
+        uploaded = _post(upload_env, handoff, original)
+        assert uploaded.status_code == 201, uploaded.text
+        uploads.append(uploaded.json()["file"])
+    ready = Barrier(2)
+
+    def save(file):
+        with principal.request_scope(who):
+            ready.wait(timeout=10)
+            return commands.op_capture_source(
+                vault, source_schema=source_schema, title="Gate survey", source_kind="session", files=[file],
+            )["files"][0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(save, uploads)
+
+    assert first["ref"] == second["ref"]
+    assert first["hash"] == second["hash"] == hashlib.sha256(original).hexdigest()
+    assert sum(row.get("state") == "already_stored" for row in (first, second)) == 1
+
+    from exomem import note
+    from exomem import vault as vault_module
+
+    page = vault / first["page"]
+    frontmatter, body, _ = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    with principal.request_scope(who):
+        summary = note.note(
+            vault, title="Gate survey summary", note_type="insight", status="draft",
+            content="## Findings\n\n- [finding] The survey team completed its inspection.",
+            sources=[first["page"]],
+        )
+    updated, updated_body, _ = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert updated_body == body
+    assert updated["evidence_file"] == frontmatter["evidence_file"]
+    assert (vault / updated["evidence_file"]).read_bytes() == original
+    assert summary.path.removesuffix(".md") in str(updated["ingested_into"])

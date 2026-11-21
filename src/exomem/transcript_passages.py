@@ -54,9 +54,9 @@ def is_transcript(text: str) -> bool:
     return len(timed_lines(text)) >= 2
 
 
-def turns(text: str) -> list[tuple[int, int, float]]:
+def turns(text: str, *, minimum: int = 2) -> list[tuple[int, int, float]]:
     lines = timed_lines(text)
-    if len(lines) < 2:
+    if len(lines) < minimum:
         return []
     result = []
     for index, (start, _, timestamp) in enumerate(lines):
@@ -100,12 +100,14 @@ def match(
     if query and exact is None:
         exact = _locate(text, query, ignore_case=True)
 
-    for anchor in (exact, dense):
+    for anchor, literal in ((exact, True), (dense, False)):
         if anchor is None:
             continue
         low, high = anchor
         matched = [(start, end, ts) for start, end, ts in spans if start < high and end > low]
-        if not matched:
+        if not matched or (not literal and len(matched) != 1):
+            # A legacy vector can name a block with several timed turns.
+            # Its score cannot establish which one contains the answer.
             continue
         start, end, timestamp = matched[0]
         for _, turn_end, _ in matched[1:]:

@@ -1811,7 +1811,7 @@ def _commit_staged_sources(
                 ):
                     body_started = True
                     if import_capture is not None:
-                        previous, repaired = import_capture.lookup(vault_root)
+                        previous, repaired = import_capture.lookup(vault_root, artifact)
                         if repaired:
                             wrote_import_receipt = True
                             mark_active_mutation_committed()

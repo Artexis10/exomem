@@ -248,8 +248,10 @@ def test_vector_dimension_and_finiteness_are_closed() -> None:
         _measurement(variant, (float("nan"), 0.0))
 
 
-def test_only_the_admitted_transcript_variant_contributes_passage_vectors() -> None:
+def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_path) -> None:
     from dataclasses import replace
+
+    from exomem.governance import transcript_banks
 
     path = "Knowledge Base/Sources/Session/gate-log.md"
     text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
@@ -262,24 +264,24 @@ def test_only_the_admitted_transcript_variant_contributes_passage_vectors() -> N
     public = _variant("summary", "2" * 64, level=6, text="Gate summary")
     source = _item(path, "1" * 64, low, full)
     summary = _item("summary", "2" * 64, public)
+    bank = transcript_banks.publish(
+        tmp_path, projected_retrieval.transcript_samples(full), ((0.0, 1.0), (1.0, 0.0)),
+    )
     index = projected_retrieval.ProjectedVectorIndex(
         _namespace(source, summary),
         (_measurement(low, (0.0, 1.0)), _measurement(public, (0.5, 0.5)),
-         replace(_measurement(full, (0.0, 1.0)), passages=(
-             projected_retrieval.ProjectionTranscriptSample(1, 0, (0.0, 1.0)),
-             projected_retrieval.ProjectionTranscriptSample(1, text_start, (1.0, 0.0)),
-         ))),
+         replace(_measurement(full, (0.0, 1.0)), transcript_bank=bank)),
         extractor_version="projected-text-v1",
         model_version="test-model-v1",
     )
 
-    shown = index.search_vector(_map((source, full), (summary, public)), (1.0, 0.0), k=1)
-    assert shown[0].item_identity == path
-    part, passage = shown[0].transcript
+    admitted = index.match_transcript(tmp_path, full, (1.0, 0.0), score=0)
+    assert admitted is not None
+    part, passage = admitted.transcript
     assert part == 1
     assert passage.start == text_start
     assert passage.text == "[0:09] The ranger shut it."
+    assert index.match_transcript(tmp_path, low, (1.0, 0.0), score=0) is None
     restricted = index.search_vector(_map((source, low), (summary, public)), (1.0, 0.0), k=1)
     withheld = index.search_vector(_map((source, None), (summary, public)), (1.0, 0.0), k=1)
     assert restricted == withheld
-    assert restricted[0].item_identity == "summary"

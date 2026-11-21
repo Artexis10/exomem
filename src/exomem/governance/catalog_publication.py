@@ -497,7 +497,7 @@ def catalog_item(
     same batch is about to write, by vault-relative path; `part_folder` is where the page's
     parts are now when the page is about to move away from them.
     """
-    from .. import extraction_parts, preserve, transcript_passages
+    from .. import extraction_parts, memory_refs, preserve, source_custody, transcript_passages
 
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -524,10 +524,17 @@ def catalog_item(
             vault_root, path, source, pending=pending, folder=part_folder
         )
         head = preserve.extracted_text(source) if parts else ""
-        if not head and transcript_passages.is_source(path):
-            text = transcript_passages.source_text(parsed.body)
-            if transcript_passages.is_transcript(text):
-                head = text
+        fields = search_fields(parsed)
+        if transcript_passages.is_source(path):
+            text = head or transcript_passages.source_text(parsed.body)
+            if parts or transcript_passages.is_transcript(text):
+                reference = memory_refs.ref_from_markdown(source)
+                if reference is not None and source_custody.read_manifest(vault_root, reference)[0] is not None:
+                    # These derivatives have independent retention. The Source
+                    # eraser has no owner that can account for this bank.
+                    fields["source_erasure"] = "managed"
+                elif not head:
+                    head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
                 item_identity=path,
@@ -535,7 +542,7 @@ def catalog_item(
                 scope_ids=scope_ids,
                 policy=policy,
                 projector_schema_version=target_key.projector_schema_version,
-                full_search_fields=search_fields(parsed),
+                full_search_fields=fields,
             ),
             parts,
             head=head,
@@ -871,23 +878,23 @@ def _target_vector_measurements(
                 "the target vector measurements cannot be rebuilt"
             ) from error
 
-    def passages_for(variant):
-        variant_id = variant.projection_variant_id
+    def bank_for(variant) -> str | None:
+        from . import transcript_banks
+
         candidates = projected_retrieval.transcript_samples(variant)
         if not candidates:
-            return ()
+            return None
+        variant_id = variant.projection_variant_id
         previous = active_by_id.get(variant_id)
         if (
-            previous is not None and previous.passages
+            previous is not None and previous.transcript_bank is not None
+            and transcript_banks.available(vault_root, previous.transcript_bank)
             and candidates == projected_retrieval.transcript_samples(active_variants[variant_id])
         ):
-            return previous.passages
+            return previous.transcript_bank
         try:
             vectors = embeddings._embed_live_chunks([match.text for _, match in candidates])
-            return tuple(
-                projected_retrieval.ProjectionTranscriptSample(part, match.start, tuple(map(float, vector)))
-                for (part, match), vector in zip(candidates, vectors, strict=True)
-            )
+            return transcript_banks.publish(vault_root, candidates, vectors)
         except Exception as error:
             raise CatalogPublicationError("the target transcript measurements cannot be built") from error
 
@@ -904,7 +911,7 @@ def _target_vector_measurements(
                 if variant.projection_variant_id in active_by_id
                 else rebuilt[variant.projection_variant_id]
             ),
-            passages=passages_for(variant),
+            transcript_bank=bank_for(variant),
         )
         for variant in target_variants
     )

@@ -118,7 +118,7 @@ class ImportCapture:
                 "IMPORT_IDENTITY_CONFLICT: This import ID already names different bytes or capture metadata."
             )
 
-    def lookup(self, root: Path) -> tuple[duplicates.Duplicate | None, bool]:
+    def lookup(self, root: Path, artifact) -> tuple[duplicates.Duplicate | None, bool]:
         """Verify one exact committed receipt, or reconcile an interrupted file publication."""
         rel = self._path(root).relative_to(root).as_posix()
         raw = None
@@ -151,14 +151,52 @@ class ImportCapture:
             vault.PathGuard.capture(root, receipt.artifact, leaf_policy="absent")
         except vault.PathGuardError:
             self._require_same_input(receipt)
+            self._recover_original(root, receipt, artifact)
             duplicate = self._verified_duplicate(root, receipt)
-            if vault.content_hash(duplicate.payload.text) != receipt.source_hash:
-                raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
             self.commit_duplicate(root, duplicate)
             self.finish(root)
             return duplicate, True
         self.finish(root)
         return None, False
+
+    def _recover_original(self, root: Path, receipt: Receipt, artifact) -> None:
+        """Complete only the missing original of the exact, already-installed Source."""
+        from .add import artifact_binary_write, pools_original
+        from .governance import connector_boundary
+
+        payload = duplicates.readable_page(root, receipt.page)
+        if (
+            payload is None or payload.ref != receipt.ref or payload.artifact_path != receipt.artifact
+            or payload.sha256 != self.original_sha256 or payload.protected != self.protected
+            or vault.content_hash(payload.text) != receipt.source_hash
+        ):
+            raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
+        if duplicates.original_intact(root, receipt.page, payload, bound=True):
+            return
+        page = root / receipt.page
+        target = root / receipt.artifact
+        if (
+            target.parent != page.parent or pools_original(root, target)
+            or duplicates.binding_unproven(root, receipt.page, payload)
+        ):
+            raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
+        try:
+            page_guard = vault.PathGuard.capture(
+                root, receipt.page, leaf_policy="content", expected_content_hash=receipt.source_hash,
+            )
+            binary_guard = vault.PathGuard.capture(root, receipt.artifact, leaf_policy="absent")
+        except vault.PathGuardError:
+            raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}") from None
+        # The original's authority comes from the exact installed Source. Recheck
+        # the caller's current write admission before using the local repair owner.
+        connector_boundary.require_write(root, receipt.page, content=payload.text.encode("utf-8"))
+        binary, stream = artifact_binary_write(artifact.path, target, self.original_sha256, artifact.size)
+        binary.guard = binary_guard
+        with stream, owner_local_producer(root, OWNER):
+            vault.batch_atomic_write(
+                [binary], vault_root=root, required_guards=(page_guard,),
+                post_commit_fanout=False, commit_point=False,
+            )
 
     def _verified_duplicate(self, root: Path, receipt: Receipt) -> duplicates.Duplicate:
         duplicate = duplicates.named_duplicate(
@@ -186,6 +224,13 @@ class ImportCapture:
         private_state.remove(store / f"{self.key}.json")
 
     def commit_duplicate(self, root: Path, duplicate: duplicates.Duplicate) -> None:
+        from . import source_custody
+
+        # A file import cannot enrol for whole-Source erasure. Refuse a durable
+        # pointer into that custody so its owner can still erase every copy.
+        custody, _ = source_custody.read_manifest(root, duplicate.ref)
+        if custody is not None:
+            raise source_capture.SourceCaptureError(f"IMPORT_RECEIPT_UNAVAILABLE: {_UNAVAILABLE}")
         assert duplicate.payload.artifact_path is not None
         source_hash = vault.content_hash(duplicate.payload.text)
         page_guard = vault.PathGuard.capture(
