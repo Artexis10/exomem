@@ -373,7 +373,7 @@ def test_a_replayed_stale_page_is_not_repaired_against_an_unsettled_epoch(
 
     monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", recorded, raising=True)
     monkeypatch.setattr(
-        EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
+        EpistemicGraphIndex, "drain_epoch_admission", lambda self: False, raising=True
     )
 
     _replay(root, [root / RETITLED])
@@ -412,7 +412,7 @@ def test_the_oracle_sees_a_replay_drain_that_does_not_widen(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_topology_affected_sources",
-        lambda self, conn, rels, *, resolver: set(),
+        lambda self, conn, rels, **_kwargs: set(),
         raising=True,
     )
 
@@ -563,7 +563,7 @@ def test_a_standalone_replay_that_rebuilds_does_not_report_incremental_completio
     root = _built(vault, whole_vault_passes)
     _publish_past_a_stale_row(root)
     monkeypatch.setattr(
-        EpistemicGraphIndex, "epoch_admits_incremental_repair", lambda self: False, raising=True
+        EpistemicGraphIndex, "drain_epoch_admission", lambda self: False, raising=True
     )
 
     result = _replay(root, [root / RETITLED])

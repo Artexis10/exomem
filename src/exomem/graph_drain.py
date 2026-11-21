@@ -184,6 +184,27 @@ def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
             _per_path_blocked.add(key)
 
 
+def note_covered_contention(vault_root: Path) -> bool:
+    """A busy retry supersedes an older block only for durable scoped work."""
+    from . import deferred_index, freshness
+
+    if freshness.external_pending_unscoped(vault_root):
+        return False
+    if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
+        return False
+    observed = freshness.external_pending_paths(vault_root)
+    paths = {freshness.registry_rel(vault_root, path) for path in observed}
+    if None in paths:
+        return False
+    receipts = deferred_index.snapshot_graph(
+        vault_root, paths=set(paths) if paths else None, limit=None if paths else 1,
+    )
+    if not receipts or not paths <= {receipt.rel_path for receipt in receipts}:
+        return False
+    note_per_path_repair(vault_root, admissible=True)
+    return True
+
+
 def note_per_path_race(vault_root: Path, *, raced: bool) -> None:
     """Record whether this vault's latest per-path drain only lost races to commits."""
     key = state_paths.resolved_vault_path(vault_root)
@@ -493,22 +514,7 @@ def _external_change_stood(vault_root: Path) -> bool:
 
 
 def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
-    """Drain the committed checkpoint as one batch, once. Never raises.
-
-    A drain acknowledges only a batch that held the committed checkpoint's
-    whole path set. A truncated batch and the single-receipt replays after it
-    each publish their proven rows and retire their receipts without that
-    claim, so the queue can empty while the acknowledgement stays behind and
-    no reader can open the graph. Queueing the checkpoint again and draining
-    exactly its paths lets the existing acknowledgement rule decide.
-
-    Declines, leaving the whole-vault route to the caller, unless the
-    checkpoint is path-scoped, ahead of the acknowledgement, fits one drain,
-    no external change is pending, and this process has not already queued a
-    cover for this generation. True once the checkpoint is queued, whatever
-    its drain did: queued receipts are the ordinary drain's, and a cover that
-    did not acknowledge is escalated on the next pass, not retried.
-    """
+    """Spend one bounded cover per checkpoint generation before whole-vault recovery."""
     from . import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
 
     key = str(vault_root)
@@ -523,12 +529,26 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
             return False
         rels = {rel for rel, _content_hash in checkpoint.paths}
         rels.update(checkpoint.created_paths)
-        if len(rels) > DRAIN_LIMIT or freshness.external_pending(vault_root):
+        if not freshness.external_pending_only_for(vault_root, rels):
             return False
         if _covered_generation.get(key) == generation:
             return False
+        held = deferred_index.held_graph_proofs(
+            vault_root, digest=checkpoint.checkpoint_sha256, paths=rels,
+        )
+        if held:
+            index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            verdict = index.drain_paths([])
+            if verdict.get("published") or verdict.get("commit_race"):
+                return True
+            rels.difference_update(verdict.get("held_paths", ()))
         before = _acknowledged_label(vault_root)
-        deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
+        if held:
+            if rels:
+                # The proved held paths already own their disposition at this generation.
+                deferred_index.add_graph(vault_root, sorted(rels), generation=generation)
+        else:
+            deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
         # Spent once queued: from here the queue owns the repair. A cover
         # that raised before this stays eligible for the next pass.
         _covered_generation[key] = generation
@@ -607,7 +627,9 @@ def _work_once(vault_root: Path) -> int:
     if attempted:
         return processed
     if _barrier_pending(vault_root):
-        if _recover_once(vault_root):
+        if not _queue_pending(vault_root) and _cover_unacknowledged_checkpoint(vault_root):
+            processed += 1
+        elif _recover_once(vault_root):
             processed += 1
         # A barrier with an unpublished external epoch and no queued receipt
         # has no bounded coverage to recover from. The ordinary recovery
@@ -839,7 +861,12 @@ def _run_owned(vault_root: Path) -> None:
             elif stalled_since is None:
                 stalled_since = now
             elif now - stalled_since >= stall_seconds():
-                _request_full_rebuild(vault_root, cause="queue_stalled")
+                from . import deferred_index, epistemic_graph
+
+                if not deferred_index.graph_receipts_in_read_grace(
+                    vault_root, seconds=epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS,
+                ):
+                    _request_full_rebuild(vault_root, cause="queue_stalled")
 
 
 def start(vault_root: Path) -> threading.Thread | None:

@@ -67,3 +67,24 @@ The projection-freshness fence raised by filesystem events the process cannot at
 #### Scenario: Quarantine keeps its existing read policy
 - **WHEN** existing quarantine policy permits an acknowledged graph to remain available with a reported held-read page
 - **THEN** scoped repair preserves that policy and warning without adding a vault-wide gate for quarantine alone
+
+#### Scenario: Exact quarantine settles a checkpoint without claiming derivation
+- **WHEN** an isolated source failure reaches quarantine through the exact receipt-revision comparison
+- **THEN** its held disposition binds the canonical checkpoint and observed identity, and retains the last-readable rows
+- **AND** the drain acknowledges only after proving every other path and the held paths' admission and topology conditions
+- **AND** held paths retire no external observations, and affected writes report their pending cause
+
+#### Scenario: Quarantine settlement survives an interrupted graph commit
+- **WHEN** the process stops after exact quarantine commits and before the graph checkpoint settlement commits
+- **THEN** the next bounded drain resumes that exact disposition without restarting hot retries
+- **AND** legacy, mismatched or newer work supplies no successful coverage
+
+#### Scenario: A known isolated permission failure retains its grace period
+- **WHEN** a scoped path remains unreadable before its minimum quarantine age while all other repair authority remains valid
+- **THEN** the shorter generic stall threshold does not escalate that known failure into a whole-vault rebuild
+- **AND** unknown, outside and genuinely stalled work retains its existing recovery path
+
+#### Scenario: Cold held lineage lacks a current source witness
+- **WHEN** cold startup cannot bind a held path's current bytes and admission through a trusted witness
+- **THEN** a matching path or weak stat tuple does not certify the graph
+- **AND** source proof, existing recovery and unproved external observations retain their existing boundaries

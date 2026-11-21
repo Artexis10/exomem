@@ -886,8 +886,7 @@ def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
     """The bounded cover is tried once per generation, then whole-vault takes over.
 
     With coverage that never holds, no per-path drain can move the
-    acknowledgement. The first pass spends its one covering drain, the second
-    queues the whole-vault marker, and the third converges through it.
+    acknowledgement. The spent cover leaves its barrier for full recovery.
     """
     vault = _published_vault(tmp_path)
     created = vault / "Knowledge Base/Notes/Insights/c.md"
@@ -910,10 +909,8 @@ def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
     assert deferred_index.graph_full_rebuild_pending(vault) is None
     assert not EpistemicGraphIndex(vault).available()
 
+    assert graph_sync.acknowledged_generation(vault) < committed.generation
     assert graph_drain._work_once(vault) == 1
-    assert deferred_index.graph_full_rebuild_pending(vault) is not None
-
-    graph_drain._work_once(vault)
     assert deferred_index.graph_full_rebuild_pending(vault) is None
     assert graph_sync.acknowledged_generation(vault) == committed.generation
     assert EpistemicGraphIndex(vault).available()
@@ -1022,7 +1019,8 @@ def test_a_barrier_behind_queued_repair_waits_for_the_queue(
     page.write_text(_page("C", "C links to [[a]] before the registry saw it."), encoding="utf-8")
     deferred_index.add_graph_receipts(vault, [rel])
     EpistemicGraphIndex(vault).suspend_reads()
-    epoch = freshness.mark_external_pending(vault, paths=[page]) if scoped_mark else 0
+    if scoped_mark:
+        freshness.mark_external_pending(vault, paths=[page])
     passes: list[str] = []
     real_pass = EpistemicGraphIndex._rebuild_all_off_boundary
 
@@ -1038,12 +1036,11 @@ def test_a_barrier_behind_queued_repair_waits_for_the_queue(
     assert deferred_index.graph_full_rebuild_pending(vault) is None, (
         "barrier recovery queued whole-vault debt behind queued repair"
     )
-    assert deferred_index.list_graph_paths(vault) == [rel]
-
-    freshness.on_files_changed(vault, changed=[page])
-    if scoped_mark:
-        freshness.clear_external_pending(vault, through=epoch)
-    graph_drain._work_once(vault)
+    if not scoped_mark:
+        assert deferred_index.list_graph_paths(vault) == [rel]
+        freshness.on_files_changed(vault, changed=[page])
+        graph_drain._work_once(vault)
+    assert not freshness.external_pending(vault)
 
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()

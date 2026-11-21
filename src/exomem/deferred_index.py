@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -556,18 +557,19 @@ def store_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".deferred-index.sqlite"
 
 
-def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
+def _connect_readonly(vault_root: Path, *, deadline: float | None = None) -> sqlite3.Connection:
     """Open an existing sidecar without schema repair or journal writes."""
     with reserved_paths._subsystem_authority_scope("deferred_index"):
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("deferred-index-store",),
             identity_may_change=False,
+            deadline=deadline,
         ):
-            return _connect_readonly_owned(vault_root)
+            return _connect_readonly_owned(vault_root, timeout=0.0 if deadline else 5.0)
 
 
-def _connect_readonly_owned(vault_root: Path) -> sqlite3.Connection:
+def _connect_readonly_owned(vault_root: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     path = store_path(vault_root)
     with reserved_paths._sqlite_owner_target_scope(
         vault_root,
@@ -578,7 +580,7 @@ def _connect_readonly_owned(vault_root: Path) -> sqlite3.Connection:
         conn = _sqlite_connect_owned(
             f"{retained_path.as_uri()}?mode=ro",
             uri=True,
-            timeout=5.0,
+            timeout=timeout,
         )
         try:
             reserved_paths._publish_sqlite_owner_family(
@@ -711,7 +713,10 @@ def _connect_created_owned(
             first_failed_at REAL NOT NULL,
             last_failed_at REAL NOT NULL,
             quarantined INTEGER NOT NULL DEFAULT 0,
-            signature TEXT
+            signature TEXT,
+            held_proof TEXT,
+            failure_revision INTEGER,
+            failure_cause TEXT
         )
         """
     )
@@ -748,6 +753,12 @@ def _connect_created_owned(
         # would let a pre-upgrade receipt bless a lineage gap it knows nothing
         # about. NULL reads back as "unknown", which never counts as coverage.
         conn.execute("ALTER TABLE graph_upserts ADD COLUMN graph_generation INTEGER")
+    failure_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(graph_failures)")}
+    for column, declaration in (
+        ("held_proof", "TEXT"), ("failure_revision", "INTEGER"), ("failure_cause", "TEXT"),
+    ):
+        if column not in failure_columns:
+            conn.execute(f"ALTER TABLE graph_failures ADD COLUMN {column} {declaration}")
     _ensure_derived_batch_schema(conn)
     _ensure_vocabulary_provenance_schema(conn)
     if publish:
@@ -1522,14 +1533,16 @@ def _graph_full_rebuild_generation_locked(conn: sqlite3.Connection) -> int | Non
         return None
 
 
-def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> bool:
+def graph_repair_owed_outside(
+    vault_root: Path, rel_paths: Iterable[str], *, deadline: float | None = None,
+) -> bool:
     """Whether graph repair is owed beyond `rel_paths`.
 
     True for a queued receipt for any other path, a whole-vault rebuild marker,
     or a store that cannot be read: a caller that publishes the graph as current
     on False never publishes over work it could not see. An absent store owes
-    nothing. One connection, and receipts are counted rather than listed, so the
-    cost follows `rel_paths`, not the queue.
+    nothing. The lookup stops at the first outside receipt, so it examines at
+    most the number of paths in the proof plus one.
     """
     if not store_path(vault_root).exists():
         return False
@@ -1537,7 +1550,7 @@ def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> boo
         {rel for raw in rel_paths if (rel := _safe_markdown_rel_path(raw)) is not None}
     )
     try:
-        conn = _connect_readonly(vault_root)
+        conn = _connect_readonly(vault_root, deadline=deadline)
         try:
             tables = {
                 str(row[0])
@@ -1550,22 +1563,15 @@ def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> boo
                 return True
             if "graph_upserts" not in tables:
                 return False
-            queued = int(conn.execute("SELECT count(*) FROM graph_upserts").fetchone()[0])
-            inside = 0
-            for start in range(0, len(wanted), 900):
-                chunk = wanted[start : start + 900]
-                inside += int(
-                    conn.execute(
-                        "SELECT count(*) FROM graph_upserts WHERE rel_path IN "
-                        f"({','.join('?' for _ in chunk)})",
-                        chunk,
-                    ).fetchone()[0]
-                )
+            return conn.execute(
+                "SELECT 1 FROM graph_upserts "
+                "WHERE rel_path NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+                (json.dumps(wanted),),
+            ).fetchone() is not None
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
         return True
-    return queued > inside
 
 
 def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None) -> bool:
@@ -1785,9 +1791,15 @@ def snapshot_graph(
     *,
     limit: int | None = None,
     paths: set[str] | None = None,
+    deadline: float | None = None,
 ) -> list[DeferredReceipt]:
     """Queued graph work, oldest first, with corrupt legacy rows purged."""
-    return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
+    if deadline is None or not store_path(vault_root).exists():
+        return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
+    with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+        return _snapshot_plain(
+            vault_root, table="graph_upserts", limit=limit, paths=paths, connection=conn,
+        )
 
 
 #: Generations kept in the durable debt record. A gap wider than this is far
@@ -1985,14 +1997,103 @@ def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]
 
 
 def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    """CAS-clear graph receipts; a path derived at last forgets its failures."""
-    cleared = _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
-    if receipts:
-        forget_graph_failures(vault_root, {receipt.rel_path for receipt in receipts})
-    return cleared
+    """CAS-clear exact graph receipts and their completed failure state together."""
+    return _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
 
 
-def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
+@dataclass(frozen=True, slots=True)
+class GraphHeldProof:
+    checkpoint_digest: str
+    receipt_revision: int
+    signature: str
+    retained_source: str
+    graph_instance: str
+    policy: tuple[str, str]
+    topology: str
+    cold_generation: tuple[int, int, int] | None
+
+    def render(self) -> str:
+        return json.dumps([
+            self.checkpoint_digest, self.receipt_revision, self.signature,
+            self.retained_source, self.graph_instance, self.policy, self.topology, self.cold_generation,
+        ])
+
+    @classmethod
+    def parse(cls, raw: str) -> GraphHeldProof | None:
+        from .graph_sync import _is_digest
+
+        try:
+            digest, revision, signature, source, instance, policy, topology, cold = json.loads(raw)
+            if (
+                not all(_is_digest(value) for value in (digest, source, topology))
+                or type(revision) is not int or revision < 1
+                or not isinstance(signature, str) or not signature
+                or not isinstance(instance, str) or not instance
+                or not isinstance(policy, list) or len(policy) != 2
+                or not all(isinstance(value, str) for value in policy)
+                or (cold is not None and (
+                    not isinstance(cold, list) or len(cold) != 3
+                    or not all(type(value) is int for value in cold)
+                ))
+            ):
+                return None
+            return cls(
+                digest, revision, signature, source, instance, (policy[0], policy[1]), topology,
+                (cold[0], cold[1], cold[2]) if cold is not None else None,
+            )
+        except (TypeError, ValueError, RecursionError):
+            return None
+
+
+def held_graph_proofs(
+    vault_root: Path, *, digest: str, paths: Iterable[str], deadline: float | None = None,
+) -> dict[str, GraphHeldProof]:
+    """Read exact quarantines in one bounded query, excluding superseding receipts."""
+    wanted = list(paths)
+    if not wanted or not store_path(vault_root).exists():
+        return {}
+    with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+        if "held_proof" not in {row[1] for row in conn.execute("PRAGMA table_info(graph_failures)")}:
+            return {}
+        rows = conn.execute(
+            "SELECT f.rel_path, f.held_proof, f.signature, f.failure_revision "
+            "FROM graph_failures f WHERE f.quarantined = 1 "
+            "AND length(f.held_proof) <= 1024 "
+            "AND f.rel_path IN (SELECT value FROM json_each(?)) "
+            "AND NOT EXISTS (SELECT 1 FROM graph_upserts q WHERE q.rel_path = f.rel_path)",
+            (json.dumps(wanted),),
+        ).fetchall()
+    result = {}
+    for rel, encoded, signature, revision in rows:
+        proof = GraphHeldProof.parse(encoded)
+        if (
+            proof is not None and proof.checkpoint_digest == digest
+            and proof.signature == signature and proof.receipt_revision == revision
+        ):
+            result[str(rel)] = proof
+    return result
+
+
+def graph_receipts_in_read_grace(vault_root: Path, *, seconds: float) -> bool:
+    """Only an entirely classified queue keeps its permission grace during a stall."""
+    if not store_path(vault_root).exists():
+        return False
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            return conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM graph_upserts) AND NOT EXISTS ("
+                "SELECT 1 FROM graph_upserts q LEFT JOIN graph_failures f USING (rel_path) "
+                "WHERE f.failure_revision IS NULL OR f.failure_revision != q.revision "
+                "OR f.failure_cause IS NOT 'unreadable' OR f.first_failed_at <= ?)",
+                (time.time() - seconds,),
+            ).fetchone() == (1,)
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def note_graph_failure(
+    vault_root: Path, rel_path: str, *, revision: int | None = None, cause: str | None = None,
+) -> tuple[int, float]:
     """Count one failed isolated attempt to derive `rel_path`.
 
     Returns the attempts so far and when the first of them failed. Counted per
@@ -2004,10 +2105,12 @@ def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
     try:
         with conn:
             conn.execute(
-                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at) "
-                "VALUES (?, 1, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
-                "attempts = attempts + 1, last_failed_at = excluded.last_failed_at",
-                (rel_path, now, now),
+                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at, "
+                "failure_revision, failure_cause) VALUES (?, 1, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET attempts = attempts + 1, "
+                "last_failed_at = excluded.last_failed_at, failure_revision = excluded.failure_revision, "
+                "failure_cause = excluded.failure_cause",
+                (rel_path, now, now, revision, cause),
             )
             row = conn.execute(
                 "SELECT attempts, first_failed_at FROM graph_failures WHERE rel_path = ?",
@@ -2021,7 +2124,8 @@ def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
 
 
 def quarantine_graph_receipt(
-    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None
+    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None,
+    held: GraphHeldProof | None = None,
 ) -> bool:
     """Set a receipt no drain can derive aside, by exact revision.
 
@@ -2035,17 +2139,19 @@ def quarantine_graph_receipt(
     try:
         with conn:
             removed = conn.execute(
-                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ?",
-                (receipt.rel_path, receipt.revision),
+                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ? AND graph_generation IS ?",
+                (receipt.rel_path, receipt.revision, receipt.graph_generation),
             ).rowcount
             if removed:
                 now = time.time()
                 conn.execute(
                     "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, "
-                    "last_failed_at, quarantined, signature) VALUES (?, 1, ?, ?, 1, ?) "
-                    "ON CONFLICT(rel_path) DO UPDATE SET quarantined = 1, "
-                    "last_failed_at = excluded.last_failed_at, signature = excluded.signature",
-                    (receipt.rel_path, now, now, signature),
+                    "last_failed_at, quarantined, signature, held_proof, failure_revision) "
+                    "VALUES (?, 1, ?, ?, 1, ?, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
+                    "quarantined = 1, last_failed_at = excluded.last_failed_at, "
+                    "signature = excluded.signature, held_proof = excluded.held_proof, "
+                    "failure_revision = excluded.failure_revision",
+                    (receipt.rel_path, now, now, signature, held.render() if held else None, receipt.revision),
                 )
         return bool(removed)
     finally:
@@ -2107,7 +2213,7 @@ def release_graph_quarantine(vault_root: Path, rel_paths: list[str]) -> int:
     try:
         with conn:
             conn.executemany(
-                "UPDATE graph_failures SET quarantined = 0 WHERE rel_path = ?",
+                "UPDATE graph_failures SET quarantined = 0, held_proof = NULL WHERE rel_path = ?",
                 [(rel,) for rel in sorted(set(rel_paths))],
             )
     finally:
@@ -2334,13 +2440,22 @@ def _clear_plain_receipts(
     conn = _connect(vault_root, create=True)
     try:
         with conn:
-            changed = sum(
-                conn.execute(
-                    f"DELETE FROM {table} WHERE rel_path = ? AND revision = ?",
-                    (receipt.rel_path, receipt.revision),
-                ).rowcount
-                for receipt in receipts
-            )
+            changed = 0
+            for receipt in receipts:
+                if table == "graph_upserts":
+                    deleted = conn.execute(
+                        "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ? "
+                        "AND graph_generation IS ?",
+                        (receipt.rel_path, receipt.revision, receipt.graph_generation),
+                    ).rowcount
+                    if deleted:
+                        conn.execute("DELETE FROM graph_failures WHERE rel_path = ?", (receipt.rel_path,))
+                else:
+                    deleted = conn.execute(
+                        f"DELETE FROM {table} WHERE rel_path = ? AND revision = ?",
+                        (receipt.rel_path, receipt.revision),
+                    ).rowcount
+                changed += deleted
         return int(changed)
     finally:
         conn.close()

@@ -147,9 +147,9 @@ def test_a_standby_takes_no_lease_and_starts_no_scheduler_until_promotion(
     assert leases == ["lease"]
     assert activation.released is True
     assert service_standby.promoted() is True
-    assert record["snapshot"] == "current"
-    # No migration ran, so promotion compared the checkpoint pair rather than
-    # re-running the source proof. The record says which happened.
+    assert record["snapshot"] == "rebuild-after-promotion"
+    assert record["reproof_declined"] == "observer_unavailable"
+    assert "startup_validation" not in record["carried_from_standby"]
     assert record["revalidated"] is True
     assert record["reproved"] is False
 
@@ -173,37 +173,6 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
     assert record["revalidated"] is True
     assert record["reproved"] is False
 
-
-def test_a_declared_migration_re_runs_the_whole_source_proof(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """The migrator is the only writer between workers, so its run earns a proof.
-
-    A checkpoint pair describes state the migrator may have rewritten, so
-    comparing it would not be a re-validation at all.
-    """
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    _stub_adoption(monkeypatch)
-    reproofs: list[str] = []
-    real_reprove = service_standby._reprove
-
-    def traced(vault_root):
-        reproofs.append("reprove")
-        return real_reprove(vault_root)
-
-    monkeypatch.setattr(service_standby, "_reprove", traced)
-    service_standby.enter_standby()
-    service_standby.register_activation(_Activation())
-    service_standby.prove_graph_snapshot(tmp_path)
-    record = service_standby.promote(tmp_path, migrated=True)
-    assert reproofs == ["reprove"]
-    assert record["snapshot"] == "current"
-    assert record["migrated"] is True
-    # The migrator ran, so this branch really did re-run the whole source proof.
-    assert record["reproved"] is True
-    assert record["revalidated"] is True
 
 
 def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(
@@ -278,7 +247,7 @@ def test_readiness_payload_is_absent_outside_standby_and_present_after_promotion
     assert payload["cutover_ready"] is True
     # The operator's first look when a cutover is fast but the writes after it
     # are not: what the promoted worker's warm is entitled to skip.
-    assert payload["carried_from_standby"] == ["graph_handoff", "lexical", "semantic_corpus"]
+    assert payload["carried_from_standby"] == ["lexical", "semantic_corpus"]
 
 
 def test_the_real_standby_warm_never_publishes_index_state(monkeypatch, tmp_path: Path) -> None:
@@ -454,127 +423,7 @@ def test_the_standby_owns_its_adoption_so_the_warm_does_not_pay_it_twice(
     assert service_standby.adoption_record() == {"residue": 0, "reason": "adopted"}
 
 
-def test_the_lease_is_acquired_before_the_residue_is_enqueued(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Enqueueing the repair is a write, so the lease has to come first.
 
-    Until the lease says this vault is this process's own, it has no standing to
-    schedule work on it -- the previous worker may still be relinquishing.
-    """
-    order: list[str] = []
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    monkeypatch.setattr(
-        service_standby, "_acquire_ownership", lambda: order.append("lease")
-    )
-    monkeypatch.setattr(
-        service_standby,
-        "_apply_residue",
-        lambda root, adoption: (order.append("residue") or 1, ""),
-    )
-    _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",))
-    service_standby.enter_standby()
-    service_standby.register_activation(_Activation())
-    service_standby.prove_graph_snapshot(tmp_path)
-
-    record = service_standby.promote(tmp_path, migrated=False)
-
-    assert order == ["lease", "residue"]
-    assert record["residue_applied"] == 1
-    # Still exactly once, and a second call short-circuits.
-    assert service_standby.promote(tmp_path, migrated=False)["already_promoted"] is True
-    assert order == ["lease", "residue"]
-
-
-def test_a_migrated_promotion_reports_the_residue_the_reproof_found(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """`adoption_record()` must describe what this process owes, not the warm."""
-    from exomem import epistemic_graph
-
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    monkeypatch.setattr(service_standby, "_apply_residue", lambda root, adoption: (2, ""))
-    _stub_adoption(monkeypatch)
-    service_standby.enter_standby()
-    service_standby.register_activation(_Activation())
-    service_standby.prove_graph_snapshot(tmp_path)
-    assert service_standby.adoption_record()["residue"] == 0
-
-    monkeypatch.setattr(
-        service_standby,
-        "_reprove",
-        lambda root: epistemic_graph.SnapshotAdoption(
-            True, residue=("a.md", "b.md"), reason="adopted"
-        ),
-    )
-    service_standby.promote(tmp_path, migrated=True)
-    assert service_standby.adoption_record() == {"residue": 2, "reason": "adopted"}
-
-
-def test_a_residue_that_could_not_be_enqueued_is_named_not_silently_dropped(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Three outcomes, three records.
-
-    "Nothing owed", "repair queued" and "repair we failed to queue" produced the
-    same `residue_applied: 0` / `snapshot: current`, so an upgrade that silently
-    lost its repair looked exactly like a clean one. The cold path keeps that
-    distinction as `residue_enqueue_failed`; this path has to as well.
-    """
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-
-    for failure in ("refused", "raised"):
-        service_standby.reset_for_tests()
-        readiness.reset()
-        _stub_adoption(monkeypatch, residue=("Knowledge Base/Notes/a.md",))
-
-        def _enqueue(self, residue, mode=failure):
-            if mode == "raised":
-                raise RuntimeError("deferred index unavailable")
-            return False
-
-        from exomem import epistemic_graph
-
-        monkeypatch.setattr(
-            epistemic_graph.EpistemicGraphIndex,
-            "apply_adopted_residue",
-            _enqueue,
-            raising=True,
-        )
-        activation = _Activation()
-        service_standby.enter_standby()
-        service_standby.register_activation(activation)
-        service_standby.prove_graph_snapshot(tmp_path)
-
-        record = service_standby.promote(tmp_path, migrated=False)
-
-        assert record["residue_applied"] == 0, failure
-        assert record["snapshot"] == "rebuild-after-promotion", failure
-        assert record["reason"] == "residue_enqueue_failed", failure
-        # The worker still serves: the coalesced rebuild owns the repair.
-        assert service_standby.promoted() is True, failure
-        assert activation.released is True, failure
-
-
-def test_a_clean_promotion_names_no_residue_failure(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    _stub_adoption(monkeypatch)
-    service_standby.enter_standby()
-    service_standby.register_activation(_Activation())
-    service_standby.prove_graph_snapshot(tmp_path)
-
-    record = service_standby.promote(tmp_path, migrated=False)
-
-    assert record["residue_applied"] == 0
-    assert record["snapshot"] == "current"
-    assert "reason" not in record
 
 
 # --- Carrying the standby's warm forward (D7/D9, task 2.8) --------------------
@@ -607,9 +456,9 @@ def _promote_from_a_complete_standby_warm(monkeypatch, tmp_path: Path):
 
 def test_a_promotion_carries_the_standbys_finished_warm_forward(monkeypatch, tmp_path) -> None:
     record = _promote_from_a_complete_standby_warm(monkeypatch, tmp_path)
-    assert record["snapshot"] == "current"
+    assert record["snapshot"] == "rebuild-after-promotion"
     carried = service_standby.carried_warm_components()
-    assert carried == frozenset({"lexical", "embeddings", "semantic_corpus", "graph_handoff"})
+    assert carried == frozenset({"lexical", "embeddings", "semantic_corpus"})
     # Readable after `promote()` returns, which is the whole point: the promoted
     # worker's own `warm_all` is what reads it, and it starts inside `release()`.
     assert record["carried_from_standby"] == sorted(carried)
@@ -656,7 +505,7 @@ def test_carried_corpus_reproves_reference_owners_after_watcher_seed(
         service_standby.register_activation(_Activation())
         assert service_standby.prove_graph_snapshot(tmp_path)
         assert service_standby.build_semantic_corpus(tmp_path)
-        assert service_standby.promote(tmp_path, migrated=False)["snapshot"] == "current"
+        assert service_standby.promote(tmp_path, migrated=False)["startup_validation"] == "pending"
         if catch_up:
             page.write_text(f"---\nexomem_id: {new_id}\n---\n\nUnwatched edit.\n", encoding="utf-8")
         watcher = object.__new__(file_watcher.FileWatcher)
@@ -715,7 +564,7 @@ def test_a_component_the_standby_never_finished_is_not_carried(monkeypatch, tmp_
     carried = service_standby.carried_warm_components()
     assert "semantic_corpus" not in carried
     assert "embeddings" not in carried
-    assert carried == frozenset({"lexical", "graph_handoff"})
+    assert carried == frozenset({"lexical"})
 
 
 @pytest.mark.parametrize(

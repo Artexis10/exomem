@@ -526,3 +526,26 @@ def test_clear_drops_everything(vault: Path) -> None:
 
     assert freshness.triple(vault, "kb") is None
     assert freshness.triple(vault, "vault") is None
+
+
+def test_a_path_repair_keeps_newer_outside_and_unscoped_observations(vault: Path) -> None:
+    """A successful old repair must not make concurrent external edits appear repaired."""
+    first = vault / "Knowledge Base/Notes/first.md"
+    outside = vault / "Knowledge Base/Notes/outside.md"
+    freshness.mark_external_pending(vault, paths=[first, outside])
+    repaired = freshness.external_pending_path_epochs(vault, [first])
+    assert repaired
+    freshness.mark_external_pending(vault, paths=[first])
+    freshness.mark_external_pending(vault)
+
+    freshness.retire_external_pending_paths(vault, repaired)
+
+    assert freshness.external_pending_for(vault, [first])
+    assert freshness.external_pending_for(vault, [outside])
+    assert freshness.external_pending_unscoped(vault)
+    current = freshness.external_pending_path_epochs(vault, [first])
+    assert current and current != repaired
+    freshness.retire_external_pending_paths(vault, current)
+    assert str(first.resolve()) not in freshness.external_pending_paths(vault)
+    assert str(outside.resolve()) in freshness.external_pending_paths(vault)
+    assert freshness.external_pending_unscoped(vault)

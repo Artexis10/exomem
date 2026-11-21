@@ -315,6 +315,186 @@ def test_queued_drains_reach_the_same_graph_as_a_full_rebuild(vault: Path) -> No
     assert drained["parent_refs"] == rebuilt["parent_refs"]
 
 
+@pytest.mark.parametrize("outside_observation", [False, True])
+def test_a_committed_drain_retires_only_its_scoped_external_observations(
+    vault: Path, outside_observation: bool
+) -> None:
+    """A replacement worker must close its own repair without clearing another page's debt."""
+    changed = vault / PAGE_A
+    changed.write_text(_page("A", "A now links [[queue-c]]."), encoding="utf-8")
+    assert index_sync.publish_corpus_delta(vault, changed=[changed])
+    freshness.mark_external_pending(vault, paths=[changed])
+    if outside_observation:
+        freshness.mark_external_pending(vault, paths=[vault / PAGE_B])
+    deferred_index.add_graph_receipts(vault, [PAGE_A])
+
+    assert index_sync.drain_deferred_work(vault) >= 1
+    assert PAGE_A not in deferred_index.list_graph_paths(vault)
+    assert not freshness.external_pending_for(vault, [changed])
+    assert freshness.external_pending(vault) is outside_observation
+    assert EpistemicGraphIndex(vault).available() is not outside_observation
+    if outside_observation:
+        assert freshness.external_pending_for(vault, [vault / PAGE_B])
+        deferred_index.add_graph_receipts(vault, [PAGE_B])
+        assert index_sync.drain_deferred_work(vault) >= 1
+        assert not freshness.external_pending(vault)
+        assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_same_stat_observed_retitle_refreshes_warm_search_and_graph(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A preserved stat signature must not keep an old title in any projection."""
+    from exomem import lexstore, semantic_contract
+    from exomem.find_corpus import CACHE
+
+    page = vault / PAGE_B
+    page.write_text(_page("Blue", "A plain claim."), encoding="utf-8")
+    source = vault / PAGE_A
+    source.write_text(_page("A", "A cites [[Rose]]."), encoding="utf-8")
+    signature = freshness.stat_signature(page)
+    stat_signature = freshness.stat_signature
+
+    def colliding_signature(candidate: Path):
+        # Some filesystems cannot distinguish the rewritten page by stat.
+        return signature if Path(candidate) == page else stat_signature(candidate)
+
+    monkeypatch.setattr(freshness, "stat_signature", colliding_signature)
+    _seed_live_freshness(vault)
+    graph = EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    lexstore.ensure_fresh(vault)
+    semantic_contract.build_corpus_context(vault)
+    old = page.stat()
+    assert CACHE.get(page, vault).title == "Blue"
+    resolver = find_module.recall_resolver_snapshot(vault)
+    assert resolver.title_key_for_path(PAGE_B) == "blue"
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    page.write_text(_page("Rose", "A plain claim."), encoding="utf-8")
+    os.utime(page, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert freshness.stat_signature(page) == signature
+    freshness.mark_external_pending(vault, paths=[page])
+    deferred_index.add_graph_receipts(vault, [PAGE_B])
+
+    assert index_sync.drain_graph_work(vault) == 1
+    assert CACHE.get(page, vault).title == "Rose"
+    assert find_module.recall_resolver_snapshot(vault).title_key_for_path(PAGE_B) == "rose"
+    assert PAGE_B.removesuffix(".md") in semantic_contract.build_corpus_context(vault).resolver_titles["rose"]
+    assert lexstore.get_store(vault).page_content_hashes([PAGE_B])[PAGE_B] == vault_module.content_hash(
+        page.read_text(encoding="utf-8"),
+    )
+    assert not freshness.external_pending(vault)
+    assert graph.available()
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+@pytest.mark.parametrize("move_checkpoint", [False, True], ids=["same-checkpoint", "new-checkpoint"])
+def test_partial_checkpoint_revalidates_covered_and_outside_offline_edits(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, move_checkpoint: bool,
+) -> None:
+    """A restart must carry committed coverage and rediscover sources that moved offline."""
+    pages = {
+        f"Knowledge Base/Notes/Insights/partial-{i:02}.md": _page(f"Partial {i}", "Before.")
+        for i in range(graph_drain.DRAIN_LIMIT + 1)
+    }
+    for rel, text in pages.items():
+        (vault / rel).write_text(text, encoding="utf-8")
+    _seed_live_freshness(vault)
+    graph = EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    generation = _write_without_graph_repair(
+        vault, monkeypatch, {rel: text.replace("Before.", "Queued.") for rel, text in pages.items()},
+    )
+    assert index_sync.drain_graph_work(vault, limit=graph_drain.DRAIN_LIMIT) == graph_drain.DRAIN_LIMIT
+    remaining = deferred_index.list_graph_paths(vault)
+    assert len(remaining) == 1
+    assert _acknowledged(vault) < generation
+    assert graph.reads_suspended()
+    if move_checkpoint:
+        generation = _write_without_graph_repair(
+            vault, monkeypatch, {PAGE_B: _page("B", "A later committed checkpoint.")},
+        )
+    covered = next(rel for rel in pages if rel not in remaining)
+    (vault / covered).write_text(_page("Moved", "A covered page changed offline."), encoding="utf-8")
+    (vault / PAGE_A).write_text(_page("A", "An outside page changed offline."), encoding="utf-8")
+
+    freshness.clear()
+    find_module.evict_resolver_caches(vault)
+    epistemic_graph.clear_snapshot_proofs()
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher._reconcile_once(seed=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            EpistemicGraphIndex, "rebuild_all",
+            lambda _self: pytest.fail("partial checkpoint restarted a whole-vault rebuild"),
+        )
+        watcher.finish_startup_recovery()
+        for _ in range(3):
+            index_sync.drain_graph_work(vault)
+    assert not deferred_index.list_graph_paths(vault)
+    assert not freshness.external_pending(vault)
+    assert _acknowledged(vault) == generation
+    assert graph.available()
+    assert _graph_contents(vault) == _graph_contents_after_full_rebuild(vault)
+
+
+@pytest.mark.parametrize("fail_publish", [True, False], ids=["rollback", "newer-event"])
+def test_failed_or_superseded_drain_preserves_observed_work(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, fail_publish: bool,
+) -> None:
+    """A rollback or a newer instruction leaves exact work for the next drain."""
+    path = vault / PAGE_A
+    path.write_text(_page("A", "Repair ties [[queue-b]]."), encoding="utf-8")
+    freshness.mark_external_pending(vault, paths=[path])
+    deferred_index.add_graph_receipts(vault, [PAGE_A])
+    graph = EpistemicGraphIndex(vault)
+    before = _graph_contents(vault)
+    real_publish = graph._publish_available_marker_in_transaction
+
+    def interrupted(conn, *args, **kwargs):
+        real_publish(conn, *args, **kwargs)
+        if fail_publish:
+            raise sqlite3.OperationalError("forced rollback")
+        freshness.mark_external_pending(vault, paths=[path])
+        deferred_index.add_graph_receipts(vault, [PAGE_A])
+
+    with monkeypatch.context() as patch:
+        patch.setattr(graph, "_publish_available_marker_in_transaction", interrupted)
+        if fail_publish:
+            with pytest.raises(sqlite3.OperationalError, match="forced rollback"):
+                graph.drain_paths([path])
+        else:
+            graph.drain_paths([path])
+    assert freshness.external_pending_for(vault, [path])
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+    assert not graph.available()
+    if fail_publish:
+        assert _graph_contents(vault) == before
+    assert index_sync.drain_graph_work(vault) == 1
+    assert not freshness.external_pending(vault)
+    assert graph.available()
+
+
+def test_busy_retry_preserves_covered_work_after_a_blocked_attempt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generation = _write_without_graph_repair(
+        vault, monkeypatch, {PAGE_A: _page("A", "A links [[queue-b]].")},
+    )
+    freshness.mark_external_pending(vault, paths=[vault / PAGE_A])
+    EpistemicGraphIndex(vault).suspend_reads()
+    graph_drain.note_per_path_repair(vault, admissible=False)
+    with _writer_holding_the_boundary(vault):
+        graph_drain._work_once(vault)
+        assert deferred_index.graph_full_rebuild_pending(vault) is None
+        assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+    graph_drain._work_once(vault)
+    assert not deferred_index.list_graph_paths(vault)
+    assert _acknowledged(vault) == generation
+    assert EpistemicGraphIndex(vault).available()
+
+
 def test_a_drain_does_not_empty_the_node_and_edge_tables(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -800,6 +980,9 @@ _DECLARED_GENERATION_RECORDING_SITES = {
     "epistemic_graph.py::EpistemicGraphIndex::apply_adopted_residue": (
         "partial by design: the residue at the ACKNOWLEDGED generation, which "
         "no gap probe ever asks about"
+    ),
+    "graph_drain.py::_cover_unacknowledged_checkpoint": (
+        "The checkpoint paths not already covered by exact held dispositions."
     ),
 }
 
@@ -1643,13 +1826,15 @@ def test_the_watcher_echo_of_a_governed_create_leaves_its_repair_to_the_queue(
     watcher._flush()
 
     assert whole_vault_passes == [], "the watcher's echo rebuilt the vault"
-    assert not freshness.external_pending(vault), "the watcher's echo fenced later writes"
+    assert freshness.external_pending_for(vault, [vault / CREATED])
+    assert freshness.external_pending_only_for(vault, [vault / CREATED])
     assert deferred_index.list_graph_paths(vault), "the echo's repair is not queued"
 
     index_sync.drain_graph_work(vault)
 
     assert whole_vault_passes == []
     assert deferred_index.list_graph_paths(vault) == []
+    assert not freshness.external_pending(vault)
     assert EpistemicGraphIndex(vault).available()
     _assert_matches_a_fresh_rebuild(vault)
 
@@ -2024,7 +2209,15 @@ def _refuse_reads(
             raise error
         return real_read(path, *args, **kwargs)
 
+    real_guarded = vault_module.read_bounded_guarded_bytes_with_generation
+
+    def refuse_guarded(vault_path: Path, path: str, **kwargs: Any):
+        if (vault_path / path).resolve() == target:
+            raise error
+        return real_guarded(vault_path, path, **kwargs)
+
     monkeypatch.setattr(vault_module, "read_bytes_without_pinning", refuse)
+    monkeypatch.setattr(vault_module, "read_bounded_guarded_bytes_with_generation", refuse_guarded)
 
 
 def _undecodable_reads(monkeypatch: pytest.MonkeyPatch, root: Path, rel: str) -> None:
@@ -2103,6 +2296,7 @@ def _quarantine_unreadable_page_a(
     )
     _refuse_reads(lock, root, PAGE_A, PermissionError("the page cannot be read"))
     _drain_ticks(root, epistemic_graph.GRAPH_POISON_ATTEMPTS)
+    assert _acknowledged(root) < committed, "a failed derivation cannot acknowledge this checkpoint"
     _age_graph_failures(root, _poison_min_age())
     _drain_ticks(root, 1)
     return committed
@@ -2222,10 +2416,9 @@ def test_a_busy_boundary_refuses_the_whole_batch_and_replays_no_receipt(
     with _writer_holding_the_boundary(vault):
         assert index_sync.drain_graph_work(vault) == 0
 
-    assert drains == [2], "the drain replayed receipts after a busy boundary"
+    assert drains == [], "the drain prepared rows behind a busy boundary"
     assert rotations == []
     assert "isolating receipts" not in caplog.text
-    assert "deferred graph batch refused (MUTATION_BUSY)" in caplog.text
     assert deferred_index.list_graph_paths(vault) == queued
     assert _failure_attempts(vault, PAGE_A) == _failure_attempts(vault, PAGE_B) == 0
 
@@ -2394,6 +2587,132 @@ def test_an_unreadable_page_is_quarantined_rather_than_rotated_forever(
     check = doctor._check_graph_sync_state(vault)
     assert check.status == "warn", check.message
     assert check.details is not None and check.details["quarantined_paths"] == 1
+
+
+@pytest.mark.parametrize("change", ["none", "legacy", "newer-receipt", "newer-observation"])
+def test_stranded_quarantine_covers_only_its_exact_held_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """An interrupted finalization cannot lose or reuse held work by path alone."""
+    before = _acknowledged(vault)
+    real_drain = EpistemicGraphIndex.drain_paths
+
+    def lost_after_quarantine(self, paths):
+        if not paths:
+            raise BrokenPipeError("final graph transaction did not run")
+        return real_drain(self, paths)
+
+    with monkeypatch.context() as locked:
+        locked.setattr(EpistemicGraphIndex, "drain_paths", lost_after_quarantine)
+        with pytest.raises(BrokenPipeError):
+            _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None and _acknowledged(vault) == before
+    assert not deferred_index.list_graph_paths(vault)
+    assert deferred_index.graph_quarantined_count(vault) == 1
+
+    if change == "legacy":
+        with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+            conn.execute("UPDATE graph_failures SET held_proof = NULL WHERE rel_path = ?", (PAGE_A,))
+    elif change == "newer-receipt":
+        deferred_index.add_graph_receipts(vault, [PAGE_A], generation=checkpoint.generation)
+    elif change == "newer-observation":
+        freshness.mark_external_pending(vault, paths=[vault / PAGE_A])
+
+    graph = EpistemicGraphIndex(vault)
+    result = graph.drain_paths([])
+    if change == "none":
+        assert result["published"] and graph.available()
+        assert _acknowledged(vault) == checkpoint.generation
+        assert writer_lease._durable_graph_outcome(vault)["graph_sync_code"] == "GRAPH_SYNC_PAGE_HELD"
+    else:
+        assert not result["published"] and not graph.available()
+        assert _acknowledged(vault) == before
+        if change == "newer-observation":
+            assert freshness.external_pending_for(vault, [vault / PAGE_A])
+
+
+@pytest.mark.parametrize("trusted", [True, False], ids=["trusted-generation", "untrusted-stat"])
+def test_cold_resume_requires_byte_binding_for_an_unreadable_held_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, trusted: bool,
+) -> None:
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", True)
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    real_drain = EpistemicGraphIndex.drain_paths
+
+    def lost_after_quarantine(self, paths):
+        if not paths:
+            raise BrokenPipeError("final graph transaction did not run")
+        return real_drain(self, paths)
+
+    with monkeypatch.context() as locked:
+        locked.setattr(EpistemicGraphIndex, "drain_paths", lost_after_quarantine)
+        with pytest.raises(BrokenPipeError):
+            _quarantine_unreadable_page_a(vault, monkeypatch, locked)
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None and _acknowledged(vault) < checkpoint.generation
+    monkeypatch.setattr(vault_module, "STAT_GENERATION_TRUSTED", trusted)
+    _refuse_reads(monkeypatch, vault, PAGE_A, PermissionError("the page is still held"))
+    freshness.clear()
+    epistemic_graph.clear_snapshot_proofs()
+    find_module.evict_resolver_caches(vault)
+    _seed_live_freshness(vault)
+    graph = EpistemicGraphIndex(vault)
+    verdict = graph.validate_startup_snapshot()
+    if trusted:
+        assert verdict is True
+        assert graph.drain_paths([])["published"]
+        assert graph.available()
+    else:
+        assert verdict is False
+        assert _acknowledged(vault) < checkpoint.generation
+        assert not graph.available()
+
+
+def test_classified_permission_failure_keeps_its_grace_past_the_generic_stall(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An isolated, still-unreadable receipt reaches the quarantine timer before escalation."""
+    generation = _write_without_graph_repair(vault, monkeypatch, {PAGE_A: _page("A", "Changed.")})
+    _refuse_reads(monkeypatch, vault, PAGE_A, PermissionError("source unavailable"))
+    assert index_sync.drain_graph_work(vault) == 0
+    assert EpistemicGraphIndex(vault).reads_suspended()
+    stall_age = graph_drain.stall_seconds() + 1
+    assert stall_age < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
+    _age_graph_failures(vault, stall_age)
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        conn.execute("UPDATE graph_upserts SET created_at = ?", (time.time() - stall_age,))
+
+    graph_drain._work_once(vault)
+
+    assert deferred_index.graph_full_rebuild_pending(vault) is None
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+    assert deferred_index.graph_quarantined_count(vault) == 0
+    assert _acknowledged(vault) < generation
+
+
+def test_second_read_failure_does_not_commit_a_deletion(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _node_rows(vault, PAGE_A)
+    generation = _write_without_graph_repair(vault, monkeypatch, {PAGE_A: _page("A", "Changed.")})
+    real_read = vault_module.read_bytes_without_pinning
+    reads = 0
+
+    def fail_at_rebind(path, *args, **kwargs):
+        nonlocal reads
+        if path == vault / PAGE_A:
+            reads += 1
+            if reads == 2:
+                raise PermissionError("source unavailable at row publication")
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "read_bytes_without_pinning", fail_at_rebind)
+    graph = EpistemicGraphIndex(vault)
+    assert not graph.drain_paths([vault / PAGE_A])["indexed"]
+    assert _node_rows(vault, PAGE_A) == old
+    assert _acknowledged(vault) < generation
+    assert deferred_index.list_graph_paths(vault) == [PAGE_A]
 
 
 def test_undecodable_bytes_count_without_waiting_for_an_age(

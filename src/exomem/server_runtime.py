@@ -166,6 +166,10 @@ class LocalRuntimeActivation:
         # `/upload/sessions`; a stdio server never resumes their commits.
         self.serves_upload_sessions = False
         if not deferred:
+            from . import epistemic_graph
+
+            if epistemic_graph.sidecar_path(vault_root).exists():
+                epistemic_graph.require_startup_source_proof(vault_root)
             self._bind_graph_rebuild_lifetime()
             self._commit_recall_reembed()
 
@@ -619,8 +623,25 @@ class LocalRuntimeActivation:
 
         self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
 
+    def arm_promotion_observation(self, *, deadline: float) -> Any | None:
+        """Arm this activation's own observer before standby proof replay."""
+        with self._lock:
+            if self._shutdown.is_set() or not self._deferred or self._started:
+                return None
+            if self.file_watcher is None:
+                self.file_watcher = _create_file_watcher(self.vault_root)
+            watcher = self.file_watcher
+        if watcher is None or not watcher.arm_promotion_observation(deadline=deadline):
+            return None
+        return watcher
+
     def _start_file_watcher(self, vault_root: Path) -> None:
-        self.file_watcher = _start_file_watcher(vault_root)
+        watcher = self.file_watcher
+        if watcher is None:
+            self.file_watcher = _start_file_watcher(vault_root)
+        elif not watcher.start():
+            watcher.stop()
+            self.file_watcher = None
 
     def _start_vault_projector(self, vault_root: Path) -> None:
         self.vault_projector = _start_vault_projector(vault_root)
@@ -649,11 +670,21 @@ class LocalRuntimeActivation:
     def _start_dreamer(self, vault_root: Path) -> None:
         self.dreamer = _start_dreamer(vault_root)
 
-    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+    def _finish_file_watcher_startup(self, vault_root: Path) -> None:
         watcher = self.file_watcher
         finish = getattr(watcher, "finish_startup_recovery", None)
         if callable(finish):
             finish()
+            return
+
+        from . import epistemic_graph
+
+        if not epistemic_graph.graph_enabled() or not epistemic_graph.startup_source_proof_pending(vault_root):
+            return
+        graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+        with foreground_priority.bulk(stop=self._shutdown):
+            while graph.validate_startup_snapshot() is None:
+                foreground_priority.wait_for_retry(0.25)
 
     async def _finish_shutdown(self) -> None:
         """Finish the tracked shutdown before process teardown."""

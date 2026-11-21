@@ -98,6 +98,20 @@ A final complete pass commits rows, exact acknowledgement and availability atomi
 It requires durable lineage coverage and no unproved outside, newer or unscoped observation that can change eligible graph rows or resolution.
 Existing quarantine and held-read behavior remains unchanged.
 A quarantined page alone creates no new vault-wide gate; existing warnings and reader policy remain in force.
+The quarantine transaction records an exact held disposition alongside its receipt revision, checkpoint digest and observed identity.
+That disposition retains the last-readable rows under the existing policy; it does not claim successful source derivation.
+Legacy or path-only failure records authorize retries and diagnostics, rather than checkpoint coverage.
+The drain can settle a checkpoint after proving every other path and the held paths' admission, topology and dependency footprint.
+Held paths supply neither successful-source coverage nor retirement of external observations.
+Newer receipts, unproved observations and changed policy or topology invalidate the proposed settlement.
+An empty-queue drain can finish a crash-interrupted quarantine settlement without restarting hot retries.
+Known isolated permission failures retain their existing minimum-age window before quarantine, rather than escalating at the shorter generic stall threshold.
+A write whose checkpoint contains a held path reports its pending outcome and cause.
+Graph lag and the doctor retain the existing last-readable warning; restricted graph results gain no global quarantine count.
+
+Cold startup must still prove current source and topology conditions before reusing held lineage.
+A path or weak stat tuple cannot justify unreadable bytes across the unwatched interval.
+Untrusted generation guards, offline movement and unreadable external observations retain the existing proof or recovery path.
 After commit, the same canonical hold retires only proved `(path, epoch)` observations.
 Durable receipts keep their existing revision compare-and-swap.
 A failed transaction clears neither observations nor receipts.
@@ -114,6 +128,8 @@ The existing availability republisher remains an empty-debt repair and never sup
 The implementation reuses the normal watcher, D4 source guards, mutation coordinator, existing publication owners and graph transaction.
 The gaps require two small durable mechanisms: observed-path publication and checkpoint-scoped partial coverage.
 They add one explicit publisher input and one bounded metadata encoding with reset rules.
+The existing quarantine record also gains optional provenance for exact held settlement.
+This preserves the established read policy without treating failed derivation as successful repair.
 No new queue, endpoint, storage service or external dependency is needed.
 The observer remains owned by the normal runtime through failure, cancellation and shutdown.
 

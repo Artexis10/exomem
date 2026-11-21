@@ -1982,6 +1982,14 @@ STAT_GENERATION_TRUSTED = os.name != "nt"
 GENERATION_RACY_WINDOW_NS = 2_000_000_000
 
 
+def generation_can_bind_bytes(info: os.stat_result, observed_at_ns: int) -> bool:
+    """Whether this source's generation can witness bytes across a replay."""
+    return (
+        STAT_GENERATION_TRUSTED
+        and observed_at_ns - max(info.st_mtime_ns, info.st_ctime_ns) > GENERATION_RACY_WINDOW_NS
+    )
+
+
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
         first.device == second.device and first.inode == second.inode and first.mode == second.mode
@@ -5032,7 +5040,7 @@ def read_bounded_guarded_bytes_with_generation(
         or not _same_identity(identity, after)
         or stat_generation(after) != generation
         or before.st_size != len(data)
-        or started - max(before.st_mtime_ns, before.st_ctime_ns) <= GENERATION_RACY_WINDOW_NS
+        or not generation_can_bind_bytes(before, started)
     ):
         return data, guard, None
     bound = PathGuard(target, guard.ancestors, guard.missing_parents, identity, "generation", None)

@@ -1269,6 +1269,75 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert w.start() is False
 
 
+@pytest.mark.parametrize("cancelled", [False, True], ids=["deadline", "shutdown"])
+def test_a_blocked_observer_does_not_hold_the_promotion_request(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+) -> None:
+    import threading
+
+    from watchdog.events import FileSystemEventHandler
+
+    backend_entered = threading.Event()
+    allow_backend = threading.Event()
+    returned = threading.Event()
+    stopped = threading.Event()
+    outcomes: list[bool] = []
+    observe_calls: list[str] = []
+
+    class SlowObserver:
+        def schedule(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            observe_calls.append("start")
+            backend_entered.set()
+            if not allow_backend.wait(8):
+                raise RuntimeError("test did not release observer startup")
+
+        def is_alive(self):
+            return allow_backend.is_set() and not stopped.is_set()
+
+        def stop(self):
+            stopped.set()
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (SlowObserver, FileSystemEventHandler))
+    watcher = file_watcher.FileWatcher(vault)
+
+    def promote():
+        budget = 30 if cancelled else 0.5
+        outcomes.append(watcher.arm_promotion_observation(deadline=time.monotonic() + budget))
+        returned.set()
+
+    promotion = threading.Thread(target=promote)
+    shutdown = threading.Thread(target=watcher.stop)
+    promotion.start()
+    try:
+        assert backend_entered.wait(3)
+        if cancelled:
+            shutdown.start()
+        assert returned.wait(3), "observer startup outlasted the promotion or shutdown"
+        assert outcomes == [False]
+        assert watcher.promotion_observation_stamp() is None
+        if not cancelled:
+            assert watcher.start(), "fallback lost the owner of the pending observer"
+        allow_backend.set()
+        assert watcher._observer_armed.wait(3)
+        if not cancelled:
+            assert watcher.promotion_observation_stamp() is not None
+        assert observe_calls == ["start"], "fallback created a second observer"
+    finally:
+        allow_backend.set()
+        promotion.join(5)
+        if shutdown.ident is None:
+            watcher.stop()
+        else:
+            shutdown.join(5)
+    assert stopped.is_set()
+
+
 def test_file_watcher_dispatch_thread_restarts_after_stop(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1283,6 +1352,9 @@ def test_file_watcher_dispatch_thread_restarts_after_stop(
 
         def start(self) -> None:
             pass
+
+        def is_alive(self) -> bool:
+            return True
 
         def stop(self) -> None:
             pass
@@ -2219,9 +2291,9 @@ def _suspend_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = epistemic_graph.EpistemicGraphIndex.suspend_reads
 
-    def spy(self: epistemic_graph.EpistemicGraphIndex) -> object:
+    def spy(self: epistemic_graph.EpistemicGraphIndex, **kwargs) -> object:
         calls.append("suspend_reads")
-        return real(self)
+        return real(self, **kwargs)
 
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy)
     return calls
@@ -2446,9 +2518,9 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
         events.append("available")
         return real_available(self)
 
-    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex) -> None:
+    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex, **kwargs) -> None:
         events.append("suspend_reads")
-        return real_suspend(self)
+        return real_suspend(self, **kwargs)
 
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", spy_available)
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy_suspend)
@@ -2477,7 +2549,6 @@ def test_stopping_startup_graph_rebuild_retains_debt_and_releases_owner(
     graph.suspend_reads()
     deferred_index.mark_graph_full_rebuild(vault, generation=1)
     watcher = file_watcher.FileWatcher(vault)
-    monkeypatch.setattr(watcher, "_await_admissible_graph", lambda _graph: False)
     indexed = []
     real_index = epistemic_graph.EpistemicGraphIndex._index_path
 
@@ -2545,8 +2616,7 @@ def test_startup_boundary_retries_observe_owned_stop(vault, monkeypatch, retry_p
         raise OpError("MUTATION_BUSY", "held", details={"status": "retryable"})
 
     graph = SimpleNamespace(
-        durable_checkpoint_is_coherent=lambda: False,
-        _mutation_coordinator=SimpleNamespace(snapshot=lambda: {"state": "held"}),
+        validate_startup_snapshot=lambda: None,
         suspend_reads=busy,
     )
     monkeypatch.setattr(file_watcher.time, "sleep", stop_on_wait)
@@ -2557,3 +2627,76 @@ def test_startup_boundary_retries_observe_owned_stop(vault, monkeypatch, retry_p
                 watcher._await_admissible_graph(graph)
             else:
                 watcher._suspend_reads_within_budget(graph, context="startup", exhausted="pending")
+
+
+def test_startup_waits_for_the_actual_writer_after_its_old_admission_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow governed publication must not turn valid queued work into corruption."""
+    import threading
+
+    from exomem import foreground_priority
+
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    watcher = file_watcher.FileWatcher(vault)
+    writer_entered = threading.Event()
+    finish_write = threading.Event()
+    admission_waited = threading.Event()
+    admission_done = threading.Event()
+    outcomes: list[bool] = []
+    errors: list[BaseException] = []
+    real_wait = foreground_priority.wait_for_retry
+    monkeypatch.setattr(file_watcher, "GRAPH_WITHDRAWAL_RETRY_SECONDS", 0.0)
+
+    def pending(seconds: float) -> None:
+        admission_waited.set()
+        return real_wait(seconds)
+
+    monkeypatch.setattr(foreground_priority, "wait_for_retry", pending)
+
+    def publish() -> None:
+        try:
+            with graph._mutation_coordinator.hold(operation="governed_test_publication"):
+                graph.suspend_reads()
+                writer_entered.set()
+                if not finish_write.wait(10):
+                    raise AssertionError("test did not release the governed writer")
+                graph.rebuild_all()
+        except (Exception, foreground_priority.BulkCancelled) as error:  # noqa: BLE001 - report thread failures
+            errors.append(error)
+            writer_entered.set()
+
+    def admit() -> None:
+        try:
+            with foreground_priority.bulk(stop=watcher._stop):
+                outcomes.append(watcher._await_admissible_graph(graph))
+        except (Exception, foreground_priority.BulkCancelled) as error:  # noqa: BLE001 - report thread failures
+            errors.append(error)
+        finally:
+            admission_done.set()
+
+    writer = threading.Thread(target=publish)
+    reader = threading.Thread(target=admit)
+    writer.start()
+    try:
+        assert writer_entered.wait(10)
+        assert not errors
+        reader.start()
+        assert admission_waited.wait(2), "startup treated a held boundary as incoherent"
+        assert not admission_done.is_set()
+        finish_write.set()
+        writer.join(10)
+        reader.join(10)
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert not errors
+        assert outcomes == [True]
+        assert graph.available()
+        assert not deferred_index.graph_full_rebuild_pending(vault)
+    finally:
+        finish_write.set()
+        watcher._stop.set()
+        writer.join(10)
+        if reader.ident is not None:
+            reader.join(10)

@@ -3594,6 +3594,7 @@ def publish_corpus_files_changed_classified(
     changed: Iterable[Path] = (),
     deleted: Iterable[Path | str] = (),
     populate_on_miss: bool = True,
+    observed: Iterable[vault.PathGuard] = (),
 ) -> CorpusPublicationFailure | None:
     """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
 
@@ -3607,6 +3608,7 @@ def publish_corpus_files_changed_classified(
     because its consumers' apply follows this publication, and calls
     :func:`populate_cold_corpus_context` once that apply has landed.
     """
+    guards = tuple(observed)
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
     deleted_values = tuple(Path(value) for value in deleted)
@@ -3618,7 +3620,17 @@ def publish_corpus_files_changed_classified(
     )
     with _CORPUS_CONTEXT_UPDATE_LOCK:
         try:
-            freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
+            if guards:
+                from .find_corpus import CACHE
+
+                vault.recheck_path_guards(root, guards)
+                CACHE.invalidate_paths(root, (guard.target for guard in guards))
+                freshness.on_files_changed(
+                    root, changed=changed_paths, deleted=deleted_paths,
+                    observed=(root / guard.target for guard in guards),
+                )
+            else:
+                freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
             # Read the token here, not in the patch call below: it is a
             # registry-side read, so a failure in it is registry-side too and
             # must not be reported as the projection's fault.
@@ -3634,6 +3646,8 @@ def publish_corpus_files_changed_classified(
                 deleted=deleted_values,
                 event_checkpoint=event_checkpoint,
             )
+            if guards:
+                vault.recheck_path_guards(root, guards)
         except BaseException as error:
             # Freshness already advanced, so the previous context can no
             # longer prove continuity. Evict every caption before reporting

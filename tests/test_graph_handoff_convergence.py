@@ -62,6 +62,9 @@ def _clean_standby_state() -> Iterator[None]:
     service_standby.reset_for_tests()
     readiness.reset()
     yield
+    activation = service_standby._activation
+    if activation is not None and getattr(activation, "file_watcher", None) is not None:
+        activation.file_watcher.stop()
     service_standby.reset_for_tests()
     readiness.reset()
 
@@ -85,16 +88,16 @@ def whole_vault_passes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return passes
 
 
-class _Activation:
-    def release(self) -> None:
-        return None
+def _enter_standby(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    from exomem.server_runtime import LocalRuntimeActivation
 
-
-def _enter_standby(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_FILE_WATCHER", raising=False)
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
     service_standby.enter_standby()
-    service_standby.register_activation(_Activation())
+    activation = LocalRuntimeActivation(root, deferred=True)
+    monkeypatch.setattr(activation, "start", lambda: None)
+    service_standby.register_activation(activation)
 
 
 def _commit_unpublished_page(root: Path) -> None:
@@ -180,7 +183,7 @@ def test_a_page_created_after_the_last_publication_does_not_strand_the_standby(
 ) -> None:
     root = handoff_vault
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
 
     assert service_standby.prove_graph_snapshot(root) is True, (
         "a page created after the last publication is a bounded repair, not a "
@@ -352,7 +355,7 @@ def test_a_standby_reproves_after_the_serving_worker_republishes(
 ) -> None:
     root = handoff_vault
     _decline_on_an_oversized_residue(root, monkeypatch)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
 
     assert service_standby.prove_graph_snapshot(root) is False
@@ -372,7 +375,7 @@ def test_a_waiting_standby_does_not_reprove_an_unchanged_graph(
 ) -> None:
     root = handoff_vault
     _decline_on_an_oversized_residue(root, monkeypatch)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is False
 
@@ -393,7 +396,7 @@ def test_a_standby_reproof_is_rate_limited(
 ) -> None:
     root = handoff_vault
     _decline_on_an_oversized_residue(root, monkeypatch)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     assert service_standby.REPROVE_INTERVAL_SECONDS == 30.0
     assert service_standby.prove_graph_snapshot(root) is False
     EpistemicGraphIndex(root).rebuild_all()
@@ -407,7 +410,7 @@ def test_the_standby_reproof_loop_runs_until_promotion_or_discard(
 ) -> None:
     root = handoff_vault
     _decline_on_an_oversized_residue(root, monkeypatch)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is False
 
@@ -439,7 +442,7 @@ def test_the_standby_reproof_loop_runs_until_promotion_or_discard(
 
     # A discarded standby stops re-proving at once.
     service_standby.reset_for_tests()
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     service_standby.discard()
     assert service_standby.reprove_until_promoted(root, poll_seconds=0.01) is False
 
@@ -453,7 +456,7 @@ def test_promotion_retires_the_full_marker_its_proof_covered(
     root = handoff_vault
     deferred_index.mark_graph_full_rebuild(root, generation=1)
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
 
     assert service_standby.prove_graph_snapshot(root) is True
     record = service_standby.promote(root, migrated=False)
@@ -474,7 +477,7 @@ def test_a_migrated_promotion_retires_the_marker_its_reproof_covered(
 ) -> None:
     root = handoff_vault
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     assert service_standby.prove_graph_snapshot(root) is True
     # Raised after the warm's proof but before the promotion re-proof samples it.
     deferred_index.mark_graph_full_rebuild(root, generation=1)
@@ -492,11 +495,16 @@ def test_debt_raised_after_the_proof_survives_promotion(
     root = handoff_vault
     deferred_index.mark_graph_full_rebuild(root, generation=1)
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     assert service_standby.prove_graph_snapshot(root) is True
-    # A repeat raise keeps the value but moves the raise count.
-    deferred_index.mark_graph_full_rebuild(root, generation=1)
+    reprove = service_standby._reprove
 
+    def raise_under_replay(*args, **kwargs):
+        # A repeat raise keeps the value but moves the raise count.
+        deferred_index.mark_graph_full_rebuild(root, generation=1)
+        return reprove(*args, **kwargs)
+
+    monkeypatch.setattr(service_standby, "_reprove", raise_under_replay)
     record = service_standby.promote(root, migrated=False)
 
     assert record["full_marker"] == "retained"
@@ -655,7 +663,7 @@ def test_an_adopted_residue_drains_to_the_edges_of_a_fresh_rebuild(
     whole_vault_passes.clear()
     mutate(root)
     freshness.rebaseline(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
 
     assert service_standby.prove_graph_snapshot(root) is True, service_standby.adoption_record()
     service_standby.promote(root, migrated=False)
@@ -674,7 +682,7 @@ def test_the_edge_oracle_sees_a_drain_that_does_not_widen(
     monkeypatch.setattr(
         EpistemicGraphIndex,
         "_topology_affected_sources",
-        lambda self, conn, rels, *, resolver: set(),
+        lambda self, conn, rels, **_kwargs: set(),
         raising=True,
     )
     (root / GENERATED / "fresh-target.md").write_text(_note(501, []), encoding="utf-8")
@@ -700,7 +708,7 @@ def test_a_snapshot_published_during_the_proof_is_held_and_reproved_at_promotion
     # only when S1 is still current.
     root = handoff_vault
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     clock = _Clock()
     monkeypatch.setattr(service_standby, "_clock", clock, raising=True)
     real = EpistemicGraphIndex.adopt_published_snapshot
@@ -791,7 +799,7 @@ def test_a_proof_under_live_writes_folds_them_and_converges_after_promotion(
     # page, `snapshot_published_during_proof`), or adopts a residue missing a moved page;
     # and a promotion re-proof whose adoption leaves the graph short of a fresh rebuild.
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     s1 = service_standby.snapshot_token(root)
     replaced = [f"{GENERATED}/generated-note-0001.md", f"{GENERATED}/generated-note-0002.md"]
@@ -875,7 +883,7 @@ def test_a_promotion_reproof_that_runs_out_of_time_falls_back_to_the_full_handof
     from exomem import warmup
 
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     assert service_standby.prove_graph_snapshot(root) is True
     s1 = service_standby.proved_checkpoint()
@@ -896,6 +904,9 @@ def test_a_promotion_reproof_that_runs_out_of_time_falls_back_to_the_full_handof
     freshness.rebaseline(root)
     monkeypatch.setattr(warmup, "warmup_enabled", lambda: True, raising=True)
     warmup.warm_graph_handoff(root)
+    service_standby._activation._start_file_watcher(root)
+    assert service_standby._activation.file_watcher.wait_until_seeded(30)
+    service_standby._activation._finish_file_watcher_startup(root)
     _drain_to_empty(root)
 
     assert EpistemicGraphIndex(root).available() is True
@@ -985,7 +996,7 @@ def test_the_promotion_reproof_takes_its_share_of_the_request_budget(
     # old supervisor's ten-second cap the request times out and discards the standby;
     # below a new supervisor's budget a large vault's re-proof declines for nothing.
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     assert service_standby.prove_graph_snapshot(root) is True
     edited = root / GENERATED / "generated-note-0007.md"
@@ -1016,7 +1027,7 @@ def test_promotion_stops_a_background_proof_that_is_still_walking(
     # Catches a background re-proof that runs on through promotion: its result is
     # dropped, and meanwhile it competes with the promotion's own bounded re-proof.
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     walking = _admission_slowed_per_page(monkeypatch, 0.05)
     real_adopt = EpistemicGraphIndex.adopt_published_snapshot
@@ -1047,7 +1058,7 @@ def test_a_page_rewritten_after_every_read_declines_instead_of_folding_forever(
     # Catches an unbounded fold: an editor that saves a page after every read would hold
     # the proof, and the standby's warm budget, until the upgrade is discarded.
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     churned = f"{GENERATED}/generated-note-0005.md"
     real_read = vault_module.read_bounded_guarded_bytes
@@ -1076,7 +1087,7 @@ def test_a_page_written_during_its_own_read_is_read_again_and_adopted_as_residue
     # Catches a proof that settles on a round whose recheck was clean but which never
     # read one page, and adopts that page at the bytes its stale row holds.
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     freshness.rebaseline(root)
     written = f"{GENERATED}/generated-note-0007.md"
     real_read = vault_module.read_bounded_guarded_bytes
@@ -1320,14 +1331,14 @@ def _durable_generation(root: Path) -> int | None:
     return None if checkpoint is None else checkpoint.generation
 
 
-def test_a_full_marker_raised_before_its_batch_lands_is_not_retired_by_an_earlier_proof(
+def test_promotion_rechecks_full_marker_debt_that_landed_after_the_standby_proof(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """OQ1: a full-scope batch marks its debt before its bytes land."""
     root = handoff_vault
     deferred_index.mark_graph_full_rebuild(root, generation=1)
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     before = _durable_generation(root)
     assert service_standby.prove_graph_snapshot(root) is True
 
@@ -1335,9 +1346,10 @@ def test_a_full_marker_raised_before_its_batch_lands_is_not_retired_by_an_earlie
     assert _durable_generation(root) != before, "the batch must move the durable generation"
     record = service_standby.promote(root, migrated=False)
 
-    assert record["snapshot"] == "current", "the sidecar did not move, only the bytes"
-    assert record["full_marker"] == "retained"
-    assert deferred_index.graph_full_rebuild_pending(root) is not None
+    assert record["snapshot"] == "current", "promotion replay must cover the newly landed bytes"
+    assert record["residue_applied"] >= 1
+    assert record["full_marker"] == "retired"
+    assert deferred_index.graph_full_rebuild_pending(root) is None
 
 
 def test_a_proved_standby_keeps_reproving_while_the_graph_moves(
@@ -1347,7 +1359,7 @@ def test_a_proved_standby_keeps_reproving_while_the_graph_moves(
     root = handoff_vault
     deferred_index.mark_graph_full_rebuild(root, generation=1)
     _commit_unpublished_page(root)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is True
 
@@ -1365,7 +1377,7 @@ def test_a_declined_reproof_keeps_the_held_proof(
 ) -> None:
     """A re-proof of a held proof replaces it only when it succeeds."""
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is True
     held = service_standby.proved_checkpoint()
@@ -1390,8 +1402,10 @@ def test_a_declined_reproof_keeps_the_held_proof(
     assert service_standby.proved_checkpoint() == held
     assert service_standby.cutover_components()["graph_snapshot"] == "ready"
     record = service_standby.promote(root, migrated=False)
-    assert record["snapshot"] == "current"
-    assert "graph_handoff" in record["carried_from_standby"]
+    assert record["snapshot"] == "rebuild-after-promotion"
+    assert record["reproof_declined"] == "residue_exceeds_drain_limit"
+    assert "startup_validation" not in record["carried_from_standby"]
+    assert "graph_handoff" not in record["carried_from_standby"]
 
 
 class _Clock:
@@ -1421,7 +1435,7 @@ def test_the_reproof_interval_runs_from_the_end_of_the_last_proof(
         return epistemic_graph.SnapshotAdoption(False, reason="resolver_topology_mismatch")
 
     monkeypatch.setattr(EpistemicGraphIndex, "adopt_published_snapshot", slow_decline, raising=True)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, tmp_path)
     assert service_standby.prove_graph_snapshot(tmp_path) is False  # 1000 -> 1050
 
     clock.now = 1070.0  # 20 s after the end, 70 s after the start
@@ -1438,7 +1452,7 @@ def test_an_unchanged_graph_is_polled_without_opening_the_sidecar(
     """L1: the once-a-second poll is two stats when nothing moved."""
     root = handoff_vault
     _decline_on_an_oversized_residue(root, monkeypatch)
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     monkeypatch.setattr(service_standby, "REPROVE_INTERVAL_SECONDS", 0.0, raising=True)
     assert service_standby.prove_graph_snapshot(root) is False
     opened: list[str] = []
@@ -1473,7 +1487,7 @@ def test_a_promotion_that_raises_does_not_leave_the_standby_promoting(
 ) -> None:
     """L4: a promotion that failed must not stop the standby proving."""
     root = handoff_vault
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
     assert service_standby.prove_graph_snapshot(root) is True
 
     def refused() -> None:
@@ -1488,7 +1502,7 @@ def test_a_promotion_that_raises_does_not_leave_the_standby_promoting(
 
 
 def test_rows_an_unpublished_drain_landed_carry_their_topology(
-    vault: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path
 ) -> None:
     """M2: a drain that withholds publication still records the topology of its rows.
 
@@ -1499,18 +1513,9 @@ def test_rows_an_unpublished_drain_landed_carry_their_topology(
     created = root / GENERATED / "drained-unpublished.md"
     created.write_text(_note(800, []), encoding="utf-8")
     freshness.rebaseline(root)
-    real_identity = epistemic_graph._incremental_projection_identity
-    calls = iter(range(1_000_000))
-
-    def moving(vault_root):
-        # Never equal twice: the vault moved elsewhere under the drain.
-        return (real_identity(vault_root), next(calls))
-
-    monkeypatch.setattr(epistemic_graph, "_incremental_projection_identity", moving, raising=True)
+    outside = root / GENERATED / "generated-note-0002.md"
+    freshness.mark_external_pending(root, paths=[outside])
     report = EpistemicGraphIndex(root).drain_paths([created])
-    monkeypatch.setattr(
-        epistemic_graph, "_incremental_projection_identity", real_identity, raising=True
-    )
     assert report["published"] is False
     assert _file_row(root, f"{GENERATED}/drained-unpublished.md")
 
@@ -1805,7 +1810,7 @@ def test_a_graph_schema_bump_settles_the_snapshot_so_the_upgrade_proceeds(
             )
     finally:
         conn.close()
-    _enter_standby(monkeypatch)
+    _enter_standby(monkeypatch, root)
 
     assert service_standby.prove_graph_snapshot(root) is False
     assert service_standby.adoption_record()["reason"] == "graph_sync_snapshot_unusable"
