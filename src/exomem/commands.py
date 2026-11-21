@@ -14311,6 +14311,8 @@ def op_propose_reclassification(
         return reclassify_module.propose(
             vault_root, path, source_kind=source_kind, domain=domain
         ).as_dict()
+    except request_budget_module.ReadBudgetExhausted:
+        raise reclassify_module.preview_warming() from None
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
 

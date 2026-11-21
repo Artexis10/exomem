@@ -190,6 +190,49 @@ def test_a_stopped_watchers_preview_fallback_builds_once_from_disk(
         assert referrer in first.result(timeout=5).rewritten
 
 
+def test_observer_handover_cancels_a_disk_preview_without_waiting(vault, source_schema, monkeypatch):
+    from exomem import file_watcher
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import owner_principal, request_scope
+
+    source = _capture(vault, source_schema, title="Water quality samples").path
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher.start()
+    try:
+        assert watcher.wait_until_seeded(10)
+        started, release = threading.Event(), threading.Event()
+        opened = []
+        original = vault_module.read_guarded_text
+
+        def hold_first_read(root, path):
+            opened.append(path)
+            if len(opened) == 1:
+                started.set()
+                assert release.wait(5)
+            return original(root, path)
+
+        def preview():
+            with request_scope(owner_principal(surface="mcp")):
+                return rc.propose(vault, source, source_kind="dataset-export")
+
+        monkeypatch.setattr(vault_module, "read_guarded_text", hold_first_read)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reading = pool.submit(preview)
+            try:
+                assert started.wait(5)
+                pool.submit(watcher.arm_optional_recovery).result(timeout=2)
+                assert vault_module.inbound_recovery_stop(vault, observing=True) is not None
+            finally:
+                release.set()
+            with pytest.raises(OpError) as retry:
+                reading.result(timeout=5)
+        assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+        assert len(opened) == 1
+    finally:
+        watcher.stop()
+
+
 @pytest.mark.parametrize("fault", ["unreadable", "changed", "unchanged-metadata", "new-checkpoint", "interrupted"])
 def test_served_disk_preview_requires_a_complete_stable_read(vault, source_schema, monkeypatch, fault):
     from exomem import freshness, request_budget

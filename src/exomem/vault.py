@@ -8390,6 +8390,7 @@ class _InboundGeneration:
     generation: int = 0
     demanded: threading.Event = field(default_factory=threading.Event)
     owner: tuple[threading.Event, Callable[[], bool] | None] | None = None
+    disk_preview_stop: threading.Event | None = None
     # Reconcile, request-triggered recovery and exact preview fallback share this slot.
     building: threading.Lock = field(default_factory=threading.Lock)
 
@@ -8419,6 +8420,12 @@ def register_inbound_index(
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
         if stop is not None and not stop.is_set():
             state.owner = (stop, observer_alive)
+            if (
+                state.disk_preview_stop is not None
+                and freshness.event_indexes_enabled()
+                and state.recovery_stop(observing=True) is not None
+            ):
+                state.disk_preview_stop.set()
 
 
 def unregister_inbound_index(vault_root: Path, stop: threading.Event) -> None:
@@ -8452,18 +8459,22 @@ def inbound_recovery_available(vault_root: Path) -> bool:
 
 
 @contextmanager
-def _disk_inbound_build_slot(vault_root: Path) -> Iterator[bool]:
+def _disk_inbound_build_slot(vault_root: Path) -> Iterator[threading.Event | None]:
     """Admit one disk preview only while no live observer owns recovery."""
     root = str(vault_root.resolve())
     with _INBOUND_INDEX_LOCK:
         state = _INBOUND_INDEX_GENERATIONS.setdefault(root, _InboundGeneration())
         observing = freshness.event_indexes_enabled() and state.recovery_stop(observing=True) is not None
-        acquired = not observing and state.building.acquire(blocking=False)
+        stop = threading.Event() if not observing and state.building.acquire(blocking=False) else None
+        if stop is not None:
+            state.disk_preview_stop = stop
     try:
-        yield acquired
+        yield stop
     finally:
-        if acquired:
-            state.building.release()
+        if stop is not None:
+            with _INBOUND_INDEX_LOCK:
+                state.disk_preview_stop = None
+                state.building.release()
 
 
 def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
@@ -8506,7 +8517,7 @@ def _build_inbound_index(vault_root: Path, *, paths: Iterable[Path] | None = Non
     file_targets: dict[str, tuple[str, ...]] = {}
     seq = 0
     for md in foreground_priority.yielding_in_bulk(walk_vault_md(vault_root) if paths is None else paths):
-        request_budget.checkpoint()
+        foreground_priority.check_cancelled()
         try:
             md_rel = md.relative_to(vault_root).as_posix()
             text, _guard = read_guarded_text(vault_root, md)
@@ -8555,14 +8566,14 @@ def checked_disk_inbound_wikilinks(
             freshness.external_pending_epoch(vault_root),
         )
 
-    with _disk_inbound_build_slot(vault_root) as acquired:
-        if not acquired:
+    with _disk_inbound_build_slot(vault_root) as stop:
+        if stop is None:
             return None
         check = request_budget.current_checkpoint()
         if check is None and (budget := request_budget.current()) is not None:
             check = request_budget.ReadCheckpoint(budget)
         try:
-            with request_budget.checking(check):
+            with request_budget.checking(check), foreground_priority.cancellable(stop):
                 start = epoch()
                 started_ns = time.time_ns()
                 before = inventory()
@@ -8573,10 +8584,10 @@ def checked_disk_inbound_wikilinks(
                     if before.get(path) != after.get(path) or relative_posix(path, vault_root) not in data.sources
                 }
                 for path, (mtime, ctime, size) in before.items():
+                    foreground_priority.check_cancelled()
                     rel = relative_posix(path, vault_root)
                     if rel in unproven or (STAT_GENERATION_TRUSTED and started_ns - max(mtime, ctime) > GENERATION_RACY_WINDOW_NS):
                         continue
-                    request_budget.checkpoint()
                     try:
                         read_bounded_guarded_bytes(vault_root, rel, limit=size, expected_hash=data.sources[rel])
                     except PathGuardError:
@@ -8594,12 +8605,13 @@ def checked_disk_inbound_wikilinks(
                     keep = proven_visible
                 snapshot = _snapshot_inbound(data, target_rel_path)
                 result = _select_inbound_wikilinks(snapshot, target_rel_path, keep)
-                request_budget.checkpoint()
-                if start == epoch():
-                    return result
+                foreground_priority.check_cancelled()
+                if start != epoch():
+                    return None
         except (OSError, request_budget.ReadBudgetExhausted, foreground_priority.BulkCancelled):
             return None
-    return None
+    # Releasing the slot retires its signal under the same lock that publishes an owner.
+    return None if stop.is_set() else result
 
 
 def _vault_freshness_key(vault_root: Path):
