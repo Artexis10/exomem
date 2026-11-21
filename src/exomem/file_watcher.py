@@ -2113,10 +2113,9 @@ class FileWatcher:
         graph_exists = graph.path.exists()
         rebuild_graph = epistemic_graph.graph_enabled() and graph_exists
         try:
-            if rebuild_graph and (
-                epistemic_graph.recovery_decline_reason(self._vault_root)
-                == epistemic_graph.RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
-            ):
+            decline = epistemic_graph.recovery_decline_reason(self._vault_root) if rebuild_graph else None
+            marker_owns_repair = decline == epistemic_graph.RECOVERY_DECLINE_MARKER_OWNS_REPAIR
+            if decline == epistemic_graph.RECOVERY_DECLINE_QUEUE_OWNS_REPAIR:
                 observation = freshness.external_observation_stamp()
                 paths = freshness.external_pending_paths(self._vault_root)
                 if 0 < len(paths) <= graph_sync._PATH_LIMIT:
@@ -2137,14 +2136,14 @@ class FileWatcher:
                         return
             find_module.evict_resolver_caches(self._vault_root)
             vault_module.evict_inbound_index(self._vault_root)
-            if graph_exists:
+            if graph_exists and not marker_owns_repair:
                 graph.withdraw_availability()
         except Exception:  # noqa: BLE001 - leave the epoch dirty for the next cycle
             log.exception("file watcher: pending epoch recovery preparation failed")
             return
 
         freshness.clear_external_pending(self._vault_root, through=pending_epoch)
-        if freshness.external_pending(self._vault_root) or not rebuild_graph:
+        if freshness.external_pending(self._vault_root) or not rebuild_graph or marker_owns_repair:
             return
         if epistemic_graph.publication_refusal_active(self._vault_root):
             # The same publication was refused recently; re-paying a full

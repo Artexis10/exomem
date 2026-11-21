@@ -46,7 +46,7 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -266,6 +266,22 @@ def test_legacy_marker_clear_seeds_the_durable_generation_sequence(vault: Path) 
     assert deferred_index.advance_graph_full_rebuild(vault) == 8
     assert deferred_index.clear_graph_full_rebuild(vault, generation=7) is False
     assert deferred_index.graph_full_rebuild_pending(vault) == 8
+
+
+def test_value_clear_retires_only_its_markers_fatal_family(vault: Path) -> None:
+    stamp = "a" * 64
+    with pytest.raises(ValueError, match="SHA-256 digest"):
+        deferred_index.mark_graph_full_rebuild(vault, generation=7, fatal_family="invalid")
+    deferred_index.mark_graph_full_rebuild(vault, generation=7, fatal_family=stamp)
+    new_generation = deferred_index.advance_graph_full_rebuild(vault)
+
+    assert not deferred_index.clear_graph_full_rebuild(vault, generation=new_generation - 1)
+    details = deferred_index.graph_full_rebuild_details(vault)
+    assert details is not None and details.fatal_family == stamp
+    assert deferred_index.clear_graph_full_rebuild(vault, generation=new_generation)
+    deferred_index.mark_graph_full_rebuild(vault, generation=new_generation + 1)
+    ordinary = deferred_index.graph_full_rebuild_details(vault)
+    assert ordinary is not None and ordinary.fatal_family is None
 
 
 def test_a_poisoned_path_is_rotated_behind_the_rest_of_the_queue(vault: Path) -> None:
@@ -3018,3 +3034,117 @@ def test_edit_after_availability_marker_sql_prevents_stale_ack(vault, monkeypatc
     )
 
     assert deferred_index.list_graph_paths(vault) == [PAGE_A]
+
+
+@pytest.mark.parametrize("barrier", [False, True], ids=["coherent", "barrier"])
+def test_fatal_graph_rows_hold_recovery_until_the_sidecar_changes(vault, monkeypatch, barrier):
+    graph = EpistemicGraphIndex(vault)
+    generation = _write_without_graph_repair(vault, monkeypatch, {PAGE_A: _page("A", "First revision.")})
+    graph.rebuild_all()
+    if barrier:
+        graph.suspend_reads()
+        deferred_index.add_graph(vault, [PAGE_A], generation=generation)
+    canonical_paths = (graph_sync.floor_path(vault), graph_sync.checkpoint_path(vault))
+    canonical = [path.read_bytes() for path in canonical_paths]
+    with closing(sqlite3.connect(graph.path)) as conn:
+        assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        node_page = conn.execute("SELECT rootpage FROM sqlite_schema WHERE name = 'graph_nodes'").fetchone()[0]
+    healthy = graph.path.read_bytes()
+    assert node_page > 1
+    with graph.path.open("r+b") as sidecar:
+        sidecar.seek((node_page - 1) * page_size)
+        sidecar.write(b"\xff")  # Damage only the SQLite node table's b-tree page type.
+    damaged = graph.path.read_bytes()
+    with closing(sqlite3.connect(graph.path)) as conn:
+        assert conn.execute("SELECT value FROM graph_meta WHERE key = 'instance'").fetchone()
+        with pytest.raises(sqlite3.DatabaseError) as corrupt:
+            conn.execute("SELECT source_hash FROM graph_nodes WHERE kind = 'file' LIMIT 1").fetchone()
+        assert corrupt.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_CORRUPT
+
+    epistemic_graph.require_startup_source_proof(vault)
+    verdict = graph.validate_startup_snapshot()
+    assert verdict == epistemic_graph.STARTUP_FULL_MARKER_REQUIRED
+    original = deferred_index.graph_full_rebuild_details(vault)
+    assert original is not None and original.fatal_family is not None
+    assert original.token[0] == generation
+    assert not graph.recover_startup_graph(verdict)
+    assert [path.read_bytes() for path in canonical_paths] == canonical
+    assert graph.path.read_bytes() == damaged
+
+    if not barrier:
+        def assert_unreadable_marker_keeps_fence():
+            assert deferred_index.graph_full_rebuild_observation(vault) is None
+            for withdraw in (graph.suspend_reads, graph.withdraw_availability):
+                with pytest.raises(deferred_index.GraphFullRebuildStateUnavailable):
+                    withdraw()
+            assert graph.validate_startup_snapshot() is None
+            result = epistemic_graph.converge_full_graph_marker(vault)
+            assert result.outcome == "deferred" and not result.whole_vault_attempted
+            assert graph.path.read_bytes() == damaged
+
+        def busy_queue(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        with monkeypatch.context() as busy:
+            busy.setattr(deferred_index, "_connect_readonly", busy_queue)
+            assert_unreadable_marker_keeps_fence()
+        assert deferred_index.graph_full_rebuild_details(vault) == original
+
+        fatal_key = deferred_index._GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY
+        with closing(sqlite3.connect(deferred_index.store_path(vault))) as conn:
+            with conn:
+                conn.execute("UPDATE maintenance_state SET value = 'invalid' WHERE key = ?", (fatal_key,))
+            assert_unreadable_marker_keeps_fence()
+            assert conn.execute("SELECT value FROM maintenance_state WHERE key = ?", (fatal_key,)).fetchone() == ("invalid",)
+            with conn:
+                conn.execute("UPDATE maintenance_state SET value = ? WHERE key = ?", (original.fatal_family, fatal_key))
+
+    deferred_index.mark_graph_full_rebuild(vault, generation=generation)
+    assert not deferred_index.retire_observed_graph_full_rebuild(vault, original.token)
+    newer = _write_without_graph_repair(vault, monkeypatch, {PAGE_A: _page("A", "Later canonical revision.")})
+    assert newer > generation
+    deferred_index.mark_graph_full_rebuild(vault, generation=newer)
+    assert not deferred_index.clear_graph_full_rebuild(vault, generation=generation)
+    advanced = deferred_index.graph_full_rebuild_details(vault)
+    assert advanced is not None and advanced.fatal_family == original.fatal_family
+    assert advanced.token[0] == newer
+    canonical = [path.read_bytes() for path in canonical_paths]
+
+    # A replacement worker must observe the same fault before attempting a barrier write.
+    assert EpistemicGraphIndex(vault).validate_startup_snapshot() == verdict
+    for _ in range(2):
+        result = epistemic_graph.converge_full_graph_marker(vault)
+        assert (result.outcome, result.code) == ("failed", "graph_sidecar_requires_replacement")
+        assert not result.whole_vault_attempted
+        assert graph_drain._work_once(vault) == 0
+    with pytest.raises(graph_sync.GraphRebuildRegistrationError) as refused:
+        graph.rebuild_all()
+    assert refused.value.code == "GRAPH_SYNC_SIDECAR_REQUIRES_REPLACEMENT"
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._suspend_reads_for_acknowledgement(graph)
+    graph.withdraw_availability()
+    with monkeypatch.context() as disabled:
+        disabled.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+        assert epistemic_graph.upsert_after_write(vault, [vault / PAGE_A]).code == "graph_index_disabled"
+    observed = freshness.mark_external_pending(vault, paths=[PAGE_A])
+    watcher._recover_external_pending(observed)
+    assert not freshness.external_pending(vault)
+    assert epistemic_graph.converge_full_graph_marker(vault).code == "graph_sidecar_requires_replacement"
+    assert deferred_index.graph_full_rebuild_details(vault) == advanced
+    assert epistemic_graph.startup_source_proof_pending(vault)
+    assert graph.path.read_bytes() == damaged
+    assert [path.read_bytes() for path in canonical_paths] == canonical
+
+    # Model an offline restore after closing the corrupt family's readers.
+    restored = graph.path.with_name("restored.sqlite")
+    restored.write_bytes(healthy)
+    for suffix in ("-wal", "-shm"):
+        graph.path.with_name(graph.path.name + suffix).unlink(missing_ok=True)
+    restored.replace(graph.path)
+    assert epistemic_graph.converge_full_graph_marker(vault).code == "graph_rebuild_completed"
+    assert graph.available() and _acknowledged(vault) == newer
+    assert deferred_index.graph_full_rebuild_details(vault) is None
+    deferred_index.mark_graph_full_rebuild(vault, generation=newer)
+    ordinary = deferred_index.graph_full_rebuild_details(vault)
+    assert ordinary is not None and ordinary.fatal_family is None

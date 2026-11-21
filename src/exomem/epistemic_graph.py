@@ -1069,6 +1069,7 @@ _PUBLICATION_FAILURE_TYPES: tuple[type[BaseException], ...] = (
     # builder, an incoherent epoch lineage, a refused lineage reset.  None of
     # them is evidence that the event registry stopped naming the file set.
     graph_sync.GraphRebuildRegistrationError,
+    deferred_index.GraphFullRebuildStateUnavailable,
 )
 
 # `OpError` codes raised by the shared vault mutation boundary.  A publication
@@ -1121,6 +1122,14 @@ class GraphPublicationSuperseded(GraphPublicationUnavailable):
     still a `graph_sync.GraphRebuildRegistrationError`, so `is_publication_failure`
     answers True and `may_mark_external_pending` answers False.
     """
+
+
+class _GraphSidecarRequiresReplacement(graph_sync.GraphRebuildRegistrationError):
+    def __init__(self) -> None:
+        super().__init__(
+            "GRAPH_SYNC_SIDECAR_REQUIRES_REPLACEMENT",
+            "Restore or replace the damaged graph sidecar offline.",
+        )
 
 
 class GraphProjectionMoved(RuntimeError):
@@ -1285,6 +1294,7 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
 
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
 RECOVERY_DECLINE_QUEUE_OWNS_REPAIR = "queue_owns_repair"
+RECOVERY_DECLINE_MARKER_OWNS_REPAIR = "marker_owns_repair"
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
 RECOVERY_DECLINE_NO_SIDECAR = "no_sidecar"
@@ -1330,6 +1340,10 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     """
     from . import freshness
 
+    details = deferred_index.graph_full_rebuild_details(vault_root)
+    if details is not None and details.fatal_family is not None:
+        # The marker owner checks the data family before any recovery write.
+        return RECOVERY_DECLINE_MARKER_OWNS_REPAIR
     if _graph_receipts_own_repair(vault_root):
         return RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
     if freshness.external_pending(vault_root):
@@ -1428,7 +1442,10 @@ def recover_suspended_graph(vault_root: Path) -> bool:
     from . import freshness
     from . import vault as vault_module
 
-    decline = recovery_decline_reason(vault_root)
+    try:
+        decline = recovery_decline_reason(vault_root)
+    except deferred_index.GraphFullRebuildStateUnavailable:
+        return False
     _note_recovery_decline(vault_root, decline)
     if decline is not None:
         return False
@@ -2166,6 +2183,18 @@ class _GraphStartupState(NamedTuple):
 
 STARTUP_FULL_MARKER_REQUIRED: Literal["full_marker_required"] = "full_marker_required"
 _SQLITE_FATAL_GRAPH_ERRORS = frozenset({sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB})
+
+
+@contextmanager
+def _observe_fatal_graph_read(output: list[int] | None) -> Iterator[None]:
+    """Capture fatal SQLite results only around statements on the graph connection."""
+    try:
+        yield
+    except sqlite3.Error as error:
+        code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+        if output is not None and code in _SQLITE_FATAL_GRAPH_ERRORS:
+            output.append(code)
+        raise
 
 
 class _GraphSidecarDamage(NamedTuple):
@@ -3488,6 +3517,71 @@ class EpistemicGraphIndex:
             )
             return True
 
+    def _graph_data_family_stamp(self, *, deadline: float) -> str | None:
+        """Stamp the bounded owner-held data family without querying its SQLite rows."""
+        with reserved_paths._subsystem_authority_scope("epistemic_graph"), reserved_paths._identity_coordination_scope(
+            self.vault_root, descriptor_ids=("graph-store",), identity_may_change=False, deadline=deadline,
+        ):
+            try:
+                with reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root, self.path, "graph-store", create=False,
+                ) as target:
+                    family: list[tuple[int, ...] | None] = []
+                    for suffix in ("", "-wal", "-journal", "-shm"):
+                        info: os.stat_result | None
+                        try:
+                            info = target.with_name(target.name + suffix).lstat()
+                        except FileNotFoundError:
+                            if not suffix:
+                                raise OSError("graph data family changed during sampling") from None
+                            info = None
+                        if info is not None and (
+                            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                            or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                        ):
+                            raise OSError("graph data family has an unsafe member")
+                        # SHM and an empty WAL carry only reader bookkeeping.
+                        if suffix == "-shm":
+                            continue
+                        family.append(None if info is None or (suffix == "-wal" and not info.st_size) else (
+                            info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                            info.st_mtime_ns, info.st_ctime_ns,
+                        ))
+            except FileNotFoundError:
+                return None
+        if time.monotonic() > deadline:
+            raise TimeoutError("graph data family sample expired")
+        return hashlib.sha256(json.dumps(family, separators=(",", ":")).encode("ascii")).hexdigest()
+
+    def _check_graph_rebuild_destination(
+        self, details: deferred_index.GraphFullRebuildDetails | None,
+        *, deadline: float | None = None,
+    ) -> None:
+        if details is None or details.fatal_family is None:
+            return
+        try:
+            family = self._graph_data_family_stamp(
+                deadline=deadline if deadline is not None else time.monotonic() + 0.05,
+            )
+        except (OSError, OpError, RuntimeError) as error:
+            raise graph_sync.GraphEpochUnreadable("graph data family could not be verified") from error
+        if family == details.fatal_family:
+            require_startup_source_proof(self.vault_root)
+            raise _GraphSidecarRequiresReplacement()
+
+    def _keep_attested_graph_fence(self, *, deadline: float | None = None) -> bool:
+        """Keep the existing fence without changing its data family under the boundary."""
+        if self.path != sidecar_path(self.vault_root):
+            return False  # A private build has no published family to fence.
+        if deadline is None:
+            deadline = time.monotonic() + 0.05
+        details = deferred_index.graph_full_rebuild_details(self.vault_root, deadline=deadline)
+        try:
+            self._check_graph_rebuild_destination(details, deadline=deadline)
+        except _GraphSidecarRequiresReplacement:
+            return True
+        return False
+
     def validate_startup_snapshot(self) -> bool | Literal["full_marker_required"] | None:
         """Admit the snapshot, retry a pending check, or fence proved repair debt."""
         if not self.path.exists():
@@ -3495,6 +3589,7 @@ class EpistemicGraphIndex:
             return True
         coordinator = self._canonical_mutation_coordinator()
         boundary = {"operation": "epistemic_graph_startup_validation", "holder_kind": "graph"}
+        fatal_read: list[int] = []
         try:
             with coordinator.try_hold(**boundary) as held:
                 if not held:
@@ -3502,13 +3597,24 @@ class EpistemicGraphIndex:
                 initial = self._startup_state()
                 if initial is None:
                     return None
+                data_family = self._graph_data_family_stamp(deadline=time.monotonic() + 0.05)
+                if data_family is None:
+                    return None
+                details = deferred_index.graph_full_rebuild_details(
+                    self.vault_root, deadline=time.monotonic() + 0.05,
+                )
+                if details is not None and details.fatal_family == data_family:
+                    require_startup_source_proof(self.vault_root)
+                    return STARTUP_FULL_MARKER_REQUIRED
             if not initial.coherent or freshness.external_pending(self.vault_root):
-                recovered = self._recover_startup_scoped_debt(initial)
-                if recovered is not False:
+                recovered = self._recover_startup_scoped_debt(initial, fatal_read)
+                if recovered is not False and not fatal_read:
                     return recovered
             else:
                 negative: list[_SnapshotSourceSeal] = []
-                conn = self._open_read_snapshot(prove=True, startup_negative=negative)
+                conn = self._open_read_snapshot(
+                    prove=True, startup_negative=negative, fatal_read_out=fatal_read,
+                )
                 if conn is not None:
                     conn.close()
                     with coordinator.try_hold(**boundary) as held:
@@ -3516,22 +3622,34 @@ class EpistemicGraphIndex:
                             return None
                         _admit_startup_source(self.vault_root)
                         return True
-                if not negative:
-                    recovered = self._recover_startup_scoped_debt(initial)
-                    return recovered if recovered is not False else None
-                if not self._snapshot_source_seal_matches_disk(negative[0]):
-                    return None
+                if not fatal_read:
+                    if not negative:
+                        recovered = self._recover_startup_scoped_debt(initial, fatal_read)
+                        if not fatal_read:
+                            return recovered if recovered is not False else None
+                    elif not self._snapshot_source_seal_matches_disk(negative[0]):
+                        return None
 
             # The source replay is outside the hold. A writer or observation
             # after that replay invalidates the negative before it can fence.
             with coordinator.try_hold(**boundary) as held:
                 if not held or self._startup_state() != initial:
                     return None
+                if fatal_read:
+                    if self._graph_data_family_stamp(deadline=time.monotonic() + 0.05) != data_family:
+                        return None
+                    require_startup_source_proof(self.vault_root)
+                    checkpoint = initial.epoch.checkpoint
+                    deferred_index.mark_graph_full_rebuild(
+                        self.vault_root, generation=checkpoint.generation if checkpoint else 0,
+                        fatal_family=data_family,
+                    )
+                    return STARTUP_FULL_MARKER_REQUIRED
                 self.suspend_reads(identity_deadline=time.monotonic() + 0.05)
                 return False
         except sqlite3.Error as error:
             code = getattr(error, "sqlite_errorcode", 0) & 0xFF
-            if code == sqlite3.SQLITE_ERROR or code in _SQLITE_FATAL_GRAPH_ERRORS:
+            if not fatal_read and (code == sqlite3.SQLITE_ERROR or code in _SQLITE_FATAL_GRAPH_ERRORS):
                 try:
                     if self._fence_damaged_startup_sidecar():
                         return STARTUP_FULL_MARKER_REQUIRED
@@ -3574,7 +3692,9 @@ class EpistemicGraphIndex:
             log.exception("startup graph validation failed")
         return False
 
-    def _recover_startup_scoped_debt(self, initial: _GraphStartupState) -> bool | None:
+    def _recover_startup_scoped_debt(
+        self, initial: _GraphStartupState, fatal_read: list[int],
+    ) -> bool | None:
         """Revalidate partial rows and bounded residue before choosing whole-vault repair."""
         from . import graph_drain
         from .index_sync import _graph_stat_token
@@ -3608,17 +3728,24 @@ class EpistemicGraphIndex:
         ) if checkpoint is not None else {}
         held_pages: dict[str, _ProofPage] = {}
         if held_proofs and vault_module.STAT_GENERATION_TRUSTED:
-            with closing(self._connect_existing(readonly=True, timeout=0.0)) as conn:
-                conn.execute("BEGIN")
-                held = self._valid_held_graph_paths(
-                    conn, held_proofs, policy=initial.policy,
-                    topology=initial.values.get(_RESOLVER_TOPOLOGY_KEY, ""),
-                )
-                titles = dict(conn.execute(
-                    "SELECT path, title FROM graph_nodes WHERE kind = 'file' "
-                    "AND path IN (SELECT value FROM json_each(?))",
-                    (json.dumps(sorted(held)),),
-                ))
+            try:
+                with closing(self._connect_existing(readonly=True, timeout=0.0)) as conn:
+                    conn.execute("BEGIN")
+                    held = self._valid_held_graph_paths(
+                        conn, held_proofs, policy=initial.policy,
+                        topology=initial.values.get(_RESOLVER_TOPOLOGY_KEY, ""),
+                        fatal_read_out=fatal_read,
+                    )
+                    with _observe_fatal_graph_read(fatal_read):
+                        titles = dict(conn.execute(
+                            "SELECT path, title FROM graph_nodes WHERE kind = 'file' "
+                            "AND path IN (SELECT value FROM json_each(?))",
+                            (json.dumps(sorted(held)),),
+                        ))
+            except sqlite3.Error:
+                if fatal_read:
+                    return None
+                raise
             for rel in held:
                 witness = held_proofs[rel]
                 if witness.cold_generation is None:
@@ -3650,7 +3777,7 @@ class EpistemicGraphIndex:
         known_debt = accounted | (set(coverage.paths) if coverage is not None else set())
         proof = self.adopt_published_snapshot(
             apply_residue=False, prime_resolver=False, known_queued=known_debt,
-            held_pages=held_pages,
+            held_pages=held_pages, fatal_read_out=fatal_read,
         )
         if not proof.adopted or proof.proof_reads is None or proof.proved_resolver is None:
             if proof.reason in (
@@ -3717,6 +3844,7 @@ class EpistemicGraphIndex:
         refusal_out: list[str] | None = None,
         reader: Callable[[str], bool] | None = None,
         startup_negative: list[_SnapshotSourceSeal] | None = None,
+        fatal_read_out: list[int] | None = None,
     ) -> sqlite3.Connection | None:
         """Open one validated read transaction without creating or migrating schema.
 
@@ -4002,6 +4130,7 @@ class EpistemicGraphIndex:
                 if self._snapshot_sources_match_disk(
                     conn, resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
                     fold=True, seal_out=seal, negative_out=startup_negative,
+                    fatal_read_out=fatal_read_out,
                 ):
                     startup_negative.extend(seal)
             if current and (not exact_live_checkpoint or startup_negative is not None):
@@ -4078,6 +4207,7 @@ class EpistemicGraphIndex:
                             reason_out=decline,
                             fold=startup_negative is not None,
                             negative_out=startup_negative,
+                            fatal_read_out=fatal_read_out,
                         )
                         # A proof that raised proved nothing about the sidecar.
                         if decline != ["proof_raised"] and not self_owned:
@@ -4442,6 +4572,7 @@ class EpistemicGraphIndex:
         prior_reads: _ProofReads | None = None,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        fatal_read_out: list[int] | None = None,
     ) -> SnapshotAdoption:
         """Prove an inherited sidecar and make its checkpoint live for this process.
 
@@ -4536,6 +4667,7 @@ class EpistemicGraphIndex:
                 held_pages=held_pages,
                 deadline=deadline,
                 cancelled=cancelled,
+                fatal_read_out=fatal_read_out,
             )
         finally:
             conn.close()
@@ -4600,6 +4732,7 @@ class EpistemicGraphIndex:
         held_pages: Mapping[str, _ProofPage] | None = None,
         deadline: float | None = None,
         cancelled: Callable[[], bool] | None = None,
+        fatal_read_out: list[int] | None = None,
     ) -> bool:
         """Prove a cold/foreign sidecar against human-owned Markdown bytes.
 
@@ -4716,12 +4849,11 @@ class EpistemicGraphIndex:
                 if memberships is None:
                     return declined("recall_membership_unreadable")
                 resolver_membership, indexed_membership = memberships
-            stored_hashes = {
-                str(path): str(source_hash)
-                for path, source_hash in conn.execute(
+            with _observe_fatal_graph_read(fatal_read_out):
+                stored_rows = conn.execute(
                     "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file'"
                 ).fetchall()
-            }
+            stored_hashes = {str(path): str(source_hash) for path, source_hash in stored_rows}
             admitted = resolver_membership | indexed_membership
             pages: dict[str, _ProofPage] = dict(seed.pages) if seed is not None else {}
             if held_pages:
@@ -4851,15 +4983,16 @@ class EpistemicGraphIndex:
                 # stored topology saw, so its title is unchanged: leave it out
                 # of the revert below, which would otherwise treat it as absent.
                 # It stays residue, so the drain repairs it with one rebuild.
-                unchanged_without_row = {
-                    rel
-                    for rel in created
-                    if conn.execute(
-                        "SELECT 1 FROM graph_dependency_coverage "
-                        "WHERE source_path = ? AND source_hash = ?",
-                        (rel, current_hashes[rel]),
-                    ).fetchone()
-                }
+                with _observe_fatal_graph_read(fatal_read_out):
+                    unchanged_without_row = {
+                        rel
+                        for rel in created
+                        if conn.execute(
+                            "SELECT 1 FROM graph_dependency_coverage "
+                            "WHERE source_path = ? AND source_hash = ?",
+                            (rel, current_hashes[rel]),
+                        ).fetchone()
+                    }
             resolver = vault_module.WikilinkResolver.from_entries(
                 self.vault_root,
                 [(rel, pages[rel].title) for rel in sorted(resolver_membership)],
@@ -4870,7 +5003,8 @@ class EpistemicGraphIndex:
                 or bool(
                     explained
                     and self._residue_explains_topology(
-                        conn, resolver, explained, resolver_fingerprint
+                        conn, resolver, explained, resolver_fingerprint,
+                        fatal_read_out=fatal_read_out,
                     )
                 )
             )
@@ -5106,6 +5240,8 @@ class EpistemicGraphIndex:
         resolver: vault_module.WikilinkResolver,
         residue: set[str],
         stored_fingerprint: str,
+        *,
+        fatal_read_out: list[int] | None = None,
     ) -> bool:
         """Whether reverting the residue's resolver entries reproduces the stored topology.
 
@@ -5117,7 +5253,8 @@ class EpistemicGraphIndex:
         outside the indexed corpus has no stored title to put back, so any
         change to one still declines.
         """
-        entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
+        with _observe_fatal_graph_read(fatal_read_out):
+            entries = {rel: self._stored_resolver_entry(conn, rel) for rel in residue}
         present = [(rel, title) for rel, (exists, title) in sorted(entries.items()) if exists]
         absent = [rel for rel, (exists, _title) in sorted(entries.items()) if not exists]
         before = resolver.fork()
@@ -5261,7 +5398,11 @@ class EpistemicGraphIndex:
             attempts += 1
             # Read before this attempt samples its epoch: whole-vault debt that
             # already exists now is paid by the publication this attempt makes.
-            covered_marker = _observe_full_marker(self.vault_root)
+            marker = deferred_index.graph_full_rebuild_details(
+                self.vault_root, deadline=time.monotonic() + 0.05,
+            )
+            self._check_graph_rebuild_destination(marker)
+            covered_marker = marker.token if marker is not None else None
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
             if prepared_recall is None:
                 self._reconcile_recall_publication()
@@ -5434,6 +5575,9 @@ class EpistemicGraphIndex:
                     operation="epistemic_graph_publish_rebuild", holder_kind="graph"
                 ):
                     foreground_priority.check_cancelled()
+                    self._check_graph_rebuild_destination(deferred_index.graph_full_rebuild_details(
+                        self.vault_root, deadline=time.monotonic() + 0.05,
+                    ))
                     if not (
                         self._behind_ticket_matches(behind_ticket)
                         if behind_ticket is not None
@@ -6752,7 +6896,7 @@ class EpistemicGraphIndex:
         "marker missing, barrier set" exactly as it did before. Nothing persists
         differently.
         """
-        if not self.path.exists():
+        if not self.path.exists() or self._keep_attested_graph_fence():
             return
         conn = self._connect_existing(readonly=False)
         try:
@@ -6784,6 +6928,8 @@ class EpistemicGraphIndex:
             operation="epistemic_graph_suspend_reads",
             holder_kind="graph",
         ):
+            if self._keep_attested_graph_fence(deadline=identity_deadline):
+                return
             options: dict[str, Any] = {"timeout": 0.0} if identity_deadline is not None else {}
             conn = self._connect_existing(
                 readonly=False, identity_deadline=identity_deadline, **options,
@@ -8870,6 +9016,7 @@ class EpistemicGraphIndex:
         *,
         policy: tuple[str, str],
         topology: str,
+        fatal_read_out: list[int] | None = None,
     ) -> set[str]:
         """Prove the exact retained rows and exclude superseded observations."""
         from .index_sync import _graph_stat_token
@@ -8879,11 +9026,12 @@ class EpistemicGraphIndex:
         instance = conn.execute("SELECT value FROM graph_meta WHERE key = 'instance'").fetchone()
         if instance is None:
             return set()
-        rows = dict(conn.execute(
-            "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file' "
-            "AND path IN (SELECT value FROM json_each(?))",
-            (json.dumps(tuple(proofs)),),
-        ))
+        with _observe_fatal_graph_read(fatal_read_out):
+            rows = dict(conn.execute(
+                "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file' "
+                "AND path IN (SELECT value FROM json_each(?))",
+                (json.dumps(tuple(proofs)),),
+            ))
         observed = freshness.external_pending_path_epochs(self.vault_root, proofs)
         if freshness.external_pending_unscoped(self.vault_root):
             return set()
@@ -12889,10 +13037,22 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
             # The marker and its raise count, so the clear below declines for
             # any debt raised after this sample -- including a repeat at the
             # same value, which a value compare-and-swap would erase.
-            observed = deferred_index.graph_full_rebuild_observation(root)
-            if observed is None:
-                return GraphDispatchResult.not_required()
-            index = EpistemicGraphIndex(root, mutation_coordinator=coordinator)
+            try:
+                details = deferred_index.graph_full_rebuild_details(root, deadline=time.monotonic() + 0.05)
+                if details is None:
+                    return GraphDispatchResult.not_required()
+                index = EpistemicGraphIndex(root, mutation_coordinator=coordinator)
+                index._check_graph_rebuild_destination(details)
+            except _GraphSidecarRequiresReplacement:
+                return GraphDispatchResult(
+                    "failed", "graph_sidecar_requires_replacement", graph_sync.read_checkpoint(root),
+                )
+            except (deferred_index.GraphFullRebuildStateUnavailable, graph_sync.GraphEpochUnreadable):
+                checkpoint = graph_sync.read_checkpoint(root)
+                return GraphDispatchResult(
+                    "deferred" if checkpoint is not None else "failed",
+                    "graph_epoch_unavailable", checkpoint,
+                )
             state = graph_sync.classify_epoch(root)
             if state.kind in {"pre_floor", "recoverable"}:
                 # Never wait on a committing batch while holding the writers'
@@ -12951,7 +13111,7 @@ def _converge_full_graph_marker(vault_root: Path) -> GraphDispatchResult:
         if checkpoint is None:
             return GraphDispatchResult("failed", "graph_convergence_failed")
         return GraphDispatchResult("deferred", "graph_convergence_deferred", checkpoint)
-    deferred_index.retire_observed_graph_full_rebuild(root, observed)
+    deferred_index.retire_observed_graph_full_rebuild(root, details.token)
     return GraphDispatchResult("completed", code, checkpoint)
 
 

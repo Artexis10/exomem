@@ -624,7 +624,7 @@ def _work_once(vault_root: Path) -> int:
     for it (`per_path_repair_raced`): a whole-vault pass would lose to the same
     commits.
     """
-    from . import epistemic_graph, freshness
+    from . import deferred_index, epistemic_graph, freshness
 
     processed = 0
     attempted = False
@@ -638,18 +638,21 @@ def _work_once(vault_root: Path) -> int:
     queued_after = _queue_pending(vault_root)
     if _barrier_pending(vault_root):
         if not queued_after and _cover_unacknowledged_checkpoint(vault_root):
-            processed += 1
-        elif _recover_once(vault_root):
-            processed += 1
+            return processed + 1
+        if _recover_once(vault_root):
+            return processed + 1
+        try:
+            decline = epistemic_graph.recovery_decline_reason(vault_root)
+        except deferred_index.GraphFullRebuildStateUnavailable:
+            return processed
         # A barrier with an unpublished external epoch and no queued receipt
         # has no bounded coverage to recover from. The ordinary recovery
         # refuses it correctly; route that unknown scope through the existing
         # guarded full-marker convergence instead of leaving the barrier to
         # retry a refusal forever. A recent publication refusal keeps its
         # established backoff rather than spending another rebuild.
-        elif (
-            epistemic_graph.recovery_decline_reason(vault_root)
-            == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
+        if (
+            decline == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
             and not epistemic_graph.publication_refusal_active(vault_root)
             # A busy pass with more scoped observations than it can check leaves
             # the queue eligible for ordinary stall recovery.

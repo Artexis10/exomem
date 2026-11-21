@@ -15,7 +15,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import reserved_paths, sidecar_store
 from .kbdir import managed_split_parts
@@ -30,6 +30,7 @@ _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 #: marker's value unchanged, so a retirement can tell "no new debt" from "new
 #: debt at the same value".
 _GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
+_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY = "graph_full_rebuild_fatal_family:v1"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 #: Set, in the transaction that rebuilds it, to the component names the table's
 #: CHECK accepts, so a release that adds a component widens the CHECK once.
@@ -1398,8 +1399,15 @@ def record_graph_debt_generation(vault_root: Path, *, generation: int) -> None:
         conn.close()
 
 
-def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
+def mark_graph_full_rebuild(
+    vault_root: Path, *, generation: int, fatal_family: str | None = None,
+) -> None:
     """Record that a whole-vault rebuild is owed, at or after this generation."""
+    if fatal_family is not None:
+        from .graph_sync import _is_digest
+
+        if not _is_digest(fatal_family):
+            raise ValueError("fatal graph family must be a SHA-256 digest")
     conn = _connect(vault_root, create=True)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1437,6 +1445,12 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, recorded))),
             )
             _count_graph_full_rebuild_mark_locked(conn)
+            if fatal_family is not None:
+                conn.execute(
+                    "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY, fatal_family),
+                )
         except Exception:
             conn.rollback()
             raise
@@ -1499,6 +1513,15 @@ def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:
     )
 
 
+class GraphFullRebuildDetails(NamedTuple):
+    token: tuple[int, int]
+    fatal_family: str | None
+
+
+class GraphFullRebuildStateUnavailable(RuntimeError):
+    """The marker state could not be read or validated."""
+
+
 def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
     """The standing marker and its raise count, read together, or None.
 
@@ -1506,27 +1529,46 @@ def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
     publication can retire exactly the debt that existed then and nothing
     raised after -- see `retire_observed_graph_full_rebuild`.
     """
-    if not store_path(vault_root).exists():
-        return None
     try:
-        conn = _connect_readonly(vault_root)
+        details = graph_full_rebuild_details(vault_root)
+    except GraphFullRebuildStateUnavailable:
+        return None
+    return details.token if details is not None else None
+
+
+def graph_full_rebuild_details(
+    vault_root: Path, *, deadline: float | None = None,
+) -> GraphFullRebuildDetails | None:
+    """Read one marker snapshot. None means the marker is absent."""
+    from .cli_ops import OpError
+    from .graph_sync import _is_digest
+
+    try:
         try:
-            rows = dict(
-                conn.execute(
-                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
-                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY),
-                ).fetchall()
-            )
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error):
-        return None
-    if _GRAPH_FULL_REBUILD_KEY not in rows:
-        return None
-    try:
-        return int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0))
-    except (TypeError, ValueError):
-        return None
+            store_path(vault_root).lstat()
+        except FileNotFoundError:
+            return None
+        with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = dict(conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY, _GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY),
+                ))
+            except sqlite3.OperationalError:
+                # A store from before maintenance markers could not hold one.
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'maintenance_state'").fetchone() is None:
+                    return None
+                raise
+        if _GRAPH_FULL_REBUILD_KEY not in rows:
+            return None
+        token = (int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0)))
+        fatal_family = rows.get(_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY)
+        if min(token) < 0 or (fatal_family is not None and not _is_digest(fatal_family)):
+            raise ValueError("malformed graph rebuild marker")
+        return GraphFullRebuildDetails(token, fatal_family)
+    except (OSError, OpError, RuntimeError, sqlite3.Error, TypeError, ValueError) as error:
+        raise GraphFullRebuildStateUnavailable("graph rebuild marker state is unavailable") from error
 
 
 def retire_observed_graph_full_rebuild(
@@ -1572,15 +1614,15 @@ def retire_observed_graph_full_rebuild(
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, marker))),
             )
-            changed = conn.execute(
-                "DELETE FROM maintenance_state WHERE key = ?",
-                (_GRAPH_FULL_REBUILD_KEY,),
-            ).rowcount
+            conn.execute(
+                "DELETE FROM maintenance_state WHERE key IN (?, ?)",
+                (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY),
+            )
         except Exception:
             conn.rollback()
             raise
         conn.commit()
-        return bool(changed)
+        return True
     finally:
         conn.close()
 
@@ -1698,6 +1740,11 @@ def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None)
                     "AND CAST(value AS INTEGER) <= ?",
                     (_GRAPH_FULL_REBUILD_KEY, int(generation)),
                 ).rowcount
+            if changed:
+                conn.execute(
+                    "DELETE FROM maintenance_state WHERE key = ?",
+                    (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY,),
+                )
         except Exception:
             conn.rollback()
             raise
