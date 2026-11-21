@@ -522,3 +522,37 @@ def test_v2_refuses_an_undeclared_write_above_the_image_bound_without_reading_it
         vault.batch_atomic_write([blob], vault_root=root, post_commit_fanout=False)
     assert counting.read_bytes == 0
     assert not blob.path.exists()
+
+
+def test_v2_repair_accepts_an_opaque_original_bound_to_a_retained_source(tmp_path, monkeypatch):
+    from exomem import vocabulary_auxiliaries
+
+    root = _activated_root(tmp_path, monkeypatch)
+    artifact = "Knowledge Base/Sources/Sessions/log.bin"
+    source = root / f"{artifact}.md"
+    source.parent.mkdir(parents=True)
+    data = b"\x00\xffOriginal bytes"
+    original = vault.PlannedWrite(
+        root / artifact, _prepared(data), create_only=True, expected_hash=vault.MISSING_CONTENT_HASH,
+    )
+    text = (
+        f"---\ntype: source\nevidence_file: {artifact}\nbinary_sha256: {original.content.sha256}\n"
+        "---\n\nOriginal record.\n"
+    )
+    source.write_text(text, encoding="utf-8")
+    guard = vault.PathGuard.capture(
+        root, source.relative_to(root).as_posix(), leaf_policy="content",
+        expected_content_hash=vault.content_hash(text),
+    )
+
+    with library_scope():
+        declaration = vocabulary_auxiliaries.seal_retained_original(
+            root, primary=vault.PlannedWrite(source, text, guard=guard), original=original,
+        )
+        vault.batch_atomic_write(
+            [original], vault_root=root, required_guards=(guard,),
+            post_commit_fanout=False, _vocabulary_auxiliaries=declaration,
+        )
+
+    assert source.read_text(encoding="utf-8") == text
+    assert original.path.read_bytes() == data

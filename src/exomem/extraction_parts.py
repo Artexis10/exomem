@@ -34,8 +34,10 @@ from .governance import raw_protection
 from .kbdir import managed_root
 from .vault import (
     MISSING_CONTENT_HASH,
+    PathGuardError,
     PlannedWrite,
     content_hash,
+    markdown_lf,
     parse_frontmatter,
     read_frontmatter_header,
     read_guarded_text,
@@ -183,6 +185,15 @@ def text_of_part(content: str) -> str:
     if start == -1:
         return ""
     return content[start + len(marker) :].removesuffix("\n")
+
+
+def part_document(content: str) -> tuple[dict, str] | None:
+    """Read a page at a declared part path only if it carries a Source binding."""
+    content = markdown_lf(content)
+    frontmatter, _, _ = parse_frontmatter(content)
+    if "part_of" not in frontmatter:
+        return None
+    return frontmatter, text_of_part(content)
 
 
 def count_of(frontmatter: Mapping[str, object]) -> int:
@@ -487,8 +498,14 @@ def _by_stat(memo: dict[Path, tuple[tuple[int, int, int], int]], path: Path, mea
 
 
 def _part_text(vault_root: Path, page: Path, number: int) -> str:
-    raw, _guard = read_guarded_text(vault_root, part_path(page, number))
-    return text_of_part(raw)
+    try:
+        raw, _guard = read_guarded_text(vault_root, part_path(page, number))
+    except (PathGuardError, UnicodeError) as error:
+        raise OSError("a declared extraction part is unreadable") from error
+    part = part_document(raw)
+    if part is None:
+        raise FileNotFoundError("a declared extraction part has no Source binding")
+    return part[1]
 
 
 def _part_length(vault_root: Path, page: Path, number: int) -> int:
@@ -523,29 +540,38 @@ def bounds_of(first_length: int, lengths: Iterable[int]) -> list[int]:
     return bounds
 
 
-def _bounds(vault_root: Path, page: Path, first: str, count: int) -> list[int]:
+def _bounds(vault_root: Path, page: Path, first: str, count: int, *, prefix: bool = False) -> list[int]:
     """Where each part starts in the whole text as it is now, then where the text ends."""
-    return bounds_of(len(first), (_part_length(vault_root, page, number) for number in range(2, count + 1)))
+    def lengths() -> Iterator[int]:
+        for number in range(2, count + 1):
+            try:
+                yield _part_length(vault_root, page, number)
+            except OSError:
+                if not prefix:
+                    raise
+                return
+
+    return bounds_of(len(first), lengths())
 
 
 def stored_parts(
     vault_root: Path,
     page: str,
-    content: str,
     *,
+    first: str,
+    count: int,
     pending: Mapping[str, str] = MappingProxyType({}),
     folder: str | None = None,
 ) -> tuple[tuple[int, str, int], ...]:
     """`(number, text, start)` of each further part of the extraction on `page`, for a catalog.
 
-    `page` is the vault-relative path of the Source page and `content` its text. A part is
-    one the page lists (2 up to its `extraction_parts`) that carries `part_of`, the rule every
+    `page` is the vault-relative Source path, `first` its normalized first extraction part,
+    and `count` the declared part count. A part is one the page lists that carries `part_of`, the rule every
     reader that folds parts applies; the run stops at the first part that is missing or is not
     one, so no part after a gap gets in. `start` is where the part starts in the whole stored
     text. `pending` holds the text of the pages a batch is about to write, by vault-relative
     path; `folder` is where the parts are now when the page is about to move away from them.
     """
-    count = count_of(parse_frontmatter(content)[0])
     if count < 2:
         return ()
     location = Path(folder) if folder is not None else folder_for(Path(page))
@@ -558,10 +584,11 @@ def stored_parts(
                 raw, _guard = read_guarded_text(vault_root, vault_root / relative)
             except (OSError, ValueError):  # a guard refusal or bad UTF-8 is a part that does not read
                 break
-        if "part_of" not in parse_frontmatter(raw)[0]:
+        part = part_document(raw)
+        if part is None:
             break
-        texts.append(text_of_part(raw))
-    starts = bounds_of(len(preserve.extracted_text(content)), (len(text) for text in texts))
+        texts.append(part[1])
+    starts = bounds_of(len(first), (len(text) for text in texts))
     return tuple((number, text, starts[number - 1]) for number, text in enumerate(texts, 2))
 
 
@@ -584,22 +611,24 @@ class Window:
 
     text: str
     offset: int
-    #: Where the next window starts; None when this one reaches the end of the text.
+    #: Where the next window starts. None only at a verified end of the text.
     next_offset: int | None
-    total_chars: int
+    total_chars: int | None
     part: int
     parts: int
 
 
 def _window_end(text: str, start: int) -> int:
-    """Where a window that starts at `start` in `text` ends: at a paragraph or line break when it must be cut."""
+    """Prefer a break after enough text to include a complete search passage."""
+    from .find_parts import MAX_PASSAGE_CHARS
+
     end = start + WINDOW_CHARS
     if end >= len(text):
         return len(text)
     window = text[start:end]
     for mark in ("\n\n", "\n"):
         cut = window.rfind(mark)
-        if cut > 0:
+        if cut + len(mark) >= MAX_PASSAGE_CHARS:
             return start + cut + len(mark)
     return end
 
@@ -629,17 +658,20 @@ def read_window(
     `next_offset` is always past `offset`, and walking it from 0 to None returns the text of
     every part, in order, exactly. `withhold` gives the spans of a part's text that the caller
     is not shown; they leave the window's text, never its positions. Raises `ValueError` for
-    an `offset` outside the text and `OSError` for a part page that is missing or that changes
-    during the read.
+    an `offset` outside the text and `OSError` for a part needed to reach it that is missing or
+    changes during the read. A missing later part leaves the total unknown.
     """
     count = count_of(frontmatter)
     for _attempt in range(2):
-        bounds = _bounds(vault_root, page, first, count)
+        bounds = _bounds(vault_root, page, first, count, prefix=True)
         total = bounds[-1]
+        incomplete = len(bounds) != count + 1
+        if incomplete and offset >= total:
+            raise FileNotFoundError("an extraction part needed for this offset is missing")
         if not 0 <= offset < max(total, 1):
             raise ValueError(f"offset {offset} is outside the extracted text of {total} characters")
         # The first part that ends past `offset`; an empty part holds no position.
-        number = next((n for n in range(1, count + 1) if offset < bounds[n]), 1)
+        number = next((n for n in range(1, len(bounds)) if offset < bounds[n]), 1)
         text = first if number == 1 else _part_text(vault_root, page, number)
         if len(text) == bounds[number] - bounds[number - 1]:
             break
@@ -649,7 +681,8 @@ def read_window(
     end = _window_end(text, local)
     reached = bounds[number - 1] + end
     shown = without_spans(text, local, end, withhold(text))
-    return Window(shown, offset, reached if reached < total else None, total, number, count)
+    next_offset = reached if incomplete or reached < total else None
+    return Window(shown, offset, next_offset, None if incomplete else total, number, count)
 
 
 @dataclass

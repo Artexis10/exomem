@@ -25,7 +25,7 @@ from .principal import OWNER_AUDIENCE
 
 MAX_PROJECTION_VARIANTS_PER_ITEM = 256
 # 3: a full-text variant holds the further parts of its Source's extracted text.
-PROJECTOR_SCHEMA_VERSION = 3
+PROJECTOR_SCHEMA_VERSION = 4
 MAX_HIDDEN_CORPUS_WIRE_DELTA_MS = 25
 MAX_HIDDEN_CORPUS_WIRE_DELTA_RATIO = 0.10
 MAX_GOVERNED_CATALOG_ITEMS = 16_384
@@ -364,7 +364,7 @@ class ProjectionVariant:
     #: The further parts of the Source's extracted text, numbered from 2 without a gap.
     #: They are text of this row, not of the variant identity, so stored vectors stay valid.
     parts: tuple[ProjectionPart, ...] = ()
-    #: Where part 1 lies in the body, when the variant holds parts and part 1 maps to it.
+    #: Where the first Source text lies in the body when it has a stored position.
     head: ProjectionHead | None = None
 
     def __post_init__(self) -> None:
@@ -416,10 +416,10 @@ class ProjectionVariant:
             raise ProjectionCanonicalizationError("variant parts must run from 2 without a gap")
         if self.head is not None and (
             not isinstance(self.head, ProjectionHead)
-            or not self.parts
+            or self.decision_level != 6
             or self.head.end > len(self.search_fields.get("body", ""))
         ):
-            raise ProjectionCanonicalizationError("a variant head must lie in the body of a variant with parts")
+            raise ProjectionCanonicalizationError("a variant head must lie in the body of a full-text variant")
 
 
 def part_count(variants: Iterable[ProjectionVariant]) -> int:
@@ -449,7 +449,7 @@ def with_parts(
     by_strip: dict[bytes, tuple[tuple[ProjectionPart, ...], _Mapped | None]] = {}
     built: list[ProjectionVariant] = []
     for variant in variants:
-        if variant.decision_level != 6 or not stored_parts:
+        if variant.decision_level != 6 or (not stored_parts and not head):
             built.append(variant)
             continue
         release_strip = json.loads(variant.value_jcs)["release_strip"]
@@ -461,10 +461,7 @@ def with_parts(
                 _projected(variant.item_identity, head, strip),
             )
         parts, first = by_strip[key]
-        if parts:
-            built.append(replace(variant, parts=parts, head=_head_in(variant, first)))
-        else:
-            built.append(variant)
+        built.append(replace(variant, parts=parts, head=_head_in(variant, first)))
     return tuple(built)
 
 

@@ -1276,6 +1276,8 @@ def _already_stored_outcome(
 def _validate_staged_adoption(
     artifact: StagedArtifact, envelope: AdoptionEnvelope
 ) -> None:
+    if artifact.held is not None and (artifact.held.record or {}).get("import_key") is not None:
+        raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Save this held Source without adoption.")
     if (
         artifact.file_id != envelope.selected_file_id
         or not artifact.filename.strip()
@@ -1689,6 +1691,7 @@ def capture_source_artifacts(
     title: str,
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
+    import_key: str | None = None,
     **source_fields: object,
 ) -> dict:
     """Stage remote files first, then capture each as a Source under a guard.
@@ -1743,7 +1746,7 @@ def capture_source_artifacts(
 
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged=staged, outcomes=outcomes,
-        source_fields=source_fields,
+        source_fields=source_fields, import_key=import_key,
     )
 
 
@@ -1755,20 +1758,29 @@ def _commit_staged_sources(
     staged: Mapping[int, StagedArtifact],
     outcomes: list[dict | None],
     source_fields: Mapping[str, object],
+    import_key: str | None = None,
 ) -> dict:
     """Capture each staged file as a Source under the mutation guard, releasing the staged bytes.
 
     A correction names its predecessor, so it never meets an earlier Source that holds the same bytes.
     """
     from . import add as add_module
-    from . import document_identity, source_corrections
+    from . import (
+        document_containers,
+        document_identity,
+        source_capture,
+        source_corrections,
+        source_imports,
+    )
 
     resolution: dict | None = None
     manager = active_manager()
     refusals: list[OpError] = []
+    wrote_import_receipt = False
     try:
         for index, artifact in staged.items():
             body_started = False
+            key = import_key
             try:
                 if (
                     not artifact.file_id
@@ -1787,15 +1799,53 @@ def _commit_staged_sources(
                     document_identity.inspect(artifact.path, claimed_url if isinstance(claimed_url, str) else None)
                     if document_identity.is_pdf(artifact.filename) else None
                 )
+                held_key = (artifact.held.record or {}).get("import_key") if artifact.held is not None else None
+                if held_key is not None and (
+                    len(outcomes) != 1 or source_fields.get("correction") is not None
+                    or import_key is not None and import_key != held_key
+                ):
+                    raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Use the held Source's import ID in a single-file capture.")
+                key = import_key or held_key
+                if key is not None:
+                    safe_name = add_module.source_artifact_name(artifact.filename)
+                    if document_containers.is_container(safe_name):
+                        raise SafeFetchError(
+                            "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
+                        )
+                import_capture = (
+                    source_imports.ImportCapture.bind(vault_root, key, artifact, title=item_title, source_fields=source_fields)
+                    if key is not None else None
+                )
                 with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
                 ):
                     body_started = True
+                    resumed = None
+                    if import_capture is not None:
+                        previous, repaired, resumed = import_capture.lookup(vault_root, artifact)
+                        if repaired:
+                            wrote_import_receipt = True
+                            mark_active_mutation_committed()
+                        if previous is not None:
+                            duplicate = DuplicateArtifact(
+                                artifact.sha256, previous.payload.artifact_path, previous.path, previous.ref,
+                            )
+                            outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
+                            if repaired:
+                                warnings: list[str] = []
+                                _schedule_media(
+                                    manager, vault_root, duplicate.path, warnings,
+                                    kept="the original", operation="capture_source_media",
+                                )
+                                if warnings:
+                                    outcomes[index]["warnings"] = warnings
+                                import_capture.finish(vault_root)
+                            continue
                     # Looked up and committed under this one acquisition, so two identical hand-overs
                     # cannot both find nothing.
-                    if source_fields.get("correction") is not None:
+                    if source_fields.get("correction") is not None or resumed is not None:
                         duplicate, available = None, True
                     else:
                         duplicate, available = _earlier_source(
@@ -1813,8 +1863,20 @@ def _commit_staged_sources(
                                 content_type=artifact.content_type,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
+                            import_capture=import_capture,
+                            _import_resume=resumed,
                             **source_fields,
                         )
+                    elif import_capture is not None:
+                        admitted = duplicates.named_duplicate(
+                            vault_root, duplicate.sidecar_path, sha256=artifact.sha256,
+                            lane=duplicates.SOURCES, protected=import_capture.protected, keeps_original=True,
+                        )
+                        if admitted is None or admitted.ref != duplicate.ref:
+                            raise SafeFetchError("IMPORT_RECEIPT_UNAVAILABLE", "The duplicate Source could not be verified.")
+                        import_capture.commit_duplicate(vault_root, admitted)
+                        wrote_import_receipt = True
+                        mark_active_mutation_committed()
                 if _wrote(duplicate):
                     mark_active_mutation_committed()
                 if duplicate is not None:
@@ -1858,8 +1920,15 @@ def _commit_staged_sources(
                     # Stored with the row, so a replayed reply offers the same next step.
                     outcomes[index]["correctable"] = source_corrections.can_record(vault_root, payload["ref"])
                 source_result_attribution.bind(outcomes[index], (result.ref,))
+                if import_capture is not None:
+                    import_capture.finish(vault_root)
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
+            except source_capture.SourceCaptureError as error:
+                if key is None:
+                    raise
+                code, _, reason = str(error).partition(":")
+                outcomes[index] = _failed(artifact.file_id, SafeFetchError(code, reason.strip()))
             except add_module.AddError as error:
                 outcomes[index] = _failed(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
@@ -1890,7 +1959,7 @@ def _commit_staged_sources(
     if source_fields.get("custody_only") is True:
         # The resolved mark (a correction carries its predecessor's): the outcome line says so.
         out["custody_only"] = True
-    return _unless_written(out)
+    return out if wrote_import_receipt else _unless_written(out)
 
 
 def capture_source_correction(
