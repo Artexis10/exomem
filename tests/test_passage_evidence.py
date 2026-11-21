@@ -1030,7 +1030,8 @@ def test_the_memory_of_verified_passages_stays_within_its_bound(
 
 def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
     """Weighing an entry by its frontmatter dict and chunk strings alone counted under half the bytes
-    it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap."""
+    it kept alive, so the 16 MiB bound let the memory hold about 40 MiB in a pod without swap. A
+    Source identity is a mapping whose strings have no length limit, so it is weighed deeply too."""
     memory = passage_evidence._VerifiedSources(max_entries=1000, max_bytes=1 << 40)
     root, scope, proof = Path("/vault").absolute(), "kb", ("checkpoint", "catalogue", 7)
     for n in range(50):
@@ -1042,7 +1043,8 @@ def test_the_memory_of_verified_passages_weighs_at_least_what_it_keeps():
             for number in range(3)
         }
         path = f"Knowledge Base/Sources/Sessions/2026-11-21-source-{n:03d}.md"
-        source = passage_evidence._VerifiedSource(f"lh{n:03d}gx.6h5l", f"https://example.com/v/{n:011d}", chunks)
+        identity = {"system": "example-video", "record_id": f"{n:04d}-" + "x" * 2000, "revision": "1"}
+        source = passage_evidence._VerifiedSource(f"lh{n:03d}gx.6h5l", identity, chunks)
         memory.keep({(root, scope, path, hashlib.sha256(path.encode()).hexdigest()): source}, proof)
 
     # Every object the memory keeps alive, once each; the root, scope and proof belong to the caller.

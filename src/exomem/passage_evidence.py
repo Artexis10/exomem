@@ -293,10 +293,21 @@ class _VerifiedSource:
     """What a passage hit takes from one Source page: its identity fields and selected chunks."""
 
     exomem_id: str | None
-    source_identity: str | None
+    #: The page's `source_identity` frontmatter: a mapping such as system, record id and revision.
+    source_identity: Mapping[str, Any] | str | None
     #: Chunk number to chunk, for the selected numbers the Source's cut holds. Never changed after
     #: creation, so readers may share it.
     chunks: Mapping[int, PassageChunk]
+
+
+def _plain_size(value: Any) -> int:
+    """The bytes a frontmatter value keeps alive, its nested strings and containers included."""
+    weight = sys.getsizeof(value)
+    if isinstance(value, Mapping):
+        weight += sum(_plain_size(item) for pair in value.items() for item in pair)
+    elif isinstance(value, (list, tuple)):
+        weight += sum(_plain_size(item) for item in value)
+    return weight
 
 
 def _weigh(key: tuple, source: _VerifiedSource) -> int:
@@ -308,7 +319,8 @@ def _weigh(key: tuple, source: _VerifiedSource) -> int:
     weight = sys.getsizeof(key) + sum(sys.getsizeof(part) for part in key[2:])
     weight += sys.getsizeof((None, None))  # The entry's (proof, source) record.
     weight += sys.getsizeof(source) + sys.getsizeof(source.exomem_id)
-    weight += sys.getsizeof(source.source_identity) + sys.getsizeof(source.chunks)
+    # A Source identity comes from frontmatter and holds strings of any length, so weigh it deeply.
+    weight += _plain_size(source.source_identity) + sys.getsizeof(source.chunks)
     for number, chunk in source.chunks.items():
         weight += sys.getsizeof(number) + sys.getsizeof(chunk)
         weight += sum(sys.getsizeof(getattr(chunk, field.name)) for field in fields(chunk))
