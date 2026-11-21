@@ -14,9 +14,9 @@ NOT raise.
 #### Scenario: Diarization runs in the sidecar subprocess
 
 - **WHEN** `EXOMEM_DIARIZE` is set and the diarizer sidecar venv is provisioned
-- **THEN** the extraction process gives the isolated sidecar the audio path and an output-file path
+- **THEN** the main process spawns the sidecar interpreter on `worker.py` with the audio path and
+  an output-file path
 - **AND** the sidecar writes `{"turns": [{"start", "end", "label"}, …]}` JSON to the output file
-- **AND** each turn has finite, ordered timestamps and a nonempty string label
 - **AND** the main process parses it into `[(start, end, raw_label)]` and feeds it to the unchanged
   named-attribution path
 
@@ -50,31 +50,6 @@ NOT raise.
 - **THEN** diarization still functions via the sidecar
 - **AND** the main venv never imports `pyannote.audio`, so the cu132 torchcodec/torchaudio
   incompatibility cannot affect the embedding stack
-
-### Requirement: Bounded CUDA Diarizer Reuse
-
-A personal WSL2 media worker SHALL be able to reuse its isolated CUDA diarizer for successive
-recordings when `EXOMEM_DIARIZE_DEVICE=cuda` and CUDA is visible. The worker SHALL submit one
-recording at a time. The sidecar SHALL release unused CUDA allocator blocks after each result.
-Automatic device selection, CPU requests, standalone extraction, and hosted workers SHALL use
-one-shot processing.
-
-#### Scenario: A media worker processes successive recordings
-
-- **WHEN** a personal WSL2 media worker runs diarization with `EXOMEM_DIARIZE_DEVICE=cuda` for two recordings in one burst
-- **THEN** the sidecar loads the pipeline once and returns separate speaker turns for each recording
-- **AND** the sidecar exits when the media worker exits, including an unexpected worker death
-
-#### Scenario: A reusable sidecar cannot complete a request
-
-- **WHEN** the reusable sidecar crashes, times out, or returns an invalid result
-- **THEN** the media worker retires the sidecar and publishes the plain transcript for the recording
-- **AND** the next recording may start a new sidecar after the failed process exits
-
-#### Scenario: Automatic routing can measure available CUDA memory
-
-- **WHEN** a personal WSL2 media worker selects the device automatically for a recording
-- **THEN** the prior diarizer holds no CUDA memory from a previous recording
 
 ### Requirement: Diarization Sidecar Provisioning
 
