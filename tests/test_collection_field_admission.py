@@ -83,6 +83,7 @@ def release_document(basis, who=GUEST):
 
 def test_inspection_admits_enum_declarations_only_for_released_fields(store):
     """A guest who can inspect the collection must not see its withheld field's declarations."""
+    from exomem.governance import artifact_census
     from exomem.governance.policy import governance_root
     from exomem.init import _SCAFFOLD
 
@@ -101,6 +102,7 @@ def test_inspection_admits_enum_declarations_only_for_released_fields(store):
         CID, item={"title": "Survey", "state": "complete", "room": "north"},
         item_key=KEY, why="record the survey",
     )
+    assert artifact_census.rebuild_published(store.root, eager=True)
 
     owner = tool(store, "record_memory", action="inspect", collection=CID)
     guest = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
@@ -116,6 +118,7 @@ def test_inspection_admits_enum_declarations_only_for_released_fields(store):
         documents={"grants/room-field.yaml": yaml.safe_dump(document)},
         selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
     govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+    assert artifact_census.rebuild_published(store.root, eager=True)
     released = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
     assert released["contract"]["declared_enums"] == {"values": {"state": state, "room": room}, "truncated": False}
 

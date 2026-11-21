@@ -20,8 +20,9 @@ from test_collection_store_service import service  # noqa: F401 - the SQLite wor
 from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
 from test_governance_postfilter import AWS_KEY, HIGH_ENTROPY
 
-from exomem import call_ledger, state_migration, writer_lease
+from exomem import call_ledger, memory_refs, semantic_contract, state_migration, writer_lease
 from exomem import server as server_module
+from exomem.governance import artifact_census
 
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
@@ -38,6 +39,7 @@ def agent_vault(request):
         root = request.getfixturevalue("service").root
         schema = "Knowledge Base/_Schema"
         copytree(FIXTURE_VAULT / schema, root / schema, dirs_exist_ok=True)
+        assert artifact_census.rebuild_published(root, eager=True)
     else:
         request.getfixturevalue("vault")
     return strategy
@@ -342,7 +344,7 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_va
     assert type(rows[0]["severity"]) is bool
 
 
-def test_restricted_enum_hints_follow_terminal_filtering(build, configured_boundary, vault) -> None:
+def test_restricted_enum_hints_follow_terminal_filtering(build, configured_boundary, vault, monkeypatch) -> None:
     config, authenticate = configured_boundary
     scopes = vault / "Knowledge Base/_Governance/scopes"
     (scopes / "inbox.yaml").write_text(
@@ -355,11 +357,14 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     host = json.loads(config.read_text(encoding="utf-8"))
     host["capture_paths"].append(manifest.parent.relative_to(vault).as_posix())
     config.write_text(json.dumps(host), encoding="utf-8")
-    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, True])
+    protected_field = f"Follow [[{Path(PRIVATE).stem}]]"
+    unproved_identity = memory_refs.memory_ref("f338e51e-a1cf-4512-96be-e5cb56286d08")
+    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, unproved_identity, True])
     manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
         f"    release_hash: {{type: enum, enum: {declared}}}\n"
-        f"    group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n"
+        f"    resource_group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n"
+        f"    {json.dumps(protected_field)}: {{type: enum, enum: [42]}}\n"
         f"    {AWS_KEY}: {{type: enum, enum: [false]}}\n",
     ), encoding="utf-8")
     authority = state_migration.assert_offline_migration_authority(source="restricted enum fixture")
@@ -368,17 +373,29 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
 
     async def scenario(client):
         target = {"collection": record_fixtures.LEDGER_COLLECTION_PATH}
-        inspected = await _call(client, "inspect_memory", {
-            "operation": "records.inspect", "arguments": target})
+        operation = {"operation": "records.inspect", "arguments": target}
+        with monkeypatch.context() as cold:
+            cold.setattr(artifact_census, "published_view", lambda root: None)
+            cold.setattr(artifact_census, "vault_census", lambda root: pytest.fail("enum scan walked the vault"))
+            cold_inspected = await _call(client, "inspect_memory", operation)
+        assert cold_inspected["contract"]["declared_enums"] == {"values": {}, "truncated": True}
+        assert cold_inspected["lifecycle_guards"]["expected_container_hash"]
+        assert artifact_census.rebuild_published(vault, eager=True)
+        item = record_fixtures.ledger_item(release_hash="invalid")
+        del item["word_count"]
+        with monkeypatch.context() as cold_identity:
+            cold_identity.setattr(semantic_contract, "borrow_link_snapshot", lambda root: None)
+            cold_identity.setattr(
+                memory_refs, "paths_for_optional_references_read_only",
+                lambda *args, **kwargs: pytest.fail("enum entered the identity lookup that can walk the vault"),
+            )
+            inspected = await _call(client, "inspect_memory", operation)
+            refused = await _call(client, "add_record", {**target, "why": "Log an entry", "item": item})
         assert "contract" in inspected, inspected
         projection = inspected["contract"]["declared_enums"]
         assert projection["truncated"] is True
         assert projection["values"] == {"release_hash": [True]}
         assert type(projection["values"]["release_hash"][0]) is bool
-        item = record_fixtures.ledger_item(release_hash="invalid")
-        del item["word_count"]
-        refused = await _call(client, "add_record", {
-            **target, "why": "Log an entry", "item": item})
         assert refused.get("error", {}).get("code") == "SCHEMA_ENUM", refused
         choices = refused["error"]["candidates"]
         assert choices == [True] and type(choices[0]) is bool

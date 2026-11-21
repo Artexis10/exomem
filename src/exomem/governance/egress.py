@@ -6283,8 +6283,10 @@ def _reconcile_record_enum_declarations(
     if isinstance(declared, Mapping) and isinstance(released, Mapping):
         for field, choices in released.items():
             admitted = _released_enum_choices(declared.get(field), choices)
-            if admitted and (kept := _released_enum_choices(admitted, scan_text(admitted))):
-                delivered[field] = kept
+            if admitted:
+                scanned_field, *scanned_choices = scan_text([field, *admitted])
+                if scanned_field == field and (kept := _released_enum_choices(admitted, scanned_choices)):
+                    delivered[scanned_field] = kept
     after["values"] = delivered
     if delivered != declared:
         after["truncated"] = True
@@ -6572,15 +6574,18 @@ def postfilter_error(
     )
     blocked = False
 
-    def _clean(value: Any) -> Any:
+    def _scrub(value: Any) -> Any:
         nonlocal blocked
+        with call_spans.span("egress.scrub"):
+            cleaned, hit = scrubber.scrub_value(value)
+        blocked = blocked or hit
+        return cleaned
+
+    def _clean(value: Any) -> Any:
         # The same fixed labels as `postfilter`, aggregated across values.
         with call_spans.span("egress.artifact_gate"):
             cleaned = gate.gate_payload(value, scan_strings=True)
-        with call_spans.span("egress.scrub"):
-            cleaned, hit = scrubber.scrub_value(cleaned)
-        blocked = blocked or hit
-        return cleaned
+        return _scrub(cleaned)
 
     code = getattr(error, "code", None)
     args = tuple(error.args or ())
@@ -6592,17 +6597,17 @@ def postfilter_error(
         value = getattr(error, name, None)
         if value is None or value == code:
             continue
-        cleaned = _clean(value)
-        if (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
-                and isinstance(value, Mapping) and isinstance(cleaned, dict)):
-            # The refusal's fixed `allowed` list already passed as ordinary text, independent of the field name.
+        enum_details = (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
+                        and isinstance(value, Mapping))
+        cleaned = _clean({key: item for key, item in value.items() if key != "allowed"} if enum_details else value)
+        if enum_details and isinstance(cleaned, dict):
             if value.get("field") != cleaned.get("field") or value.get("retry_with") != cleaned.get("retry_with"):
                 cleaned.pop("retry_with", None)
-                cleaned.pop("allowed", None)
-            elif choices := _released_enum_choices(value.get("allowed"), cleaned.get("allowed")):
-                cleaned["allowed"] = choices
-            else:
-                cleaned.pop("allowed", None)
+            elif isinstance(allowed := value.get("allowed"), list):
+                with call_spans.span("egress.artifact_gate"):
+                    scanned = gate.scan_optional_text(allowed) if gate._can_scan_optional_text() else []
+                if choices := _released_enum_choices(allowed, _scrub(scanned)):
+                    cleaned["allowed"] = choices
         if cleaned != value:
             _rewrite_error_attribute(error, name, cleaned)
     if blocked:
@@ -7711,13 +7716,43 @@ class _ArtifactReferenceGate:
             with call_spans.span("egress.artifact_gate.index"):
                 self._index()
 
-    def _index(self) -> None:
+    def _index(self, census: artifact_census.CensusView | None = None) -> None:
         self._index_entered = True
-        self.census = artifact_census.request_census(self.vault_root)
+        self.census = census if census is not None else artifact_census.request_census(self.vault_root)
         self.filings = self.census.filings
         self.tombstone_paths, self.tombstone_literals = artifact_census.tombstone_aliases(
             self.tombstones, managed_root_rel()
         )
+
+    def _can_scan_optional_text(self) -> bool:
+        if self.fail_closed:
+            return False
+        if self._indexed or (self._policy_empty() and not self.tombstones):
+            return True
+        census = artifact_census.published_view(self.vault_root)
+        if census is None:
+            return False
+        self._index(census)
+        self._indexed = True
+        return True
+
+    def _admit_pending_identity_paths(self, paths: Iterable[str]) -> Iterable[str]:
+        return pending_identity_candidates(self.vault_root, paths, principal=self.who, purpose=self.purpose)
+
+    @functools.cached_property
+    def _borrowed_identity_lookup(self) -> Callable[[str], tuple[str, ...] | None]:
+        from .. import semantic_contract
+
+        snapshot = semantic_contract.borrow_link_snapshot(self.vault_root)
+        if snapshot is None:
+            return lambda identifier: None
+        return memory_refs.reference_owner_lookup(
+            self.vault_root, snapshot.reference_owners, admit_pending_paths=self._admit_pending_identity_paths,
+        )
+
+    def scan_optional_text(self, values: list[Any]) -> list[Any]:
+        return [self.gate_text(value, _borrow_identity=True) if isinstance(value, str) else value
+                for value in values]
 
     def _paths_for(self, alias: str) -> tuple[str, ...] | None:
         key = alias.casefold()
@@ -7774,7 +7809,9 @@ class _ArtifactReferenceGate:
         token = token.split("#", 1)[0].strip().strip("\"'").rstrip(".,;:!?")
         return token, wikilink
 
-    def resolve(self, value: str, *, directory: str | None = None) -> tuple[str, ...] | None:
+    def resolve(
+        self, value: str, *, directory: str | None = None, _borrow_identity: bool = False,
+    ) -> tuple[str, ...] | None:
         self._ensure_index()
         token, wikilink = self._unwrap(value)
         if lifecycle.is_tombstoned_in(self.tombstones, token):
@@ -7786,12 +7823,12 @@ class _ArtifactReferenceGate:
                 return ()
             # Redaction keeps raw hidden-owner evidence after pending withdrawal.
             # Potentially visible uncertainty omits the token, not admitted material.
-            paths = memory_refs.paths_for_optional_references_read_only(
-                self.vault_root, (memory_id,),
-                admit_pending_paths=lambda paths: pending_identity_candidates(
-                    self.vault_root, paths, principal=self.who, purpose=self.purpose,
-                ),
-            ).get(memory_id, ())
+            if _borrow_identity:
+                paths = self._borrowed_identity_lookup(memory_id)
+            else:
+                paths = memory_refs.paths_for_optional_references_read_only(
+                    self.vault_root, (memory_id,), admit_pending_paths=self._admit_pending_identity_paths,
+                ).get(memory_id, ())
             if paths is None:
                 return None
             if len(paths) != 1:
@@ -7870,7 +7907,7 @@ class _ArtifactReferenceGate:
         self.verdicts[rel_path] = allowed
         return allowed
 
-    def gate_text(self, text: str) -> str:
+    def gate_text(self, text: str, *, _borrow_identity: bool = False) -> str:
         request_budget.checkpoint()
         if (raw_protection.PREFIX in text.casefold()
                 and not unrestricted_content_access(self.vault_root, self.who)):
@@ -7896,7 +7933,7 @@ class _ArtifactReferenceGate:
                     # The caller sent this. Echoing it back tells them nothing;
                     # replacing it tells them the item exists.
                     return token
-            candidates = self.resolve(token)
+            candidates = self.resolve(token, _borrow_identity=_borrow_identity)
             if candidates is None or (
                 candidates and not all(self._permits(rel) for rel in candidates)
             ):
@@ -7983,14 +8020,19 @@ def gate_artifact_references(
             pass
     try:
         gate = _ArtifactReferenceGate(Path(vault_root), principal=principal, purpose=purpose)
+        declared = _record_enum_declarations(payload) if _scan_record_enums else None
+        if declared is not None:
+            # An authored field named for free text must not send optional enums
+            # through the ordinary artifact walk before the published-census check.
+            payload = {**payload, "contract": {**payload["contract"], "declared_enums": {}}}
         gated = gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
-        if _scan_record_enums:
-            declared = _record_enum_declarations(payload)
-            released = _record_enum_declarations(gated)
-            if declared is not None and released is not None:
-                _reconcile_record_enum_declarations(
-                    declared, released, lambda choices: gate.gate_payload(choices, scan_strings=True),
-                )
+        if declared is not None and (released := _record_enum_declarations(gated)) is not None:
+            if gate._can_scan_optional_text():
+                checked = dict(declared)
+                _reconcile_record_enum_declarations(declared, checked, gate.scan_optional_text)
+                released.update(checked)
+            else:
+                released.update(values={}, truncated=True)
         return gated
     finally:
         if started is not None:
