@@ -2184,6 +2184,7 @@ def _preflight_existing(
             registry=corpus_registry,
             language_registry=corpus_language,
             status_basis=status_basis,
+            writer_preflight=True,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
     resolver_freshness = (
@@ -5219,6 +5220,7 @@ def _evaluate_structural(
     source: str,
     operation: str,
     status_basis: lifecycle_statuses.Basis | None = None,
+    writer_preflight: bool = False,
 ) -> tuple[
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
@@ -5242,7 +5244,7 @@ def _evaluate_structural(
     source = _place_origin_source(destination, source)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, status_basis=status_basis
+        root, status_basis=status_basis, writer_preflight=writer_preflight
     )
     candidate, source = _structural_candidate(
         root, destination, source, before=before, status_basis=status_basis
@@ -5401,7 +5403,12 @@ def _preflight_creation(
     started = time.perf_counter()
     try:
         result, state, corpus_census, before_corpus, source, after_corpus = _evaluate_structural(
-            root, destination=path, source=source, operation=operation, status_basis=status_basis
+            root,
+            destination=path,
+            source=source,
+            operation=operation,
+            status_basis=status_basis,
+            writer_preflight=True,
         )
     finally:
         measured["structural_ms"] = round((time.perf_counter() - started) * 1000.0)
