@@ -115,6 +115,7 @@ from . import multi_edit as multi_edit_module
 from . import mutation_terminal as mutation_terminal_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
+from . import ocr_facts as ocr_facts_module
 from . import overview as overview_module
 from . import page_ids as page_ids_module
 from . import page_names as page_names_module
@@ -8696,6 +8697,15 @@ def read_memory_stored(
 @wraps(read_memory_stored)
 def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
     result = read_memory_stored(vault_root, *args, **kwargs)
+    frontmatter = result.get("frontmatter")
+    if (
+        isinstance(frontmatter, Mapping)
+        and frontmatter.get("processing_state") == "completed"
+        and frontmatter.get("media_type") in (None, "image")  # Prior extraction pages carry no media type.
+    ):
+        available = ocr_facts_module.ocr_text_available(frontmatter.get("extracted_by"))
+        if available is not None:
+            result["ocr_text_available"] = available
     if capabilities_module.shows_links_by_title():
         result = _show_links_by_title(vault_root, result)
     return result
