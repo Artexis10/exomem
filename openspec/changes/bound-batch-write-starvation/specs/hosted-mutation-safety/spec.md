@@ -107,3 +107,27 @@ A `process_media reprocess` request SHALL plan each path, including the hash of 
 - **WHEN** the media runtime becomes unavailable between a path's plan and its queueing hold
 - **THEN** the path's page, job and result row all show the blocked state
 - **AND** the queueing hold wrote no page
+
+### Requirement: Upload commits hold the boundary only to plan and install
+
+An upload commit SHALL copy, hash and flush every payload byte into a private reserved stage on the vault's own filesystem before it acquires the vault mutation boundary. Inside the boundary it SHALL only re-plan against current state, revalidate the stage, install it by rename, write the pages and indexes, and run or hand off the fan-out. Post-upload provenance hashing SHALL run outside the boundary. A copy or a hash of the payload inside the boundary SHALL be a named fallback in the holder status. A reserved stage is not a vault or sidecar file for "Lock Acquisition Fails Closed Before Mutation": a refused acquisition leaves no canonical byte, only a stage that the owner or the sweep removes.
+
+#### Scenario: A note save during a large upload commit does not wait on its bytes
+
+- **WHEN** a resumable upload of 1 GiB is committing
+- **AND** a keyed note save arrives
+- **THEN** the save commits without `MUTATION_BUSY`
+- **AND** the upload commit's hold contains no phase that grows with the payload size
+
+#### Scenario: A changed stage publishes nothing
+
+- **WHEN** a stage's bytes change after staging and before adoption
+- **THEN** the commit publishes no canonical byte
+- **AND** the upload session stays retryable
+
+#### Scenario: A stop after staging leaves no canonical residue
+
+- **WHEN** the process stops after staging and before the install
+- **THEN** the vault holds no new canonical file
+- **AND** the next serving start removes the orphaned stage and leaves any stage whose owner is alive
+
