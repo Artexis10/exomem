@@ -54,11 +54,11 @@ Only a download and decrypt proves that the key version still opens the replica 
 
 A sample uses the replica read that fixity already uses (`write_stored_original`) into a sink that only hashes. No plaintext reaches disk. It runs only where repair could read the replica: an `immediate` store and a key version whose identity this install can read. Any other replica reads "sample not possible" with the reason.
 
-The sample takes the replica whose last decrypt proof is oldest, never-proven first, that fits the month's remaining budget. A replica larger than the remaining budget is skipped for the month, and the status counts the skips. The media ledger records the bytes spent per store and calendar month (UTC).
+The sample runs only where checks run (D1), so a store with no declared descriptor is never sampled and never charged. It takes the replica whose sample turn came longest ago, never-sampled first, that fits the month's remaining budget. A replica larger than the remaining budget is skipped for the month, and the status counts the skips. The media ledger records the bytes spent per store and calendar month (UTC). A sample charges a replica's bytes before it downloads them, so a sample that stops part-way is still paid for.
 
 ### D3: Check results live in the derived table and survive its rebuild
 
-The table gains `checked_at`, `level` (`presence`, `content` or `decrypted`), `decrypted_at`, `failure` and the state `quarantined`. A rebuild keeps these columns for a row whose object and version are unchanged, as it already keeps the upload time. A new version starts unchecked.
+The table gains `checked_at`, `level` (`presence`, `content` or `decrypted`), `decrypted_at`, `failure`, the schedule keys `check_from` and `sample_from`, and the state `quarantined`. `checked_at` and `decrypted_at` are proof times that the status reports; the schedule keys are the order of each schedule, because a failed attempt proves nothing and must move a row on without reading as a proof. A rebuild keeps these columns for a row whose object and version are unchanged, as it already keeps the upload time. A new version starts unchecked.
 
 A lost table loses the check history. Every row then reads "never checked", which is true of what the vault knows, and the cycle checks them first. A lost quarantine is found again by the next check of that replica. Repair rehashes every copy anyway, so a forgotten quarantine never lets bad bytes in.
 
@@ -66,7 +66,9 @@ Rejected alternative: write check results into the binding. 1,000,000 sidecar wr
 
 ### D4: A failed check quarantines, reports and re-copies
 
-A replica is quarantined when `head` answers "absent", or returns another size or digest than the entry records, or when a sample's plaintext does not match. An unavailable store, a timeout or a store that does not answer as itself never quarantines: unavailable is not proof of loss. Those leave the row as it was and count in the store's reach.
+A replica is quarantined only when its bytes are proved damaged: `head` answers "absent" or "condemned", the ciphertext that a read returns has another size or SHA-256 than the entry records, or ciphertext that matches its record decrypts to other bytes than the binding. One place proves damage in a read that decrypts: it hashes the whole ciphertext even when `age` stops early, and compares it with the record before it looks at `age`'s exit status.
+
+These never quarantine, because they say nothing about the bytes: an unavailable store, a timeout, a store that does not answer as itself, an `age` that a signal stopped, and matching ciphertext that the identity refuses. The last is its own finding, `key_refused`, shown in the status. A row whose binding cannot be read, or whose version the store cannot address, is likewise recorded with what was found (`binding_unreadable`, `binding_lists_no_replica`, `record_invalid`, `store_read_failed`) and skipped; its next turn comes after a day. Those leave the row's state as it was and count in `failed_attempts`.
 
 A quarantined replica:
 
@@ -78,18 +80,22 @@ The re-copy writes a new version into the same store. The source is the local or
 
 Eviction already calls `head` on the store serving eviction before it drops local bytes. A mismatch there now quarantines the pointer and reports it, instead of refusing silently. This closes the drill's gap.
 
-What quarantine prevents: repair or eviction trusting a replica known to be bad, and an owner who believes they hold two copies when they hold one. Its cost when it fires wrongly: one extra copy of an original into a store. A false quarantine needs a store to return a wrong size or digest for an intact object, so the cost is small and the store pays in space.
+A quarantine whose ciphertext matched its record and whose plaintext differed stays due for a sample once per cycle. A sample that decrypts to the binding releases it and drops its queued copy. A check cannot release it, because the ciphertext matching its record proves nothing about the plaintext. Every other quarantine stays until a new copy replaces its entry. The pointer of the store serving eviction that a copy replaces has its old name released for collection (collect-released-media D5) before the binding changes; replica stores collect nothing, so their names stay.
+
+What quarantine prevents: repair or eviction trusting a replica known to be bad, and an owner who believes they hold two copies when they hold one. Its cost when it fires wrongly: one extra copy of an original into a store, and a replica that reads as lost, and as not recoverable, until a sample lifts it or a new copy replaces it. Because only a size or digest that differs from the record, or a plaintext that differs from the binding, quarantines, a wrong identity, a killed decryption, a busy ledger or one unreadable row cannot reach it; the first version of this design let any decryption failure quarantine, and a wrong identity file would have queued a copy again of every replica.
 
 ### D5: Checks are paced like fixity, inside the replica worker
 
 The replica worker runs a check round after its copy drain, within a time bound per round, and yields to foreground work between replicas. It never holds the vault mutation guard for a check. A content check reads bytes under a read-rate cap, with a default of 32 MiB/s like fixity's.
 
-The cycle defaults to 30 days and is an operator setting. Each round picks the rows whose `checked_at` is oldest, never-checked first, per store, through an index on `(store, checked_at)`. A round's byte budget follows fixity's `budget_for`: the store's total bytes times the round interval over the cycle.
+The cycle defaults to 30 days and is an operator setting. Each round picks, per store, the rows whose `check_from` is oldest, never-checked first, through an index on `(store, check_from)`, a bounded pick at a time, until the store's share of the cycle, the round's time or the byte budget is spent. A store's share is its replicas times the round interval over the cycle, floored at 16, and for a content check its bytes by the same rule (fixity's `budget_for`). A round runs 1.25 times the seconds that the read cap needs for the byte shares, between 120 and 300 seconds. The cap is an average over the round: an object is read at the store's speed and the wait for its share follows it. No read is paced in chunks.
 
-At the sizing target:
+At the sizing target (500,000 replicas and 25 TB in one store, the 10-minute interval, the 30-day cycle and the 32 MiB/s cap):
 
+- A round holds 116 replicas and 5.4 GiB. 4,320 rounds in the cycle check 501,120 replicas and 25 TB.
+- Reading 5.4 GiB takes 173 seconds under the cap, so the round runs 216 seconds, inside the 300-second maximum.
 - Presence checks cost 500,000 `head` requests per store per 30 days, about one every five seconds.
-- Content checks of a 25 TB filesystem store read about 10 MB/s averaged over the cycle, under the 32 MiB/s cap.
+- Content checks of the 25 TB store read about 10 MB/s averaged over the cycle, under the 32 MiB/s cap.
 - One pick is an index range scan with a `LIMIT`, whatever the table size.
 
 ### D6: Fixity skips quarantined replicas and keeps a copy it could not install
@@ -100,7 +106,7 @@ When a copy verifies but cannot be put in place, fixity now keeps the staged fil
 
 ## Risks / Trade-offs
 
-- **Orphaned versions.** Each re-copy leaves the bad version in its store. Mitigation: re-copy is rare, and the orphan is named in the finding. A release path for replica stores is a later change.
+- **Orphaned versions.** Each re-copy leaves the bad version in its store. Mitigation: re-copy is rare, and the orphan is named in the finding. The old name of a replaced pointer in the store serving eviction is released for collection; a release path for replica stores is a later change.
 - **Large originals starve the sample.** An original larger than the month's budget is never sampled. Mitigation: the status counts the skips per store. A larger budget or a ranged sample is a later choice.
 - **The presence check trusts the store's declared digest.** It proves existence, not integrity. Mitigation: the status labels its level `presence`, and the sample proves content within its budget.
 - **A lost table forgets quarantines.** Mitigation: the next check finds them again, and repair rehashes every copy.

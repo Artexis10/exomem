@@ -11,6 +11,7 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 from contextlib import closing
 from pathlib import Path
 
@@ -793,7 +794,7 @@ def test_a_store_that_does_not_answer_as_itself_changes_no_replica_when_its_chec
     """An unmounted NAS reads as an empty store; treating that as absence would quarantine every replica on it."""
     _replicated(vault)
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
-        ledger.execute("UPDATE media_replicas SET checked_at = 0, level = NULL")  # due, as a month from now would be
+        ledger.execute("UPDATE media_replicas SET checked_at = 0, check_from = 0, level = NULL")  # due, as a month from now would be
     (mirrored / media_store.STORE_MARKER).unlink()
 
     media_replicas.check(vault)
@@ -812,7 +813,7 @@ def test_a_check_round_takes_the_replicas_checked_longest_ago_first_and_stops_at
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
         paths = [row[0] for row in ledger.execute("SELECT binary_rel FROM media_replicas WHERE store = ? ORDER BY binary_rel", (MIRROR,))]
         for age, path in enumerate(paths):  # the second path has waited longest
-            ledger.execute("UPDATE media_replicas SET checked_at = ? WHERE binary_rel = ? AND store = ?",
+            ledger.execute("UPDATE media_replicas SET checked_at = 0, check_from = ? WHERE binary_rel = ? AND store = ?",
                            (100.0 + (age - 1) ** 2, path, MIRROR))
     monkeypatch.setattr(media_replicas, "_CHECK_FLOOR_ROWS", 1)  # one replica per round, as a large store's share is
 
@@ -837,7 +838,7 @@ def test_a_check_pick_reads_the_due_index_in_order_with_no_sort(vault: Path, sel
 def _unproven(vault: Path) -> None:
     """Forget every sample, as a replica that no round has decrypted yet."""
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
-        ledger.execute("UPDATE media_replicas SET decrypted_at = 0, sample_month = 0")
+        ledger.execute("UPDATE media_replicas SET decrypted_at = 0, sample_from = 0, sample_month = 0")
         ledger.execute("DELETE FROM media_replica_samples")
 
 
@@ -957,8 +958,8 @@ def test_a_replica_of_another_key_version_is_never_sampled_and_gives_its_reason(
     assert [proven for _path, proven in _sampled(vault)] == [False]
 
 
-def test_a_sample_that_cannot_decrypt_a_stored_replica_quarantines_it(vault: Path, selected_store, mirrored: Path) -> None:
-    """A replica that the key cannot open is the finding the sample exists to make."""
+def test_a_sample_that_finds_a_stored_replica_damaged_quarantines_it(vault: Path, selected_store, mirrored: Path) -> None:
+    """A replica whose ciphertext no longer matches its record is the finding the sample exists to make."""
     relative, replica = _replicated(vault)
     _unproven(vault)
     [stored] = [path for path in _objects(mirrored) if path.parent.name == replica.object]
@@ -970,7 +971,7 @@ def test_a_sample_that_cannot_decrypt_a_stored_replica_quarantines_it(vault: Pat
 
     row = _replica_row(vault)
     assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
-                                                            "decrypt_failed")
+                                                            "digest_mismatch")
 
 
 def test_the_sample_pick_and_the_month_release_read_the_sample_index_with_no_sort(
@@ -1000,7 +1001,7 @@ def test_the_eviction_gate_reads_the_index_of_quarantined_rows(vault: Path, sele
 def _due_again(vault: Path) -> None:
     """Make every replica due for its next check, as a month from now would."""
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
-        ledger.execute("UPDATE media_replicas SET checked_at = 0, level = NULL")
+        ledger.execute("UPDATE media_replicas SET checked_at = 0, check_from = 0, level = NULL")
 
 
 def _stored_file(root: Path, replica: originals.StoredObject) -> Path:
@@ -1170,7 +1171,7 @@ def test_a_damaged_pointer_of_an_evicted_original_is_replaced_from_a_replica_and
         assert source.stream.read() == content
 
 
-def test_a_replica_that_fixity_downloads_and_cannot_decrypt_is_quarantined_with_the_failure(
+def test_a_replica_that_fixity_downloads_and_finds_damaged_is_quarantined_with_the_failure(
         vault: Path, selected_store, mirrored: Path) -> None:
     """A repair that skipped the finding would try the same bad copy at every later damage, and the owner never learn of it."""
     original = _stored(vault, "Recordings")
@@ -1186,7 +1187,7 @@ def test_a_replica_that_fixity_downloads_and_cannot_decrypt_is_quarantined_with_
 
     row = _replica_row(vault, store=reference.store)
     assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
-                                                            "decrypt_failed")
+                                                            "digest_mismatch")
     assert [item[:2] for item in _queued(vault) if item[0] == reference.store] == [(reference.store, media_replicas.RECOPY)]
 
 
@@ -1505,3 +1506,308 @@ def test_the_findings_command_prints_the_page_that_the_owner_reads(
 
     [finding] = json.loads(capsys.readouterr().out)["findings"]
     assert (finding["path"], finding["store"]) == (relative, MIRROR)
+
+
+# --- verify-stored-replicas, review round 1: what is not damage, one bad row, the round's size -------------------
+
+
+def _another_identity(directory: Path) -> bytes:
+    """The text of an age identity that is not the vault's: a key that opens none of its ciphertext."""
+    path = directory / "another-identity"
+    subprocess.run(["age-keygen", "-o", str(path)], capture_output=True, check=True)
+    return path.read_bytes()
+
+
+def _age_stopped_by_a_signal(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put an `age` ahead of the real one on PATH that dies by SIGTERM, as a memory kill or a shutdown ends it."""
+    shim = directory / "shim"
+    shim.mkdir()
+    (shim / "age").write_text("#!/bin/sh\nkill -TERM $$\n")
+    (shim / "age").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+
+
+def _hand_edit_mirror_version(vault: Path, relative: str, version: str) -> None:
+    """Rewrite the version that an original's binding lists for the mirror, as a person editing the sidecar would."""
+    snapshot = originals.original_state(vault, relative)
+    mirror = next(entry for entry in snapshot.replicas if entry.store == MIRROR)
+    edited = originals.StoredObject(1, MIRROR, mirror.key_version, mirror.object, version, mirror.ciphertext_size,
+                                    mirror.ciphertext_sha256)
+    media_store._publishing(vault, "test_hand_edit", lambda: media_store._commit_reference(
+        vault, media_store.prepare_replica(vault, snapshot, edited)))
+
+
+def test_a_store_with_no_declared_descriptor_is_never_sampled_and_no_bytes_are_charged(
+        vault: Path, selected_store) -> None:
+    """A Cloud cell's single store declares no `stores` list: a sample there would read and bill a store checks skip."""
+    _offload(vault, _preserved(vault))
+    media_replicas.rebuild(vault)
+
+    assert media_replicas.sample(vault) == 0
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT COUNT(*) FROM media_replica_samples").fetchone() == (0,)
+        assert ledger.execute("SELECT decrypted_at FROM media_replicas").fetchall() == [(0.0,)]
+
+
+def test_the_status_gives_a_store_whose_checks_are_not_scheduled_as_the_reason_it_is_not_sampled(
+        vault: Path, selected_store) -> None:
+    _offload(vault, _preserved(vault))
+    media_replicas.rebuild(vault)
+
+    [store] = [stats for stats in media_replicas.status(vault)["stores"] if stats["replicas"]]
+
+    assert store["sample"]["not_sampled"] == [{"reason": media_replicas.HEAD_NOT_DECLARED, "replicas": 1}]
+
+
+def test_a_sample_whose_identity_refuses_matching_ciphertext_is_a_key_finding_and_no_quarantine(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path) -> None:
+    """A wrong identity file is the owner's to fix: it must not read as damage and queue a copy again of every replica."""
+    values, _config = selected_store
+    _replicated(vault)
+    _unproven(vault)
+    Path(values["identity_path"]).write_bytes(_another_identity(tmp_path))
+
+    media_replicas.sample(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["failure"]) == (media_replicas.UPLOAD_VERIFIED, media_store.KEY_REFUSED)
+    assert [item for item in _queued(vault) if item[1] == media_replicas.RECOPY] == []
+    assert _mirror_stats(vault)["failed_attempts"] == [{"failure": media_store.KEY_REFUSED, "replicas": 1}]
+
+
+def test_a_repair_restores_an_original_from_a_replica_after_a_wrong_identity_was_put_right(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path) -> None:
+    """The point of not quarantining: the replicas that a wrong key refused are still the owner's copies once it is right."""
+    values, _config = selected_store
+    original = _stored(vault, "Recordings")
+    reference = _offload(vault, original)
+    _replicate_all(vault)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    identity = Path(values["identity_path"])
+    right = identity.read_bytes()
+    identity.write_bytes(_another_identity(tmp_path))
+    _unproven(vault)
+    media_replicas.sample(vault)
+    identity.write_bytes(right)
+    original.write_bytes(DAMAGED)
+    first = Path(values["root"]) / reference.object / reference.version
+    first.write_bytes(os.urandom(first.stat().st_size))
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+
+
+def test_a_sample_whose_age_is_stopped_by_a_signal_quarantines_nothing(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A killed decryption says nothing about the bytes: a nightly memory kill must not condemn every replica it meets."""
+    _replicated(vault)
+    _unproven(vault)
+    _age_stopped_by_a_signal(tmp_path, monkeypatch)
+
+    media_replicas.sample(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["failure"]) == (media_replicas.UPLOAD_VERIFIED, media_replicas.READ_FAILED)
+    assert [item for item in _queued(vault) if item[1] == media_replicas.RECOPY] == []
+
+
+def test_a_sample_that_stops_part_way_still_has_its_bytes_charged_to_the_month(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The egress bill counts what was read, not what finished: an uncharged failure could repeat all month for free."""
+    _relative, replica = _replicated(vault)
+    _unproven(vault)
+    _age_stopped_by_a_signal(tmp_path, monkeypatch)
+
+    media_replicas.sample(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT bytes FROM media_replica_samples WHERE store = ?", (MIRROR,)).fetchone() == (
+            replica.ciphertext_size,)
+
+
+def test_a_replica_quarantined_for_a_plaintext_mismatch_leaves_quarantine_when_a_sample_decrypts_to_the_binding(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A false alarm of the plaintext check must not queue a copy again for good: the next proof must be able to lift it."""
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    _unproven(vault)
+
+    media_replicas.sample(vault)
+
+    row = _replica_row(vault)
+    assert (row["state"], row["failure"], row["decrypted_at"] > 0) == (media_replicas.UPLOAD_VERIFIED, None, True)
+    assert [item for item in _queued(vault) if item[0] == MIRROR] == []
+
+
+def test_a_replica_quarantined_for_damaged_ciphertext_stays_quarantined_through_a_sample(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """Only a new copy replaces damaged bytes: a sample must not lift the finding that a check or a repair made."""
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="digest_mismatch")
+    _unproven(vault)
+
+    media_replicas.sample(vault)
+
+    assert _replica_row(vault)["state"] == media_replicas.QUARANTINED
+    assert [item[:2] for item in _queued(vault) if item[0] == MIRROR] == [(MIRROR, media_replicas.RECOPY)]
+
+
+def test_one_unreadable_row_does_not_stop_the_checks_of_the_rows_behind_it(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A row that always fails and always comes first would starve every other replica of its store of a check."""
+    paths = [_preserved(vault, category=category) for category in ("a", "b", "c")]
+    for path in paths:
+        _offload(vault, path)
+    _replicate_all(vault)
+    relatives = sorted(path.relative_to(vault).as_posix() for path in paths)
+    _hand_edit_mirror_version(vault, relatives[0], "a/b")  # the first row of the round is the unreadable one
+    media_replicas.rebuild(vault)
+    _due_again(vault)
+
+    media_replicas.check(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        rows = {path: (state, failure, checked_at > 0) for path, state, failure, checked_at in ledger.execute(
+            "SELECT binary_rel, state, failure, checked_at FROM media_replicas WHERE store = ?", (MIRROR,))}
+    assert rows == {relatives[0]: (media_replicas.UPLOAD_VERIFIED, media_replicas.RECORD_INVALID, False),
+                    relatives[1]: (media_replicas.UPLOAD_VERIFIED, None, True),
+                    relatives[2]: (media_replicas.UPLOAD_VERIFIED, None, True)}
+    assert _mirror_stats(vault)["failed_attempts"] == [{"failure": media_replicas.RECORD_INVALID, "replicas": 1}]
+
+
+def test_a_binding_that_cannot_be_read_now_does_not_make_its_replica_unsampleable(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A moment's read error is not a fact about the replica: marked unsampleable it would never be sampled again."""
+    _replicated(vault)
+    _unproven(vault)
+    original_state = originals.original_state
+
+    def busy(*args, **kwargs):
+        raise OSError("busy")
+
+    monkeypatch.setattr(originals, "original_state", busy)
+    media_replicas.sample(vault)
+    monkeypatch.setattr(originals, "original_state", original_state)
+
+    row = _replica_row(vault)
+    assert (row["sample_month"], row["failure"]) == (0, media_replicas.UNREADABLE)
+    assert not any(item["reason"] == media_replicas.NO_EXACT_DIGEST for item in _mirror_stats(vault)["sample"]["not_sampled"])
+
+
+def test_a_quarantined_replica_is_not_recoverable_in_the_status_and_in_the_original_view(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The count is the owner's answer to "do I survive losing this machine": a damaged copy is not one of the survivors."""
+    relative, replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="digest_mismatch")
+
+    totals = _measured(vault)["totals"]
+    shown = {item["store"]: (item["recoverable"], item["reason"])
+             for item in media_replicas.original_view(vault, relative)["replicas"]}
+
+    assert (totals["recoverable"], totals["not_recoverable"]) == (1, 1)
+    assert _mirror_stats(vault)["not_recoverable_reasons"] == [media_replicas.QUARANTINED]
+    assert shown[MIRROR] == (False, media_replicas.QUARANTINED)
+    assert shown["test-store"] == (True, None)
+
+
+def test_a_check_round_takes_every_pick_of_its_share_and_not_only_the_first(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round that took one pick of 64 could never check a store whose share is larger within the cycle."""
+    for category in ("a", "b", "c"):
+        _offload(vault, _preserved(vault, category=category))
+    _replicate_all(vault)
+    media_replicas.rebuild(vault)
+    _due_again(vault)
+    monkeypatch.setattr(media_replicas, "_CHECK_BATCH", 1)
+    monkeypatch.setattr(media_replicas, "_CHECK_FLOOR_ROWS", 3)  # the store's share is three replicas, a pick is one
+
+    media_replicas.check(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT COUNT(*) FROM media_replicas WHERE store = ? AND checked_at > 0",
+                              (MIRROR,)).fetchone() == (3,)
+
+
+def test_the_round_at_the_default_settings_checks_a_store_of_the_sizing_target_within_the_cycle(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """500,000 replicas and 25 TB: a share too small, or a round too short to read it, would leave the cycle unmet."""
+    ledger = media_jobs.MediaJobStore(vault)
+    with closing(ledger._connect()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
+                     (MIRROR, 500_000, 25 * 10**12))
+    cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
+
+    rows, size = media_replicas._store_budget(ledger, MIRROR, cycle)
+    rounds = cycle / media_replicas._CHECK_INTERVAL
+
+    # The byte share is a whole number of bytes, so it is short of the exact share by under a millionth.
+    assert (rows * rounds >= 500_000, size * rounds >= 25 * 10**12 * 0.999999) == (True, True)
+    assert media_replicas._round_seconds(size, rate) * rate >= size  # the round's time reads its byte share under the cap
+
+
+def test_replacing_a_damaged_pointer_releases_its_old_name_for_collection(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The damaged version's name left in the store for good would cost its bytes for as long as the vault lives."""
+    values, _config = selected_store
+    relative, _mirror = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    _recopy_all(vault)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT object FROM media_releases").fetchall() == [(pointer.object,)]
+
+
+def test_a_copy_again_does_not_read_a_replica_in_a_store_that_is_not_immediate(
+        vault: Path, selected_store, tmp_path: Path) -> None:
+    """A retrieval of minutes or hours is the owner's to ask for: a background repair must never start one."""
+    values, _config = selected_store
+    _declare(vault, selected_store, tmp_path / "mirror", retrieval_class="hours")
+    relative, _replica = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    assert media_store.evict(vault, vault / relative)
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+
+    _recopy_all(vault)
+
+    assert originals.original_state(vault, relative).reference == pointer
+    assert [item[2:] for item in _queued(vault) if item[0] == pointer.store] == [
+        (media_replicas.REFUSED, media_store.NO_VERIFIED_SOURCE)]
+
+
+def test_a_cache_row_that_failed_to_follow_a_replaced_pointer_is_recorded_by_the_retry_so_the_original_can_be_evicted(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The binding changed but the cache row stayed on the old pointer: eviction refuses a cache row that names another pointer."""
+    values, _config = selected_store
+    relative, _mirror = _replicated(vault)
+    pointer = originals.original_state(vault, relative).reference
+    _damage_a_byte(Path(values["root"]) / pointer.object / pointer.version)
+    _due_again(vault)
+    media_replicas.check(vault)
+    repoint = media_store._repoint_cache
+    failures = []
+
+    def fail_once(*args, **kwargs):
+        if not failures:
+            failures.append(True)
+            raise sqlite3.OperationalError("database is locked")
+        return repoint(*args, **kwargs)
+
+    monkeypatch.setattr(media_store, "_repoint_cache", fail_once)
+    monkeypatch.setattr(media_replicas, "_RETRY_SECONDS", 0)
+    for _ in range(3):  # the first attempt fails after publishing, the retry finds the finding stale
+        media_replicas.drain(vault)
+    assert originals.original_state(vault, relative).reference != pointer
+
+    assert media_store.evict(vault, vault / relative)

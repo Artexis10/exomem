@@ -831,7 +831,7 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
 
     Returns the staged file, or the token that says why the candidate did not verify.
     """
-    from . import archive_members, media_store
+    from . import archive_members, media_replicas, media_store
 
     if copy["source"] == KEPT_COPY:
         return _rehash_kept(vault, row, pace)
@@ -860,7 +860,7 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
             os.fsync(sink.fileno())
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
-        failure, damage = "hash_mismatch", "plaintext_mismatch"
+        failure, damage = "hash_mismatch", media_replicas.PLAINTEXT_MISMATCH
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
@@ -917,9 +917,12 @@ def _keep(vault: Path, row: Row, staged: Path) -> None:
 def _drop_unneeded_kept_copies(vault: Path, connection: sqlite3.Connection) -> None:
     """Remove each kept copy whose row restored, changed its hash or retired: only an unresolved row uses one."""
     folder = table_path(vault).parent
+    kept_copies = list(folder.glob(f"*{_KEPT_SUFFIX}")) if folder.is_dir() else []
+    if not kept_copies:
+        return  # almost every pass: the table is not queried for a sweep that has nothing to remove
     needed = {sha256 for (sha256,) in connection.execute(
         "SELECT sha256 FROM originals WHERE state = ?", (CORRUPT_NO_COPY,))}
-    for kept in folder.glob(f"*{_KEPT_SUFFIX}") if folder.is_dir() else ():
+    for kept in kept_copies:
         if kept.name.removesuffix(_KEPT_SUFFIX) not in needed:
             kept.unlink(missing_ok=True)
 

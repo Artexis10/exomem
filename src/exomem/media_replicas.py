@@ -33,6 +33,16 @@ UPLOAD_VERIFIED = "verified-at-upload"
 #: A replica that a check found absent or damaged. Nothing trusts it, and the worker copies the original again.
 QUARANTINED = "quarantined"
 
+#: Why a replica's plaintext was quarantined although its ciphertext matched its record: the one finding that a later
+#: sample can release (a replica whose ciphertext differs, or is absent, stays until it is copied again).
+PLAINTEXT_MISMATCH = "plaintext_mismatch"
+#: What an attempt on a replica that is not quarantined found. None is damage, and none quarantines.
+UNREADABLE = "binding_unreadable"  # its binding cannot be read now
+UNLISTED = "binding_lists_no_replica"  # its binding no longer lists a replica in the store; the next rebuild drops the row
+RECORD_INVALID = "record_invalid"  # its binding names a version that the store cannot address
+READ_FAILED = "store_read_failed"  # the store did not answer for this replica
+#: A key refusal (`media_store.KEY_REFUSED`) is the fifth: a download's ciphertext matched, and the identity refused it.
+
 #: What a check proved, strongest last. Protocol tokens of the owner status, not vault vocabulary.
 PRESENCE = "presence"  # the version exists with the recorded size and the digest the store declares
 CONTENT = "content"  # the store recomputed the digest of the stored ciphertext
@@ -60,12 +70,26 @@ _OBSERVE_SECONDS = 60.0
 _SCAN_BATCH = 500
 DEFAULT_CHECK_CYCLE_DAYS = 30.0
 DEFAULT_CHECK_READ_MIB_PER_SECOND = 32.0
-#: The least time between two check rounds of a vault, the longest one runs, the replicas one pick takes, and the
-#: replicas a round may check in a store however small it is, so a small vault still finishes its cycle.
+#: The least time between two check rounds of a vault, and the replicas one pick takes. A round takes each store's share
+#: of the cycle, a pick at a time (`check`): `replicas x interval / cycle` rows, floored at `_CHECK_FLOOR_ROWS` so a
+#: small vault still finishes its cycle, and for a content check `bytes x interval / cycle` bytes.
+#: A round runs `_CHECK_ROUND_FACTOR` times the seconds that the read cap needs for its byte share, never less than
+#: `_CHECK_ROUND_SECONDS` and never more than `_CHECK_ROUND_MAX`. At the sizing target (500,000 replicas and 25 TB in
+#: a store, the default 30-day cycle and 32 MiB/s cap) a round holds 116 replicas and 5.4 GiB: 173 s of reading, so
+#: a 216 s round, and 4,320 rounds in the cycle check 501,120 replicas and 25 TB. The cap is an average over the round:
+#: one object is read at the store's speed and the wait for its share follows it, so no read is paced in chunks.
 _CHECK_INTERVAL = 600.0
 _CHECK_ROUND_SECONDS = 120.0
+_CHECK_ROUND_MAX = 300.0
+_CHECK_ROUND_FACTOR = 1.25
 _CHECK_BATCH = 64
 _CHECK_FLOOR_ROWS = 16
+#: How long after a failed attempt on a replica its next turn comes, however long the cycle: a failure that a day does not
+#: clear is shown in the status, and one that it does is cleared by that turn.
+_FAILED_RETRY = 86400.0
+#: Consecutive replicas in one store whose read failed that end the store's round: the store is the likelier cause of
+#: the third, and a row that fails alone is recorded and skipped, never retried in the round.
+_STORE_FAILURES = 3
 
 
 #: Columns that a table made by an earlier release lacks. `0` in a time column means never.
@@ -74,8 +98,13 @@ _ADDED_COLUMNS = (
     ("checked_at", "REAL NOT NULL DEFAULT 0"),  # the last scheduled check, passed or failed
     ("level", "TEXT"),  # what that check proved, or the level that failed for a quarantined row
     ("decrypted_at", "REAL NOT NULL DEFAULT 0"),  # the last sample whose plaintext hashed to the binding
-    ("failure", "TEXT"),  # why a quarantined row failed
+    ("failure", "TEXT"),  # why a quarantined row failed, or what the last attempt on a row that is not quarantined found
     ("sample_month", "INTEGER NOT NULL DEFAULT 0"),  # the UTC month (YYYYMM) in which a sample skipped this row for size
+    # The instant from which each schedule counts a replica's cycle: a passed attempt sets it to its time, a failed one to
+    # a time that brings the next turn after `_FAILED_RETRY`. It is the order of each schedule, which a proof time cannot be,
+    # because a failed attempt proves nothing and must not read as a proof.
+    ("check_from", "REAL NOT NULL DEFAULT 0"),
+    ("sample_from", "REAL NOT NULL DEFAULT 0"),
 )
 _STATUS_INDEX_COLUMNS = ("store", "key_version", "state", "level", "verified_at", "checked_at", "decrypted_at",
                          "sample_month")
@@ -103,11 +132,18 @@ def initialize(conn: sqlite3.Connection) -> None:
     # A check round takes the replicas checked longest ago first, and a sample those proved by decryption longest ago
     # first, each as one range read in index order with no sort. The literal in the partial index is the one the
     # queries below repeat: SQLite uses a partial index only when the query states the same condition.
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_due ON media_replicas(store, checked_at) "
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_due ON media_replicas(store, check_from) "
                  f"WHERE state <> '{QUARANTINED}'")
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_sample ON media_replicas("
-                 "store, key_version, sample_month, decrypted_at) "
+                 "store, key_version, sample_month, sample_from) "
                  f"WHERE state <> '{QUARANTINED}'")
+    # The rows whose last attempt found something, which the status counts by store and token: only those rows are in it.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_failing ON media_replicas(store, failure) "
+                 f"WHERE state <> '{QUARANTINED}' AND failure IS NOT NULL")
+    # The quarantined rows that a sample may release: the plaintext differed from the binding while the ciphertext
+    # matched its record, which a later download can find was a false alarm. Oldest finding first, per key version.
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_reproof ON media_replicas(store, key_version, sample_from) "
+                 f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'")
     # The quarantined rows, which the findings list reads in path order.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_findings ON media_replicas(binary_rel, store) "
                  f"WHERE state = '{QUARANTINED}'")
@@ -176,7 +212,8 @@ def _upsert(seen: str) -> str:
             f"verified_at = CASE WHEN {unchanged} THEN COALESCE(excluded.verified_at, media_replicas.verified_at) "
             "ELSE excluded.verified_at END, "
             + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
-            + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0"))
+            + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0") + ", "
+            + keep("check_from", "0") + ", " + keep("sample_from", "0"))
 
 
 #: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
@@ -206,9 +243,9 @@ def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *,
                      (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
                       replica.ciphertext_size, UPLOAD_VERIFIED))
         changed = conn.execute(
-            "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ? "
+            "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
             "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
-            (QUARANTINED, level, failure, time.time(), binary_rel, replica.store, replica.object,
+            (QUARANTINED, level, failure, time.time(), time.time(), binary_rel, replica.store, replica.object,
              replica.version)).rowcount
         if changed:
             conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?) "
@@ -353,13 +390,17 @@ def _exports(conn: sqlite3.Connection) -> dict[str, float]:
         return {}
 
 
-def recoverability(config: dict[str, object], key_version: str, exports: dict[str, float]) -> tuple[bool | None, str | None]:
+def recoverability(config: dict[str, object], key_version: str, exports: dict[str, float], *,
+                   quarantined: bool = False) -> tuple[bool | None, str | None]:
     """Whether a replica made under `key_version` survives the loss of this machine, and the reason when it does not.
 
-    It does when a platform holds the identity (the configuration says so) or the owner confirmed an export. A vault
-    that lists its own stores is a personal install, where the owner's export is the only way, so an unconfirmed
-    key reads as not recoverable. A vault with neither, such as a Cloud cell's, says nothing about custody: unknown.
+    A quarantined replica does not: its bytes are damaged or absent, whoever holds the key. Otherwise it does when a
+    platform holds the identity (the configuration says so) or the owner confirmed an export. A vault that lists its
+    own stores is a personal install, where the owner's export is the only way, so an unconfirmed key reads as not
+    recoverable. A vault with neither, such as a Cloud cell's, says nothing about custody: unknown.
     """
+    if quarantined:
+        return False, QUARANTINED
     if config.get(originals.KEY_CUSTODY) == originals.PLATFORM_CUSTODY or key_version in exports:
         return True, None
     if originals.STORES in config:
@@ -453,6 +494,11 @@ _GROUPS = ("SELECT store, key_version, state, level, COUNT(*) AS replicas, COUNT
            "SUM(sample_month = ?) AS skipped, SUM(sample_month < 0) AS unsampleable "
            "FROM media_replicas GROUP BY store, key_version, state, level")
 
+#: The replicas whose last attempt found something but no damage, by store and what it found: a range of the small
+#: partial index `media_replicas_failing`, which holds only those rows.
+_FAILING = ("SELECT store, failure, COUNT(*) AS replicas FROM media_replicas "
+            f"WHERE state <> '{QUARANTINED}' AND failure IS NOT NULL GROUP BY store, failure")
+
 #: Why a replica is not sampled, beyond the reasons `media_store.unreadable_reason` gives.
 SAMPLING_OFF = "sampling_off"
 NO_EXACT_DIGEST = "no_exact_digest"  # its binding lists no plaintext digest to hash against
@@ -469,7 +515,7 @@ def _unknown(reason: str, **extra: object) -> dict[str, object]:
 def _check_counts() -> dict[str, object]:
     """The check values of one store, or of all: each level counted apart, so a presence check is never content."""
     return {
-        "quarantined": 0, "never_checked": 0, "checks_not_scheduled": None,
+        "quarantined": 0, "never_checked": 0, "checks_not_scheduled": None, "failed_attempts": [],
         "checks": {level: {"replicas": 0, "oldest_at": None} for level in (PRESENCE, CONTENT, DECRYPTED)},
     }
 
@@ -488,6 +534,14 @@ def _sample_totals(stores: list[dict[str, object]]) -> dict[str, object]:
             "skipped_for_size": sum(store["skipped_for_size"] for store in stores),
             "not_sampled": [{"reason": reason, "replicas": count} for reason, count in sorted(
                 _sum_reasons(store["not_sampled"] for store in stores).items())]}
+
+
+def _merged(first: list[dict[str, object]], second: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Two lists of `{failure, replicas}` as one, a failure's replicas summed, in failure order."""
+    summed: dict[str, int] = {}
+    for item in (*first, *second):
+        summed[item["failure"]] = summed.get(item["failure"], 0) + item["replicas"]
+    return [{"failure": failure, "replicas": count} for failure, count in sorted(summed.items())]
 
 
 def _sum_reasons(lists: Iterable[list[dict[str, object]]]) -> dict[str, int]:
@@ -530,10 +584,9 @@ def _count_checks(vault: Path, stats: dict[str, Any], entry: originals.StoreEntr
     if row["oldest_decrypted"] is not None and (proof["oldest_at"] is None or row["oldest_decrypted"] < proof["oldest_at"]):
         proof["oldest_at"] = row["oldest_decrypted"]
     # The reason a replica is not sampled is a property of its store and key version, so it is read here from the
-    # group, never from a store.
-    reason = (STORE_NOT_DECLARED if entry is None
-              else SAMPLING_OFF if entry.sample_bytes_per_month <= 0
-              else media_store.unreadable_reason(vault, row["store"], row["key_version"]))
+    # group, never from a store. A store whose checks are not scheduled is not sampled either: one rule for both.
+    reason = (_unscheduled_reason(entry) or (SAMPLING_OFF if entry.sample_bytes_per_month <= 0
+              else media_store.unreadable_reason(vault, row["store"], row["key_version"])))
     if reason is None:
         stats["sample"]["skipped_for_size"] += row["skipped"]
         reason, replicas = NO_EXACT_DIGEST, row["unsampleable"]
@@ -549,6 +602,7 @@ def _add_checks(totals: dict[str, Any], stats: dict[str, Any]) -> None:
     """Fold one store's check values into the aggregate."""
     totals["quarantined"] += stats["quarantined"]
     totals["never_checked"] += stats["never_checked"]
+    totals["failed_attempts"] = _merged(totals["failed_attempts"], stats["failed_attempts"])
     if (found := stats["checks_not_scheduled"]) is not None:
         waiting = totals["checks_not_scheduled"] or {"replicas": 0, "reasons": []}
         totals["checks_not_scheduled"] = {"replicas": waiting["replicas"] + found["replicas"],
@@ -579,6 +633,7 @@ def status(vault: Path) -> dict[str, object]:
             exports = _exports(conn)
             month = _month(time.time())
             groups = conn.execute(_GROUPS, (month,)).fetchall()
+            failing = conn.execute(_FAILING).fetchall()
             spent = {row["store"]: row["bytes"] for row in conn.execute(
                 "SELECT store, bytes FROM media_replica_samples WHERE month = ?", (month,))}
             queue = conn.execute("SELECT store, state, COUNT(*) AS n FROM media_replica_queue WHERE kind = ? "
@@ -624,7 +679,7 @@ def status(vault: Path) -> dict[str, object]:
         if row["oldest"] is not None and (stats["oldest_verified_at"] is None or row["oldest"] < stats["oldest_verified_at"]):
             stats["oldest_verified_at"] = row["oldest"]
         _count_checks(vault, stats, entries.get(row["store"]), row)
-        recoverable, reason = recoverability(config, row["key_version"], exports)
+        recoverable, reason = recoverability(config, row["key_version"], exports, quarantined=row["state"] == QUARANTINED)
         if recoverable is True:
             stats["recoverable"] += row["replicas"]
             continue
@@ -634,6 +689,9 @@ def status(vault: Path) -> dict[str, object]:
         stats[counted] += row["replicas"]
         if reason is not None and reason not in stats[reasons]:
             stats[reasons].append(reason)
+    for row in failing:
+        if row["store"] in stores:
+            stores[row["store"]]["failed_attempts"].append({"failure": row["failure"], "replicas": row["replicas"]})
     progress: dict[str, dict[str, int]] = {}
     for row in queue:
         progress.setdefault(row["store"], {})[row["state"]] = row["n"]
@@ -681,6 +739,8 @@ def _check_view(row: sqlite3.Row) -> dict[str, object]:
         "decrypted_at": _iso(row["decrypted_at"] or None),
         "finding": ({"failed_level": row["level"], "failure": row["failure"], "at": _iso(row["checked_at"])}
                     if quarantined else None),
+        # What the last check or sample attempt found when it could not prove the replica and found no damage.
+        "failed_attempt": None if quarantined else row["failure"],
     }
 
 
@@ -716,7 +776,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
     listed: dict[str, list[dict[str, object]]] = {}
     for row in rows:
         entry = entries.get(row["store"])
-        recoverable, reason = recoverability(config, row["key_version"], exports)
+        recoverable, reason = recoverability(config, row["key_version"], exports, quarantined=row["state"] == QUARANTINED)
         listed.setdefault(row["binary_rel"], []).append({
             "store": row["store"], "state": row["state"], "verified_at": _iso(row["verified_at"]),
             "failure_domain": entry.failure_domain if entry is not None else None,
@@ -788,17 +848,19 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
     found = []
     for replica in _replicas_of(snapshot):
         entry = entries.get(replica.store)
-        recoverable, reason = recoverability(config, replica.key_version, exports)
         row = recorded.get(replica.store)
         # A row that names another version describes a replica that the binding no longer lists: no check applies.
         checked = row if row is not None and (row["object"], row["version"]) == (replica.object, replica.version) else None
+        recoverable, reason = recoverability(config, replica.key_version, exports,
+                                             quarantined=checked is not None and checked["state"] == QUARANTINED)
         found.append({
             "store": replica.store, "state": UPLOAD_VERIFIED if checked is None else checked["state"],
             "verified_at": _iso(row["verified_at"]) if row is not None else None,
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "recoverable": recoverable, "reason": reason, "key_version": replica.key_version,
-            **(_check_view(checked) if checked is not None else {"last_check": None, "decrypted_at": None, "finding": None}),
+            **(_check_view(checked) if checked is not None else {"last_check": None, "decrypted_at": None, "finding": None,
+                                                              "failed_attempt": None}),
         })
     return {"state": "measured", "reason": None, "original_state": snapshot.state, "replicas": found}
 
@@ -1040,36 +1102,60 @@ def scheduled_level(entry: originals.StoreEntry) -> str | None:
 _BINDING_UNREADABLE = (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError)
 
 
-def _bound(vault: Path, row: sqlite3.Row) -> tuple[originals.OriginalSnapshot, originals.StoredObject] | None:
-    """The binding and the entry that it lists for the row's store now; the table follows the binding when they differ.
+def _bound(vault: Path, row: sqlite3.Row) -> tuple[originals.OriginalSnapshot, originals.StoredObject] | str:
+    """The binding and the entry that it lists for the row's store now, else the finding that says why there is none.
 
-    None when the binding lists no replica in the store, or cannot be read: the next rebuild drops such a row.
+    The table follows the binding when they differ. The finding is `UNREADABLE` for a binding that cannot be read now,
+    and `UNLISTED` for one that lists no replica in the store (the next rebuild drops the row).
     """
     try:
         snapshot = originals.original_state(vault, row["binary_rel"])
     except _BINDING_UNREADABLE:
-        return None
+        return UNREADABLE
     entry = next((found for found in _replicas_of(snapshot) if found.store == row["store"]), None)
     if entry is None:
-        return None
+        return UNLISTED
     if (entry.object, entry.version) != (row["object"], row["version"]):
         record(vault, row["binary_rel"], entry, verified_at=None)  # a newer version, which starts unchecked
     return snapshot, entry
 
 
 def _passed(vault: Path, binary_rel: str, replica: originals.StoredObject, level: str) -> None:
-    """Record a check that matched. A replica that was quarantined meanwhile stays so."""
+    """Record a check that matched. A replica that was quarantined meanwhile stays so.
+
+    It clears what an earlier attempt found, except a key refusal: only a download that decrypts can disprove that.
+    """
+    from . import media_store
+
+    now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("UPDATE media_replicas SET checked_at = ?, level = ?, failure = NULL "
+        conn.execute("UPDATE media_replicas SET checked_at = ?, check_from = ?, level = ?, "
+                     "failure = CASE WHEN failure = ? THEN failure ELSE NULL END "
                      "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
                      f"AND state <> '{QUARANTINED}'",
-                     (time.time(), level, binary_rel, replica.store, replica.object, replica.version))
+                     (now, now, level, media_store.KEY_REFUSED, binary_rel, replica.store, replica.object,
+                      replica.version))
 
 
-#: The replicas of a store checked longest ago, never-checked first, that the cycle has made due: a range of
+def _failed(vault: Path, row: sqlite3.Row, finding: str, *, sample: bool = False) -> None:
+    """Record an attempt on a replica that found no damage and proved nothing, and move the row on in its schedule.
+
+    The finding replaces what the row showed and is counted in the status. It never quarantines: an attempt that
+    could not complete says nothing about the bytes. The row's next turn comes after `_FAILED_RETRY`, so one unreadable
+    row never holds back the rows behind it.
+    """
+    column, cycle = ("sample_from" if sample else "check_from"), check_cycle()
+    # A quarantined row (a sample's second look) keeps the finding that quarantined it; only its turn moves.
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute(f"UPDATE media_replicas SET {column} = ?, failure = CASE WHEN state = '{QUARANTINED}' "
+                     "THEN failure ELSE ? END WHERE binary_rel = ? AND store = ?",
+                     (time.time() - cycle + min(cycle, _FAILED_RETRY), finding, row["binary_rel"], row["store"]))
+
+
+#: The replicas of a store attempted longest ago, never-attempted first, that the cycle has made due: a range of
 #: `media_replicas_due` in its own order, so a pick reads `LIMIT` rows whatever the table holds.
 _DUE = ("SELECT binary_rel, store, object, version FROM media_replicas "
-        f"WHERE store = ? AND state <> '{QUARANTINED}' AND checked_at <= ? ORDER BY checked_at LIMIT ?")
+        f"WHERE store = ? AND state <> '{QUARANTINED}' AND check_from <= ? ORDER BY check_from LIMIT ?")
 
 
 def _due(ledger: MediaJobStore, store: str, cycle: float, limit: int) -> list[sqlite3.Row]:
@@ -1088,56 +1174,81 @@ def _store_budget(ledger: MediaJobStore, store: str, cycle: float) -> tuple[int,
             original_fixity.budget_for([size], interval=_CHECK_INTERVAL, cycle=cycle))
 
 
+def _round_seconds(shares: int, rate: float) -> float:
+    """How long a check round may run to read `shares` bytes at the read cap: see `_CHECK_ROUND_FACTOR`."""
+    return min(_CHECK_ROUND_MAX, max(_CHECK_ROUND_SECONDS, _CHECK_ROUND_FACTOR * shares / rate))
+
+
 def check(vault: Path, *, deadline: float | None = None) -> int:
-    """One bounded round of scheduled checks over every store whose descriptor allows one; return the replicas checked.
+    """One bounded round of scheduled checks over every store whose descriptor allows one; return the replicas attempted.
 
-    Each store takes the replicas checked longest ago first, within its share of the cycle (replicas, and for a content
-    check bytes under the read-rate cap) and within the round's time. It holds no vault guard: a check reads a store and
-    writes one derived row. A store that does not answer as itself changes no row and is tried again on a later round.
+    Each store takes the replicas attempted longest ago first, a pick at a time, until its share of the cycle is spent
+    (replicas, and for a content check bytes under the read-rate cap) or the round's time is. It holds no vault guard: a
+    check reads a store and writes one derived row. A replica whose binding or read fails is recorded and skipped; a
+    store that does not answer as itself, or fails `_STORE_FAILURES` replicas in a row, ends its own round and changes
+    no row that it did not attempt.
     """
-    from . import media_store
-
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True:
         return 0
     ledger = MediaJobStore(vault)
     cycle, rate = check_cycle(), check_read_rate()
-    limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
-    checked = 0
+    entries = originals.store_entries(config)
+    shares = sum(_store_budget(ledger, name, cycle)[1] for name, entry in entries.items()
+                 if scheduled_level(entry) == CONTENT)
+    limit = time.monotonic() + _round_seconds(shares, rate) if deadline is None else deadline
     cap = _ReadCap(rate, limit)
-    for name, entry in originals.store_entries(config).items():
-        level = scheduled_level(entry)
-        if level is None:
-            continue
-        if (answer := media_store.store_reachable(vault, name)) is not None:
-            _note_reach(vault, name, answer)
-        if answer is False:
-            continue
-        rows, budget = _store_budget(ledger, name, cycle)
-        spent = 0
-        for row in _due(ledger, name, cycle, min(rows, _CHECK_BATCH)):
+    return sum(_check_store(vault, ledger, name, level, cycle, cap, limit) for name, entry in entries.items()
+               if (level := scheduled_level(entry)) is not None)
+
+
+def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycle: float, cap: _ReadCap,
+                 limit: float) -> int:
+    """One store's part of a check round: the replicas attempted."""
+    from . import media_store
+
+    if (answer := media_store.store_reachable(vault, name)) is not None:
+        _note_reach(vault, name, answer)
+    if answer is False:
+        return 0
+    rows, budget = _store_budget(ledger, name, cycle)
+    attempted = spent = failing = 0
+    while attempted < rows:
+        picked = _due(ledger, name, cycle, min(rows - attempted, _CHECK_BATCH))
+        if not picked:
+            break
+        for row in picked:
             if time.monotonic() >= limit or (level == CONTENT and spent >= budget):
-                break
+                return attempted
             foreground_priority.yield_to_foreground()
+            attempted += 1
             bound = _bound(vault, row)
-            if bound is None:
+            if isinstance(bound, str):
+                _failed(vault, row, bound)
                 continue
             replica = bound[1]
             try:
                 failure = media_store.check_replica(vault, replica)
-            except (media_store.MediaStoreError, ValueError):
-                break  # The store cannot answer now: unavailable is no proof of loss, so no row changes.
+            except ValueError:
+                _failed(vault, row, RECORD_INVALID)  # the store answered; it cannot address this version
+                continue
+            except media_store.MediaStoreError:
+                _failed(vault, row, READ_FAILED)  # unavailable is no proof of loss: the row is not quarantined
+                failing += 1
+                if failing >= _STORE_FAILURES:
+                    return attempted
+                continue
+            failing = 0
             if failure is None:
                 _passed(vault, row["binary_rel"], replica, level)
             else:
                 quarantine(vault, row["binary_rel"], replica, level=level, failure=failure)
-            checked += 1
             if level == CONTENT:
                 spent += replica.ciphertext_size
                 if not cap.spend(replica.ciphertext_size):
-                    break  # The cap would hold the worker past the round: the next round goes on.
-    return checked
+                    return attempted  # The cap would hold the worker past the round: the next round goes on.
+    return attempted
 
 
 # --- sampled checks ----------------------------------------------------------------------------------
@@ -1150,12 +1261,16 @@ _SAMPLE_RELEASE = 256
 #: `sample_month` of a row that no sample can read (its binding lists no exact plaintext digest, or cannot be read).
 _UNSAMPLEABLE = -1
 
-#: The replica of a store whose last decrypt proof is oldest, never-proven first, among those not skipped this month and
-#: not proved within the cycle: a range of `media_replicas_sample` in its own order. The key version is the one whose
-#: identity this install holds. A replica is sampled once per cycle, so a small store does not spend its budget twice.
+#: The replica of a store whose sample turn is oldest, never-sampled first, among those not skipped this month and
+#: whose turn the cycle has made due: a range of `media_replicas_sample` in its own order. The key version is the one
+#: whose identity this install holds. A replica is sampled once per cycle, so a small store does not spend its budget twice.
 _SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
            f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
-           "AND decrypted_at <= ? ORDER BY decrypted_at LIMIT 1")
+           "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
+#: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`.
+_REPROOF = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
+            f"WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' "
+            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: A new month gives the replicas that the last one skipped for size another chance, a bounded batch at a time.
 _SAMPLE_RESET = ("UPDATE media_replicas SET sample_month = 0 WHERE (binary_rel, store) IN ("
                  "SELECT binary_rel, store FROM media_replicas WHERE store = ? AND key_version = ? "
@@ -1175,13 +1290,30 @@ def _mark_sample(vault: Path, row: sqlite3.Row, month: int) -> None:
                      (month, row["binary_rel"], row["store"]))
 
 
-def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, store: str, month: int) -> None:
-    """Record a sample that matched and charge its bytes to the month; a replica quarantined meanwhile stays so."""
+def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, store: str) -> None:
+    """Record a sample that matched: it clears every finding of an attempt, and a replica quarantined meanwhile stays so."""
+    now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("UPDATE media_replicas SET decrypted_at = ?, failure = NULL WHERE binary_rel = ? AND store = ? "
-                     f"AND object = ? AND version = ? AND state <> '{QUARANTINED}'",
-                     (time.time(), row["binary_rel"], store, replica.object, replica.version))
-        _charge(conn, store, month, replica.ciphertext_size)
+        conn.execute("UPDATE media_replicas SET decrypted_at = ?, sample_from = ?, failure = NULL "
+                     "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+                     f"AND state <> '{QUARANTINED}'", (now, now, row["binary_rel"], store, replica.object, replica.version))
+
+
+def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) -> None:
+    """A quarantined replica whose download decrypted to the binding was a false alarm: it leaves quarantine, unchecked.
+
+    Its check proofs are reset, so the scheduled check proves it again, and the copy again that its finding queued is dropped.
+    """
+    now = time.time()
+    with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        released = conn.execute(
+            "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
+            "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+            f"AND state = '{QUARANTINED}'", (UPLOAD_VERIFIED, now, now, row["binary_rel"], row["store"], replica.object,
+                                             replica.version)).rowcount
+        if released:
+            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
+                         (row["store"], row["binary_rel"], RECOPY))
 
 
 def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
@@ -1194,9 +1326,12 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
 
     A sample downloads a replica, decrypts it into a sink that keeps nothing, and hashes the plaintext against the
     binding. Each store spends at most its `sample_bytes_per_month` in a UTC calendar month (zero turns it off), and a
-    replica that does not fit the month's remainder is skipped for the month. It reads only where repair could read:
-    an `immediate` store and the key version whose identity this install holds. A store that does not answer as
-    itself, or an unreadable identity, is no finding: nothing changes.
+    replica that does not fit the month's remainder is skipped for the month. The bytes are charged before the
+    download, so a sample that stops part-way is still paid for. It runs where checks run (`_unscheduled_reason`) and
+    reads only where repair could read: an `immediate` store and the key version whose identity this install holds.
+    A store that does not answer as itself, or an unreadable identity, is no finding: nothing changes. A replica whose
+    read fails, or that the key refuses, is recorded and skipped; a quarantined replica whose plaintext differed gets
+    one more download per round, and leaves quarantine when it decrypts to the binding.
     """
     from . import media_store
 
@@ -1209,7 +1344,8 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
     cap, cycle = _ReadCap(check_read_rate(), limit), check_cycle()
     month, key_version, sampled = _month(time.time()), str(config.get("key_version")), 0
     for name, entry in originals.store_entries(config).items():
-        if entry.sample_bytes_per_month <= 0 or media_store.unreadable_reason(vault, name, key_version) is not None:
+        if (_unscheduled_reason(entry) is not None or entry.sample_bytes_per_month <= 0
+                or media_store.unreadable_reason(vault, name, key_version) is not None):
             continue
         if (answer := media_store.store_reachable(vault, name)) is not None:
             _note_reach(vault, name, answer)
@@ -1217,47 +1353,68 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
             continue
         with closing(ledger._connect()) as conn, conn:
             conn.execute(_SAMPLE_RESET, (name, key_version, month, _SAMPLE_RELEASE))
-        reads = skips = 0
+        reads = skips = failing = 0
+        second_look = True  # a quarantined replica comes first, once per round
         while reads < _SAMPLE_READS and skips < _SAMPLE_SKIPS and time.monotonic() < limit:
             with closing(ledger._connect(readonly=True)) as conn:
-                row = conn.execute(_SAMPLE, (name, key_version, time.time() - cycle)).fetchone()
+                row = conn.execute(_REPROOF, (name, key_version, time.time() - cycle)).fetchone() if second_look else None
+                quarantined = row is not None
+                if row is None:
+                    row = conn.execute(_SAMPLE, (name, key_version, time.time() - cycle)).fetchone()
                 held = conn.execute("SELECT bytes FROM media_replica_samples WHERE store = ? AND month = ?",
                                     (name, month)).fetchone()
+            second_look = False
             if row is None:
                 break
             remaining = entry.sample_bytes_per_month - (held["bytes"] if held is not None else 0)
             if remaining <= 0:
                 break
             if row["size"] > remaining:  # a size of 0 is not yet known: the binding gives it below
-                _mark_sample(vault, row, month)
-                skips += 1
+                if not quarantined:
+                    _mark_sample(vault, row, month)
+                    skips += 1
                 continue
             foreground_priority.yield_to_foreground()
             bound = _bound(vault, row)
-            if bound is None or bound[0].binary_sha256 is None or bound[0].binary_size is None:
-                _mark_sample(vault, row, _UNSAMPLEABLE)
+            if isinstance(bound, str):
+                _failed(vault, row, bound, sample=True)  # a binding that cannot be read now is no reason to give up on the row
                 skips += 1
                 continue
             snapshot, replica = bound
-            if replica.ciphertext_size > remaining:
-                _mark_sample(vault, row, month)
+            if snapshot.binary_sha256 is None or snapshot.binary_size is None:
+                _mark_sample(vault, row, _UNSAMPLEABLE)  # the binding is readable and lists no plaintext digest: nothing to hash against
                 skips += 1
                 continue
-            try:
-                failure = media_store.sample_replica(
-                    vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
-            except (media_store.MediaStoreError, ValueError):
-                break  # The store cannot answer now: unavailable is no proof of loss, so no row changes.
-            if failure is None:
-                _proved(vault, row, replica, name, month)
-            else:
-                with closing(ledger._connect()) as conn, conn:
-                    _charge(conn, name, month, replica.ciphertext_size)
-                quarantine(vault, row["binary_rel"], replica, level=DECRYPTED, failure=failure)
+            if replica.ciphertext_size > remaining:
+                if not quarantined:
+                    _mark_sample(vault, row, month)
+                    skips += 1
+                continue
+            with closing(ledger._connect()) as conn, conn:
+                _charge(conn, name, month, replica.ciphertext_size)
             reads += 1
             sampled += 1
-            if not cap.spend(replica.ciphertext_size):
-                break
+            try:
+                damage = media_store.sample_replica(
+                    vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
+            except media_store.KeyRefused:
+                _failed(vault, row, media_store.KEY_REFUSED, sample=True)  # the bytes match their record: no damage
+                failing += 1
+            except ValueError:
+                _failed(vault, row, RECORD_INVALID, sample=True)  # the store answered; it cannot address this version
+            except media_store.MediaStoreError:
+                _failed(vault, row, READ_FAILED, sample=True)  # unavailable is no proof of loss
+                failing += 1
+            else:
+                failing = 0
+                if damage is not None:
+                    quarantine(vault, row["binary_rel"], replica, level=DECRYPTED, failure=damage)
+                elif quarantined:
+                    _released(vault, row, replica)
+                else:
+                    _proved(vault, row, replica, name)
+            if failing >= _STORE_FAILURES or not cap.spend(replica.ciphertext_size):
+                break  # a store or key that fails three in a row is the likelier cause; the next round tries again
     return sampled
 
 

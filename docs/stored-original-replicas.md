@@ -22,12 +22,15 @@ A store with no `head_recomputes` is not checked, and the status says so with th
 A `presence` check never counts as `content`: the status counts each level apart.
 
 The `decrypted` level is a sample, because it costs a download.
-It runs only for a store with `retrieval_class` `immediate` and a key version whose identity this install can read.
+It runs only where checks run (a store whose descriptor states `head_recomputes`), for a store with `retrieval_class` `immediate`, and for a key version whose identity this install can read.
+A store whose checks are not scheduled is never sampled and is never charged bytes.
 
 ## Set the cycle and the read rate
 
 Each replica is checked about once in 30 days, oldest check first.
-A content check reads at up to 32 MiB per second.
+A round runs every ten minutes and takes each store's share of the cycle: its replicas and, for a content check, its bytes, each times ten minutes over the cycle.
+A content check reads at up to 32 MiB per second on average over a round: an object is read at the store's speed, and the wait for its share of time follows it.
+At 500,000 replicas and 25 TB in one store, a round checks 116 replicas and 5.4 GiB in about 216 seconds, which covers the store in 30 days.
 Set these two environment variables on the service to change them:
 
 - `EXOMEM_REPLICA_CHECK_CYCLE_DAYS`: the days between two checks of one replica.
@@ -45,7 +48,8 @@ A negative value, or text, makes the store unavailable and the status names the 
 
 Expected result: the next status shows the new `budget_bytes` for that store.
 
-The sample takes the replica with the oldest decrypt proof first.
+The sample takes the replica whose sample turn came longest ago first.
+It charges a replica's bytes to the month before it downloads them, so a sample that stops part-way is still paid for.
 A replica larger than the remaining budget waits for the next month and counts in `skipped_for_size`.
 The month is a calendar month in UTC.
 An older release ignores this field.
@@ -56,7 +60,9 @@ The `process_media` status result carries a `replicas` section.
 Each store, and the totals, report these values:
 
 - `replicas` and `verified_at_upload`: the copies made and the copies that the upload verified.
-- `quarantined`: the replicas that a check found damaged.
+- `quarantined`: the replicas that a check or a repair found damaged.
+- `recoverable`, `not_recoverable` and `not_recoverable_reasons`: whether each replica survives the loss of this machine. A quarantined replica is never recoverable, and its reason is `quarantined`.
+- `failed_attempts`: the replicas whose last check or sample could not complete, with what it found. These replicas are not quarantined. The tokens are `binding_unreadable`, `binding_lists_no_replica`, `record_invalid`, `store_read_failed` and `key_refused`.
 - `checks`: for `presence`, `content` and `decrypted`, the replicas whose last check proved that level and the time of the oldest.
 - `never_checked`: the replicas that no check has reached since upload, or since a rebuild that lost the history.
 - `checks_not_scheduled`: the replicas whose store gets no check, with the reasons.
@@ -68,7 +74,17 @@ Unavailable is not proof of loss, so it never makes a finding.
 
 ## Read the findings
 
-A replica becomes a finding when its store says the version is absent, returns another size or SHA-256 than recorded, or when a sample does not decrypt to the original.
+A replica becomes a finding when its bytes are proved damaged:
+
+- The store says the version is `absent`, or `condemned` (a hide or a newer version made the bucket rule delete it).
+- The ciphertext has another size or SHA-256 than recorded (`size_mismatch`, `digest_mismatch`).
+- The ciphertext matches its record and decrypts to bytes that are not the original (`plaintext_mismatch`).
+
+These are not findings, because they say nothing about the bytes: a store that is offline or slow, a decryption that a signal stopped, and a replica that one unreadable row of the binding hides.
+The status reports them in `failed_attempts`, and the next turn of the replica tries again after a day.
+When ciphertext matches its record and your identity refuses it, the status reports `key_refused`.
+Check the identity file, then wait for the next sample: a passing sample clears it, and a repair is never blocked by it.
+
 List the findings with the command line:
 
 1. Run `exomem media-replicas findings --vault <vault path>`.
@@ -84,8 +100,10 @@ The `recopy` value says what the worker does about the finding:
 - `null`: no copy is queued.
 
 The worker writes a new version, from the local original when it still hashes to the binding, or else from another replica that is not quarantined.
-The damaged version stays in its store as an orphan.
+The damaged version stays in its store as an orphan. For the store that serves eviction, its name is also released for collection.
 Eviction and fixity never read a quarantined replica.
+A `plaintext_mismatch` finding gets one more sample per cycle, and a sample that decrypts to the original lifts it and drops the queued copy.
+Any other finding stays until a new copy replaces the entry.
 
 When a finding reads `no_verified_source`, bring back the original or another good replica.
 The daily rebuild then tries the copy again.

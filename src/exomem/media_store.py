@@ -104,6 +104,19 @@ class ReplicaMismatch(MediaStoreError):
         self.failure = failure
 
 
+#: The finding when ciphertext that matches its record is refused by the key: the identity or the recipient is wrong.
+KEY_REFUSED = "key_refused"
+
+
+class KeyRefused(MediaStoreError):
+    """The ciphertext is the one the binding records, and the decryption identity refuses it: the key, not the bytes."""
+
+    failure = KEY_REFUSED
+
+    def __init__(self) -> None:
+        super().__init__("MEDIA_ORIGINAL_UNVERIFIED", "the decryption identity refuses the ciphertext")
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectHead:
     size: int
@@ -1351,26 +1364,27 @@ class _NullSink:
 def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> str | None:
     """Download and decrypt `replica` and hash its plaintext against `expected`: None when it matches, else why not.
 
-    The answers are `plaintext_mismatch` and `decrypt_failed` (the ciphertext or its authenticated decryption failed). An
-    unavailable store raises `MEDIA_STORE_UNAVAILABLE`.
+    The answers are `size_mismatch` and `digest_mismatch` (the ciphertext differs from its record) and
+    `plaintext_mismatch` (it decrypts to other bytes than the binding). The identity refusing ciphertext that matches
+    its record raises `KeyRefused`, which is no damage; an unavailable store, or an age that was stopped, raises
+    `MEDIA_STORE_UNAVAILABLE`.
     """
+    from . import media_replicas
+
     try:
         head = write_stored_original(vault, replica, _NullSink(), store=replica.store)
-    except MediaStoreError as error:
-        if (damage := replica_damage(error)) is None:
-            raise
-        return damage
-    return None if head == expected else "plaintext_mismatch"
+    except ReplicaMismatch as mismatch:
+        return mismatch.failure
+    return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
 
 
 def replica_damage(error: MediaStoreError) -> str | None:
-    """The failure token when a read of a stored version failed because its bytes are damaged; None for an outage.
+    """The failure token when a read of a stored version found its ciphertext different from the record; else None.
 
-    A size that differs from the record is `size_mismatch`; ciphertext that does not decrypt is `decrypt_failed`.
+    Damage is proved in one place, `_decrypted_chunks`, which raises `ReplicaMismatch` for it. Any other failure of a
+    read is an outage or a key refusal, and neither says the bytes are damaged.
     """
-    if isinstance(error, ReplicaMismatch):
-        return error.failure
-    return "decrypt_failed" if error.code == "MEDIA_ORIGINAL_UNVERIFIED" else None
+    return error.failure if isinstance(error, ReplicaMismatch) else None
 
 
 def _quarantine_found(vault: Path, binary_rel: str, reference: StoredObject, mismatch: ReplicaMismatch) -> None:
@@ -1987,8 +2001,9 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
                        name: str, snapshot: OriginalSnapshot, target: str) -> tuple[ObjectHead, str, str]:
     """Copy the ciphertext of another entry of the binding into `backend`: the head, the version and the key version.
 
-    Each entry that is not quarantined is tried in the binding's order. One whose bytes differ from its record is
-    quarantined as the finding it is, and the next is tried. A store that cannot answer ends the attempt as an outage
+    Each entry that is not quarantined is tried in the binding's order, and only one in an `immediate` store: the
+    store that holds it must be one that repair and the sampled check read too. One whose bytes differ from its record
+    is quarantined as the finding it is, and the next is tried. A store that cannot answer ends the attempt as an outage
     when no entry copied; only when every entry was tried does the original have no verified source.
     """
     from . import media_replicas
@@ -1998,6 +2013,9 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
     for candidate in (snapshot.reference, *snapshot.replicas):
         if candidate is None or candidate.store == target or media_replicas.has_quarantined(vault, (candidate,)):
             continue
+        holder = originals.store_entry(config, candidate.store)
+        if holder is None or not holder.available or holder.retrieval_class != originals.IMMEDIATE:
+            continue  # a retrieval that is not immediate is the owner's to ask for, never a background read
         try:
             source_backend = store_for(vault, candidate.store)
             if isinstance(source_backend, FilesystemStore):
@@ -2043,6 +2061,10 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
         damaged = _entry_in(snapshot, store_name)
         if damaged is None or not media_replicas.is_quarantined(vault, relative, damaged):
+            # A publication that stopped after the binding changed but before its cache row followed (`_repoint_cache`)
+            # is retried as a stale finding: the one recovery that eviction waits for records the cache row now.
+            if entry.serves_eviction and snapshot.state == "cached" and not cache_matches(vault, path, snapshot=snapshot):
+                recover_cache(vault, path, snapshot)
             return None
         source = None
         if snapshot.state in ("local", "cached"):  # the binding states whose bytes are on this volume: `originals` fixes them
@@ -2074,6 +2096,12 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             _seal(ledger, snapshot, name)
             # The prepared edit re-reads the sidecar and refuses unless it is still the one that `snapshot` names.
             if entry.serves_eviction:
+                # The pointer's old name retires with its reference (collect-released-media D5): the caller commits the
+                # release first, so a crash between the two keeps the reference, and a hold condemns the name only
+                # when no retained backup or companion still references it. A replica's name is never released: no
+                # replica store collects.
+                if damaged.object != name:  # a retried copy that reuses the damaged name must not release its own
+                    _release_name(ledger, damaged.object)
                 _commit_reference(vault, prepare_reference(vault, snapshot, replica))
                 _repoint_cache(vault, ledger, snapshot, damaged, replica)
             else:
@@ -2272,21 +2300,34 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
 
 
 def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) -> Iterator[bytes]:
-    """Stream plaintext; exhaustion verifies the ciphertext and age's authenticated exit."""
+    """Stream plaintext; exhaustion settles what a failed read means. This is the one place that proves damage.
+
+    The whole ciphertext is hashed even when age stops early, so a failed read is judged against the record:
+    a size or digest that differs from it is damage (`ReplicaMismatch`). Ciphertext that matches its record and that
+    age refuses is `KeyRefused`: the identity or recipient is wrong, and the bytes are no worse for it. An age that a
+    signal stopped says nothing about either and raises `MEDIA_STORE_UNAVAILABLE` (a platform that reports a stopped
+    process as a positive code reads it as a key refusal, which damages nothing).
+    """
     process = subprocess.Popen(["age", "--decrypt", "--identity", identity],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert process.stdin is not None and process.stdout is not None
     ciphertext, fed, feed_errors = hashlib.sha256(), [0], []
+    stopped = threading.Event()  # the reader is gone: nothing needs the rest of the download
 
     def feed() -> None:
+        piping = True
         try:
             with closing(_stored_chunks(backend, reference)) as chunks:
                 for chunk in chunks:
+                    if stopped.is_set():
+                        return
                     ciphertext.update(chunk)
                     fed[0] += len(chunk)
-                    process.stdin.write(chunk)
-        except BrokenPipeError:
-            pass  # age stopped early; its exit status refuses the result.
+                    if piping:
+                        try:
+                            process.stdin.write(chunk)
+                        except BrokenPipeError:
+                            piping = False  # age stopped early; the rest is still hashed against the record
         except BaseException as error:  # noqa: BLE001 - re-raised on the calling thread below.
             feed_errors.append(error)
         finally:
@@ -2301,6 +2342,7 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) ->
             yield chunk
         returncode = process.wait()
     except BaseException:
+        stopped.set()
         process.kill()
         process.wait()
         raise
@@ -2309,8 +2351,14 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str) ->
         process.stdout.close()
     if feed_errors:
         raise feed_errors[0]
-    if returncode or ObjectHead(fed[0], ciphertext.hexdigest()) != ObjectHead(reference.ciphertext_size, reference.ciphertext_sha256):
-        raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the ciphertext or its authenticated decryption failed")
+    if fed[0] != reference.ciphertext_size:
+        raise ReplicaMismatch("size_mismatch")
+    if ciphertext.hexdigest() != reference.ciphertext_sha256:
+        raise ReplicaMismatch("digest_mismatch")
+    if returncode < 0:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the decryption was stopped before it finished")
+    if returncode:
+        raise KeyRefused()
 
 
 def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO) -> ObjectHead:
