@@ -6237,36 +6237,53 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
 
 
 
-def _committed_file_item_title(root: Path, path: str, version: str) -> str | None:
-    """Read only the ordinary image released by the terminal path filter."""
-    from .. import document_containers, record_formats
+def _access_config_absent(root: Path) -> bool:
+    """Only an absent directory entry proves no access configuration."""
+    try:
+        access.access_config_path(root).lstat()
+    except FileNotFoundError:
+        return True
+    return False
 
-    if (reserved_paths.classify_logical(path).disposition != reserved_paths.PathDisposition.ORDINARY
-            or raw_protection.marked(path) or document_containers.in_payload_tree(path)):
-        return None
-    # Optional prose shares the direct-read tier rules and never opens governance authority.
+
+def _name_committed_file_item(
+    root: Path, result: dict[str, Any], path: str, version: str,
+) -> dict[str, Any]:
+    """Use the exact ordinary file image when the vault has no access configuration."""
+    from .. import document_containers, record_formats, runtime_resources
+
+    # Leave the delivery reserve alone. The held file open and guard recheck do not retry.
     budget = request_budget.current()
     delay = min(0.1, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS) if budget else 0.1
     check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=delay))
     try:
         with request_budget.checking(check):
             check()
-            tier = access.bounded_access_tier(root, path)
-            if tier is None or tier == access.TIER_EXCLUDED:
-                return None
+            if (not _access_config_absent(root)
+                    or reserved_paths.classify_logical(path).disposition != reserved_paths.PathDisposition.ORDINARY
+                    or raw_protection.marked(path) or document_containers.in_payload_tree(path)):
+                return result
             raw, guard = vault._read_bounded_guarded_snapshot(root, path, record_formats._MAX_ITEM_BYTES)
             if guard.expected_content_hash != version:
-                return None
-            page = find_corpus._parse_page_after_checkpoint(root / path, 0, root, content=raw, resolved_relative=path)
+                return result
+            with runtime_resources.parser_preparation(
+                len(raw), limit_bytes=record_formats._MAX_ITEM_BYTES, check=check,
+            ) as preparation:
+                # Charge the same logical Markdown header that the page parser will see.
+                preparation.hold(raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+                page = find_corpus._parse_page_after_checkpoint(
+                    root / path, 0, root, content=raw, resolved_relative=path,
+                )
             if page is None or not page.frontmatter_valid or "container_member" in page.frontmatter:
-                return None
+                return result
             if any(bridges.parse_bridge_frontmatter(page.frontmatter)):
-                return None
+                return result
+            named = _name_receipt_title(result, path, page.title)
             guard.recheck(root)
             check()
-            return page.title
+            return named if _access_config_absent(root) else result
     except (Exception, request_budget.ReadBudgetExhausted):  # noqa: BLE001 - optional prose cannot refuse a commit
-        return None
+        return result
 
 
 def _name_receipt_title(result: dict[str, Any], path: str, title: str | None) -> dict[str, Any]:
@@ -9752,8 +9769,7 @@ def filter_withheld_entries(
                     and decision.level == LEVEL_FULL and not decision.release_strip):
                 # The ordinary path decision is already complete. The receipt binds the exact title bytes,
                 # so a replay needs no current manifest recipe and a SQLite row token cannot pass.
-                title = _committed_file_item_title(vault_root, path, version)
-                filtered = _name_receipt_title(filtered, path, title)
+                filtered = _name_committed_file_item(vault_root, filtered, path, version)
     if (
         isinstance(payload, Mapping)
         and {"items", "summary", "shown", "total", "truncated", "note"}.issubset(payload)

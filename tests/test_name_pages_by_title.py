@@ -234,10 +234,21 @@ def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
         assert egress.filter_withheld_entries(vault, result, _item_receipt=True) == result
 
 
-def test_replayed_file_receipt_uses_the_committed_recipe_and_current_access(build, vault) -> None:
+def test_replayed_file_receipt_uses_the_committed_recipe_until_access_is_configured(build, vault, monkeypatch) -> None:
     from lifecycle_fixtures import RECORDS_PATH, records_manifest
 
     from exomem import access
+    from exomem.governance import egress
+
+    original_format = egress._name_receipt_title
+
+    def configure_access_after_formatting(result, path, title):
+        named = original_format(result, path, title)
+        assert "-> Panel shipment (" in named["user_summary"]
+        access.access_config_path(vault).write_text(
+            "excluded: [Records/Deliveries/Events]\n", encoding="utf-8",
+        )
+        return named
 
     async def run() -> None:
         async with Client(build()) as client:
@@ -268,14 +279,57 @@ def test_replayed_file_receipt_uses_the_committed_recipe_and_current_access(buil
             assert "-> Panel shipment (" in replay["user_summary"]
             assert replay["after_item_hash"] == saved["after_item_hash"]
 
-            access.access_config_path(vault).write_text("excluded: [Records/Deliveries/Events]\n", encoding="utf-8")
-            excluded = (await client.call_tool(*call, meta=meta)).structured_content
+            with monkeypatch.context() as patch:
+                patch.setattr(egress, "_name_receipt_title", configure_access_after_formatting)
+                excluded = (await client.call_tool(*call, meta=meta)).structured_content
             assert excluded["user_summary"].endswith(f"-> {path} (personal Exomem)")
             assert excluded["item_key"] == saved["item_key"]
             assert excluded["after_item_hash"] == saved["after_item_hash"]
+
+            access.access_config_path(vault).write_text("readonly: []\n", encoding="utf-8")
+            configured = (await client.call_tool(*call, meta=meta)).structured_content
+            assert configured["user_summary"] == excluded["user_summary"]
             assert (vault / path).read_bytes() == committed
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("refused_at", [1, 2], ids=["initial-read", "guard-recheck"])
+def test_receipt_sharing_refusal_uses_one_attempt(vault, monkeypatch, refused_at) -> None:
+    from exomem.governance import egress
+    from exomem.governance.principal import owner_principal
+
+    path = "Knowledge Base/Records/item.md"
+    page = vault / path
+    page.parent.mkdir(exist_ok=True)
+    raw = b"---\ntitle: Panel shipment\n---\n"
+    page.write_bytes(raw)
+    receipt = {
+        "user_summary": f"Saved -> {path} (personal Exomem)",
+        "paths": [path],
+        "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
+        "after_item_hash": vault_module.content_hash(raw.decode()),
+    }
+    original_read = vault_module._read_bounded_guarded_snapshot
+    original_platform = vault_module._uses_windows_guarded_reader
+    attempts = 0
+
+    def read_shared_file(root, target, limit):
+        nonlocal attempts
+        attempts += 1
+        if attempts == refused_at:
+            cause = PermissionError("file is in use")
+            cause.winerror = 32
+            raise vault_module.PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from cause
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module, "_uses_windows_guarded_reader", original_platform)
+            return original_read(root, target, limit)
+
+    monkeypatch.setattr(vault_module, "_uses_windows_guarded_reader", lambda: True)
+    monkeypatch.setattr(vault_module, "_read_bounded_guarded_snapshot", read_shared_file)
+    with request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(vault, receipt, _item_receipt=True) == receipt
+    assert attempts == refused_at
 
 
 def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypatch) -> None:
@@ -284,10 +338,10 @@ def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypat
     from exomem import reserved_paths
     from exomem.governance import egress, store
 
-    read_title = egress._committed_file_item_title
+    name_item = egress._name_committed_file_item
     observed = threading.Event()
 
-    def read_while_locked(*args):
+    def read_while_locked(root, result, path, version):
         acquired, release, expired = threading.Event(), threading.Event(), threading.Event()
 
         def hold():
@@ -305,11 +359,11 @@ def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypat
         holder.start()
         try:
             assert acquired.wait(3)
-            assert (vault / args[1]).is_file()
-            title = read_title(*args)
+            assert (vault / path).is_file()
+            named = name_item(root, result, path, version)
             assert not expired.is_set()
             observed.set()
-            return title
+            return named
         finally:
             release.set()
             holder.join(3)
@@ -321,7 +375,7 @@ def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypat
                 "why": "Track dispatch", "scaffold": True,
             }})
             store.open_connection(vault).close()
-            monkeypatch.setattr(egress, "_committed_file_item_title", read_while_locked)
+            monkeypatch.setattr(egress, "_name_committed_file_item", read_while_locked)
             result = await _tool(client, "add_record", {"collection": RECORDS_PATH,
                 "item": {"occurred_on": "2026-02-01", "title": "Panel shipment", "event_type": "dispatch"},
                 "why": "Track dispatch",
