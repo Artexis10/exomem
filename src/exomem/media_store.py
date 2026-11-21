@@ -1033,19 +1033,31 @@ def _guard(vault: Path, operation: str):
     return get_manager().mutation_guard(vault, operation=operation, holder_kind="background")
 
 
-def _publishing(vault: Path, operation: str, unit: Callable[[], None]) -> None:
+def _publishing(vault: Path, operation: str, unit: Callable[[], None], *,
+                publishing: Sequence[StoredObject] = ()) -> None:
     """Run a unit that publishes a reference (``_publish_reference``) under the vault boundary.
 
     Its sidecar commit runs on the store thread in a store-mode vault, so the unit runs there
     (``vault_store.media.holding_boundary``). A boundary that stays busy is ordinary contention,
     reported as ``STORE_BUSY_CODE``, which returns an offload job to the queue without spending an
     attempt.
+
+    `publishing` is the stored version that the unit is about to list. The unit runs only if no finding recorded it as
+    damaged, by its name or by its ciphertext, since it was chosen; else the publication stops as busy with nothing
+    written, so the request waits for a new choice. A finding that lands after this check reaches the version through
+    its row write (`media_replicas.record`).
     """
+    from . import media_replicas
     from .vault_store import media as store_media
     from .vault_store import projector
 
+    def checked() -> None:
+        if publishing and media_replicas.has_quarantined(vault, publishing):
+            raise MediaStoreError(STORE_BUSY_CODE, "the version to publish was found damaged")
+        unit()
+
     try:
-        store_media.holding_boundary(vault, operation, unit, lambda: _guard(vault, operation))
+        store_media.holding_boundary(vault, operation, checked, lambda: _guard(vault, operation))
     except projector.BoundaryBusy as busy:
         raise MediaStoreError(STORE_BUSY_CODE, "the vault boundary is busy") from busy
 
@@ -1929,10 +1941,6 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
-                if reuse is not None and media_replicas.has_quarantined(vault, (reference,)):
-                    # A finding landed after the version was chosen: the retry skips it. The row write would also
-                    # inherit it, but a filing must not be published on a version that is known to be damaged.
-                    raise MediaStoreError(STORE_BUSY_CODE, "the version that offload chose was found damaged")
                 decision, _candidate = _offload_admission(
                     vault, snapshot, reference=reference, select_reuse=False, usage=census(),
                 )
@@ -1948,7 +1956,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                     media_replicas.note_repair(vault, ledger._relative(path), damaged)
                 _finish_reference(ledger, original_state(vault, path), source)
 
-            _publishing(vault, "media_store_publish", publish)
+            _publishing(vault, "media_store_publish", publish, publishing=(reference,) if reuse is not None else ())
         return reference
 
 
@@ -2090,7 +2098,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
             # Only a definitive absence replaces the entry; an unknown answer raised above and keeps it.
         source = None
         if snapshot.state == "evicted":
-            assert snapshot.reference is not None
+            assert snapshot.reference is not None  # its ciphertext is copied from an entry that is not damaged, below
         elif snapshot.state in ("local", "cached"):
             source = held.enter_context(_open_local_original(vault, path.relative_to(vault).as_posix(), snapshot))
             _bind_pin(ledger, token, snapshot, source)
@@ -2110,9 +2118,8 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
             key_version = str(config["key_version"])
             head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream, snapshot.binary_size)
         else:
-            assert snapshot.reference is not None
-            key_version = snapshot.reference.key_version
-            head, version = _copy_ciphertext(ledger, token, config, backend, name, snapshot.reference, store_for(vault))
+            head, version, copied = _copy_from_replica(vault, ledger, token, config, backend, name, snapshot, store_name)
+            key_version = copied.key_version
         replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
         if not _confirmed(backend, replica):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
@@ -2257,7 +2264,6 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
         key_version = str(config["key_version"])
         sibling = _repaired_sibling(vault, snapshot, damaged, backend) if entry.serves_eviction else None
         source = None
-        rests_on: list[StoredObject] = []  # the stored versions whose bytes the new entry stands on: none of them damaged
         # A filing whose own bytes verify uploads its own copy under the current key: a replacement of an older key may be
         # one that this install cannot decrypt. Only a filing whose bytes do not verify, or that has none, takes it.
         if ((sibling is None or sibling.reference.key_version != key_version)
@@ -2292,7 +2298,6 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
 
             held.push(drop_hold)
             replica = sibling.reference
-            rests_on.append(replica)
         else:
             if source is not None:
                 head, version = _upload_encrypted(ledger, token, config, backend, name, source.stream,
@@ -2301,9 +2306,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 head, version, copied = _copy_from_replica(vault, ledger, token, config, backend, name, snapshot,
                                                            store_name)
                 key_version = copied.key_version
-                rests_on.append(copied)
             replica = StoredObject(1, store_name, key_version, name, version, head.size, head.sha256)
-            rests_on.append(replica)
         if not _confirmed(backend, replica):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the uploaded version is not confirmed")
 
@@ -2312,10 +2315,6 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 source.require_current()
             if sibling is not None and original_state(vault, sibling.path) != sibling:
                 raise MediaStoreError(STORE_BUSY_CODE, "the filing that holds the replacement changed")
-            if media_replicas.has_quarantined(vault, rests_on):
-                # None of them was damaged when it was chosen; a finding since is newer than that choice, and the copy
-                # would carry the damage to a filing that eviction then trusts. The request stays pending for a new source.
-                raise MediaStoreError(STORE_BUSY_CODE, "a version that the copy rests on was found damaged")
             _seal(ledger, snapshot, name)
             # The prepared edit re-reads the sidecar and refuses unless it is still the one that `snapshot` names.
             if entry.serves_eviction:
@@ -2337,7 +2336,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             _note_replica(vault, path, replica, None if sibling is not None else time.time())
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
 
-        _publishing(vault, "media_store_replica_recopy", publish)
+        _publishing(vault, "media_store_replica_recopy", publish, publishing=(replica,))
     return replica
 
 
