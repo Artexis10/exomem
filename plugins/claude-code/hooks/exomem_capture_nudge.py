@@ -16,7 +16,8 @@ shell command that commits, pushes, merges, tags or opens/merges a pull request
 or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
 did not fail. A command counts unless its output reports an explicit non-zero
 exit code (Claude: `is_error`); a Codex cell that returned while the command was
-still running carries no exit code and counts. Q&A, reading and CI-watching turns stay silent however long the reply.
+still running carries no exit code and counts. A turn is also a candidate when it creates a file with Claude's `Write`
+tool and its reply names that file (`_handed_over_file`). Q&A, reading and CI-watching turns stay silent however long the reply.
 Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
 those turns wrote anything. At "maximal" the older gate stays: the reply is
 substantial (>= a char threshold). Either way the KB must not already have been
@@ -115,7 +116,7 @@ import sys
 import threading
 import time
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
 _KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
@@ -772,6 +773,28 @@ def _successful_landing(tool: dict) -> bool:
     return any(_landing_command(command) for command in _tool_commands(tool))
 
 
+#: The file-creating tool of Claude, matched on the lowercased name. An edit of an existing file is not a
+#: hand-over: a reply that says "let me update app.py" names a file that holds working state.
+_FILE_WRITE_TOOLS = frozenset({"write"})
+
+
+def _handed_over_file(tools: list[dict], reply: str) -> bool:
+    """Whether the turn created a file that its reply names: a hand-over that no commit or push marks.
+
+    A reply that names the file it just wrote has delivered work to the user, as a landing does. The name
+    must stand as a whole token in the reply, so `a.md` does not match `data.md`.
+    """
+    for tool in tools:
+        if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
+            continue
+        tool_input = tool.get("input")
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        name = PureWindowsPath(path).name if isinstance(path, str) else ""
+        if name and re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-])", reply):
+            return True
+    return False
+
+
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
 #: hooks take effect for the CURRENT session, but the MCP server they reference
 #: is not loaded until the client restarts — so on a fresh install the very
@@ -1348,8 +1371,8 @@ def main(argv: list[str] | None = None) -> int:
     if level == "maximal":  # the most aggressive level keeps the length gate
         if len(assistant_text.strip()) < min_chars:
             return 0
-    elif not any(_successful_landing(tool) for tool in tools):
-        return 0  # nothing landed: Q&A, reading and watching turns stay silent
+    elif not any(_successful_landing(tool) for tool in tools) and not _handed_over_file(tools, assistant_text):
+        return 0  # nothing landed or was handed over: Q&A, reading and watching turns stay silent
 
     ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded

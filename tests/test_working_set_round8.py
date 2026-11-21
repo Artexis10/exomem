@@ -178,7 +178,7 @@ def test_structural_local_material_abstains_at_both_public_paths(
     assert guards == [True]
     assert packet is not None
     assert packet["generation"].get("carried_by") != "conversation"
-    assert not any(item.get("origin") == "conversation" for item in packet["anchors"])
+    assert not any(item.get("origin") == "conversation" for item in packet.get("anchors", ()))
 
 
 @pytest.mark.parametrize(
@@ -226,7 +226,7 @@ def test_local_material_vetoes_even_an_empty_title_licensed_residue(turn: str) -
 def test_local_material_never_attaches_a_historical_subject(cvault: Path, turn: str) -> None:
     packet = commands.op_activate_context(cvault, turn=turn, conversation=THREAD)
     assert packet["generation"].get("carried_by") != "conversation"
-    assert not any(item.get("origin") == "conversation" for item in packet["anchors"])
+    assert not any(item.get("origin") == "conversation" for item in packet.get("anchors", ()))
 
 
 @pytest.mark.parametrize(
@@ -660,7 +660,7 @@ def test_a_historical_information_request_never_cancels_other_local_material(tur
 def test_a_finite_local_nominal_never_uses_the_request_exemption(cvault: Path, turn: str) -> None:
     packet = commands.op_activate_context(cvault, turn=turn, conversation=THREAD)
     assert packet["generation"].get("carried_by") != "conversation"
-    assert not any(item.get("origin") == "conversation" for item in packet["anchors"])
+    assert not any(item.get("origin") == "conversation" for item in packet.get("anchors", ()))
 
 
 def test_a_local_veto_does_not_walk_any_historical_subject(cvault: Path, monkeypatch) -> None:
