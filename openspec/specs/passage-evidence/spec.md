@@ -244,7 +244,7 @@ A Source captured without declared passages SHALL keep its title in its embedded
 When the caller of a passage request leaves before the reply, the cell SHALL stop that request at its next phase boundary and release its admission capacity.
 The phase boundaries SHALL be the points before eligibility, query encoding, chunk selection and byte verification.
 A stopped request SHALL NOT start a later phase.
-A request that waits for its model execution turn SHALL leave that wait when its caller leaves, and SHALL stop before it encodes the query.
+Under the `service-v1` resource policy, a request that waits for its model execution turn SHALL leave that wait when its caller leaves, and SHALL stop before it encodes the query.
 The cell SHALL log each stopped request with the phase it stopped before.
 A request without a serving host, such as a command-line request, SHALL run to completion.
 
@@ -261,6 +261,7 @@ A request without a serving host, such as a command-line request, SHALL run to c
 
 #### Scenario: The caller leaves while the request waits for its model turn
 
+- **GIVEN** the cell runs the `service-v1` resource policy
 - **WHEN** a caller abandons a passage request while the request waits for a model execution turn that another encode holds
 - **THEN** the request leaves the wait and stops before it encodes the query
 - **AND** its admission capacity is free while the other encode still runs
