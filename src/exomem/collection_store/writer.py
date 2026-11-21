@@ -629,7 +629,9 @@ class CollectionWriter:
                     "references": references,
                     "inbound": reference_index.inbound(
                         self._operation, self.connection, field_plan.manifest),
-                    "contract": record_governance._inspection_contract(field_plan.manifest),
+                    "contract": record_governance._inspection_contract(
+                        field_plan.manifest, admits_enum_path=field_plan.admits_member_path,
+                    ),
                     "snapshot": snapshot,
                     "source_versions": [{"path": manifest.path, "hash": manifest.manifest_version.hash},
                                         *({"path": row_source(manifest, item), "hash": item["public_version"]}
@@ -760,7 +762,9 @@ class CollectionWriter:
             "references": references,
             "inbound": reference_index.inbound(
                 self._operation, self.connection, manifest),
-            "contract": record_governance._inspection_contract(manifest),
+            "contract": record_governance._inspection_contract(
+                manifest, admits_enum_path=field_plan.admits_member_path,
+            ),
             "snapshot": visible_snapshot,
             "source_versions": [{"path": v.path, "hash": v.hash} for v in source_versions[:record_governance._MAX_ITEM_ENTRIES]],
             "diagnostics": diagnostics[:64],

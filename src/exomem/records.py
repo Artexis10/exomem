@@ -4598,7 +4598,8 @@ class _Issue:
     #: candidate frontmatter round-trips as one block, so naming an empty field
     #: would claim an address the failure does not have.
     scope: str = ""
-    allowed: tuple[Any, ...] = ()
+    enum_choices: tuple[Any, ...] = ()
+    retry_field: str = ""
 
     def as_detail(self) -> dict[str, str]:
         detail: dict[str, str] = {}
@@ -4606,6 +4607,8 @@ class _Issue:
             detail["field"] = self.field
         if self.scope:
             detail["scope"] = self.scope
+        if self.retry_field:
+            detail["retry_field"] = self.retry_field
         detail.update({"code": self.code, "reason": self.reason, "received": self.received})
         return detail
 
@@ -4617,8 +4620,10 @@ def _issue_refusal(issues: list[_Issue]) -> collections.CollectionError:
         details["field"] = first.field
     if first.scope:
         details["scope"] = first.scope
-    if first.allowed:
-        details["allowed"] = first.allowed
+    if first.enum_choices:
+        allowed, _ = collections.enum_choices_for_wire(first.enum_choices)
+        if allowed:
+            details["allowed"] = allowed
     details["issues"] = [issue.as_detail() for issue in issues]
     return collections.CollectionError(first.code, first.headline or first.reason, details)
 
@@ -4688,7 +4693,7 @@ def _collect_field_issues(
                 code=failure.code,
                 reason=failure.reason,
                 received=_value_class(value),
-                allowed=failure.details.get("allowed", ()),
+                enum_choices=failure.enum_choices,
             )
         )
         return
@@ -4699,7 +4704,8 @@ def _collect_field_issues(
                 code=sub_failure.code,
                 reason=sub_failure.reason,
                 received=_value_class(sub_value),
-                allowed=sub_failure.details.get("allowed", ()),
+                enum_choices=sub_failure.enum_choices,
+                retry_field=path,
             )
         )
 
@@ -5453,13 +5459,14 @@ def resume_with(action: str, held_id: str, issues: Sequence[Mapping[str, Any]]) 
     field. An undeclared field can only be removed; for any other failure the right value is the
     caller's to supply, so the override is a placeholder that the schema refuses until it is replaced.
     """
-    overrides = {
-        str(issue["field"]): None
-        if issue.get("code") == "SCHEMA_UNKNOWN_FIELD"
-        else f"<corrected {issue['field']}>"
-        for issue in issues
-        if issue.get("field")
-    }
+    overrides = {}
+    for issue in issues:
+        # The held writer merges whole fields. An array index only locates the failure.
+        field = issue.get("retry_field") or issue.get("field")
+        if field:
+            overrides[str(field)] = (
+                None if issue.get("code") == "SCHEMA_UNKNOWN_FIELD" else f"<corrected {field}>"
+            )
     resume: dict[str, Any] = {"held": held_id}
     if overrides:
         resume["changes" if action == "update" else "item"] = overrides

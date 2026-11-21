@@ -81,6 +81,31 @@ def release_document(basis, who=GUEST):
             "surface": who.surface, "issuer_family": who.issuer_family, "purpose": None, "release_version": 1}})
 
 
+def test_inspection_only_shows_enum_choices_for_released_members(store):
+    front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    front["item_schema"]["fields"]["update"] = {
+        "type": "object",
+        "properties": {
+            "state": {"type": "enum", "enum": ["complete", "awaiting"]},
+            "room": {"type": "enum", "enum": ["north", "south"], "classification": "location"},
+        },
+    }
+    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
+    store.create_collection(manifest_path(), text, why="declare workflow fields", scaffold=False)
+    store.append_record(
+        CID, item={"title": "Survey", "update": {"state": "complete", "room": "north"}},
+        item_key=KEY, why="record the survey",
+    )
+
+    owner = tool(store, "record_memory", action="inspect", collection=CID)
+    guest = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
+
+    state = {"path": ["update", "properties", "state"], "choices": ["complete", "awaiting"]}
+    room = {"path": ["update", "properties", "room"], "choices": ["north", "south"]}
+    assert owner["contract"]["enum_fields"] == {"values": [state, room], "truncated": False}
+    assert guest["contract"]["enum_fields"] == {"values": [state], "truncated": False}
+
+
 def test_recipient_queries_metrics_and_nested_projection_before_hidden_value_decoding(store, monkeypatch):
     """A default or explicit read that hydrates location or an undeclared residual before masking it."""
     create(store)

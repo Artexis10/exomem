@@ -156,6 +156,8 @@ class CollectionError(ValueError):
     code: str
     reason: str
     details: dict[str, Any] = field(default_factory=dict)
+    # Keep the declaration by reference. The caller that selects a public refusal bounds it once.
+    enum_choices: tuple[Any, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         self.details = dict(self.details)
@@ -3537,23 +3539,25 @@ def _parse_plan_join(value: object, schema: ItemSchema, index: int) -> Mapping[s
     return MappingProxyType(join)
 
 
-def enum_choices_wire_size(choices: object) -> int | None:
-    """Return the encoded size of a non-empty enum that fits the reply budget."""
-    if not isinstance(choices, list | tuple) or not 1 <= len(choices) <= _MAX_ENUM_VALUES:
-        return None
-    size = len(choices) + 1  # List brackets and separators.
-    for choice in choices:
+def enum_choices_for_wire(
+    choices: list[Any] | tuple[Any, ...], budget: int = ENUM_CHOICES_WIRE_BYTES
+) -> tuple[list[Any], int]:
+    """Keep enum choices that fit in the reply, with their JSON types and declared order."""
+    selected: list[Any] = []
+    size = 2  # JSON list brackets.
+    for choice in choices[:_MAX_ENUM_VALUES]:
         if type(choice) not in {str, bool, int, float}:
-            return None
-        if isinstance(choice, str) and len(choice) > ENUM_CHOICES_WIRE_BYTES - size:
-            return None
+            continue
+        if isinstance(choice, str) and len(choice) > budget - size:
+            continue
         try:
-            size += len(json.dumps(choice, allow_nan=False))
+            width = len(json.dumps(choice, allow_nan=False)) + bool(selected)
         except ValueError:
-            return None
-        if size > ENUM_CHOICES_WIRE_BYTES:
-            return None
-    return size
+            continue
+        if size + width <= budget:
+            selected.append(choice)
+            size += width
+    return selected, size
 
 
 def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool = False) -> None:
@@ -3597,8 +3601,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        allowed = {"allowed": spec.enum} if enum_choices_wire_size(spec.enum) is not None else {}
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}", allowed)
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}", enum_choices=spec.enum)
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:

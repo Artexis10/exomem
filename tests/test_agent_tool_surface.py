@@ -276,10 +276,23 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
     assert "word_count: 50" in items and "word_count: 60" not in items
 
 
-def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build) -> None:
+@pytest.mark.parametrize(
+    ("declaration", "invalid", "path", "choices", "corrected", "truncated"),
+    [
+        ("{type: enum, enum: [42, short, long]}", "medium", ["word_count"], [42, "short", "long"], 42, False),
+        (
+            "{type: array, items: {type: enum, enum: [42, " + "x" * 17_000 + ", true, short]}}",
+            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], True,
+        ),
+    ],
+    ids=["field", "array-item-with-oversized-choice"],
+)
+def test_an_agent_can_repair_a_record_with_a_declared_enum_value(
+    build, declaration, invalid, path, choices, corrected, truncated,
+) -> None:
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
-        "    word_count:\n      type: enum\n      enum: [42, short, long]\n",
+        f"    word_count: {declaration}\n",
     )
 
     async def scenario(client):
@@ -289,21 +302,22 @@ def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build) -> None:
         assert "error" not in created, created
         args = {"collection": "Publications ledger", "why": "Log a published entry"}
         refusal = await _call(client, "add_record", {
-            **args, "item": record_fixtures.ledger_item(word_count="medium")})
+            **args, "item": record_fixtures.ledger_item(word_count=invalid)})
         inspection = await _call(client, "inspect_memory", {
             "operation": "records.inspect", "arguments": {"collection": args["collection"]}})
         assert refusal["error"]["code"] == "SCHEMA_ENUM", refusal
-        assert "short" in refusal["error"].get("candidates", []), refusal
+        assert refusal["error"]["candidates"] == choices
         enums = inspection["contract"]["enum_fields"]
-        assert enums == {"values": {"word_count": [42, "short", "long"]}, "truncated": False}
+        assert enums == {"values": [{"path": path, "choices": choices}], "truncated": truncated}
+        retry = refusal["error"]["retry"]["arguments"]
+        assert list(retry["item"]) == ["word_count"]
         added = await _call(client, "add_record", {
-            **args, "held": refusal["error"]["retry"]["arguments"]["held"],
-            "item": {"word_count": enums["values"]["word_count"][0]}})
+            **args, "held": retry["held"], "item": {"word_count": corrected}})
         assert "error" not in added, added
         return await _call(client, "query_records", {"collection": args["collection"]})
 
     rows = _session(build(), scenario)["rows"]
-    assert [row["word_count"] for row in rows] == [42]
+    assert [row["word_count"] for row in rows] == [corrected]
 
 
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:

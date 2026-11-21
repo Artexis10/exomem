@@ -84,6 +84,8 @@ def _candidates(refusal: Mapping[str, Any]) -> list[Any]:
     for name in ("candidates", "allowed"):
         value = refusal.get(name)
         if isinstance(value, (list, tuple)) and value:
+            if name == "allowed" and refusal.get("code") == "SCHEMA_ENUM":
+                return list(value)
             return [item if isinstance(item, Mapping) else str(item) for item in value]
     options = refusal.get("options")
     if isinstance(options, (list, tuple)):

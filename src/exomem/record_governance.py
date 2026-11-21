@@ -180,20 +180,22 @@ def _inspection_field_name(value: Any) -> str | None:
     return _inspection_string(value, maximum=128)
 
 
-def _bounded_enum_fields(choices_by_field: Mapping[str, Any]) -> tuple[dict[str, list[Any]], bool]:
-    fields: dict[str, list[Any]] = {}
+def _bounded_enum_fields(
+    declarations: Iterable[tuple[list[str], list[Any] | tuple[Any, ...]]],
+) -> tuple[list[dict[str, Any]], bool]:
+    fields: list[dict[str, Any]] = []
+    truncated = False
     remaining = collections.ENUM_CHOICES_WIRE_BYTES
-    for name, choices in choices_by_field.items():
-        if _inspection_field_name(name) is None:
-            continue
-        size = collections.enum_choices_wire_size(choices)
-        if size is None:
-            continue
-        size += len(json.dumps(name)) + 2
-        if size <= remaining:
-            fields[name] = list(choices)
-            remaining -= size
-    return fields, len(fields) != len(choices_by_field)
+    for path, choices in declarations:
+        if len(fields) >= collections._MAX_SCHEMA_FIELDS:
+            return fields, True
+        overhead = len(json.dumps(path)) + len('{"path":,"choices":},')
+        selected, size = collections.enum_choices_for_wire(choices, remaining - overhead)
+        if selected:
+            fields.append({"path": path, "choices": selected})
+            remaining -= size + overhead
+        truncated |= len(selected) != len(choices)
+    return fields, truncated
 
 
 def _inspection_enum_fields(value: Any) -> dict[str, Any] | None:
@@ -201,11 +203,28 @@ def _inspection_enum_fields(value: Any) -> dict[str, Any] | None:
         not isinstance(value, Mapping)
         or set(value) != {"values", "truncated"}
         or type(value["truncated"]) is not bool
-        or not isinstance(value["values"], Mapping)
+        or not isinstance(value["values"], list)
         or len(value["values"]) > collections._MAX_SCHEMA_FIELDS
     ):
         return None
-    fields, invalid = _bounded_enum_fields(value["values"])
+    declarations = []
+    seen: set[tuple[str, ...]] = set()
+    for entry in value["values"]:
+        if not isinstance(entry, Mapping) or set(entry) != {"path", "choices"}:
+            return None
+        path, choices = entry["path"], entry["choices"]
+        if (
+            not isinstance(path, list)
+            or not 1 <= len(path) <= 2 * collections._MAX_SCHEMA_DEPTH + 1
+            or any(_inspection_field_name(segment) is None for segment in path)
+            or not isinstance(choices, list)
+            or not choices
+            or tuple(path) in seen
+        ):
+            return None
+        seen.add(tuple(path))
+        declarations.append((path, choices))
+    fields, invalid = _bounded_enum_fields(declarations)
     return None if invalid else {"values": fields, "truncated": value["truncated"]}
 
 
@@ -2280,9 +2299,30 @@ def inspect_legacy_tracker(vault_root: Path, path: str | Path) -> dict[str, Any]
     return projected
 
 
-def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, Any]:
-    declared_enums = {name: spec.enum for name, spec in manifest.schema.fields.items() if spec.enum}
-    enum_values, truncated = _bounded_enum_fields(declared_enums)
+def _declared_enum_fields(
+    manifest: collections.CollectionManifest,
+    admits: Callable[[tuple[str, ...]], bool] | None,
+) -> Iterator[tuple[list[str], tuple[Any, ...]]]:
+    def visit(
+        spec: collections.FieldSpec, path: list[str], members: tuple[str, ...],
+    ) -> Iterator[tuple[list[str], tuple[Any, ...]]]:
+        if spec.enum and (admits is None or admits(members)):
+            yield path, spec.enum
+        if spec.items is not None:
+            yield from visit(spec.items, [*path, "items"], members)
+        for name, child in spec.properties.items():
+            yield from visit(child, [*path, "properties", name], (*members, name))
+
+    for name, spec in manifest.schema.fields.items():
+        yield from visit(spec, [name], (name,))
+
+
+def _inspection_contract(
+    manifest: collections.CollectionManifest,
+    *,
+    admits_enum_path: Callable[[tuple[str, ...]], bool] | None = None,
+) -> dict[str, Any]:
+    enum_values, truncated = _bounded_enum_fields(_declared_enum_fields(manifest, admits_enum_path))
     return {
         "collection_id": manifest.collection_id,
         "path": manifest.path,
@@ -2295,7 +2335,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "format_version": manifest.storage.format_version,
         },
         "plans": [],
-        **({"enum_fields": {"values": enum_values, "truncated": truncated}} if declared_enums else {}),
+        **({"enum_fields": {"values": enum_values, "truncated": truncated}} if enum_values or truncated else {}),
         **(
             {"claims": {name: list(values) for name, values in manifest.claims.items()}}
             if manifest.claims is not None
