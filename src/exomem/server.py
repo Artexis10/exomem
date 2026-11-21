@@ -498,9 +498,13 @@ class RefusalFloorMiddleware(Middleware):
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
-    def __init__(self, *, hosted: bool = False, traffic_monitor=None, vault_root: Path | None = None) -> None:
+    def __init__(
+        self, *, hosted: bool = False, traffic_monitor=None, vault_root: Path | None = None,
+        surface_descriptor: capabilities.ActiveSurfaceDescriptor | None = None,
+    ) -> None:
         self.hosted = hosted
         self.vault_root = vault_root
+        self.surface_descriptor = surface_descriptor
         if traffic_monitor is None:
             from .runtime_readiness import get_silent_traffic_monitor
 
@@ -647,9 +651,14 @@ class CallTraceMiddleware(Middleware):
                                       duration_ms=round((time.perf_counter() - t0) * 1000, 2),
                                       message=str(error))
                     tool = await context.fastmcp_context.fastmcp.get_tool(tool_name)
-                    result = tool.convert_result(agent_refusal_result(
-                        public_refusal(error), error, tool_name, ledger_args, ledger_args, write=False,
-                    ))
+                    surface = (
+                        capabilities.active_surface(self.surface_descriptor)
+                        if self.surface_descriptor is not None else nullcontext()
+                    )
+                    with surface:
+                        result = tool.convert_result(agent_refusal_result(
+                            public_refusal(error), error, tool_name, ledger_args, ledger_args, write=False,
+                        ))
                 dur = round((time.perf_counter() - t0) * 1000, 2)
                 # A ContextVar set inside the synchronous tool wrapper (which
                 # runs in FastMCP's anyio threadpool) does not propagate back
@@ -1101,16 +1110,6 @@ def build_server(
     from .public_surface import PASSTHROUGH_COMMANDS, build_tools, public_surface
 
     surface = public_surface()
-    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
-    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
-    # Cloud traces retain their content-free form after name normalization.
-    mcp.add_middleware(CallTraceMiddleware(hosted=cloud, vault_root=runtime.vault_root))
-    mcp.add_middleware(RenderedRefusalMiddleware())
-    available = {command.name for command in product_commands}
-    discovery = PreferredToolDiscovery(frozenset(
-        public for command, public in PASSTHROUGH_COMMANDS.items() if command in available
-    ))
-    mcp.add_transform(discovery)
     surface_descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="mcp",
         profile="product-cloud" if cloud else "product",
@@ -1130,6 +1129,18 @@ def build_server(
             for exclusion in commands_module.cloud_surface_exclusions(upload_bridge=upload_bridge)
         ) if cloud else (),
     )
+    mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
+    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
+    # Cloud traces retain their content-free form after name normalization.
+    mcp.add_middleware(CallTraceMiddleware(
+        hosted=cloud, vault_root=runtime.vault_root, surface_descriptor=surface_descriptor,
+    ))
+    mcp.add_middleware(RenderedRefusalMiddleware())
+    available = {command.name for command in product_commands}
+    discovery = PreferredToolDiscovery(frozenset(
+        public for command, public in PASSTHROUGH_COMMANDS.items() if command in available
+    ))
+    mcp.add_transform(discovery)
     if cloud:
         from .cell_identity import register_identity_route
 

@@ -727,8 +727,6 @@ def _propose(
             source_guard.recheck(vault_root)
         except PathGuardError:
             raise preview_warming() from None
-        if destination is not None and any(link.path not in read_hashes for link in inbound):
-            raise preview_warming()
         if _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound:
             raise preview_warming()
     return ReclassifyProposal(
@@ -855,7 +853,7 @@ def _referrer_outcome(
     def borrow_resolver() -> vault.WikilinkResolver:
         from .find import borrow_query_resolver
 
-        resolver = borrow_query_resolver(vault_root)
+        resolver = borrow_query_resolver(vault_root, visible=egress.reader_view(vault_root))
         if resolver is None:
             raise preview_warming()
         return resolver
@@ -888,7 +886,7 @@ def _referrer_outcome(
         resolver_factory=borrow_resolver if read_hashes is not None else None,
     )
     for item in plans:
-        if read_hashes is not None and item.path in forms:
+        if read_hashes is not None:
             read_hashes[item.path] = item.guard.expected_content_hash
         if not writable_page(item.path):
             continue  # the move leaves a page its mover may not write unchanged
@@ -907,6 +905,10 @@ def _referrer_outcome(
         elif item.append_only:
             for form in sorted(forms.get(item.path, ())):
                 unchanged.setdefault(form, []).append(item.path)
+    if read_hashes is not None:
+        planned_paths = forms.keys() | set(named_in)
+        if not planned_paths.issubset(read_hashes):
+            raise preview_warming()
     if relocating:
         _, self_links = semantic_writes.rewrite_wikilinks_for_move(text, rel, destination)
         if self_links:

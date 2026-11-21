@@ -131,18 +131,25 @@ def test_a_withheld_write_leaves_the_restricted_inbound_field_as_it_was(served: 
     assert _links(served, restricted=True) == before
 
 
+@pytest.mark.parametrize("evidence_referrer", [False, True])
 def test_a_withheld_referrer_does_not_delay_reclassification_preview(
-    served: Path, monkeypatch: pytest.MonkeyPatch,
+    served: Path, monkeypatch: pytest.MonkeyPatch, evidence_referrer: bool,
 ) -> None:
+    from uuid import uuid4
+
     from exomem import file_watcher, writer_lease
     from exomem.cli_ops import OpError
 
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     source = "Knowledge Base/Sources/Other/coverage-source.md"
-    _write_as_the_service_does(served, source, "---\nsource_type: other\n---\n\n# Source\n")
+    _write_as_the_service_does(served, source, f"---\nsource_type: other\nexomem_id: {uuid4()}\n---\n\n# Source\n")
     _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
+    evidence = "Knowledge Base/Evidence/field-log.md"
+    if evidence_referrer:
+        _write_as_the_service_does(served, evidence, f"# Field log\n\n[[{source.removesuffix('.md')}]]\n")
     assert vault_module.prime_inbound_index(served, eager=True)
+    assert find_module.shared_resolver(served) is not None
     monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
     _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n\nNew context.\n")
 
@@ -156,7 +163,8 @@ def test_a_withheld_referrer_does_not_delay_reclassification_preview(
         preview = writer_lease.invoke_command(
             command, served, operation="propose-reclassification", path=source, source_kind="dataset-export",
         )
-    assert preview["references"] == 0
+    assert preview["references"] == int(evidence_referrer)
+    assert preview["referrers"]["pointer_repointed"] == ([evidence] if evidence_referrer else [])
     assert preview["preview_digest"]
 
 

@@ -160,27 +160,44 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
-@pytest.mark.parametrize("fault", ["release", "render", "cold-resolver", "removed-link", "changed-source"])
+@pytest.mark.parametrize("fault", ["release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link"])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
     from fastmcp import Client
     from fastmcp.tools import FunctionTool
     from test_agent_tool_surface import _call
 
-    from exomem import file_watcher, find, freshness, move_file, request_budget, server
+    from exomem import (
+        file_watcher,
+        find,
+        freshness,
+        move_file,
+        path_mentions,
+        request_budget,
+        server,
+    )
     from exomem import vault as vault_module
     from exomem.governance import egress
 
     monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     source = _capture(vault, source_schema, title="Field measurements").path
-    referrer = f"{KB}/Evidence/field-log.md" if fault == "cold-resolver" else f"{KB}/Notes/field-log.md"
+    referrer = (
+        f"{KB}/Evidence/field-log.md" if fault in ("cold-resolver", "catalogue-link")
+        else f"{KB}/Notes/field-log.md"
+    )
     (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
-    (vault / referrer).write_text(f"# Field log\n\n[[{source.removesuffix('.md')}]]\n", encoding="utf-8")
+    link = f"[[{source.removesuffix('.md')}]]"
+    original_reference = f"See `{source}`." if fault == "catalogue-link" else link
+    (vault / referrer).write_text(f"# Field log\n\n{original_reference}\n", encoding="utf-8")
     freshness.seed(vault, "vault", (
         (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
     ))
     assert vault_module.prime_inbound_index(vault, eager=True)
+    if fault == "catalogue-link":
+        lexstore.ensure_fresh(vault)
+        assert referrer in path_mentions.find_pages(vault, [source]).pages
+        find.shared_resolver(vault)
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     mcp = server.build_server(require_auth=False)
@@ -200,13 +217,14 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             return convert(*args, **kwargs)
 
         monkeypatch.setattr(target, name, expire)
-    elif fault in ("removed-link", "changed-source"):
+    elif fault in ("removed-link", "changed-source", "catalogue-link"):
         plan = move_file.plan_inbound_rewrites
 
         def edit_during_planning(*args, **kwargs):
             # Hold watcher delivery back, so the planner sees the edit before the cache does.
-            changed = referrer if fault == "removed-link" else source
-            (vault / changed).write_text("# Edited while planning\n", encoding="utf-8")
+            changed = source if fault == "changed-source" else referrer
+            body = link if fault == "catalogue-link" else "# Edited while planning"
+            (vault / changed).write_text(f"{body}\n", encoding="utf-8")
             return plan(*args, **kwargs)
 
         monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
@@ -221,6 +239,8 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             retry = await _call(client, *call)
             assert retry.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
             assert "references" not in retry and "preview_digest" not in retry
+            if fault == "render":
+                assert retry["error"]["retry"]["tool"] == "inspect_memory"
             if fault == "cold-resolver":
                 assert await asyncio.to_thread(find.await_recall_resolver_warm)
                 preview = await _call(client, *call)
