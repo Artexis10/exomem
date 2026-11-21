@@ -111,6 +111,9 @@ _ADDED_COLUMNS = (
     # because a failed attempt proves nothing and must not read as a proof.
     ("check_from", "REAL NOT NULL DEFAULT 0"),
     ("sample_from", "REAL NOT NULL DEFAULT 0"),
+    # The digest of the stored ciphertext, so the copies of bytes that decrypt wrong are found by the rows themselves.
+    # An earlier release's row has none until a rebuild fills it.
+    ("ciphertext_sha256", "TEXT"),
 )
 _STATUS_INDEX_COLUMNS = ("store", "key_version", "state", "level", "verified_at", "checked_at", "decrypted_at",
                          "sample_month")
@@ -158,9 +161,12 @@ def initialize(conn: sqlite3.Connection) -> None:
     # costs nothing to find again.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version) "
                  f"WHERE state <> '{QUARANTINED}'")
-    # The filings of one stored version that a plaintext finding quarantined, which a sample that decrypts the version
-    # lifts together (`_released`): a version has few filings, so that release reads only them, however many other
-    # replicas are quarantined.
+    # The filings of one ciphertext, under any name, which a wrong plaintext quarantines together and a sample that
+    # decrypts it releases together (`_inherit`, `_released`).
+    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_digest ON media_replicas(ciphertext_sha256)")
+    # The filings of one stored version that a plaintext finding quarantined, which a later finding of another cause on
+    # the version moves to that cause (`quarantine_all`): a version has few filings, so that reads only them, however
+    # many other replicas are quarantined.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_reproof_version ON media_replicas(object, version, store) "
                  f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'")
     # A stored version that a check, a sample or eviction found damaged, whichever filings list it: what eviction asks
@@ -239,10 +245,10 @@ def _upsert(seen: str) -> str:
     def keep(column: str, fresh: str) -> str:
         return f"{column} = CASE WHEN {unchanged} THEN media_replicas.{column} ELSE {fresh} END"
 
-    return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, seen) "
-            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, {seen}) ON CONFLICT(binary_rel, store) DO UPDATE SET "
+    return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, seen, "
+            f"ciphertext_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {seen}, ?) ON CONFLICT(binary_rel, store) DO UPDATE SET "
             "object = excluded.object, version = excluded.version, key_version = excluded.key_version, "
-            "size = excluded.size, seen = excluded.seen, "
+            "size = excluded.size, seen = excluded.seen, ciphertext_sha256 = excluded.ciphertext_sha256, "
             f"verified_at = CASE WHEN {unchanged} THEN COALESCE(excluded.verified_at, media_replicas.verified_at) "
             "ELSE excluded.verified_at END, "
             + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
@@ -262,13 +268,14 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
     A version that a finding recorded as damaged stays damaged for a filing that lists it later: the row is written
     quarantined with its request, in the same transaction, so a publication that raced the finding is never trusted.
     So is a copy of ciphertext that a finding recorded as decrypting wrong, under whatever name it was written
-    (`_INHERIT`): a finding that lands before this transaction reaches the new version here, and one after it reaches
-    it through the digest wherever a copy is trusted (`damaged_among`).
+    (`_inherit`): a finding that lands before this transaction reaches the new version here, and one after it reaches
+    the row through its digest (`quarantine_all`).
     """
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
         conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
-                                         replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED))
-        conn.execute(_INHERIT, (_quadruples([replica]),))
+                                         replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED,
+                                         replica.ciphertext_sha256))
+        conn.execute(_INHERIT_OF, (replica.ciphertext_sha256,))
         changed = _quarantine_listing(conn, time.time(), replica, binary_rel=binary_rel)
     if changed:
         wake()
@@ -311,10 +318,10 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
         _record_damage(conn, replica, level, failure)
         for binary_rel in binary_rels:
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
-                         "state, seen) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM media_replica_generation "
-                         "WHERE id = 1)) ON CONFLICT(binary_rel, store) DO NOTHING",
+                         "state, seen, ciphertext_sha256) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM "
+                         "media_replica_generation WHERE id = 1), ?) ON CONFLICT(binary_rel, store) DO NOTHING",
                          (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
-                          replica.ciphertext_size, UPLOAD_VERIFIED))
+                          replica.ciphertext_size, UPLOAD_VERIFIED, replica.ciphertext_sha256))
             if conn.execute(
                     "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
                     "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
@@ -325,25 +332,36 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
                              f"ON CONFLICT(store, binary_rel) DO UPDATE SET {_RENEW}",
                              (replica.store, binary_rel, PENDING, RECOPY))
                 changed = True
-        changed |= _quarantine_listing(conn, now, replica)
+        if failure == PLAINTEXT_MISMATCH:
+            conn.execute(_INHERIT_OF, (replica.ciphertext_sha256,))
+            changed |= _quarantine_listing(conn, now, digest=replica.ciphertext_sha256)
+        else:
+            # The record now names this cause, so the filings that a wrong plaintext quarantined follow it: left as they
+            # were, a sample that decrypts the ciphertext would release a version that this finding holds lost or differing.
+            conn.execute("UPDATE media_replicas SET level = ?, failure = ? WHERE object = ? AND version = ? AND store = ? "
+                         f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'",
+                         (level, failure, replica.object, replica.version, replica.store))
+            changed |= _quarantine_listing(conn, now, replica)
     if changed:
         wake()
 
 
 def _quarantine_listing(conn: sqlite3.Connection, now: float, only: originals.StoredObject | None = None, *,
-                        binary_rel: str | None = None) -> bool:
+                        binary_rel: str | None = None, digest: str | None = None) -> bool:
     """Quarantine each filing that lists a damaged version and is not quarantined yet, and queue its copy again.
 
-    The version is `only`, or any in `media_damaged_versions`; `binary_rel` narrows it to one filing's row, which a
-    publication reads by its primary key. Two statements whose reads are indexed: the filings of one version in
-    `media_replicas_held` (they state the index's condition), and, for every version, the damaged table.
-    A filing that is already quarantined keeps its own request. Returns whether a filing changed.
+    The version is `only`, the versions that record `digest`, or any in `media_damaged_versions`; `binary_rel` narrows
+    `only` to one filing's row, which a publication reads by its primary key. Two statements whose reads are indexed:
+    the filings of one version in `media_replicas_held` (they state the index's condition), and, for every version,
+    the damaged table. A filing that is already quarantined keeps its own request. Returns whether a filing changed.
     """
     version, parameters, row = "", (), ""
     if only is not None:
         version, parameters = " WHERE object = ? AND version = ? AND store = ?", (only.object, only.version, only.store)
         if binary_rel is not None:
             row, parameters = " AND binary_rel = ? AND store = ?", (*parameters, binary_rel, only.store)
+    elif digest is not None:
+        version, parameters = " WHERE ciphertext_sha256 = ?", (digest,)
     damaged = f"(object, version, store) IN (SELECT object, version, store FROM media_damaged_versions{version}){row}"
 
     def found(column: str) -> str:
@@ -383,13 +401,25 @@ _RECORDED = ("FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_dama
              "WHERE store = json_extract(wanted.value, '$[0]') AND object = json_extract(wanted.value, '$[1]') "
              "AND version = json_extract(wanted.value, '$[2]')) OR EXISTS (SELECT 1 FROM media_damaged_versions "
              "WHERE ciphertext_sha256 = json_extract(wanted.value, '$[3]'))")
-#: A copy of ciphertext that a finding recorded as decrypting wrong is damaged under its own name: record it, unless the
-#: table already holds that version. A new version is first quarantined by `_quarantine_listing`, where its row is.
-_INHERIT = ("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, generation) "
-            "SELECT json_extract(wanted.value, '$[0]'), json_extract(wanted.value, '$[1]'), "
-            f"json_extract(wanted.value, '$[2]'), '{DECRYPTED}', '{PLAINTEXT_MISMATCH}', json_extract(wanted.value, '$[3]'), "
-            "random() FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_damaged_versions "
-            "WHERE ciphertext_sha256 = json_extract(wanted.value, '$[3]')) ON CONFLICT(store, object, version) DO NOTHING")
+
+
+def _inherit(recorded: str) -> str:
+    """The statement that records, for each filing of ciphertext that a finding recorded as decrypting wrong, its version.
+
+    A filing of such bytes is damaged under its own name, whatever it is called: `_quarantine_listing` then quarantines
+    it, so its row says so and the status, the findings and the recoverability read the row. `recorded` selects the
+    digests, from the table that holds them; a version the table already holds keeps its record.
+    """
+    return ("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, generation) "
+            f"SELECT filing.store, filing.object, filing.version, '{DECRYPTED}', '{PLAINTEXT_MISMATCH}', "
+            f"filing.ciphertext_sha256, random() FROM ({recorded}) AS wrong CROSS JOIN media_replicas AS filing "
+            f"ON filing.ciphertext_sha256 = wrong.digest WHERE filing.state <> '{QUARANTINED}' "
+            "ON CONFLICT(store, object, version) DO NOTHING")
+
+
+_INHERIT_OF = _inherit("SELECT DISTINCT ciphertext_sha256 AS digest FROM media_damaged_versions WHERE ciphertext_sha256 = ?")
+_INHERIT_ALL = _inherit("SELECT DISTINCT ciphertext_sha256 AS digest FROM media_damaged_versions "
+                        "WHERE ciphertext_sha256 IS NOT NULL")
 _DAMAGED = f"SELECT 1 {_RECORDED} LIMIT 1"
 _DAMAGED_AMONG = ("SELECT json_extract(wanted.value, '$[0]'), json_extract(wanted.value, '$[1]'), "
                   f"json_extract(wanted.value, '$[2]') {_RECORDED}")
@@ -475,10 +505,6 @@ def rebuild(vault: Path) -> int:
     written = 0
     totals: dict[str, list[int]] = {}  # per store: replicas and ciphertext bytes, for the check budget
     batch: list[tuple] = []
-    with closing(ledger._connect(readonly=True)) as conn:
-        wrong = {row[0] for row in conn.execute("SELECT DISTINCT ciphertext_sha256 FROM media_damaged_versions "
-                                                "WHERE ciphertext_sha256 IS NOT NULL")}
-    copies: list[originals.StoredObject] = []  # entries of ciphertext that a finding recorded as decrypting wrong
 
     def flush() -> None:
         with closing(ledger._connect()) as conn, conn:
@@ -489,9 +515,7 @@ def rebuild(vault: Path) -> int:
         relative = snapshot.path.relative_to(vault).as_posix()
         for replica in _replicas_of(snapshot):
             batch.append((relative, replica.store, replica.object, replica.version, replica.key_version,
-                          replica.ciphertext_size, None, UPLOAD_VERIFIED, generation))
-            if replica.ciphertext_sha256 in wrong:
-                copies.append(replica)
+                          replica.ciphertext_size, None, UPLOAD_VERIFIED, generation, replica.ciphertext_sha256))
             held = totals.setdefault(replica.store, [0, 0])
             held[0] += 1
             held[1] += replica.ciphertext_size
@@ -505,15 +529,16 @@ def rebuild(vault: Path) -> int:
         # a copy of ciphertext that decrypts wrong. The record of a damaged version is never forgotten here: the walk skips a
         # binding whose Trash retirement is unconfirmed and never enters the Trash, so a version that no row lists may still
         # be listed by a filing, and eviction trusts the record.
-        if copies:
-            conn.execute(_INHERIT, (_quadruples(copies),))
+        conn.execute(_INHERIT_ALL)
         _quarantine_listing(conn, time.time())
         conn.execute("DELETE FROM media_replica_store_totals")
         conn.executemany("INSERT INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
                          [(store, held[0], held[1]) for store, held in totals.items()])
-        # A new copy that had no verified source may have one now: the original came back, or another replica did.
+        # A request that had no verified source, a copy again or a first replica, may have one now: the original came
+        # back, another replica did, or a pointer that was found wrong has been repaired.
         conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
-                     "token = random() WHERE state = ? AND kind = ?", (PENDING, REFUSED, RECOPY))
+                     "token = random() WHERE state = ? AND (kind = ? OR code = ?)",
+                     (PENDING, REFUSED, RECOPY, media_store.NO_VERIFIED_SOURCE))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -1493,19 +1518,14 @@ _UNSAMPLEABLE = -1
 _SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
            f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
-#: The version's record holds a finding that a download cannot answer: a row says wrong plaintext, and the record that a
-#: later finding renewed says the version is lost or differs. A version with no record is no such case.
-_ANOTHER_CAUSE = ("EXISTS (SELECT 1 FROM media_damaged_versions AS other WHERE other.store = media_replicas.store "
-                  "AND other.object = media_replicas.object AND other.version = media_replicas.version "
-                  f"AND other.failure <> '{PLAINTEXT_MISMATCH}')")
-#: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`.
+#: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`, whose
+#: every row a plaintext finding still holds (a finding of another cause moves its filings out of it, `quarantine_all`).
 #: It also reads the generation of the version's damage record (see `_released`).
 _REPROOF = ("SELECT binary_rel, store, object, version, size, (SELECT generation FROM media_damaged_versions AS d "
             "WHERE d.store = media_replicas.store AND d.object = media_replicas.object "
             "AND d.version = media_replicas.version) AS generation "
             f"FROM media_replicas WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' "
-            f"AND failure = '{PLAINTEXT_MISMATCH}' AND NOT {_ANOTHER_CAUSE} AND sample_from <= ? "
-            "ORDER BY sample_from LIMIT 1")
+            f"AND failure = '{PLAINTEXT_MISMATCH}' AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: A new month gives the replicas that the last one skipped for size another chance, a bounded batch at a time.
 _SAMPLE_RESET = ("UPDATE media_replicas SET sample_month = 0 WHERE (binary_rel, store) IN ("
                  "SELECT binary_rel, store FROM media_replicas WHERE store = ? AND key_version = ? "
@@ -1543,10 +1563,11 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
 
     The proof answers the damage that the sample picked, and the version's record names that damage by its generation:
     every finding on the version, of any cause and from any filing, gives the record a new one (`_record_damage`). Only
-    a record that is still the one the sample read, and holds no cause but a wrong plaintext, is released, in one
-    transaction. The ciphertext decrypted, so every filing that lists a copy of it under any name is released too, with
-    the copies again they queued, and no record of it is left; a newer finding leaves all of it, this replica included,
-    quarantined with its request. Released rows are unchecked, so the scheduled check proves them again.
+    a record that is still the one the sample read is released, in one transaction. The ciphertext decrypted, so every
+    filing of it under any name that a wrong plaintext quarantined is released too, with the copies again they queued,
+    and no record of a wrong plaintext of it is left; a newer finding leaves all of it, this replica included,
+    quarantined with its request. A filing that holds another cause stays: its version is lost or differs, which this
+    download does not answer. Released rows are unchecked, so the scheduled check proves them again.
     """
     now = time.time()
     store, name, version = row["store"], replica.object, replica.version
@@ -1554,7 +1575,7 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         if not conn.execute(
                 "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
                 "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
-                f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND NOT {_ANOTHER_CAUSE} "
+                f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' "
                 "AND (SELECT generation FROM media_damaged_versions WHERE store = ? AND object = ? AND version = ?) IS ?",
                 (UPLOAD_VERIFIED, now, now, row["binary_rel"], store, name, version, store, name, version,
                  row["generation"])).rowcount:
@@ -1565,8 +1586,7 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         # quarantined, under this version or another, and the copies they queued, go, or each would upload a copy of
         # bytes just proven good. A record of another cause on such a version stays and only loses the digest.
         digest = replica.ciphertext_sha256
-        same = (f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (object, version, store) IN "
-                "(SELECT object, version, store FROM media_damaged_versions WHERE ciphertext_sha256 = ?)")
+        same = f"WHERE ciphertext_sha256 = ? AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}'"
         conn.execute("DELETE FROM media_replica_queue WHERE kind = ? AND (store, binary_rel) IN "
                      f"(SELECT store, binary_rel FROM media_replicas {same})", (RECOPY, digest))
         conn.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, "

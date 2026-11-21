@@ -781,6 +781,11 @@ def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_row
         7.0, media_replicas.UPLOAD_VERIFIED, 0, None, 0)
     assert media_replicas.status(vault)["state"] == "unknown"  # no sizes until the next rebuild writes them
     assert media_replicas.drain(vault) == 0  # the queue table gained its `kind` and `token` columns
+    assert row["ciphertext_sha256"] is None  # the digest of the stored ciphertext waits for the rebuild too
+
+    media_replicas.rebuild(vault)
+
+    assert _replica_row(vault)["ciphertext_sha256"] == replica.ciphertext_sha256
 
 
 # --- verify-stored-replicas: the check round -----------------------------------------------------------
@@ -1655,6 +1660,34 @@ def test_a_replica_of_an_evicted_original_is_not_copied_from_a_pointer_that_was_
     assert all(entry.store != MIRROR for entry in originals.original_state(vault, original).replicas)
 
 
+def test_a_replica_request_refused_for_want_of_a_verified_source_is_made_again_by_the_rebuild_after_the_pointer_is_repaired(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The owner asked once for the replica; a repaired pointer is a source now, and no second request should be needed."""
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    relative = original.relative_to(vault).as_posix()
+    assert media_store.evict(vault, original)
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    media_replicas.request(vault, MIRROR)
+    while media_replicas.work(vault):
+        pass
+    assert [item[1:] for item in _queued(vault) if item[0] == MIRROR] == [
+        (media_replicas.REPLICATE, media_replicas.REFUSED, "no_verified_source")]
+    _unproven(vault)
+    media_replicas.sample(vault)  # the pointer decrypts to the binding: the finding was a false alarm
+    assert _replica_row_of(vault, original, pointer.store)["state"] == media_replicas.UPLOAD_VERIFIED
+
+    media_replicas.rebuild(vault)
+
+    assert [item[1:] for item in _queued(vault) if item[0] == MIRROR] == [
+        (media_replicas.REPLICATE, media_replicas.PENDING, None)]
+    while media_replicas.work(vault):
+        pass
+    assert _entry(vault, relative, MIRROR).store == MIRROR
+    assert len(_objects(mirrored)) == 1
+
+
 def test_a_quarantined_replica_with_no_verified_source_stays_quarantined_and_the_binding_is_unchanged(
         vault: Path, selected_store, mirrored: Path) -> None:
     """With both copies damaged and the original gone, a copy of either would spread the damage under a fresh name."""
@@ -2507,13 +2540,13 @@ def _vm_steps_of_a_release(vault: Path, unrelated: int, monkeypatch: pytest.Monk
     """Release one version of two filings beside `unrelated` quarantined replicas of other versions; count SQLite's steps."""
     version = originals.StoredObject(1, MIRROR, "1", f"{unrelated:064x}", "version", 10, "0" * 64)
     quarantined = ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, "
-                   "level, failure, seen) VALUES (?, ?, ?, ?, '1', 10, 0, 'quarantined', 'decrypted', "
-                   f"'{media_replicas.PLAINTEXT_MISMATCH}', 1)")
+                   "level, failure, seen, ciphertext_sha256) VALUES (?, ?, ?, ?, '1', 10, 0, 'quarantined', 'decrypted', "
+                   f"'{media_replicas.PLAINTEXT_MISMATCH}', 1, ?)")
     with closing(media_jobs.MediaJobStore(vault)._connect()) as ledger, ledger:
-        ledger.executemany(quarantined, [(f"Originals/{unrelated}/{number}.bin", MIRROR, f"{number:064x}", f"other-{number}")
-                                         for number in range(unrelated)])
-        ledger.executemany(quarantined, [(f"Originals/{unrelated}/pair-{number}.bin", MIRROR, version.object, version.version)
-                                         for number in range(2)])
+        ledger.executemany(quarantined, [(f"Originals/{unrelated}/{number}.bin", MIRROR, f"{number:064x}", f"other-{number}",
+                                          f"{number:064x}") for number in range(unrelated)])
+        ledger.executemany(quarantined, [(f"Originals/{unrelated}/pair-{number}.bin", MIRROR, version.object, version.version,
+                                          version.ciphertext_sha256) for number in range(2)])
         ledger.execute("INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256, "
                        f"generation) VALUES (?, ?, ?, 'decrypted', '{media_replicas.PLAINTEXT_MISMATCH}', ?, 7)",
                        (MIRROR, version.object, version.version, version.ciphertext_sha256))
@@ -2592,8 +2625,7 @@ def test_a_sample_that_decrypts_a_version_leaves_a_finding_that_another_filing_r
     assert picked  # the sample ran: the version was decrypted before the sibling's finding settled
     for original in (first, second):
         row = _replica_row_of(vault, original, pointer.store)
-        assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, failure if original == second else
-                                                  media_replicas.PLAINTEXT_MISMATCH)
+        assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, failure)  # the version's newest finding
         assert (held[original], media_replicas.RECOPY) in _requests(vault)
     assert media_replicas.has_quarantined(vault, (pointer,))
 
@@ -2623,35 +2655,67 @@ def test_a_pointer_is_not_copied_back_from_a_replica_that_was_a_copy_of_the_vers
         (media_replicas.REFUSED, "no_verified_source")]
 
 
-def test_a_rebuild_quarantines_the_copy_of_a_version_that_was_found_wrong_after_the_copy_was_made(
+def test_a_finding_quarantines_the_copy_of_its_ciphertext_under_another_name_at_once(
         vault: Path, selected_store, mirrored: Path) -> None:
-    """The copy has its own object name, so only its ciphertext says that it is as wrong as the version found wrong."""
+    """The copy has its own object name, so only its ciphertext says that it is as wrong as the pointer found wrong."""
     relative, _pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
-    assert _replica_row(vault)["state"] == media_replicas.UPLOAD_VERIFIED  # the finding named the pointer only
+
+    row = _replica_row(vault)  # no rebuild ran: the finding itself reached the copy through its row
+    assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.PLAINTEXT_MISMATCH)
+    assert (MIRROR, media_replicas.RECOPY) in [item[:2] for item in _queued(vault)]
+    assert media_replicas.has_quarantined(vault, (mirror,))
+    assert (relative, media_replicas.RECOPY) in _requests(vault)
+
+
+def test_a_finding_on_a_filing_that_has_no_row_writes_its_row_with_the_ciphertext_digest(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A row without the digest is reached by no later finding and no release until a rebuild fills it."""
+    pointer = originals.StoredObject(1, MIRROR, "1", "a" * 64, "version", 10, "b" * 64)
+
+    media_replicas.quarantine(vault, "Originals/lost.bin", pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT state, ciphertext_sha256 FROM media_replicas").fetchall() == [
+            (media_replicas.QUARANTINED, pointer.ciphertext_sha256)]
+
+
+def test_a_rebuild_quarantines_the_copy_whose_row_an_earlier_release_wrote_with_no_digest(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A row without a digest cannot be found by it: the rebuild that fills the digest is where the copy is reached."""
+    relative, _pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, ciphertext_sha256 = NULL "
+                       "WHERE store = ?", (media_replicas.UPLOAD_VERIFIED, MIRROR))
+        ledger.execute("DELETE FROM media_damaged_versions WHERE store = ?", (MIRROR,))
+        ledger.execute("DELETE FROM media_replica_queue WHERE store = ?", (MIRROR,))
 
     media_replicas.rebuild(vault)
 
     row = _replica_row(vault)
-    assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.PLAINTEXT_MISMATCH)
+    assert (row["state"], row["failure"], row["ciphertext_sha256"]) == (
+        media_replicas.QUARANTINED, media_replicas.PLAINTEXT_MISMATCH, mirror.ciphertext_sha256)
     assert (relative, media_replicas.RECOPY) in _requests(vault)
-    assert media_replicas.has_quarantined(vault, (mirror,))
 
 
-def test_a_later_finding_of_another_cause_on_a_version_found_wrong_does_not_make_its_copies_good_again(
+def test_a_later_finding_of_another_cause_on_a_version_found_wrong_does_not_make_a_later_copy_of_its_bytes_good(
         vault: Path, selected_store, mirrored: Path) -> None:
-    """The store losing the version says nothing about its bytes: the copy of them elsewhere is still decrypting wrong."""
-    relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    """The store losing the version says nothing about its bytes: a copy of them made since still decrypts wrong."""
+    pointer = originals.StoredObject(1, MIRROR, "1", "a" * 64, "version", 10, "b" * 64)
+    media_replicas.quarantine(vault, "Originals/first.bin", pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    media_replicas.quarantine(vault, "Originals/first.bin", pointer, level=media_replicas.CONTENT, failure="absent")
+    later = originals.StoredObject(1, MIRROR, "1", "c" * 64, "later", 10, pointer.ciphertext_sha256)
 
-    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.CONTENT, failure="absent")
+    media_replicas.record(vault, "Originals/later.bin", later, verified_at=time.time())
 
-    assert media_replicas.has_quarantined(vault, (mirror,))
+    assert media_replicas.has_quarantined(vault, (later,))
 
 
 def test_a_sample_that_decrypts_a_version_found_wrong_releases_its_copies_under_other_names(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The proof is about the ciphertext: a copy that the finding quarantined with it must not stay and be repaired."""
     relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
-    media_replicas.rebuild(vault)
     assert _replica_row(vault)["state"] == media_replicas.QUARANTINED
     _unproven(vault)
 
@@ -2662,9 +2726,9 @@ def test_a_sample_that_decrypts_a_version_found_wrong_releases_its_copies_under_
     assert [item for item in _requests(vault) if item[0] == relative] == []
 
 
-def test_a_sample_does_not_release_a_filing_whose_version_record_no_longer_holds_a_wrong_plaintext(
+def test_a_finding_of_another_cause_moves_the_filings_of_a_wrong_plaintext_to_that_cause_and_no_sample_lifts_them(
         vault: Path, selected_store, mirrored: Path) -> None:
-    """The record, not the filing's row, is what a proof answers: a version that is now recorded as lost is no false alarm."""
+    """The version's record names one cause, the newest: a filing that kept the old one would be lifted by a proof of bytes."""
     first = _preserved(vault, category="first")
     pointer = _offload(vault, first)
     second = _preserved(vault, category="second")
@@ -2677,10 +2741,95 @@ def test_a_sample_does_not_release_a_filing_whose_version_record_no_longer_holds
 
     media_replicas.sample(vault)
 
-    row = _replica_row_of(vault, first, pointer.store)
-    assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.PLAINTEXT_MISMATCH)
-    assert (held[first], media_replicas.RECOPY) in _requests(vault)
+    for original in (first, second):
+        row = _replica_row_of(vault, original, pointer.store)
+        assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.CONTENT, "absent")
+        assert (held[original], media_replicas.RECOPY) in _requests(vault)
     assert media_replicas.has_quarantined(vault, (pointer,))
+
+
+def test_a_sample_that_decrypts_a_copy_of_a_version_found_wrong_leaves_the_filing_whose_version_was_found_lost_since(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The proof is that the ciphertext decrypts. It answers nothing about a version that the store has since lost."""
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    second = _preserved(vault, category="second")
+    assert _offload(vault, second) == pointer
+    assert media_store.evict(vault, first) and media_store.evict(vault, second)
+    _replicate_all(vault)  # each mirror copy is the pointer's ciphertext under another name
+    held = {original: original.relative_to(vault).as_posix() for original in (first, second)}
+    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    media_replicas.quarantine(vault, held[second], pointer, level=media_replicas.CONTENT, failure="absent")
+
+    def recopies() -> list[str]:
+        return sorted(item[0] for item in _queued(vault) if item[1] == media_replicas.RECOPY)
+
+    assert recopies() == sorted([MIRROR, MIRROR, pointer.store, pointer.store])  # the mirror's copies were found wrong with it
+    _unproven(vault)
+
+    media_replicas.sample(vault)  # the mirror's copy decrypts to the binding: a false alarm for the ciphertext
+
+    for original in (first, second):
+        assert _replica_row_of(vault, original, MIRROR)["state"] == media_replicas.UPLOAD_VERIFIED
+        row = _replica_row_of(vault, original, pointer.store)
+        assert (row["state"], row["failure"]) == (media_replicas.QUARANTINED, "absent")
+    assert recopies() == [pointer.store] * 2
+    assert media_replicas.has_quarantined(vault, (pointer,))
+
+
+def test_the_status_and_the_original_view_count_a_copy_of_ciphertext_found_wrong_as_damaged_before_any_rebuild(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The owner's count of surviving copies cannot lag a finding: the copy under another name is as wrong as the pointer."""
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    assert media_store.evict(vault, original)
+    _replicate_all(vault)  # the mirror's copy is the pointer's ciphertext under another name
+    media_replicas.confirm_key_export(vault)
+    media_replicas.rebuild(vault)
+    relative = original.relative_to(vault).as_posix()
+    assert media_replicas.status(vault)["totals"]["recoverable"] == 2
+
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)  # no rebuild after it
+
+    status = media_replicas.status(vault)
+    shown = {item["store"]: (item["recoverable"], item["reason"])
+             for item in media_replicas.original_view(vault, relative)["replicas"]}
+    assert (status["totals"]["recoverable"], status["totals"]["not_recoverable"]) == (0, 2)
+    assert {stats["name"]: stats["quarantined"] for stats in status["stores"]} == {MIRROR: 1, pointer.store: 1}
+    assert shown == {MIRROR: (False, media_replicas.QUARANTINED), pointer.store: (False, media_replicas.QUARANTINED)}
+    assert sorted(item["store"] for item in media_replicas.findings(vault)["findings"]) == sorted([MIRROR, pointer.store])
+
+
+def _vm_steps_of_a_reproof_pick(vault: Path, stale: int) -> int:
+    """Quarantine `stale` filings of one version for a wrong plaintext, then for a lost version; count the steps of the pick."""
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as ledger, ledger:  # an earlier size's rows would be picked first
+        ledger.execute("DELETE FROM media_replicas")
+        ledger.execute("DELETE FROM media_damaged_versions")
+    version = originals.StoredObject(1, MIRROR, "1", f"{stale:064x}", "version", 10, f"{stale + 1:064x}")
+    live = originals.StoredObject(1, MIRROR, "1", f"{stale + 2:064x}", "version", 10, f"{stale + 3:064x}")
+    filings = [f"Originals/{stale}/{number}.bin" for number in range(stale)]
+    media_replicas.quarantine_all(vault, filings, version, level=media_replicas.DECRYPTED,
+                                  failure=media_replicas.PLAINTEXT_MISMATCH)
+    media_replicas.quarantine_all(vault, filings[:1], version, level=media_replicas.CONTENT, failure="absent")
+    media_replicas.quarantine_all(vault, [f"Originals/{stale}/live.bin"], live, level=media_replicas.DECRYPTED,
+                                  failure=media_replicas.PLAINTEXT_MISMATCH)
+    steps = [0]
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as ledger:
+        ledger.set_progress_handler(lambda: steps.__setitem__(0, steps[0] + 1), 1)
+        picked = ledger.execute(media_replicas._REPROOF, (MIRROR, "1", time.time() + 60)).fetchone()
+    assert picked["object"] != version.object  # a filing that a wrong plaintext still holds, never one moved on
+    return steps[0]
+
+
+def test_the_pick_of_a_quarantine_to_release_costs_what_it_costs_beside_many_filings_that_a_later_finding_moved_on(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """A filing that a later finding of another cause left in the pick's index would be read and rejected, one by one."""
+    few = _vm_steps_of_a_reproof_pick(vault, 20)
+    many = _vm_steps_of_a_reproof_pick(vault, 10_000)
+
+    assert many < few * 2 + 500
 
 
 def test_one_unreadable_row_does_not_stop_the_checks_of_the_rows_behind_it(
