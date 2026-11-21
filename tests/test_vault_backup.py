@@ -722,6 +722,32 @@ def test_a_stop_ends_staging_between_the_files_that_are_copied_whole(vault: Path
     assert not (stage / ".voice_profiles.json").exists()
 
 
+_LATE_COPIER = r"""
+import json, sys, time
+for line in sys.stdin:
+    source, target = json.loads(line)
+    time.sleep(1.5)  # still copying when the service gives up on it
+    open(target, "wb").write(b"part")
+    print("ok", flush=True)
+"""
+
+
+def test_a_copy_that_the_child_finishes_after_the_service_gave_up_never_reaches_the_snapshot(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A copy the service no longer trusts is removed; a child still running must not write it again afterwards.
+    monkeypatch.setattr(vault_backup, "_PLAIN_COPIER", _LATE_COPIER)
+    monkeypatch.setattr(vault_backup, "_PLAIN_COPY_TIMEOUT", 0.2)
+    (_state_dir(vault) / ".voice_profiles.json").write_text('{"profiles": []}')
+
+    staged, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+    time.sleep(2)
+
+    assert staged == 0
+    assert {"kind": "state", "path": ".voice_profiles.json", "code": "state_copy_failed"} in findings
+    assert not (tmp_path / "stage" / ".voice_profiles.json").exists()
+
+
 def test_staging_copies_a_one_byte_file_as_it_is(vault: Path, tmp_path: Path) -> None:
     # SQLite reads a 1-byte file as an empty database, so a staging that asked SQLite first would back up the
     # media worker's lock file, or any 1-byte state file, as a new 4 KB database and report nothing.

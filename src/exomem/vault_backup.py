@@ -480,7 +480,7 @@ def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, 
                 result = None
             while result is None:
                 if stop.is_set():
-                    helper.kill()
+                    _end_copier(helper)
                     target.unlink(missing_ok=True)
                     raise BackupError("stopped", "staging")
                 if time.monotonic() > deadline:
@@ -494,6 +494,7 @@ def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, 
                 copied += 1
             elif result == "":
                 # The child stopped answering: this copy is not trusted, and nothing after it was copied.
+                _end_copier(helper)
                 target.unlink(missing_ok=True)
                 findings.extend({"kind": "state", "path": rest, "code": "state_copy_failed"}
                                 for _, _, rest in pending[index:])
@@ -507,9 +508,15 @@ def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, 
             try:
                 helper.wait(timeout=_PLAIN_COPY_POLL)
             except subprocess.TimeoutExpired:
-                helper.kill()
-                helper.wait()
+                _end_copier(helper)
     return copied
+
+
+def _end_copier(helper: subprocess.Popen) -> None:
+    """Kill the child and wait until it is gone. Only then may a copy it was writing be removed: a child still
+    running could write the file again after the removal."""
+    helper.kill()
+    helper.wait()
 
 
 def _copy_sqlite(source: Path, target: Path) -> bool:
