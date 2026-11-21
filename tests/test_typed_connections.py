@@ -15,6 +15,7 @@ import pytest
 import yaml
 from test_activate_context_maps import _activate
 from test_context_catalogue import INSIGHTS, _built, _page
+from test_governance_egress import _external, write_rule, write_scope
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
 from exomem import (
@@ -25,9 +26,11 @@ from exomem import (
     lexstore,
     served_context,
     working_set,
+    working_set_runtime,
 )
 from exomem import vault as vault_module
 from exomem.governance import egress
+from exomem.governance.principal import owner_principal, request_scope
 
 
 def _warm_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,3 +412,134 @@ def test_the_default_recall_budget_is_six_thousand_with_a_half_turn_slice(vault:
     assert packet["budget"]["limit_chars"] == 6000
     assert packet["map"]["items"] and packet["task_context"]["candidates"]
     assert context_views._slice_reserve(6000) == int(6000 * context_views.TURN_SLICE_SHARE) == 3000
+
+
+def test_an_inbound_reason_withholds_the_authoring_pages_origin_carrier(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrestricted reader receives the inbound page's lede under that page's prose rules."""
+    seed = _page(vault, "visit-capture", body=LEAD_BODY, folder="Knowledge Base/Sources/Articles")
+    _page(vault, "visit-report", body=(
+        "<!-- exomem-origin withheld-input-reference -->\n\nThe revised visit report.\n\n"
+        f"- supersedes [[{seed.removesuffix('.md')}]]\n"
+    ))
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+
+    with request_scope(owner_principal(surface="library")):
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+
+    listed, _omitted = served[seed]
+    inbound = next(connection for connection in listed if connection.direction == "inbound")
+    assert "The revised visit report" in inbound.why
+    assert "exomem-origin" not in inbound.why
+
+
+def test_a_line_inside_an_origin_carrier_is_never_quoted_as_a_reason(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrestricted reader's reason never quotes a line inside an origin carrier."""
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    _page(vault, "visit-report", body=(
+        "The revised visit report.\n\n<!-- exomem-origin\n"
+        f"confidential interview transcript about [[{seed.removesuffix('.md')}]]\n-->\n\n"
+        f"- supersedes [[{seed.removesuffix('.md')}]]\n"
+    ))
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+
+    with request_scope(owner_principal(surface="library")):
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=None, per_seed=4)
+
+    listed, _omitted = served[seed]
+    reasons = " ".join(connection.why for connection in listed)
+    assert "confidential interview transcript" not in reasons
+
+
+def test_a_governed_caller_keeps_a_graph_pointer_without_a_quote(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a full page release can require projection, so the pointer carries the relation alone."""
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    report = _page(vault, "visit-report", body=(
+        f"The revised visit report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after review\n"
+    ))
+    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    _built(vault).close()
+    _warm_resolver(monkeypatch)
+    resolved = type("Anchor", (), {"status": "resolved", "path": seed, "ref": seed})()
+
+    with request_scope(_external()):
+        assert egress.release_level_for(vault, report) == egress.LEVEL_FULL
+        reader = egress.reader_view(vault)
+        items, _missing = working_set.run_lanes(
+            vault, anchors=[resolved], roles=[{"id": "connections"}],
+            registry=context_roles.load_roles(), visible=reader,
+        )
+
+    assert [(item.path, item.why) for item in items] == [(report, "supersedes (inbound)")]
+
+
+@pytest.fixture
+def graph_reason_pages(vault: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    seed = "Knowledge Base/Entities/People/Calibration Coordinator.md"
+    _write(
+        vault, seed,
+        "---\ntype: entity\nentity_type: person\nstatus: active\n---\n\n# Calibration Coordinator\n\n" + LEAD_BODY,
+    )
+    report = _page(vault, "visit-report", body=(
+        f"The revised visit report.\n\n- supersedes [[{seed.removesuffix('.md')}]] after review\n"
+    ))
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
+    _built(vault).close()
+    lexstore.ensure_fresh(vault)
+    _warm_resolver(monkeypatch)
+    return seed, report
+
+
+def test_a_graph_reason_loses_its_quote_when_governance_takes_effect(
+    vault: Path, graph_reason_pages: tuple[str, str],
+) -> None:
+    seed, report = graph_reason_pages
+    turn = "Tell me about the Calibration Coordinator"
+
+    def quote(packet):
+        return next(pointer["why"] for pointer in packet["pointers"] if pointer["ref"] == report)
+
+    with request_scope(owner_principal(surface="library")):
+        cold = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        assert quote(cold) == "supersedes (inbound): supersedes Calibration Coordinator after review"
+        with egress.policy_module.request_policy_snapshot():
+            assert egress.unrestricted_source_access(vault, purpose=None)
+            write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+            write_rule(vault, audience="owner", ceiling=egress.LEVEL_FULL)
+            guarded = egress.guard_working_set(vault, cold, egress.AnnotatedHits(hits=[]))
+        assert guarded is None
+        governed = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        assert quote(governed) == "supersedes (inbound)"
+
+
+def test_a_policy_change_during_compile_leaves_the_unrestricted_cache_valid(
+    vault: Path, graph_reason_pages: tuple[str, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, report = graph_reason_pages
+    turn = "Tell me about the Calibration Coordinator"
+    compile_packet = working_set.compile_packet
+
+    def enable_governance(*args, **kwargs):
+        write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+        write_rule(vault, audience="owner", ceiling=egress.LEVEL_FULL)
+        return compile_packet(*args, **kwargs)
+
+    with request_scope(owner_principal(surface="library")):
+        with monkeypatch.context() as during_compile:
+            during_compile.setattr(working_set, "compile_packet", enable_governance)
+            working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+        governance = vault / "Knowledge Base" / "_Governance"
+        (governance / "rules" / "patterns-external.yaml").unlink()
+        (governance / "scopes" / "patterns.yaml").unlink()
+        restored = working_set_runtime.serve(vault, turn=turn, anchor=seed, max_chars=6000)
+
+    quote = next(pointer["why"] for pointer in restored["pointers"] if pointer["ref"] == report)
+    assert quote == "supersedes (inbound): supersedes Calibration Coordinator after review"
