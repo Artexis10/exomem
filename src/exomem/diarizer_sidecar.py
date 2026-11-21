@@ -14,22 +14,15 @@ The service only locates the venv; it never builds one at runtime.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import hashlib
-import json
-import logging
 import os
 import shutil
-import socket
 import subprocess
 import sys
-import time
-from contextvars import ContextVar
 from pathlib import Path
 
 from . import state_paths
 
-log = logging.getLogger(__name__)
 PROJECT = Path(__file__).resolve().parent / "_sidecars" / "diarizer"
 _PYTHON = Path("Scripts/python.exe") if os.name == "nt" else Path("bin/python")
 
@@ -69,87 +62,6 @@ def python() -> Path | None:
 
 def worker_script() -> Path:
     return PROJECT / "worker.py"
-
-
-class WorkerSession:
-    """One isolated CUDA diarizer owned by a disposable WSL media worker."""
-
-    def __init__(self) -> None:
-        self._process: subprocess.Popen | None = None
-        self._channel: socket.socket | None = None
-
-    def run(self, command: list[str], *, env: dict[str, str], timeout: float) -> None:
-        """Send one audio path and receive confirmation that its output file is ready."""
-        deadline = time.monotonic() + timeout
-        if self._process is None or self._process.poll() is not None:
-            self.close()
-            self._start(command[:2], env)
-        channel = self._channel
-        if channel is None:
-            raise OSError("previous diarizer is still shutting down")
-        channel.settimeout(max(0, deadline - time.monotonic()))
-        channel.sendall(json.dumps(command[2:]).encode("utf-8") + b"\n")
-        channel.settimeout(max(0, deadline - time.monotonic()))
-        reply = channel.recv(1)
-        if reply == b"\0":
-            self.close()  # Turns are ready, and a CPU fallback must release its model after the job.
-        elif reply != b"\n":
-            raise OSError("diarizer stopped before returning speaker turns")
-
-    def _start(self, command: list[str], env: dict[str, str]) -> None:
-        parent, worker = socket.socketpair()
-        try:
-            with worker:
-                fd = worker.fileno()
-                self._process = subprocess.Popen(  # noqa: S603 - fixed interpreter and worker script
-                    [*command, "--serve", str(fd), str(os.getpid())],
-                    env=env,
-                    pass_fds=(fd,),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,  # Native library output must stay out of MCP stdout.
-                )
-        except BaseException:
-            parent.close()
-            raise
-        self._channel = parent
-        log.info("started reusable CUDA diarizer")
-
-    def close(self) -> None:
-        if self._channel is not None:
-            self._channel.close()
-            self._channel = None
-        process = self._process
-        if process is None:
-            return
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            log.warning("diarizer did not exit after it was killed")
-            return  # Keep its handle so another request cannot start a second sidecar.
-        self._process = None
-
-
-current_worker_session: ContextVar[WorkerSession | None] = ContextVar("diarizer_worker_session", default=None)
-
-
-@contextlib.contextmanager
-def reuse_for_media_worker():
-    from . import cloud_cell
-
-    # WSL2 kernel releases end in this suffix. Other platforms retain one-shot workers.
-    wsl = sys.platform == "linux" and os.uname().release.lower().endswith("-wsl2")
-    if not wsl or cloud_cell.cloud_mode_enabled() or cloud_cell.hosted_mode_enabled():
-        yield
-        return
-    session = WorkerSession()
-    token = current_worker_session.set(session)
-    try:
-        yield
-    finally:
-        current_worker_session.reset(token)
-        session.close()
 
 
 def build(*, prewarm: bool = False) -> Path:

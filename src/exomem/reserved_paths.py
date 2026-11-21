@@ -44,6 +44,9 @@ REGISTRY_VERSION = 1
 ORIGINAL_POOL_DIRNAME = "_Originals"
 ORIGINAL_POOL_DESCRIPTOR_ID = "original-pool"
 ORIGINAL_POOL_OWNER = "original_pool"
+# An upload's bytes wait here, on the vault's own filesystem, between their one copy and the commit that renames them in.
+UPLOAD_STAGE_DIRNAME = "_UploadStage"
+UPLOAD_STAGE_DESCRIPTOR_ID = "upload-stage"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -822,6 +825,14 @@ _REGISTRY = (
         # install and follow that note (atomic same-volume rename), so the
         # placement suite exempts it from the constructor walk.
         component_tree_patterns=(_BATCH_WORKSPACE_RE,),
+    ),
+    InternalStateDescriptor(
+        UPLOAD_STAGE_DESCRIPTOR_ID,
+        "upload_stage",
+        StatePlacement.TARGET_ADJACENT,
+        # Machine-local scratch that must share the vault's volume: the commit renames a stage into its
+        # batch workspace and the destination, so it follows the content and never the external root.
+        trees=(UPLOAD_STAGE_DIRNAME.casefold(),),
     ),
     InternalStateDescriptor(
         "held-publication",

@@ -2071,6 +2071,26 @@ def reference_identity_snapshot_is_current(
             )
 
 
+@dataclass(slots=True)
+class _WriterCensus:
+    proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None
+
+
+_WRITER_CENSUS: contextvars.ContextVar[_WriterCensus | None] = contextvars.ContextVar(
+    "writer_disk_census", default=None
+)
+
+
+@contextmanager
+def share_writer_disk_census() -> Iterator[None]:
+    """Let one save's initial preflight use its resolver's disk proof once."""
+    token = _WRITER_CENSUS.set(_WriterCensus())
+    try:
+        yield
+    finally:
+        _WRITER_CENSUS.reset(token)
+
+
 def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | None:
     """A detached resolver over the resident corpus of a store-mode vault, else None.
 
@@ -2089,6 +2109,7 @@ def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | 
         _corpus_cache_key(root),
         relation_registry.core_registry(),
         semantic_language_registry.core_registry(),
+        writer_resolver=True,
     )
     if entry is None:
         return None
@@ -2350,6 +2371,9 @@ def _store_resident_entry(
     cache_key: tuple[str, str],
     registry: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    writer_resolver: bool = False,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
 ) -> tuple[tuple, SemanticCorpusContext] | None:
     """In store mode, the resident entry when the store and the disk both stand where it was built.
 
@@ -2360,15 +2384,25 @@ def _store_resident_entry(
     freshness registry: a store-mode watcher seeds none. A file's entry holds what its build reads of it
     besides its bytes (``_file_entry``), so a chmod or a new hard link fails the proof as an edit does.
     """
+    share = _WRITER_CENSUS.get() if writer_resolver else None
     if _store_census_owns(root) is None:
         return None
     resident = _resident_corpus_entry(root, cache_key, registry, language)
     if resident is None:
         return None
     entry = resident[0]
+    # The entry and its configuration still match the resolver's proof. Revalidation and
+    # ordinary readers never consume this proof, so each of them still checks the disk.
+    if writer_proof is not None and writer_proof[0] == root and writer_proof[1] is entry:
+        return entry
     disk = _disk_page_census(root)
     if disk is None or disk != frozenset(item for item in entry[0] if item[1] == "f"):
         return None
+    if share is not None:
+        from .collection_store.preview import bound_writer
+
+        if bound_writer(root) is not None:
+            share.proof = (root, entry)
     return entry
 
 
@@ -4144,6 +4178,7 @@ def build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    writer_preflight: bool = False,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """Enrich admitted pages without publishing caller facts into the shared cache.
 
@@ -4162,10 +4197,14 @@ def build_corpus_context_with_census(
     root = Path(vault_root)
     basis = status_basis or lifecycle_statuses.Basis(root)
     type_basis = type_basis or note_types.Basis(root)
+    share = _WRITER_CENSUS.get() if writer_preflight else None
+    if share is not None:
+        _WRITER_CENSUS.set(None)
     context, census = _build_corpus_context_with_census(
         root,
         registry=relation_registry.core_registry(),
         language_registry=semantic_language_registry.core_registry(),
+        writer_proof=share.proof if share is not None else None,
     )
     # A supplied registry is the meaning of every page without its own binding,
     # so its identity is a dependency of each enriched page.
@@ -4357,6 +4396,7 @@ def _build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     warm: bool = False,
     join_deadline: float | None = None,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -4396,7 +4436,7 @@ def _build_corpus_context_with_census(
                 )
                 return event_entry[1], event_entry[0]
         store_entry = _store_resident_entry(
-            root, cache_key, relation_definitions, language
+            root, cache_key, relation_definitions, language, writer_proof=writer_proof
         )
         if store_entry is not None:
             log.info(

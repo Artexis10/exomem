@@ -39,6 +39,15 @@
 - [x] 6.6 Proof: a batch of results takes one hold and one advance and lands whole; a failed batch rolls back and is bisected until the failing result is set aside, also behind a backlog larger than the read window; a staging failure leaves the others in the same hold; a runtime that goes down after the plan still blocks the path; a refused boundary costs one attempt; the gate defers under foreground activity and publishes at the floor; a reprocess that creates a page completes the graph without a fallback; six completed paths queue with no advance in a file-mode vault; no reprocess planning runs under the boundary.
 - [ ] 6.7 After the release is live, the personal service's log shows media-originated commit-generation advances at about one a minute or fewer under a media backfill, and no full graph rebuild from a media publication.
 
-## 7. Closure
+## 7. Upload commits stage their bytes before the boundary
 
-- [ ] 7.1 Archive this change with `openspec archive` once tasks 1–6 are merged, and run `openspec validate --all --strict` before and after.
+- [x] 7.1 Add a reserved upload-stage descriptor and a stage module: copy, hash and fsync once into a private stage on the vault's filesystem, an owner lock per stage, and a bounded sweep at serving activation that removes only a stage whose owner is proven gone.
+- [x] 7.2 Let `PreparedBinaryContent` carry a staged handle; `_batch_atomic_write_locked` adopts it into its workspace by rename, rechecks the identity on the held descriptor and rebinds the generation witness. On `EXDEV`, a missing change witness or a stage whose metadata moved, it copies under the boundary, checks the digest and logs the fallback.
+- [x] 7.3 Split `preserve` into a stage step and a commit step. A pooled vault stages with `original_pool.prepare` before the boundary. Stage before the boundary in `/upload`, `_commit_evidence_session`, `_capture_source_under_guard` and `_commit_source_session`; `add` accepts a staged payload and skips the identity hash.
+- [x] 7.4 Run the post-upload reconcile with `commit_guard`, so its hash of the binary runs outside the boundary.
+- [x] 7.5 Proof: on a disposable vault with its own state root, a note save started while a 512 MiB resumable upload commits returns without waiting for it and with no `MUTATION_BUSY`, the bytes read and written under the hold grow by at most 8 MiB from 16 MiB to 512 MiB, and the `upload_preserve` hold at 512 MiB is at most 2.5 times the hold at 16 MiB (a wall-clock bound loose enough for fsync noise). Guard tests: a stage edited after staging publishes nothing; a destination that appears before the commit keeps its existing file; a stage left by a killed process is swept at the next start while another process's live stage stays.
+- [ ] 7.6 After the release is live, the personal service's log shows `upload_preserve` holds with a p95 of at most 2 s and no growth with file size, and the refusal journal shows no `MUTATION_BUSY` caused by an upload commit.
+
+## 8. Closure
+
+- [ ] 8.1 Archive this change with `openspec archive` once tasks 1–7 are merged and 5.5, 6.7 and 7.6 hold on the live service, and run `openspec validate --all --strict` before and after.

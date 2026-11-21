@@ -82,6 +82,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     render_frontmatter_document,
     render_title_links,
     rewritable_link_ranges,
@@ -160,6 +161,7 @@ def _resolve_date_iso(
         raise EditError(error.code, [], error.reason) from error
 
 
+@semantic_contract.share_writer_disk_census()
 def edit(
     vault_root: Path,
     *,
@@ -1140,9 +1142,13 @@ def commit_edit(
     # Opportunistic sub-index refresh — surfacing any drift on every write
     # keeps the indexes self-healing.
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     top_index = kb / "index.md"
-    if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
+    if (
+        store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
+        and connector_boundary.effect_admission(vault_root)(top_index)
+    ):
         current_top, top_guard = read_guarded_text(vault_root, top_index)
         sub_writes, new_top = indexes.compute_subindex_writes(
             vault_root, top_index_text=current_top
