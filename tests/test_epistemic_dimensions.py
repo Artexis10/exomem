@@ -643,7 +643,9 @@ def test_a_served_row_dimension_preserves_complements_and_registry_edits(
     assert ("Forecast", "The signal is unqualified.") in expected[0]
     assert ("Forecast", "The signal is required.") not in expected[0]
     warm_managed_cell(vault)
-    sentinel = walk_sentinel(vault, vault / "Knowledge Base")
+    # The reader thread's walks are the contract: a lexical repair that an earlier read scheduled walks the
+    # corpus on its own background thread, and may do so while this request runs.
+    sentinel = walk_sentinel(vault, vault / "Knowledge Base", current_thread_only=True)
 
     for expression, wanted in zip(expressions, expected, strict=True):
         assert _recall_texts(vault, expression) == wanted
