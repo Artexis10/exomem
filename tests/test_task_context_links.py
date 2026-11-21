@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 from test_activate_context_maps import _activate
 from test_context_catalogue import _built, _page
+from test_governance_egress import write_rule, write_scope
 
-from exomem import epistemic_graph, find, lexstore
+from exomem import context_task, epistemic_graph, find, lexstore
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress
 
@@ -121,6 +122,34 @@ def test_a_link_to_a_page_the_caller_may_not_see_is_not_listed(vault: Path, monk
     task = _discover(vault, monkeypatch)
     assert [link["target_ref"] for link in _lead(task, lead)["links"]] == [shown]
     assert "restricted-reference" not in str(task)
+
+
+def test_source_access_narrowed_after_task_compilation_withholds_the_old_packet(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_ACTIVATION_RELEASED_CORPUS_TASKS", "on")
+    target = _linked(vault, "calibration-report")
+    lead = _page(vault, "alignment-visit", body=f"{LEAD_BODY}\n- [[{target.removesuffix('.md')}]]\n")
+    pin = context_task.pin
+    compiled_links = []
+
+    def enable_governance(root, caller, block, *, limit):
+        compiled = pin(root, caller, block, limit=limit)
+        if not compiled_links:
+            compiled_links.extend(link["target_ref"] for link in _lead(block, lead)["links"])
+            write_scope(vault, paths=target.removeprefix("Knowledge Base/"))
+            write_rule(vault, audience="owner", ceiling=egress.LEVEL_EXCERPT)
+        return compiled
+
+    with monkeypatch.context() as during_compile, egress.policy_module.request_policy_snapshot():
+        assert egress.policy_module.load(vault).empty
+        during_compile.setattr(context_task, "pin", enable_governance)
+        stale = _discover_packet(vault, monkeypatch)
+    assert compiled_links == [target]
+    assert stale["abstention"]["reason"] == "withheld"
+
+    task = _discover(vault, monkeypatch)
+    assert "links" not in _lead(task, lead)
 
 
 def test_unavailable_graph_keeps_the_leads_and_says_links_are_missing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -75,6 +75,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
+from .governance import principal
 
 log = logging.getLogger(__name__)
 
@@ -2686,6 +2687,7 @@ def _schedule_build(
             log.warning("%s background build could not start", label, exc_info=True)
 
 
+@principal.invocation_scope()
 def serve(
     vault_root: Path,
     *,
@@ -2930,16 +2932,6 @@ def serve(
         heat_digest=heat_digest,
         conventions_turn_hash=conventions_registry.turn_hash,
     )
-    # The band depends on the audience under a governed policy, so one audience's
-    # banded packet is never served to another (`working_set.band_audience_allowed`).
-    cache_identity = (
-        str(root.absolute()),
-        key,
-        lexical_state,
-        index.token(),
-        working_set.band_audience_allowed(root),
-        leads_only,
-    )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
     # from nor stored in this cache: keying it by audience and purpose would be
@@ -2950,6 +2942,18 @@ def serve(
         and not with_conversation
         and not index_stale
         and trigger == "user_turn"
+    )
+    # The band depends on audience. Graph quotes depend on unrestricted source access,
+    # which can change while the same owner's anchor index and freshness key stay fixed.
+    quote_access = cacheable and working_set.graph_quote_access(root, purpose=purpose)
+    cache_identity = (
+        str(root.absolute()),
+        key,
+        lexical_state,
+        index.token(),
+        working_set.band_audience_allowed(root),
+        quote_access,
+        leads_only,
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None
