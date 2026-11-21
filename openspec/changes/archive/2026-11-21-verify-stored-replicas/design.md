@@ -74,7 +74,7 @@ A quarantined replica:
 
 - is not a repair candidate, and eviction does not trust it;
 - shows in the status and in the per-original view, with the failed level and time;
-- gets a re-copy request in the existing copy queue.
+- gets a re-copy request in the existing copy queue. Each request carries a token that every write making it pending renews, and the worker settles only the token it picked, so a finding on the version that its own copy published keeps its request.
 
 The re-copy writes a new version into the same store. The source is the local original when its bytes hash to the binding (one that is short, unreadable or of other bytes is no source, and the next is tried), or else another replica that is not quarantined, copied as ciphertext and hashed against its own recorded digest on the way, as the copy path does for evicted originals. The publication replaces exactly the quarantined entry in the binding, by compare-and-swap on its object and version, under the vault mutation guard. The bad version stays in the store as an orphan. With no verified source, the replica stays quarantined, and the finding reads `no_verified_source`.
 
@@ -86,7 +86,7 @@ What quarantine prevents: repair or eviction trusting a replica known to be bad,
 
 ### D5: Checks are paced like fixity, inside the replica worker
 
-The replica worker runs a check round after its copy drain, within a time bound per round, and yields to foreground work between replicas. It never holds the vault mutation guard for a check. A content check reads bytes under a read-rate cap, with a default of 32 MiB/s like fixity's.
+The replica worker runs a check round after its copy drain, whether or not the drain settled work, within a time bound per round, and yields to foreground work between replicas. It never holds the vault mutation guard for a check. A content check reads bytes under a read-rate cap, with a default of 32 MiB/s like fixity's.
 
 The cycle defaults to 30 days and is an operator setting. Each round picks, per store, the rows whose `check_from` is oldest, never-checked first, through an index on `(store, check_from)`, a bounded pick at a time, until the store's share of the cycle, the round's time or the byte budget is spent. A store's share is its replicas times the round interval over the cycle, floored at 16, and for a content check its bytes by the same rule (fixity's `budget_for`). The stores of a round share one read cap, and a round runs 1.25 times the seconds that the cap needs for the byte shares of all its content stores together, between 120 seconds and the interval less the sample's 120 seconds (480). The store with the oldest due replica goes first, so a round that ends early leaves a different store behind each time and no state is kept. The cap is an average over the round: an object is read at the store's speed, and only what remains of its share of time after the read is waited out (the share counts from the read's start, so the read's own time is not paid twice). No read is paced in chunks.
 

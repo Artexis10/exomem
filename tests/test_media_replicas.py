@@ -483,6 +483,22 @@ def test_one_drain_settles_a_bounded_batch_and_an_unavailable_store_pauses_its_q
     assert (progress["copied"], progress["remaining"]) == (2, 1)
 
 
+def test_a_worker_round_that_settles_copies_still_runs_the_checks_that_are_due(
+        vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
+    """A copy backlog that never empties must not suspend verification: the replicas it made would stay unchecked."""
+    monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
+    for category in ("a", "b"):
+        _offload(vault, _preserved(vault, category=category))
+    media_replicas.request(vault, MIRROR)
+    media_replicas.work(vault)  # the rebuild
+    media_replicas.work(vault)  # the scan
+
+    assert media_replicas.work(vault)  # one copy settles, one is still queued
+
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 1
+    assert _replica_row(vault)["checked_at"] > 0
+
+
 def test_a_repeated_replicate_keeps_the_progress_of_a_running_request_and_starts_a_new_one_when_it_ends(
         vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
@@ -755,6 +771,7 @@ def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_row
     assert (row["verified_at"], row["state"], row["checked_at"], row["level"], row["size"]) == (
         7.0, media_replicas.UPLOAD_VERIFIED, 0, None, 0)
     assert media_replicas.status(vault)["state"] == "unknown"  # no sizes until the next rebuild writes them
+    assert media_replicas.drain(vault) == 0  # the queue table gained its `kind` and `token` columns
 
 
 # --- verify-stored-replicas: the check round -----------------------------------------------------------
@@ -1269,6 +1286,40 @@ def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_ori
     assert (row["object"], row["version"], row["state"]) == (fresh.object, fresh.version, media_replicas.UPLOAD_VERIFIED)
     assert _stored_file(mirrored, damaged).exists()  # the damaged version stays in its store, named by the finding
     assert [item for item in _queued(vault) if item[0] == MIRROR] == []
+
+
+@pytest.mark.parametrize("closed_first", [
+    pytest.param(False, id="the-request-is-still-queued"),
+    pytest.param(True, id="the-request-was-closed-and-is-made-again"),
+])
+def test_a_finished_copy_again_leaves_the_request_that_a_newer_finding_queued(
+        vault: Path, selected_store, mirrored: Path, monkeypatch, closed_first: bool) -> None:
+    """The copy again publishes version B; before the worker settles it, B is found bad and its repair is queued.
+    Closing that request would leave B quarantined with nothing queued to repair it, for good."""
+    relative, damaged = _replicated(vault)
+    _damage_a_byte(_stored_file(mirrored, damaged))
+    _due_again(vault)
+    media_replicas.check(vault)
+    recopy = media_store.recopy
+
+    def recopy_then_find_the_new_version_bad(root: Path, path: Path, store: str) -> originals.StoredObject | None:
+        fresh = recopy(root, path, store)
+        if closed_first:
+            with closing(sqlite3.connect(media_jobs.MediaJobStore(root).path)) as ledger, ledger:
+                ledger.execute("DELETE FROM media_replica_queue")
+        media_replicas.quarantine(root, relative, fresh, level=media_replicas.CONTENT, failure="digest_mismatch")
+        return fresh
+
+    monkeypatch.setattr(media_store, "recopy", recopy_then_find_the_new_version_bad)
+    monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
+    assert media_replicas.drain(vault) == 1
+    monkeypatch.setattr(media_store, "recopy", recopy)
+
+    assert _queued(vault) == [(MIRROR, media_replicas.RECOPY, media_replicas.PENDING, None)]
+    _recopy_all(vault)
+    row = _replica_row(vault)
+    assert (row["state"], _queued(vault)) == (media_replicas.UPLOAD_VERIFIED, [])
+    assert (row["object"], row["version"]) != (damaged.object, damaged.version)
 
 
 def test_a_replica_is_copied_again_as_ciphertext_from_another_replica_when_the_original_left_the_volume(

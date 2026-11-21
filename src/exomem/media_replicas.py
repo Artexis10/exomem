@@ -170,9 +170,15 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_queue ("
                  "store TEXT NOT NULL, binary_rel TEXT NOT NULL, state TEXT NOT NULL, code TEXT, "
                  "attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
-                 f"kind TEXT NOT NULL DEFAULT '{REPLICATE}', PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
-    if "kind" not in {row[1] for row in conn.execute("PRAGMA table_info(media_replica_queue)")}:
+                 f"kind TEXT NOT NULL DEFAULT '{REPLICATE}', token INTEGER NOT NULL DEFAULT 0, "
+                 "PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
+    queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(media_replica_queue)")}
+    if "kind" not in queue_columns:
         conn.execute(f"ALTER TABLE media_replica_queue ADD COLUMN kind TEXT NOT NULL DEFAULT '{REPLICATE}'")
+    # Every write that makes a request pending gives it a new random `token`: a settlement matches the token it
+    # picked, so it never closes or overwrites a request made after it, even one that replaced a deleted row.
+    if "token" not in queue_columns:
+        conn.execute("ALTER TABLE media_replica_queue ADD COLUMN token INTEGER NOT NULL DEFAULT 0")
     # The drain's pick is `ORDER BY store, binary_rel` among the pending rows, so this order reads it with no sort;
     # `retry_at` only filters.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replica_queue_pick ON media_replica_queue(state, store, binary_rel)")
@@ -260,9 +266,10 @@ def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.S
                     "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
                     (QUARANTINED, level, failure, now, now, binary_rel, replica.store, replica.object,
                      replica.version)).rowcount:
-                conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?) "
+                conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
+                             "VALUES (?, ?, ?, ?, random()) "
                              "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
-                             "code = NULL, attempts = 0, retry_at = 0",
+                             "code = NULL, attempts = 0, retry_at = 0, token = excluded.token",
                              (replica.store, binary_rel, PENDING, RECOPY))
                 changed = True
     if changed:
@@ -355,8 +362,8 @@ def rebuild(vault: Path) -> int:
         conn.executemany("INSERT INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
                          [(store, held[0], held[1]) for store, held in totals.items()])
         # A new copy that had no verified source may have one now: the original came back, or another replica did.
-        conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
-                     "WHERE state = ? AND kind = ?", (PENDING, REFUSED, RECOPY))
+        conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
+                     "token = random() WHERE state = ? AND kind = ?", (PENDING, REFUSED, RECOPY))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -907,8 +914,9 @@ def request(vault: Path, store: str) -> dict[str, int]:
         if active is None:
             conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ? AND kind = ?",
                          (store, DONE, REPLICATE))
-            conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL "
-                         "WHERE store = ? AND state = ? AND kind = ?", (PENDING, store, REFUSED, REPLICATE))
+            conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
+                         "token = random() WHERE store = ? AND state = ? AND kind = ?",
+                         (PENDING, store, REFUSED, REPLICATE))
             conn.execute("INSERT INTO media_replica_demands(store, requested_at, scanned_at) VALUES (?, ?, NULL) "
                          "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, scanned_at = NULL",
                          (store, now))
@@ -942,8 +950,8 @@ def scan(vault: Path, store: str) -> int:
 
     def flush() -> None:
         with closing(ledger._connect()) as conn, conn:
-            conn.executemany("INSERT INTO media_replica_queue(store, binary_rel, state) VALUES (?, ?, 'pending') "
-                             "ON CONFLICT(store, binary_rel) DO NOTHING", batch)
+            conn.executemany("INSERT INTO media_replica_queue(store, binary_rel, state, token) "
+                             "VALUES (?, ?, 'pending', random()) ON CONFLICT(store, binary_rel) DO NOTHING", batch)
         batch.clear()
 
     for snapshot in foreground_priority.yielding(media_store.bound_originals(
@@ -963,7 +971,7 @@ def scan(vault: Path, store: str) -> int:
 def _pick(paused: set[str]) -> str:
     """The query for the next pending original outside the paused stores: `(state, store, binary_rel)` order, no sort."""
     skipped = f" AND store NOT IN ({', '.join('?' for _ in paused)})" if paused else ""
-    return ("SELECT store, binary_rel, attempts, kind FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
+    return ("SELECT store, binary_rel, attempts, kind, token FROM media_replica_queue WHERE state = ? AND retry_at <= ?"
             + skipped + " ORDER BY store, binary_rel LIMIT 1")
 
 
@@ -1014,8 +1022,9 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
             else:
                 with closing(ledger._connect()) as conn, conn:
                     conn.execute("UPDATE media_replica_queue SET attempts = ?, code = ?, retry_at = ? "
-                                 "WHERE store = ? AND binary_rel = ?",
-                                 (attempts, code, time.time() + _RETRY_SECONDS * attempts, row["store"], row["binary_rel"]))
+                                 "WHERE store = ? AND binary_rel = ? AND token = ?",
+                                 (attempts, code, time.time() + _RETRY_SECONDS * attempts, row["store"], row["binary_rel"],
+                                  row["token"]))
             if code == "MEDIA_STORE_UNAVAILABLE":
                 paused.add(row["store"])  # A store that failed mid-copy fails the same way for the next original.
         else:
@@ -1030,14 +1039,15 @@ def _settle_done(ledger: MediaJobStore, row: sqlite3.Row) -> None:
         _settle(ledger, row, DONE, None)
         return
     with closing(ledger._connect()) as conn, conn:
-        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
-                     (row["store"], row["binary_rel"], RECOPY))
+        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND token = ?",
+                     (row["store"], row["binary_rel"], row["token"]))
 
 
 def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | None, *, attempts: int | None = None) -> None:
     with closing(ledger._connect()) as conn, conn:
         conn.execute("UPDATE media_replica_queue SET state = ?, code = ?, attempts = COALESCE(?, attempts) "
-                     "WHERE store = ? AND binary_rel = ?", (state, code, attempts, row["store"], row["binary_rel"]))
+                     "WHERE store = ? AND binary_rel = ? AND token = ?",
+                     (state, code, attempts, row["store"], row["binary_rel"], row["token"]))
 
 
 _observed: dict[Path, float] = {}
@@ -1045,7 +1055,7 @@ _checked: dict[Path, float] = {}  # when each vault last ran a check round
 
 
 def work(vault: Path, *, deadline: float | None = None) -> bool:
-    """One bounded unit of background work: a rebuild, a scan, a drain or a check round; True when it did something."""
+    """One bounded unit of background work: a rebuild, a scan, or a drain and the check round that is due; True when it did something."""
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True:
@@ -1062,12 +1072,13 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
     if waiting:
         scan(vault, waiting[0])
         return True
-    if drain(vault, deadline=deadline) > 0:
-        return True
+    settled = drain(vault, deadline=deadline)
+    # Verification does not wait for an empty queue: a backlog of copies would otherwise hold every check and sample
+    # back for as long as it lasts, with replicas overdue. A round costs one bounded drain and one bounded check.
     if time.monotonic() - _checked.get(vault, -_CHECK_INTERVAL) < _CHECK_INTERVAL:
-        return False
+        return settled > 0
     _checked[vault] = time.monotonic()
-    return check(vault) + sample(vault) > 0
+    return settled + check(vault) + sample(vault) > 0
 
 
 # --- scheduled checks --------------------------------------------------------------------------------
