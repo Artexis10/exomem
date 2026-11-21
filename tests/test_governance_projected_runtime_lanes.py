@@ -901,6 +901,42 @@ def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(m
     assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
 
 
+@pytest.mark.parametrize("ambiguous", [False, True], ids=["empty-first-part", "ambiguous-first-part"])
+def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, ambiguous):
+    path = "Knowledge Base/Sources/gate.md"
+    turn = "[00:19] Leave the gate open until the truck arrives."
+    opening = "" if ambiguous else turn + "\n\n"
+    extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else ""
+    policy = Policy(fingerprint="f" * 64)
+    item = catalog_publication.catalog_item(
+        vault_root=tmp_path, path=path,
+        source=(
+            "---\ntitle: Gate log\ntype: source\nextraction_parts: 2\n---\n\n"
+            f"{opening}## Extracted text\n\n{extracted}"
+        ),
+        policy=policy,
+        target_key=projections.ProjectionNamespaceKey(policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1),
+        pending={
+            extraction_parts.part_path(Path(path), 2).as_posix():
+                "---\npart_of: gate.md\n---\n\n## Extracted text\n\n[00:50] The meeting closed.\n",
+        },
+    )
+    (source,) = item.variants
+    assert source.head is None
+    runtime = _runtime((item,), vectors=(_vector(source, (1.0, 0.0)),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts is None and hit.passage is None
+    assert result.incomplete_source_passages is ambiguous
+
+
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):
     registry = lifecycle_statuses.registry_path(tmp_path)
     registry.parent.mkdir(parents=True)

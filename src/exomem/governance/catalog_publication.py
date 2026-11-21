@@ -526,17 +526,15 @@ def catalog_item(
         head = preserve.extracted_text(source) if parts else ""
         fields = search_fields(parsed)
         if transcript_passages.is_source(path):
-            text = head or transcript_passages.source_text(parsed.body)
             multipart = extraction_parts.count_of(parsed.frontmatter) > 1
-            # A split can leave only one timed turn in the first extraction part.
-            if len(transcript_passages.timed_lines(text)) >= (1 if multipart else 2):
+            text = transcript_passages.source_text(parsed.body, multipart=multipart)
+            coverage = projected_retrieval.timed_source_coverage(text, multipart=multipart)
+            if coverage is not None:
                 if parsed.frontmatter.get("source_identity") is not None:
                     # The existing Source eraser cannot account for this bank.
                     fields["source_erasure"] = "managed"
                 else:
-                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = (
-                        projected_retrieval.TIMED_SOURCE_HEAD if multipart else "true"
-                    )
+                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = coverage
                     head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(

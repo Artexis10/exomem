@@ -258,20 +258,31 @@ def _passage_in(
     )
 
 
+def timed_source_coverage(text: str, *, multipart: bool) -> str | None:
+    """Classify timed text at the Source's declared extraction boundary."""
+    # A split can leave only one timed turn in the first extraction part.
+    if len(transcript_passages.timed_lines(text)) < (1 if multipart else 2):
+        return None
+    return TIMED_SOURCE_HEAD if multipart else "true"
+
+
+def _admitted_transcript(variant: projections.ProjectionVariant) -> bool:
+    # Members have an independent live authorization check at search time.
+    return (
+        variant.decision_level == 6 and TIMED_SOURCE_FIELD in variant.search_fields
+        and not variant.search_fields.get("parent_media")
+        and variant.search_fields.get("source_erasure") != "managed"
+        and transcript_passages.is_source(variant.item_identity)
+    )
+
+
 def transcript_samples(
     variant: projections.ProjectionVariant, *, limit: int = MAX_PROJECTED_TRANSCRIPT_SAMPLES,
 ) -> tuple[tuple[int, transcript_passages.TranscriptMatch], ...]:
     """Return timed turns whose offsets map into the released first extraction part."""
     from ..find_parts import MAX_PASSAGE_CHARS, _stored_position
 
-    # Members have an independent live authorization check at search time.
-    if (
-        variant.decision_level != 6 or TIMED_SOURCE_FIELD not in variant.search_fields
-        or variant.search_fields.get("parent_media")
-        or variant.search_fields.get("source_erasure") == "managed"
-        or not transcript_passages.is_source(variant.item_identity)
-        or variant.head is None
-    ):
+    if not _admitted_transcript(variant) or variant.head is None:
         return ()
     # Other parts use a shared catalog budget. Sampling them would expose its occupancy.
     head = variant.head
@@ -953,17 +964,19 @@ class ProjectedVectorIndex:
     ) -> tuple[ProjectedLexicalHit | None, bool]:
         """Verify and score the bank of one already admitted, competitive Source."""
         candidates = transcript_samples(variant, limit=MAX_PROJECTED_TRANSCRIPT_SAMPLES + 1)
+        multipart = variant.search_fields.get(TIMED_SOURCE_FIELD) == TIMED_SOURCE_HEAD
         if not candidates:
-            return None, False
+            # A released first part can contain timed text but lack a unique stored position.
+            if variant.head is not None or not _admitted_transcript(variant):
+                return None, False
+            text = transcript_passages.source_text(variant.search_fields["body"], multipart=multipart)
+            return None, timed_source_coverage(text, multipart=multipart) is not None
         digest = self._transcripts.get(variant.projection_variant_id)
         if digest is None:
             raise transcript_banks.TranscriptBankUnavailable("projected transcript measurements are missing")
         import numpy as np
 
-        partial = (
-            variant.search_fields[TIMED_SOURCE_FIELD] == TIMED_SOURCE_HEAD
-            or len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
-        )
+        partial = multipart or len(candidates) > MAX_PROJECTED_TRANSCRIPT_SAMPLES
         candidates = candidates[:MAX_PROJECTED_TRANSCRIPT_SAMPLES]
         query = np.asarray(query_vector, dtype=np.float32)
         matrix = transcript_banks.load(root, self.namespace_key, digest, candidates, len(query))
