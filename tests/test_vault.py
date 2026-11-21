@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from exomem import held_fs, vault
+from exomem import access, held_fs, vault
 
 
 def test_wikilink_resolver_from_entries_matches_disk_resolution(tmp_path: Path) -> None:
@@ -702,6 +702,42 @@ def test_batch_completion_guard_hash_work_is_independent_of_write_count(
     )
 
     assert reads == 2
+
+
+def test_batch_access_admission_per_write_is_independent_of_write_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write is admitted before staging, before the first flip and before its own flip.
+
+    Readmitting every pending write at every flip made a 40-frame scene commit hold the
+    vault boundary for seconds, growing with the square of its frame count.
+    """
+    real_reason = access.writable_reason
+    admissions: dict[str, int] = {}
+
+    def count_admission(vault_root: Path, rel_path: str) -> str | None:
+        admissions[rel_path] = admissions.get(rel_path, 0) + 1
+        return real_reason(vault_root, rel_path)
+
+    monkeypatch.setattr(access, "writable_reason", count_admission)
+
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                tmp_path / "Evidence" / f"frame-{index}.md",
+                f"frame {index}",
+                create_only=True,
+                expected_hash=vault.MISSING_CONTENT_HASH,
+            )
+            for index in range(40)
+        ],
+        vault_root=tmp_path,
+    )
+
+    frames = {path: count for path, count in admissions.items() if path.startswith("Evidence/frame-")}
+    assert len(frames) == 40
+    assert max(frames.values()) <= 3
 
 
 @pytest.mark.parametrize("revoke_during_publication", [False, True])

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import scene_frames
+from exomem import memory_refs, move_file, scene_frames
 from exomem import vault as vault_module
 from exomem.embeddings import Scene
 from exomem.governance import catalog_publication, companions, projected_retrieval
@@ -276,6 +276,38 @@ def test_rewrite_clears_stale_frames(vault: Path) -> None:
     assert len(list(d.glob("scene-*.jpg"))) == 1
     assert len(list(d.glob("scene-*.jpg.md"))) == 1
     assert scene_frames.parse_frame_ts(next(d.glob("scene-*.jpg")).name) == 40.0
+
+
+def test_a_frame_pair_moved_after_preparation_keeps_its_old_names_free(vault: Path) -> None:
+    """A move that lands while frames are prepared outside the hold must still reserve its old path.
+
+    Otherwise the re-extracted frame takes that path, and with it the moved page's old links.
+    """
+    video = _video(vault)
+    scenes = [(_scene(t), _FakeImg()) for t in (5.0, 15.0)]
+    (moved_jpg, moved_sidecar), (kept_jpg, kept_sidecar) = scene_frames.write_scene_frames(vault, video, scenes)
+    memory_refs.ReferenceIndex(vault).rebuild_all()
+    prepared = scene_frames.prepare_scene_frames(vault, video, scenes)
+    assert prepared is not None
+    destination = vault / "Knowledge Base/Evidence/Test/kept"
+    destination.mkdir(parents=True)
+
+    move_file.move_file(
+        vault,
+        old_path=moved_sidecar.relative_to(vault).as_posix(),
+        new_path=(destination / moved_sidecar.name).relative_to(vault).as_posix(),
+        update_wikilinks=False,
+    )
+    try:
+        written, _handoff = scene_frames.commit_scene_frames(prepared)
+    finally:
+        prepared.close()
+
+    assert (destination / moved_sidecar.name).is_file()
+    assert not moved_sidecar.exists()
+    assert not moved_jpg.exists()
+    assert written == [(kept_jpg, kept_sidecar)]
+    assert kept_sidecar.is_file()
 
 
 def test_failed_save_skips_frame_without_raising(vault: Path) -> None:
