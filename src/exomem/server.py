@@ -626,12 +626,12 @@ class CallTraceMiddleware(Middleware):
             ledger_args = _extract_tool_args(context.message)
             check = None
             if self.vault_root is not None and tool_name == "manage_memory_file":
-                from .file_watcher import observing_inbound_recovery_stop
-                from .reclassify_source import is_preview_call
+                from .governance.principal import effective_principal
+                from .reclassify_source import is_preview_call, managed_preview_stop
 
                 budget = request_budget.current()
                 if (budget is not None and is_preview_call(tool_name, ledger_args)
-                        and observing_inbound_recovery_stop(self.vault_root) is not None):
+                        and managed_preview_stop(self.vault_root, effective_principal()) is not None):
                     check = request_budget.ReadCheckpoint(budget)
             try:
                 try:

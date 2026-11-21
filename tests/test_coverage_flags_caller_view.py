@@ -131,41 +131,37 @@ def test_a_withheld_write_leaves_the_restricted_inbound_field_as_it_was(served: 
     assert _links(served, restricted=True) == before
 
 
-@pytest.mark.parametrize("evidence_referrer", [False, True])
-def test_a_withheld_referrer_does_not_delay_reclassification_preview(
-    served: Path, monkeypatch: pytest.MonkeyPatch, evidence_referrer: bool,
+def test_restricted_preview_keeps_its_baseline_when_a_withheld_path_shadows_a_link(
+    served: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from uuid import uuid4
 
     from exomem import file_watcher, writer_lease
-    from exomem.cli_ops import OpError
 
-    stop = threading.Event()
-    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     source = "Knowledge Base/Sources/Other/coverage-source.md"
-    _write_as_the_service_does(served, source, f"---\nsource_type: other\nexomem_id: {uuid4()}\n---\n\n# Source\n")
-    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n")
+    shadow = source.removeprefix("Knowledge Base/")
+    write_scope(served, paths=shadow)
+    scope = served / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    with scope.open("a", encoding="utf-8") as file:
+        file.write(f'exclude:\n  paths: ["{source}"]\n')
     evidence = "Knowledge Base/Evidence/field-log.md"
-    if evidence_referrer:
-        _write_as_the_service_does(served, evidence, f"# Field log\n\n[[{source.removesuffix('.md')}]]\n")
+    _write_as_the_service_does(served, source, f"---\nsource_type: other\nexomem_id: {uuid4()}\n---\n\n# Source\n")
+    _write_as_the_service_does(served, evidence, f"# Field log\n\n[[{shadow.removesuffix('.md')}]]\n")
     assert vault_module.prime_inbound_index(served, eager=True)
-    assert find_module.shared_resolver(served) is not None
-    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
-    _write_as_the_service_does(served, HIDDEN, f"# Hidden\n\n[[{source}]]\n\nNew context.\n")
+    find_module.shared_resolver(served)
 
-    with request_scope(owner_principal(surface="mcp")), pytest.raises(OpError) as cold:
-        commands.op_propose_reclassification(served, path=source, source_kind="dataset-export")
-    assert cold.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
-
+    # The shadow changes pointer matching while staying outside the caller's view.
+    _write_as_the_service_does(served, shadow, f"---\nexomem_id: {uuid4()}\n---\n\n# Another source\n")
     command = next(item for item in commands.PRODUCT_COMMANDS if item.name == "manage_memory_file")
-    checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=30))
-    with request_scope(replace(_external(), administrative_ingress=True)), request_budget.checking(checkpoint):
-        preview = writer_lease.invoke_command(
-            command, served, operation="propose-reclassification", path=source, source_kind="dataset-export",
-        )
-    assert preview["references"] == int(evidence_referrer)
-    assert preview["referrers"]["pointer_repointed"] == ([evidence] if evidence_referrer else [])
-    assert preview["preview_digest"]
+    call = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
+    with request_scope(replace(_external(), administrative_ingress=True)):
+        stop = threading.Event()
+        monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+        observed = writer_lease.invoke_command(command, served, **call)
+        monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: None)
+        baseline = writer_lease.invoke_command(command, served, **call)
+    assert baseline["refusals"] and "preview_digest" not in baseline
+    assert observed == baseline
 
 
 def test_a_withheld_write_leaves_the_restricted_pack_complete(served: Path) -> None:

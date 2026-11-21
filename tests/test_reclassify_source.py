@@ -160,7 +160,9 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
-@pytest.mark.parametrize("fault", ["release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link"])
+@pytest.mark.parametrize("fault", [
+    "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link", "catalogue-candidates",
+])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
     from fastmcp import Client
@@ -188,15 +190,23 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
     )
     (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
     link = f"[[{source.removesuffix('.md')}]]"
-    original_reference = f"See `{source}`." if fault == "catalogue-link" else link
+    original_reference = {
+        "catalogue-link": f"See `{source}`.",
+        "catalogue-candidates": "The field log identifies the samples.",
+    }.get(fault, link)
     (vault / referrer).write_text(f"# Field log\n\n{original_reference}\n", encoding="utf-8")
     freshness.seed(vault, "vault", (
         (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
     ))
     assert vault_module.prime_inbound_index(vault, eager=True)
-    if fault == "catalogue-link":
+    if fault in ("catalogue-link", "catalogue-candidates"):
+        freshness.seed(vault, "kb", (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault / KB)
+        ))
         lexstore.ensure_fresh(vault)
-        assert referrer in path_mentions.find_pages(vault, [source]).pages
+        lookup = path_mentions.find_pages(vault, [source])
+        assert lookup.complete
+        assert lookup.pages == ((referrer,) if fault == "catalogue-link" else ())
         find.shared_resolver(vault)
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
@@ -228,6 +238,19 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             return plan(*args, **kwargs)
 
         monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
+    elif fault == "catalogue-candidates":
+        find_pages = path_mentions.find_pages
+
+        def publish_prose_edit_after_lookup(*args, **kwargs):
+            lookup = find_pages(*args, **kwargs)
+            assert lookup.complete and not lookup.pages
+            page = vault / referrer
+            page.write_text(f"See `{source}`.\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[page])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[referrer], deleted_rels=[])
+            return lookup
+
+        monkeypatch.setattr(path_mentions, "find_pages", publish_prose_edit_after_lookup)
 
     async def exercise() -> None:
         async with Client(mcp, timeout=5) as client:

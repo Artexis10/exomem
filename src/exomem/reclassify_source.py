@@ -41,10 +41,13 @@ from typing import Any, Literal
 from . import (
     file_watcher,
     foreground_priority,
+    freshness,
+    lexstore,
     originals,
     page_lineage,
     path_mentions,
     pointer_write,
+    recall_policy,
     record_formats,
     request_budget,
     semantic_writes,
@@ -56,6 +59,7 @@ from . import (
 from . import move_file as move_file_module
 from .cli_ops import OpError
 from .governance import egress
+from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
@@ -609,12 +613,10 @@ def propose(
     value that would be refused is refused here rather than after the user has
     approved it. The report names only pages the caller may see.
     """
-    from .governance.principal import effective_principal
-
     vault_root = Path(vault_root)
-    surface = effective_principal().surface
-    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
-    owner = file_watcher.observing_inbound_recovery_stop(vault_root) if surface in ("mcp", "rest") else None
+    who = effective_principal()
+    surface = who.surface
+    owner = managed_preview_stop(vault_root, who)
     check = request_budget.current_checkpoint()
     served = surface == "rest" or (surface == "mcp" and request_budget.current() is not None)
     if served and (owner is None) != (check is None):
@@ -624,14 +626,11 @@ def propose(
         return _propose(vault_root, path, source_kind=source_kind, domain=domain)
 
     try:
-        with (
-            foreground_priority.cancellable(owner),
-            egress.proven_withheld_scope(reuse=True),
-        ):
+        with foreground_priority.cancellable(owner):
             foreground_priority.check_cancelled()
             result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner)
             foreground_priority.check_cancelled()
-            if file_watcher.observing_inbound_recovery_stop(vault_root) is not owner:
+            if managed_preview_stop(vault_root, who) is not owner:
                 raise preview_warming()
             return result
     except foreground_priority.BulkCancelled:
@@ -711,6 +710,7 @@ def _propose(
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
+    generation = _preview_generation(vault_root) if owner is not None else None
     inbound = (
         _visible_inbound(vault_root, rel) if owner is None
         else _managed_preview_inbound(vault_root, rel, owner)
@@ -727,7 +727,10 @@ def _propose(
             source_guard.recheck(vault_root)
         except PathGuardError:
             raise preview_warming() from None
-        if _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound:
+        if (
+            _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound
+            or _preview_generation(vault_root) != generation
+        ):
             raise preview_warming()
     return ReclassifyProposal(
         path=rel,
@@ -761,6 +764,26 @@ _PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
 def is_preview_call(command: str, arguments: Mapping[str, object]) -> bool:
     """Select the read-only preview operation from the command schema."""
     return command == "manage_memory_file" and arguments.get("operation") == _PREVIEW_CALL["operation"]
+
+
+def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | None:
+    """A live managed observer can prove the unrestricted owner's preview."""
+    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
+    if who.surface not in ("mcp", "rest"):
+        return None
+    stop = file_watcher.observing_inbound_recovery_stop(vault_root)
+    return stop if stop is not None and egress.unrestricted_content_access(vault_root, who) else None
+
+
+def _preview_generation(vault_root: Path) -> tuple:
+    """Bind both the literal inbound index and the projected prose candidates."""
+    return (
+        freshness.consumer_checkpoint_instance(),
+        freshness.generation(vault_root, "vault"),
+        freshness.recall_generation(vault_root, "kb"),
+        recall_policy.recall_policy_identity(vault_root),
+        freshness.external_pending_epoch(vault_root),
+    )
 
 
 @dataclass(frozen=True)
@@ -803,8 +826,7 @@ def _managed_preview_inbound(
 ) -> list[InboundLink]:
     from . import find
 
-    reader = egress.reader_view(vault_root)
-    inbound = vault.cached_inbound_wikilinks(vault_root, rel, visible=reader, read_hashes=read_hashes)
+    inbound = vault.cached_inbound_wikilinks(vault_root, rel, read_hashes=read_hashes)
     if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
             return inbound
@@ -853,7 +875,7 @@ def _referrer_outcome(
     def borrow_resolver() -> vault.WikilinkResolver:
         from .find import borrow_query_resolver
 
-        resolver = borrow_query_resolver(vault_root, visible=egress.reader_view(vault_root))
+        resolver = borrow_query_resolver(vault_root)
         if resolver is None:
             raise preview_warming()
         return resolver
@@ -862,11 +884,17 @@ def _referrer_outcome(
     writable_page = connector_boundary.effect_admission(vault_root)
     paired = move_file_module.paired_move(vault_root, rel, destination) if relocating else None
     visible = egress.visible_page_filter(vault_root)
-    lookup = (
-        path_mentions.find_pages(vault_root, [rel, *([paired[0]] if paired else [])])
-        if relocating
-        else None
-    )
+    lookup = None
+    if relocating:
+        targets = [rel, *([paired[0]] if paired else [])]
+        if read_hashes is None:
+            lookup = path_mentions.find_pages(vault_root, targets)
+        elif (checkpoint := freshness.live_recall_checkpoint(vault_root, "kb")) is not None:
+            with lexstore.admitted_catalog_scope(vault_root):
+                lexstore.bind_admitted_catalog(vault_root, {"kb": checkpoint})
+                lookup = path_mentions.find_pages(vault_root, targets)
+        else:
+            lookup = path_mentions.Lookup((), False)
     named_in = [
         page
         for page in (lookup.pages if lookup is not None else ())
