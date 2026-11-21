@@ -14,6 +14,7 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_embeddings import catch_up, encoder  # noqa: F401
 from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_read_write import put, stored, writer  # noqa: F401
+from test_vault_store_write_cost import grow
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import commands, embeddings, find_corpus, memory_refs, schema, semantic_contract
@@ -173,18 +174,18 @@ def test_bound_store_passages_read_only_the_selected_sources(
 def test_store_revision_retires_borrowed_metadata_without_a_markdown_event(
     served, writer, bound_store_search
 ):
-    """A store commit must retire stale declaration metadata even with no file projection."""
-    from test_vault_store_migration import ALPHA
+    """A store commit must retire stale declaration metadata even with no file projection.
 
+    A commit that names more pages than the corpus advance carries (``_PAGE_DELTA_LIMIT``) leaves the
+    resident corpus at the earlier revision, so the borrowed metadata must be refused until a rebuild.
+    """
     saved = commands.op_capture_source(
         served, schema.load_source_schema(served), title="Revision reference", source_kind="session",
         passages=[{"key": "record", "text": "The lantern burns oil."}],
     )
     catch_up(served)
     semantic_contract.warm_corpus_context(served)
-    with read.snapshot(served) as snapshot:
-        previous = snapshot.page(ALPHA).body
-    write.commit(writer, put(ALPHA, previous + b"\nAn unrelated stored edit.\n"))
+    grow(writer, 1, semantic_contract._PAGE_DELTA_LIMIT + 1)
     assert not (served / saved["source"]["path"]).exists()
     call, encoder = bound_store_search
     before = len(encoder.texts)
@@ -194,3 +195,34 @@ def test_store_revision_retires_borrowed_metadata_without_a_markdown_event(
     semantic_contract.warm_corpus_context(served)
     ready = call(query="lantern", result_level="passage")
     assert [hit["passage_key"] for hit in ready["hits"]] == ["record"], ready
+
+
+def test_a_store_commit_moves_the_published_declarations_by_the_pages_it_names(
+    served, writer, bound_store_search
+):
+    """Defect that this guards: a published corpus that a commit leaves behind (the passage index is refused
+    after a commit of an unrelated page), or that a commit moves forward without the pages that it names (a
+    source captured after the warm-up is missing from the declarations). With no Markdown file, the index keeps
+    serving after an unrelated commit, and a source captured by a commit is searchable at once."""
+    from test_vault_store_migration import ALPHA
+
+    commands.op_capture_source(
+        served, schema.load_source_schema(served), title="Revision reference", source_kind="session",
+        passages=[{"key": "record", "text": "The lantern burns oil."}],
+    )
+    catch_up(served)
+    semantic_contract.warm_corpus_context(served)
+    call, _encoder = bound_store_search
+    with read.snapshot(served) as snapshot:
+        unrelated = snapshot.page(ALPHA).body
+    write.commit(writer, put(ALPHA, unrelated + b"\nAn unrelated stored edit.\n"))
+    after_unrelated = call(query="lantern", result_level="passage")
+    assert [hit["passage_key"] for hit in after_unrelated["hits"]] == ["record"], after_unrelated
+    later = commands.op_capture_source(
+        served, schema.load_source_schema(served), title="Later reference", source_kind="session",
+        passages=[{"key": "second", "text": "The keeper trims the wick."}],
+    )
+    catch_up(served)
+    assert not (served / later["source"]["path"]).exists()
+    after_capture = call(query="wick", result_level="passage")
+    assert "second" in [hit["passage_key"] for hit in after_capture.get("hits", [])], after_capture

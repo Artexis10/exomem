@@ -712,6 +712,10 @@ def _argument_adapter(command: Command, name: str) -> TypeAdapter:
     return TypeAdapter(_published_annotations(command)[name])
 
 
+#: The most argument problems one refusal lists.
+_MAX_TYPE_ERRORS = 8
+
+
 def _type_errors(
     command: Command, values: Mapping[str, typing.Any], *, skip: str, strict: bool
 ) -> list[str]:
@@ -724,9 +728,13 @@ def _type_errors(
         try:
             _argument_adapter(command, name).validate_python(value, strict=strict)
         except ValidationError as error:
-            first = error.errors(include_url=False)[0]
-            where = ".".join(str(part) for part in (name, *first["loc"]))
-            wrong.append(f"{where}: {first['msg']}")
+            problems = error.errors(include_url=False)
+            # Every missing field at once, so one retry supplies them all. "missing" is pydantic's documented
+            # error type; other problems keep only the first, since a union reports one per member it tried.
+            shown = [problems[0], *(problem for problem in problems[1:] if problem["type"] == "missing")]
+            for problem in shown[:_MAX_TYPE_ERRORS]:
+                where = ".".join(str(part) for part in (name, *problem["loc"]))
+                wrong.append(f"{where}: {problem['msg']}")
     return wrong
 
 

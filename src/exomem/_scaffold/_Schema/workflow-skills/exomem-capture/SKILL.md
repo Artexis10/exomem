@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 551fcc2db1f20e48a6faf497749a0c773dc61cd8e2311d46021bb20148b539e2
+  skill_contract: f8504ae159df49178608580bd8ffe6b694053e2818d6fee2be7e427bb2275cdd
   version: "0.1.0"
 ---
 
@@ -25,8 +25,9 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
-read-only. Before a compiled write: reuse current relevant search/read results,
+moves and pointer corrections. Vault content outside the managed Knowledge Base is
+read-only; ordinary workspace files are not the vault, so write them with your own
+file tools. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -77,9 +78,11 @@ is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
 uniquely resolved Entity; otherwise write one concise compiled observation. Use
 Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative events stay quiet. Durable interpretations retain explicit
-attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
+collection. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Durable
+interpretations retain explicit attribution and uncertainty rather than becoming
+established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
@@ -90,7 +93,13 @@ Before choosing a destination, partition the exchange into independently reusabl
 objects by retrieval question, subject/domain, temporal episode, and epistemic
 role. Reuse current relevant recall and resolve each meaningful cluster against
 canonical homes. The open note has no priority; keep details within one coherent
-scope together. Preserve durable hypotheses as attributed, uncertain claims.
+scope together. Save each claim at its true strength, never more certain, more general
+or more settled than its source made it. A held view, interpretation or working hypothesis
+the evidence does not settle is saved attributed to whoever holds it, with its uncertainty,
+never as fact; a remark made in passing is not a held view. A person's unsure report that
+later work could use is saved as unsure and attributed, never as an event, fact or baseline.
+Also save a question the work leaves open (as an open question, including whether something
+happened) and settled values (in full, not file pointers). No write mentions what stays unwritten.
 Perform one completeness/destination review for the whole write plan, not a new
 review after every write. During development, repository/specification artifacts
 carry transient progress; capture reusable decisions and verified milestones.

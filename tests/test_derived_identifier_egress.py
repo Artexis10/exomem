@@ -1441,7 +1441,12 @@ def test_a_withheld_raw_file_reads_as_absent_to_the_pointer_audit_and_repair(
 
     stale = f"{KB}/Sources/Other/secret.json"
     base = {_OPEN_CARD: _page("Open Card", "Raw text.", type="source", data_file=stale)}
-    withheld = {_WITHHELD_BYTES: '{"withheld": true}'}
+    withheld = {
+        _WITHHELD_BYTES: '{"withheld": true}',
+        f"{KB}/Sources/Withheld/hidden-card.md": _page(
+            "Hidden Card", "Raw text.", type="source", data_file=stale,
+        ),
+    }
     vaults = {
         "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope=_WRITE_SCOPE),
         "A": _materialize(

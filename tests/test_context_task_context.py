@@ -50,7 +50,7 @@ def test_task_discovery_does_not_require_an_anchor(vault: Path, monkeypatch: pyt
     assert projected["applicability"] == "read_required"
     assert projected["read_ref"] == method
     assert projected["source_version"]
-    assert packet["anchors"] == []
+    assert "anchors" not in packet
     token = working_set_runtime.decode_continuity(packet["continuity"])
     assert token["refs"] == []
     assert {item["source_ref"] for item in token["method_versions"]} == {method}
@@ -1065,7 +1065,7 @@ def test_a_routed_collection_serves_its_declared_plain_page_as_a_read_required_m
 ) -> None:
     """The owner's method page reaches the turn that routes to the collection, though the turn never names it."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
-    _declare_capture_method(vault, "[[Stocktake recording method]]")
+    _declare_capture_method(vault, f'[[{STOCKTAKE_METHOD.removesuffix(".md")}]]')
     _write(vault, STOCKTAKE_METHOD, STOCKTAKE_PAGE)
     _built(vault).close()
     lexstore.ensure_fresh(vault)

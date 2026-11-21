@@ -8,7 +8,7 @@ arm's own writer, sends one user turn to Claude Code in print mode (or to the Op
 - ``called_any``: the session called at least one of the named Exomem tools;
 - ``judge``: a blind model fills the case's JSON schema from the user turn and the answer, and every
   ``require`` field must match. ``include_sources`` adds the Sources the session saved (title, kind, url,
-  document form and identity check state); ``include_rows`` adds the Records rows the session committed
+  document form, identity check state and whether a correction superseded it); ``include_rows`` adds the Records rows the session committed
   (with ``collection_row``); ``reference`` states what the case's files really are.
 - ``source_saved``, ``source_count``, ``current_source``, ``compiled_with_backlinks``: the vault's Sources
   and the pages citing them, read by the arm's own code (``arm_side.py sources``), matched to the case's
@@ -512,6 +512,9 @@ def session_sources(facts: dict, before: list[str]) -> list[dict]:
         check = frontmatter.get("identity_check")
         if isinstance(check, dict) and check.get("state"):
             shown["identity_check_state"] = check["state"]
+        # A person sees a corrected Source as superseded (search names its successor), so the judge does too.
+        if row.get("corrected"):
+            shown["superseded_by_a_correction"] = True
         saved.append(shown)
     return saved
 

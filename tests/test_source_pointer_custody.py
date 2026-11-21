@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from exomem import audit as audit_module
-from exomem import capabilities, lexstore, originals
+from exomem import capabilities, lexstore, originals, request_budget
 
 KB = "Knowledge Base"
 SOURCES = f"{KB}/Sources"
@@ -54,6 +54,29 @@ def test_a_pointer_to_a_moved_file_names_the_one_same_named_candidate(vault: Pat
         "problem": "missing",
         "candidate_path": f"{SOURCES}/Other/Media/tides.json",
     }
+
+
+def test_pointer_audit_keeps_its_budget_for_source_and_evidence_cards(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    note = _write(vault, f"{KB}/Notes/unrelated.md", b"An unrelated note.\n")
+    stale = f"data_file: {SOURCES}/Old/surveys.json\n"
+    source = _card(vault, f"{SOURCES}/survey.md", stale)
+    evidence = _card(vault, f"{KB}/Evidence/survey.md", stale)
+
+    parse = audit_module.find_module._parse_page
+    budget = request_budget.RequestBudget(seconds=request_budget.MCP_REQUEST_BUDGET_SECONDS)
+
+    def expire_on_note(path, *args, **kwargs):
+        if path == vault / note:
+            request_budget.current().deadline = 0
+        return parse(path, *args, **kwargs)
+
+    monkeypatch.setattr(audit_module.find_module, "_parse_page", expire_on_note)
+    report = audit_module.audit(vault, categories=["source_pointer_drift"], budget=budget)
+
+    assert {finding.path for finding in report.findings} == {source, evidence}
+    assert report.metadata["coverage"]["complete"] is True
 
 
 def test_two_same_named_files_propose_no_candidate(vault: Path) -> None:

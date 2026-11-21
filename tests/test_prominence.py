@@ -405,9 +405,10 @@ def test_effective_capture_applies_authored_posture_under_the_active_level(
 # the projection-parity pin below is the structural guard, this one names the
 # doctrines a rewrite has already dropped once.
 _BASE_CARRIER_REVISION = "fdc9ab4d"
+# The first `balanced` pin holds the open-question clause of capture-held-views-open-questions-and-values, not base text.
 _BASE_CAPTURE_SENTENCES = {
     "balanced": (
-        "Not mid-thought exploration, tangents, or unresolved questions.",
+        "Not mid-thought exploration or tangents; a question the work leaves open is saved as an open question.",
         "Route stated intent to Planning and observed outcome to Records.",
         "Transition only on explicit user intent",
     ),

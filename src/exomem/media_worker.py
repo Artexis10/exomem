@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -78,7 +78,7 @@ from .media_jobs import (
     MediaJob as _Job,
 )
 from .media_worker_child import _reap_group
-from .ocr_facts import OcrFacts
+from .ocr_facts import OcrFacts, engine_with_ocr_text
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -762,15 +762,16 @@ class MediaWorker:
         earlier embed (transcript+speaker signals only) remains valid.
         """
         try:
-            with get_manager().mutation_guard(
-                self._vault_root,
-                operation="background_media_reembed_commit",
-                holder_kind="background",
-            ):
-                if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                    return
-                index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
-            log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
+            # A re-embed changes no canonical byte, so it takes no vault boundary: encoding
+            # runs with none held, and the embedding store's own write transaction
+            # re-checks the sidecar's signature, admission and policy identity.
+            if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
+                return
+            outcome = index_sync.refresh_embeddings(self._vault_root, [job.sidecar_path])
+            log.info(
+                "re-embed of %s (post-frame-OCR segmentation): %s (%s)",
+                job.sidecar_path.name, outcome.outcome, outcome.code,
+            )
         except OpError as exc:
             if exc.code in _TRANSIENT_OPERATION_CODES:
                 raise
@@ -1447,15 +1448,15 @@ class MediaWorker:
         if self._store is not None:
             payload: dict[str, object] = {
                 "text": text,
-                "engine": engine,
+                "engine": engine_with_ocr_text(engine, ocr),
                 "speakers": speakers or [],
                 "speaker_verification": speaker_verification or "unavailable",
             }
             if asr is not None and asr.reported:
                 payload["asr"] = asr.as_payload()
             if ocr is not None:
-                payload["ocr"] = OcrFacts(
-                    ocr.confidence, preserve._cap_low_confidence_text(ocr.low_confidence_text)
+                payload["ocr"] = replace(
+                    ocr, low_confidence_text=preserve._cap_low_confidence_text(ocr.low_confidence_text)
                 ).as_payload()
             if capture is not None:
                 payload["capture"] = capture.as_payload()
@@ -1741,13 +1742,17 @@ class MediaWorker:
             publication_intents_out=publication_intents,
         )
         assert isinstance(handoff, DeferredGraphCompletion)
+        return handoff, self._publish_epoch_in_hold(handoff)
+
+    def _publish_epoch_in_hold(self, handoff: DeferredGraphCompletion) -> bool:
+        """Publish a committed batch's graph epoch inside the hold that committed it; True once published."""
         if handoff.checkpoint is None:
-            return handoff, True  # a store-mode commit carries its graph rows; no epoch is owed
+            return True  # a store-mode commit carries its graph rows; no epoch is owed
         try:
-            return handoff, self._publish_deferred_epoch(handoff)
+            return self._publish_deferred_epoch(handoff)
         except Exception:  # noqa: BLE001 - the pages are committed; the completion recovers the epoch
             log.warning("media graph epoch not published inside the commit hold", exc_info=True)
-            return handoff, False
+            return False
 
     def _publish_deferred_epoch(self, token: DeferredGraphCompletion) -> bool:
         """Write the batch's graph floor and checkpoint; the caller holds the vault boundary.
@@ -1933,10 +1938,11 @@ class MediaWorker:
             return
         # The CLIP commit writes only the CLIP index, which no semantic input or canonical
         # page reads, so it must not advance the commit generation and stale the stamps of
-        # concurrent writes. Scene frames take their own mutation_guard when they persist.
+        # concurrent writes. Scene frames take their own mutation_guard, after this one is released.
         clip_guard = get_manager().projection_guard(
             self._vault_root, operation="background_media_clip_commit"
         )
+        persist_scene_frames = False
         with clip_guard:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
                 return
@@ -1955,17 +1961,20 @@ class MediaWorker:
             if is_video:
                 self._clip_index.upsert_frames(rel, frames, mtime)
                 log.info("CLIP-indexed %s (%d keyframes)", job.binary_path.name, len(frames))
-                if scene_pairs:
-                    assert parent_clip_samples is not None
-                    self._persist_scene_frames(
-                        job,
-                        scene_pairs,
-                        parent_clip_samples=parent_clip_samples,
-                        expected_binary=expected_binary,
-                    )
+                persist_scene_frames = bool(scene_pairs)
             else:
                 self._clip_index.upsert(rel, vec, mtime)
                 log.info("CLIP-indexed %s", job.binary_path.name)
+        if persist_scene_frames:
+            # The frames take their own hold once the projection guard is released: encoding them
+            # runs with no boundary held, and only the commit of their files holds it.
+            assert parent_clip_samples is not None and scene_pairs is not None
+            self._persist_scene_frames(
+                job,
+                scene_pairs,
+                parent_clip_samples=parent_clip_samples,
+                expected_binary=expected_binary,
+            )
 
     def _persist_scene_frames(
         self,
@@ -1982,34 +1991,81 @@ class MediaWorker:
         OCR jobs go through the normal queue (`do_clip=False` — frame children never
         get their own ClipIndex rows; the parent video's vectors own visual search).
         """
-        def persist():
+        def result_holds() -> bool:
             if not self._is_recall_admitted_media_sidecar(job.sidecar_path):
-                return None
+                return False
             if expected_binary is not None and self._identity(job) != expected_binary:
                 log.warning(
                     "scene-frame result stale for %s; changed media was not persisted",
                     job.binary_path.name,
                 )
+                return False
+            return True
+
+        # Encoding the JPEGs and rendering their sidecars needs no vault state, so it runs before
+        # the boundary is taken; the hold below only publishes the prepared files.
+        if not result_holds():
+            return
+        try:
+            prepared = scene_frames.prepare_scene_frames(
+                self._vault_root,
+                job.binary_path,
+                pairs,
+                parent_clip_samples=parent_clip_samples,
+            )
+        except Exception:  # noqa: BLE001 — persistence is strictly additive
+            log.exception("scene frame persistence failed for %s", job.binary_path.name)
+            return
+        if prepared is None:
+            return
+        publication_intents: list[object] = []
+
+        def commit():
+            if not result_holds():
                 return None
+            # Dropped here as well as in the commit, so no receipt names a frame that a moved page reserves.
+            prepared.drop_reserved()
+            # A full-index receipt per frame sidecar is durable before the files exist, so a crash
+            # between the commit and the fan-out leaves the replay that finishes it.
+            receipts = deferred_index.add_full_receipts(
+                self._vault_root,
+                [
+                    sidecar.relative_to(self._vault_root).as_posix()
+                    for _jpg, sidecar in prepared.written
+                ],
+            )
             try:
-                return scene_frames.write_scene_frames(
-                    self._vault_root,
-                    job.binary_path,
-                    pairs,
-                    parent_clip_samples=parent_clip_samples,
+                frames, handoff = scene_frames.commit_scene_frames(
+                    prepared, deferred=True, publication_intents_out=publication_intents
                 )
             except Exception:  # noqa: BLE001 — persistence is strictly additive
+                # The receipts stay: a refusal after the frames were published leaves them to the replay.
                 log.exception("scene frame persistence failed for %s", job.binary_path.name)
                 return None
+            if handoff is None or not frames:
+                deferred_index.clear_full_receipts(self._vault_root, receipts)
+                return None
+            return frames, handoff, receipts, self._publish_epoch_in_hold(handoff)
 
-        written = self._holding_boundary("background_media_scene_frame_commit", persist)
-        if written is _BUSY:
+        try:
+            committed = self._holding_boundary("background_media_scene_frame_commit", commit)
+        finally:
+            prepared.close()
+        if committed is _BUSY:
             log.info(
                 "scene frames for %s skipped: the vault boundary stayed busy", job.binary_path.name
             )
             return
-        if written is None:
+        if committed is None:
             return
+        written, handoff, receipts, epoch_published = committed
+        # The frames are committed. Their index fan-out runs with no boundary held.
+        self._complete_deferred_graph_completion(
+            handoff,
+            receipts,
+            publication_intents=publication_intents,
+            epoch_published=epoch_published,
+        )
         for jpg, sidecar in written:
             self.enqueue(
                 binary_path=jpg,

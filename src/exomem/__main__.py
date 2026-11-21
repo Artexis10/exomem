@@ -2512,16 +2512,17 @@ def _store_mode_main(argv: list[str]) -> int:
         prog="exomem store-mode",
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
-            "collection store and back. Behind the vault-store-v1 release gate; vault files are "
-            "never rewritten by a migration. `relayout --plan` reads the vault and writes nothing."
+            "collection store and back. File mode is the default. The explicit migrate command "
+            "enables store mode without rewriting vault files. "
+            "`relayout --plan` reads the vault and writes nothing."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     status = subcommands.add_parser("status", help="report the mode and, in store mode, the store's counts")
     migrate = subcommands.add_parser(
         "migrate",
-        help="stage the store from the files, prove it equals what the files derive, then install it; "
-        "run apply with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+        help="stage, verify and install the store. Run --apply with the service stopped "
+        "and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
     )
     migrate_step = migrate.add_mutually_exclusive_group(required=True)
     migrate_step.add_argument("--dry-run", action="store_true", help="run the read-only preflight; writes nothing")

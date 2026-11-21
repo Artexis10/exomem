@@ -72,7 +72,8 @@ Concurrent readers SHALL NOT exclude one another from borrowing a proved immutab
 Publisher activity SHALL NOT prevent borrowing while that generation's configuration and full publication checkpoint remain proved.
 The outcome SHALL name the existing publication or warm-up action that can make the request ready, and SHALL promise a retry only when publication can progress.
 When the cell cannot admit a passage request's model work at once, it SHALL refuse with a busy outcome and a retry hint.
-The request SHALL NOT wait for an admission slot. Admitted requests MAY await the existing serialized model execution turn within their bounded admission capacity.
+The request SHALL NOT wait for an admission slot. Admitted requests MAY await a serialized model execution turn within their bounded admission capacity.
+When the served encoder runs inferences concurrently, a passage request's query encode SHALL wait only for other passage requests' query encodes, not for the passage inferences of a capture or a background drain.
 
 #### Scenario: Page reads do not grow with the vault
 
@@ -114,6 +115,12 @@ The request SHALL NOT wait for an admission slot. Admitted requests MAY await th
 - **WHEN** a passage request arrives while the cell's model admission is full
 - **THEN** the request is refused at once with a busy outcome and a retry hint
 
+#### Scenario: A capture encodes its passages
+
+- **WHEN** a capture encodes its Source's passages on a served encoder that runs inferences concurrently
+- **AND** a passage request is admitted during that encode
+- **THEN** the request encodes its query without waiting for the capture's passage inferences
+
 #### Scenario: Two passages of one Source both rank
 
 - **WHEN** two declared passages of one Source are the two most similar passages to a query
@@ -141,8 +148,13 @@ A passage result SHALL NOT contain passage text.
 
 ### Requirement: A passage result is bound to the current page
 
-The passage path SHALL derive a result's passage and span from the Source's current bytes.
-It SHALL withhold a selected chunk whose stored text differs from the text of that chunk derived from the current page.
+The passage path SHALL derive a result's passage and span from the Source's current bytes: the bytes that the published corpus proof holds current.
+It MAY reuse a Source's selected chunks that an earlier request verified, while the published corpus records the same page hash and the eligible-set proof under which they were read still holds.
+That proof SHALL name the recall checkpoint, the catalogue identity and the retirement generation, so that a watched edit or a Source erasure ends the reuse.
+It SHALL NOT reuse chunks cut from bytes whose hash differs from the hash that the published corpus records for the page.
+It SHALL withhold every selected chunk of a Source whose bytes, read for a request, do not hash to the hash that the published corpus records for the page.
+A Source edit that no file event reports does not move the proof, so until the proof moves a request MAY answer that Source at its published bytes.
+It SHALL withhold a selected chunk whose stored text differs from the text of that chunk derived from the current bytes.
 It SHALL withhold every chunk of a Source whose passage count, number of keys and number of passages in its body are not all equal.
 The reply SHALL state the number of withheld chunks.
 
@@ -151,6 +163,18 @@ The reply SHALL state the number of withheld chunks.
 - **WHEN** a selected chunk's stored text does not equal the chunk derived from its Source's current bytes
 - **THEN** that chunk is not returned
 - **AND** the reply counts one withheld chunk
+
+#### Scenario: A page read at unpublished bytes is withheld
+
+- **WHEN** a passage request reads a selected Source page whose bytes do not hash to the hash that the published corpus records for it
+- **THEN** none of that Source's selected chunks are returned
+- **AND** the reply counts each of them as withheld
+
+#### Scenario: A repeated selection reuses verified chunks until the page changes
+
+- **WHEN** a passage request selects a Source whose chunks an earlier request verified, and the published page hash and the proof are unchanged
+- **THEN** the request answers from those chunks without reading the Source page again
+- **AND** after the Source is edited and republished, the next request reads the page again and withholds the chunk whose stored text no longer matches
 
 ### Requirement: Eligibility applies before passage ranking
 
@@ -227,6 +251,7 @@ A Source captured without declared passages SHALL keep its title in its embedded
 When the caller of a passage request leaves before the reply, the cell SHALL stop that request at its next phase boundary and release its admission capacity.
 The phase boundaries SHALL be the points before eligibility, query encoding, chunk selection and byte verification.
 A stopped request SHALL NOT start a later phase.
+Under the `service-v1` resource policy, a request that waits for its model execution turn SHALL leave that wait when its caller leaves, and SHALL stop before it encodes the query.
 The cell SHALL log each stopped request with the phase it stopped before.
 A request without a serving host, such as a command-line request, SHALL run to completion.
 
@@ -240,3 +265,10 @@ A request without a serving host, such as a command-line request, SHALL run to c
 
 - **WHEN** a passage request runs from the command line
 - **THEN** the request runs every phase to completion
+
+#### Scenario: The caller leaves while the request waits for its model turn
+
+- **GIVEN** the cell runs the `service-v1` resource policy
+- **WHEN** a caller abandons a passage request while the request waits for a model execution turn that another encode holds
+- **THEN** the request leaves the wait and stops before it encodes the query
+- **AND** its admission capacity is free while the other encode still runs

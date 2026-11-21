@@ -987,6 +987,11 @@ class CreationPreflight:
     profile_source_hash: str | None = None
     #: Whether the page is a profile, so its preview says when its proof may be used.
     profile: bool = False
+    #: `corpus` with `semantic_state` added, as the structural evaluation judged it. Retained so no
+    #: later step of the save derives it again.
+    after_corpus: semantic_contract.SemanticCorpusContext | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @property
     def draft_hash(self) -> str | None:
@@ -2179,6 +2184,7 @@ def _preflight_existing(
             registry=corpus_registry,
             language_registry=corpus_language,
             status_basis=status_basis,
+            writer_preflight=True,
         )
     resolver_freshness_after = freshness.triple(root, "vault")
     resolver_freshness = (
@@ -5214,6 +5220,7 @@ def _evaluate_structural(
     source: str,
     operation: str,
     status_basis: lifecycle_statuses.Basis | None = None,
+    writer_preflight: bool = False,
 ) -> tuple[
     semantic_contract.SemanticContractResult,
     semantic_contract.SemanticPageState,
@@ -5237,7 +5244,7 @@ def _evaluate_structural(
     source = _place_origin_source(destination, source)
     contracts = memory_schema.load_saved_contracts(root)
     before, before_census = semantic_contract.build_corpus_context_with_census(
-        root, status_basis=status_basis
+        root, status_basis=status_basis, writer_preflight=writer_preflight
     )
     candidate, source = _structural_candidate(
         root, destination, source, before=before, status_basis=status_basis
@@ -5396,7 +5403,12 @@ def _preflight_creation(
     started = time.perf_counter()
     try:
         result, state, corpus_census, before_corpus, source, after_corpus = _evaluate_structural(
-            root, destination=path, source=source, operation=operation, status_basis=status_basis
+            root,
+            destination=path,
+            source=source,
+            operation=operation,
+            status_basis=status_basis,
+            writer_preflight=True,
         )
     finally:
         measured["structural_ms"] = round((time.perf_counter() - started) * 1000.0)
@@ -5416,6 +5428,7 @@ def _preflight_creation(
                 requested_disposition=relation_disposition,
                 predecessor_path=predecessor_path,
                 predecessor_content_hash=predecessor_content_hash,
+                structural=(before_corpus, state, after_corpus),
             )
         finally:
             measured["relation_review_ms"] = round((time.perf_counter() - started) * 1000.0)
@@ -5490,6 +5503,7 @@ def _preflight_creation(
             ),
             draft_bound=draft_bound,
             profile=_is_profile(root, state.page_type),
+            after_corpus=after_corpus,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural"
@@ -5536,6 +5550,7 @@ def _preflight_creation(
         review_fields=relation_review.check_review_fields(supplied_review_fields, False),
         profile_source_hash=vault.content_hash(source) if profile else None,
         profile=profile,
+        after_corpus=after_corpus,
     )
 
 

@@ -85,7 +85,7 @@
               },
               "no_source_or_title_describes_the_thesis_summary": {
                 "type": "boolean",
-                "description": "True if no Source was saved, or if the saved Source's title describes the doctoral thesis summary rather than the 2015 article. False if a saved Source is titled as the 2015 article."
+                "description": "True if no Source was saved, or if every saved Source that no correction superseded is titled as the doctoral thesis summary rather than the 2015 article. False if such a Source is titled as the 2015 article."
               },
               "reason": {
                 "type": "string"
@@ -101,6 +101,59 @@
           "require": {
             "presents_pdf_as_the_2015_article": false,
             "no_source_or_title_describes_the_thesis_summary": true
+          },
+          "include_sources": true,
+          "reference": "repository-hit.pdf is the summary of a 2019 doctoral thesis by Ines Okparaeke. It prints no DOI. Its second page discusses and cites the 2015 article by Valdoren and Quillfeather (\"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112). The PDF is not that article."
+        }
+      }
+    },
+    {
+      "id": "mislabelled-source-corrected",
+      "about": "A Source already holds a doctoral thesis summary saved as the article the thesis cites, with that article's DOI as its url. When the person asks for the record to be put right, no current Source of the file may keep that DOI.",
+      "transport": "http",
+      "files": [
+        "repository-hit.pdf"
+      ],
+      "seed_sources": [
+        {
+          "file": "repository-hit.pdf",
+          "title": "Valdoren and Quillfeather 2015, Seasonal switching of subglacial drainage routes",
+          "source_kind": "article",
+          "url": "https://doi.org/10.5555/glx.2015.0112"
+        }
+      ],
+      "prompt": "A while ago I saved repository-hit.pdf in my sources as Valdoren and Quillfeather's 2015 article \"Seasonal switching of subglacial drainage routes\". A colleague says that file isn't the article at all. Can you check what it really is and put the record right?",
+      "pass": {
+        "current_source": {
+          "file": "repository-hit.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "10.5555/glx.2015.0112"
+            }
+          ]
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_source_titled_as_the_2015_article": {
+                "type": "boolean",
+                "description": "True if a saved Source that no correction superseded is titled as Valdoren and Quillfeather's 2015 article rather than as the doctoral thesis summary."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_source_titled_as_the_2015_article",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_source_titled_as_the_2015_article": false
           },
           "include_sources": true,
           "reference": "repository-hit.pdf is the summary of a 2019 doctoral thesis by Ines Okparaeke. It prints no DOI. Its second page discusses and cites the 2015 article by Valdoren and Quillfeather (\"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112). The PDF is not that article."
@@ -148,7 +201,7 @@
             "properties": {
               "labelled_as_abstract_or_citation_record": {
                 "type": "boolean",
-                "description": "True if a saved Source is labelled, by its title, its source kind or its document form, as an abstract or a citation record. False if every saved Source is labelled as the full article, or none was saved."
+                "description": "True if a saved Source that no correction superseded is labelled, by its title, its source kind or its document form, as an abstract or a citation record. False if every such Source is labelled as the full article, or none was saved."
               },
               "reason": {
                 "type": "string"

@@ -1640,6 +1640,79 @@ def _dispatch_watcher_lexical_only(
     ]
 
 
+def refresh_embeddings(
+    vault_root: Path,
+    semantic_paths: list[Path],
+    *,
+    defer_semantic: bool = False,
+    replayed: bool = False,
+    semantic_edited: bool = True,
+) -> IndexComponentOutcome:
+    """Bring the embedding rows of admitted markdown pages current and report how it went.
+
+    This is the embedding arm of `upsert_after_write`, callable on its own by work that
+    changed no canonical byte (a background re-embed). It encodes outside every vault
+    boundary and publishes through the embedding store's own write transaction, which
+    re-checks each page's file signature, recall admission and policy identity and
+    publishes nothing when one moved. A service profile or a deferring mode queues the
+    work durably instead; an attempt that did not complete leaves a durable receipt.
+    """
+    from . import mode
+
+    if mode.service_profile_enabled():
+        from . import semantic_drain
+
+        try:
+            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+                return IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled")
+            # A replay queues only paths whose publication is not current. An
+            # already-published path is done, as in the legacy deferring arm
+            # below, so only queued work may be reported as deferred.
+            queued = semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
+            return IndexComponentOutcome("embeddings", "deferred" if queued else "accepted", "deferred_durable" if queued else "no_eligible_paths")
+        except Exception:  # noqa: BLE001 - other projections retain their outcomes
+            log.warning("service semantic handoff failed", exc_info=True)
+            return IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed")
+    if defer_semantic or mode.defer_expensive_indexes():
+        try:
+            # The durable-defer arm had no span at all, so a write that took the
+            # cheap path looked, in the ledger, like a write that did nothing:
+            # `index.embeddings` is recorded only on the direct arm below. This
+            # is a store write that re-enters the mutation boundary, and it is
+            # exactly the kind of step the 0.84.1 read could not see.
+            with call_spans.span(
+                "derived.deferred_index_store", {"paths": len(semantic_paths)}
+            ):
+                semantic_count, added = _record_deferred_semantic_upserts(
+                    vault_root,
+                    semantic_paths,
+                    omit_proven_current=defer_semantic,
+                )
+        except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
+            log.warning("durable semantic defer failed", exc_info=True)
+            return IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed")
+        if added:
+            log.info("deferred semantic indexing for %d markdown file(s)", added)
+        if semantic_count:
+            return IndexComponentOutcome("embeddings", "deferred", "deferred_durable")
+        return IndexComponentOutcome("embeddings", "accepted", "no_eligible_paths")
+    from . import embeddings
+
+    try:
+        with call_spans.span("index.embeddings", {"paths": len(semantic_paths)}):
+            status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
+        component = _embedding_component(status)
+    except Exception:  # noqa: BLE001 - derived index must not fail a writer
+        log.warning("embeddings index dispatch failed", exc_info=True)
+        return IndexComponentOutcome("embeddings", "degraded", "dispatch_failed")
+    if status.status != "completed" and status.code != "deferred_warmup":
+        try:
+            _record_deferred_semantic_upserts(vault_root, semantic_paths)
+        except Exception:  # noqa: BLE001 - report remains the primary outcome
+            log.warning("durable semantic retry recording failed", exc_info=True)
+    return component
+
+
 def _dispatch_upsert_components(
     vault_root: Path,
     identity_paths: list[Path],
@@ -1654,7 +1727,7 @@ def _dispatch_upsert_components(
     replayed: bool = False,
     semantic_edited: bool = True,
 ) -> list[IndexComponentOutcome]:
-    from . import epistemic_graph, find, lexstore, memory_refs, mode
+    from . import epistemic_graph, find, lexstore, memory_refs
 
     components = [
         _legacy_component(
@@ -1728,69 +1801,15 @@ def _dispatch_upsert_components(
         if semantic_paths
         else IndexComponentOutcome("epistemic_graph", "not_required", "no_graph_input")
     )
-    if mode.service_profile_enabled():
-        from . import semantic_drain
-
-        try:
-            if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-                components.append(IndexComponentOutcome("embeddings", "accepted", "embeddings_disabled"))
-            else:
-                # A replay queues only paths whose publication is not current. An
-                # already-published path is done, as in the legacy deferring arm
-                # below, so only queued work may be reported as deferred.
-                queued = semantic_drain.request(vault_root, semantic_paths, edited=semantic_edited and not replayed)
-                components.append(IndexComponentOutcome("embeddings", "deferred" if queued else "accepted", "deferred_durable" if queued else "no_eligible_paths"))
-        except Exception:  # noqa: BLE001 - other projections retain their outcomes
-            log.warning("service semantic handoff failed", exc_info=True)
-            components.append(IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed"))
-    elif defer_semantic or mode.defer_expensive_indexes():
-        try:
-            # The durable-defer arm had no span at all, so a write that took the
-            # cheap path looked, in the ledger, like a write that did nothing:
-            # `index.embeddings` is recorded only on the direct arm below. This
-            # is a store write that re-enters the mutation boundary, and it is
-            # exactly the kind of step the 0.84.1 read could not see.
-            with call_spans.span(
-                "derived.deferred_index_store", {"paths": len(semantic_paths)}
-            ):
-                semantic_count, added = _record_deferred_semantic_upserts(
-                    vault_root,
-                    semantic_paths,
-                    omit_proven_current=defer_semantic,
-                )
-        except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
-            log.warning("durable semantic defer failed", exc_info=True)
-            components.append(
-                IndexComponentOutcome("embeddings", "degraded", "durable_defer_failed")
-            )
-        else:
-            if added:
-                log.info("deferred semantic indexing for %d markdown file(s)", added)
-            if semantic_count:
-                components.append(
-                    IndexComponentOutcome("embeddings", "deferred", "deferred_durable")
-                )
-            else:
-                components.append(
-                    IndexComponentOutcome("embeddings", "accepted", "no_eligible_paths")
-                )
-    else:
-        from . import embeddings
-
-        try:
-            with call_spans.span("index.embeddings", {"paths": len(semantic_paths)}):
-                status = embeddings.upsert_after_write_status(vault_root, semantic_paths)
-            component = _embedding_component(status)
-        except Exception:  # noqa: BLE001 - derived index must not fail a writer
-            log.warning("embeddings index dispatch failed", exc_info=True)
-            components.append(IndexComponentOutcome("embeddings", "degraded", "dispatch_failed"))
-        else:
-            components.append(component)
-            if status.status != "completed" and status.code != "deferred_warmup":
-                try:
-                    _record_deferred_semantic_upserts(vault_root, semantic_paths)
-                except Exception:  # noqa: BLE001 - report remains the primary outcome
-                    log.warning("durable semantic retry recording failed", exc_info=True)
+    components.append(
+        refresh_embeddings(
+            vault_root,
+            semantic_paths,
+            defer_semantic=defer_semantic,
+            replayed=replayed,
+            semantic_edited=semantic_edited,
+        )
+    )
     return components
 
 

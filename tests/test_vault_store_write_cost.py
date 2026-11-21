@@ -26,12 +26,13 @@ from test_vault_store_migration import ALPHA, BETA, vault  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
 
 from exomem import commands, entity_recurrence, semantic_contract
-from exomem.collection_store import connection
+from exomem import vault as vault_module
+from exomem.collection_store import connection, runtime
 from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import egress, policy, receipts
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import rederive, write
+from exomem.vault_store import read, rederive, write
 
 stored, writer, served = read_write.stored, read_write.writer, write_path.served
 
@@ -207,6 +208,9 @@ def test_a_store_writes_decisions_do_not_grow_with_the_pages_under_one_policy_lo
     flat, and the corpus admission boundary, which no receipt is emitted from, records none.
     """
     grow(writer, 1, 24, on_disk=served)
+    # Migration leaves a retired runtime weakly registered until cyclic GC runs. This fixture
+    # binds a private writer, so measure with no serving runtime at either size.
+    runtime._SERVING.pop(served, None)
     # The first write of a process loads what the later writes reuse.
     edit(served, create(served, "Warm-up"))
     counts = Counts(monkeypatch, writer)
@@ -304,3 +308,205 @@ def test_a_writes_emitted_receipt_is_the_one_it_emitted_before_sets_took_the_cla
         served, monkeypatch, owner_principal(surface="library"),
         ["Knowledge Base/Notes/Note 2.md", "Knowledge Base/Notes/Note 3.md", "Knowledge Base/Entities/People/Person 4.md", ALPHA],
     )
+
+
+class SaveCounts:
+    """The per-page work that a save may not do: enriching a page, deriving a whole corpus, walking the vault for
+    the corpus census, building a link resolver (``resolver_builds`` counts every one, ``large_resolvers`` those
+    built from more than ``LARGE`` entries, the whole-corpus ones: a resolver over a page or two is as cheap as a
+    dict), and parsing frontmatter or reading a stored body for a page that the save did not change."""
+
+    LARGE = 64
+    NAMES = (
+        "enrichments", "whole_derives", "census_walks", "resolver_builds", "large_resolvers",
+        "frontmatter_parses", "body_reads", "disk_listings", "index_listings",
+    )
+
+    def __init__(self, monkeypatch):
+        self.seen = Counter()
+        for name, owner, attribute in (
+            ("enrichments", semantic_contract, "enrich_page_state"),
+            ("whole_derives", semantic_contract, "_context_from_state_map"),
+            ("census_walks", semantic_contract, "_corpus_census"),
+            ("disk_listings", semantic_contract, "_disk_page_census"),
+            ("resolver_builds", vault_module.WikilinkResolver, "__init__"),
+            ("frontmatter_parses", vault_module, "parse_frontmatter"),
+        ):
+            function = getattr(owner, attribute)
+
+            def counting(*args, _name=name, _function=function, **kwargs):
+                self.seen[_name] += 1
+                return _function(*args, **kwargs)
+
+            monkeypatch.setattr(owner, attribute, counting)
+        page, bodies, sources = read.StoreSnapshot.page, read.StoreSnapshot.bodies, read.StoreSnapshot.page_sources
+
+        def counted_page(view, rel):
+            found = page(view, rel)
+            # A page that the store holds is a body read; a miss reads none.
+            self.seen["body_reads"] += found is not None
+            return found
+
+        def counted_bodies(view, rels):
+            found = bodies(view, rels)
+            self.seen["body_reads"] += len(found)
+            return found
+
+        def counted_sources(view):
+            for found in sources(view):
+                self.seen["body_reads"] += 1
+                yield found
+
+        monkeypatch.setattr(read.StoreSnapshot, "page", counted_page)
+        monkeypatch.setattr(read.StoreSnapshot, "bodies", counted_bodies)
+        monkeypatch.setattr(read.StoreSnapshot, "page_sources", counted_sources)
+        pages = read.StoreSnapshot.pages
+
+        def counted_pages(view, prefix=""):
+            # The index areas are fixed folder names in the navigation layout.
+            if prefix.rstrip("/").rsplit("/", 1)[-1] in {"Sources", "Notes", "Entities"}:
+                self.seen["index_listings"] += 1
+            return pages(view, prefix)
+
+        monkeypatch.setattr(read.StoreSnapshot, "pages", counted_pages)
+        from_entries = vault_module.WikilinkResolver.from_entries
+
+        def counted_from_entries(vault_root, entries):
+            entries = tuple(entries)
+            self.seen["large_resolvers"] += len(entries) > self.LARGE
+            return from_entries(vault_root, entries)
+
+        monkeypatch.setattr(vault_module.WikilinkResolver, "from_entries", staticmethod(counted_from_entries))
+
+    def take(self):
+        taken = {name: self.seen[name] for name in self.NAMES}
+        self.seen.clear()
+        return taken
+
+
+@pytest.mark.timeout(300)
+def test_a_store_writes_corpus_derivation_does_not_grow_with_the_pages(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: a save that enriches every page of the vault, or derives the whole corpus
+    again for the page it adds, costs seconds at 20,000 pages. A create and an edit by the owner are
+    measured at N and 2N pages, each page also a file, with a read by a restricted caller before each
+    save, under a policy whose selector reads frontmatter so that the caller cannot admit the vault's
+    type overlay as the owner can. Enrichments stay with the pages the save changes, and no whole
+    corpus is derived, whatever the page count and whoever read in between. A restricted caller that
+    overwrote the owner's enrichment would make every save after its read enrich every page. The corpus
+    cache is on, as in a served vault: the suite defaults it off.
+
+    The restricted caller's own read and a restricted caller's save are not measured. The resolvers that a
+    save builds over the whole vault are held at zero by the test after this one.
+    """
+    grow(writer, 1, 70, on_disk=served)
+    restrict_external(served, "tags: [secret]")
+
+    def restricted_read():
+        with request_scope(EXTERNAL):
+            semantic_contract.build_corpus_context_with_census(served)
+
+    edit(served, create(served, "Warm-up"))
+    counts = SaveCounts(monkeypatch)
+    measured = []
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            # The pages just committed are new to the corpus: the next save enriches them, and no more.
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        restricted_read()
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        restricted_read()
+        counts.take()
+        edit(served, path)
+        edited = counts.take()
+        measured.append((pages, created, edited))
+    (pages_n, create_n, edit_n), (pages_2n, create_2n, edit_2n) = measured
+    grown = pages_2n - pages_n
+    report = json.dumps(measured)
+    assert pages_n > counts.LARGE and grown >= 70, report
+    for at_n, at_2n in ((create_n, create_2n), (edit_n, edit_2n)):
+        # The pages a save changes are enriched; a page of the vault is not.
+        assert at_2n["enrichments"] - at_n["enrichments"] <= 2, report
+        # The page that a save adds or changes joins the corpus by the page delta, never a whole derivation.
+        assert at_n["whole_derives"] == at_2n["whole_derives"] == 0, report
+        # No resolver is built over the corpus's entries for a judged page, nor by the store commit.
+        assert at_n["large_resolvers"] == at_2n["large_resolvers"] == 0, report
+
+
+@pytest.mark.timeout(300)
+def test_a_store_save_after_a_save_walks_no_page_and_builds_no_resolver_over_the_vault(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """Defect that this guards: each store commit evicts the structural corpus, so the next save walks and
+    reconciles every page again and builds a resolver over every page, twice. A create and an edit by the
+    owner, after a save that warmed the corpus, are measured at N and 2N pages: the next save finds the corpus
+    resident (the store's revision and a listing of the files that the store does not own prove it), runs no
+    census of the vault's pages and builds no resolver over them, and the pages that it parses or reads from
+    the store are the ones that it changes, whatever the page count."""
+    grow(writer, 1, 70, on_disk=served)
+    edit(served, create(served, "Warm-up"))
+    counts = SaveCounts(monkeypatch)
+    measured = []
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            # A bulk commit leaves the corpus to the next save's walk; that save is not measured.
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        edit(served, path)
+        edited = counts.take()
+        measured.append((pages, created, edited))
+    (pages_n, create_n, edit_n), (pages_2n, create_2n, edit_2n) = measured
+    assert pages_n > SaveCounts.LARGE and pages_2n - pages_n >= 70, json.dumps(measured)
+    broken = []
+    for write_name, at_n, at_2n in (("create", create_n, create_2n), ("edit", edit_n, edit_2n)):
+        for name in ("census_walks", "resolver_builds", "large_resolvers"):
+            if at_n[name] or at_2n[name]:
+                broken.append((write_name, name, at_n[name], at_2n[name]))
+        # The pages that a save changes are parsed and read; a page of the vault is not.
+        for name in ("frontmatter_parses", "body_reads"):
+            if at_2n[name] - at_n[name] > 2:
+                broken.append((write_name, name, at_n[name], at_2n[name]))
+    assert not broken, f"(save, count, at N={pages_n} pages, at 2N={pages_2n}): {broken}"
+
+
+@pytest.mark.timeout(300)
+def test_warm_store_saves_share_the_disk_census_and_count_indexes_without_listing_pages(
+    served, writer, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """A warm save must not relist the disk for both preflight and link resolution, or
+    fetch every stored page's metadata just to count its folder in the index.
+    """
+    grow(writer, 1, 70, on_disk=served)
+    edit(served, create(served, "Warm-up"))
+    counts = SaveCounts(monkeypatch)
+    measured = {}
+    for title, more in (("First probe", 0), ("Second probe", 70)):
+        if more:
+            grow(writer, 1000, more, on_disk=served)
+            edit(served, create(served, "Catch-up"))
+        pages = page_count(served)
+        counts.take()
+        path = create(served, title)
+        created = counts.take()
+        edit(served, path)
+        measured[pages] = (created, counts.take())
+
+    pages_n, pages_2n = measured
+    assert pages_n > SaveCounts.LARGE and pages_2n - pages_n >= 70, measured
+    excessive = [
+        (pages, operation, name, save[name], limit)
+        for pages, saves in measured.items()
+        for operation, save, disk_limit in zip(("create", "edit"), saves, (2, 1), strict=True)
+        for name, limit in (("disk_listings", disk_limit), ("index_listings", 0))
+        if save[name] > limit
+    ]
+    assert not excessive, f"(pages, save, count, observed, limit): {excessive}"

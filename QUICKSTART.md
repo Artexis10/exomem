@@ -450,8 +450,8 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > comparison, interpretation, or decision value are clear. A uniquely resolved
 > Entity receives its facet; otherwise capture one concise compiled observation;
 > an observed measurement uses only compatible existing Records. Fleeting
-> preferences, one-off activity, incidental associations, trivial metrics, and
-> tentative claims get no note. A concise observation or narrow Entity facet follows
+> preferences, one-off activity, incidental associations, and trivial metrics
+> get no note. A concise observation or narrow Entity facet follows
 > `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 > accepting a queued relation requires `link_acceptance`; merge or substantial curation
 > requires confirmed `restructure_execution`.
@@ -595,6 +595,11 @@ Lower the `MIN_CHARS` values — those scripts pack more meaning per character, 
 the defaults (tuned for English) can under-fire. (These tunables were renamed from
 `KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
+By default the capture reminder blocks the stop, which costs one extra model turn. To
+deliver it on the session's next prompt instead, set `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn`
+or add `"capture_nudge_delivery": "next-turn"` to `~/.exomem/config.json`. The episode ask
+still blocks the stop, and any other value means `stop`.
+
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `search_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
@@ -705,7 +710,7 @@ inline example; paste it into the Claude app at **Settings → Profile → "What
 personal preferences should Claude consider in responses?"**:
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 Optionally paste this separate response-style block too (or trim it to taste):

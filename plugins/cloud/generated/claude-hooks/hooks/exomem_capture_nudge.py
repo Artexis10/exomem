@@ -16,7 +16,8 @@ shell command that commits, pushes, merges, tags or opens/merges a pull request
 or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
 did not fail. A command counts unless its output reports an explicit non-zero
 exit code (Claude: `is_error`); a Codex cell that returned while the command was
-still running carries no exit code and counts. Q&A, reading and CI-watching turns stay silent however long the reply.
+still running carries no exit code and counts. A turn is also a candidate when it creates a file with Claude's `Write`
+tool and its reply names that file (`_handed_over_file`). Q&A, reading and CI-watching turns stay silent however long the reply.
 Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
 those turns wrote anything. At "maximal" the older gate stays: the reply is
 substantial (>= a char threshold). Either way the KB must not already have been
@@ -35,6 +36,14 @@ Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_C
 it for a dense script like Japanese, which packs more meaning per char),
 EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
+
+Delivery. By default the per-turn capture reminder blocks the Stop, which forces one
+extra model turn. With `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` (or the config key
+`capture_nudge_delivery`; anything else means `stop`) the same reminder, after the same
+gates and cooldown, is left as a pending marker for the session instead, the Stop is not
+blocked, and the UserPromptSubmit hook (`exomem_retrieve_nudge.py`) adds the reminder to
+that session's next prompt, once, if it is under 6 hours old. The episode ask below
+blocks in both modes.
 
 Episode ask. Every K substantive turns (K and a cooldown by prominence,
 `_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
@@ -107,7 +116,7 @@ import sys
 import threading
 import time
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
 _KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
@@ -286,6 +295,29 @@ def _prominence() -> str:
     except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
         from_config = None
     return from_config or "balanced"
+
+
+#: The reminder's delivery modes. A closed pair this hook implements, so the setting is not a vocabulary.
+_DELIVERY_NEXT_TURN = "next-turn"
+
+
+def _delivery() -> str:
+    """How the per-turn capture reminder is delivered: `stop` (block the Stop) or `next-turn`.
+
+    `EXOMEM_CAPTURE_NUDGE_DELIVERY` env -> `capture_nudge_delivery` in the config file -> `stop`.
+    The first layer that sets a value decides, and any value but `next-turn` means `stop`, so a
+    typo keeps today's behaviour instead of silently changing it.
+    """
+    value = os.environ.get("EXOMEM_CAPTURE_NUDGE_DELIVERY")
+    if not value or not value.strip():
+        try:
+            data = json.loads(_config_path().read_text("utf-8"))
+            value = data.get("capture_nudge_delivery") if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
+            value = None
+    if isinstance(value, str) and value.strip().lower() == _DELIVERY_NEXT_TURN:
+        return _DELIVERY_NEXT_TURN
+    return "stop"
 
 
 def _hook_client() -> str:
@@ -741,6 +773,28 @@ def _successful_landing(tool: dict) -> bool:
     return any(_landing_command(command) for command in _tool_commands(tool))
 
 
+#: The file-creating tool of Claude, matched on the lowercased name. An edit of an existing file is not a
+#: hand-over: a reply that says "let me update app.py" names a file that holds working state.
+_FILE_WRITE_TOOLS = frozenset({"write"})
+
+
+def _handed_over_file(tools: list[dict], reply: str) -> bool:
+    """Whether the turn created a file that its reply names: a hand-over that no commit or push marks.
+
+    A reply that names the file it just wrote has delivered work to the user, as a landing does. The name
+    must stand as a whole token in the reply, so `a.md` does not match `data.md`.
+    """
+    for tool in tools:
+        if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
+            continue
+        tool_input = tool.get("input")
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        name = PureWindowsPath(path).name if isinstance(path, str) else ""
+        if name and re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-])", reply):
+            return True
+    return False
+
+
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
 #: hooks take effect for the CURRENT session, but the MCP server they reference
 #: is not loaded until the client restarts — so on a fresh install the very
@@ -1183,10 +1237,37 @@ def _touch(stamp: Path) -> None:
         pass
 
 
-def _log(text: str) -> None:
+def _pending_reminder_path(session_id: str) -> Path:
+    """Where next-turn delivery leaves the session's reminder, beside its cooldown stamps.
+
+    The name is a digest of the full `client\0session_id`, as the continuation token's is: a
+    sanitised or truncated id maps distinct sessions onto one file, and one session would then
+    take another's reminder. `exomem_retrieve_nudge.py` derives the same name itself, so a
+    prompt with nothing waiting loads no sibling script; `tests/test_capture_nudge_next_turn.py`
+    runs both hooks against one state home and checks that colliding ids stay apart.
+    """
+    digest = hashlib.sha256(
+        f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+
+
+def _defer_reminder(session_id: str) -> bool:
+    """Leave the reminder for the session's next prompt; False if the marker cannot be written."""
+    try:
+        _state_core().write_nudge_file(
+            _pending_reminder_path(session_id), str(time.time()).encode("utf-8")
+        )
+    except Exception:  # noqa: BLE001 — the caller blocks the stop instead
+        return False
+    return True
+
+
+def _log(text: str, outcome: str = "fired") -> None:
+    """One metadata row per nudge: `fired` (the Stop blocked), `deferred` or `delivered` (next-turn mode)."""
     try:
         logp = _hook_home() / "exomem-capture-nudge.log"
-        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired\n"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge {outcome}\n"
         _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 — logging must never break a stop hook
         pass
@@ -1196,6 +1277,16 @@ def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
         return "Skip if Exomem is not connected or cannot capture; read_instructions first if no contract.\n" + reason
     return reason
+
+
+def deferred_reminder() -> str:
+    """The reminder text the prompt hook adds for a deferred reminder, logged as delivered.
+
+    Public because `exomem_retrieve_nudge.py` loads this module for it: the wording and
+    its log row live here, once.
+    """
+    _log("", "delivered")
+    return _capture_reason(REMINDER_SHORT)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1280,14 +1371,19 @@ def main(argv: list[str] | None = None) -> int:
     if level == "maximal":  # the most aggressive level keeps the length gate
         if len(assistant_text.strip()) < min_chars:
             return 0
-    elif not any(_successful_landing(tool) for tool in tools):
-        return 0  # nothing landed: Q&A, reading and watching turns stay silent
+    elif not any(_successful_landing(tool) for tool in tools) and not _handed_over_file(tools, assistant_text):
+        return 0  # nothing landed or was handed over: Q&A, reading and watching turns stay silent
 
     ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 
     _touch(stamp)
+    # Next-turn delivery: the prompt hook adds the reminder to this session's next prompt. If the
+    # marker cannot be left, the reminder blocks the Stop as usual rather than vanish.
+    if _delivery() == _DELIVERY_NEXT_TURN and _defer_reminder(session_id):
+        _log(assistant_text, "deferred")
+        return 0
     _log(assistant_text)
     print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
     return 0

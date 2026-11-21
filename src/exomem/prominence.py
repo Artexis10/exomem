@@ -240,7 +240,39 @@ _BASELINE_CAPTURE = (
     "there, else one concise compiled observation; Records only for a compatible existing "
     "measurement. Before an affiliation facet, check the relation queue: a match the user "
     "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
-    "incidental associations, trivia, and tentative claims get no note."
+    "incidental associations and trivia get no note."
+)
+
+#: The one-sentence form of `_CAPTURE_RULES`, in the `say` text that every hook revision renders. A
+#: stepping stone saves more than a personal baseline: a held view, an open question, an unsure report and
+#: the values a task settled. Each is named as a stepping stone because a real-model probe saw sessions that
+#: ended on one, with nothing decided, save nothing. It names no excluded material: agents echoed a "not X"
+#: clause into their writes as a disclaimer that kept X. Short by budget: above `_CAPTURE_POLICY_MAX_CHARS`
+#: the hook keeps only the block's lead sentence, so a longer text here silences every capture rule.
+_EPISTEMIC_CAPTURE = (
+    "Held views, open questions, unsure reports and settled values are stepping stones: save each at its "
+    "true strength, attributed; values in full. A write never mentions what goes unsaved."
+)
+
+#: The key the full capture rule travels under in the activation `capture_policy` block.
+CAPTURE_RULES_KEY = "rules"
+
+#: The full capture rule, served under its own key. It did not fit the hook's per-turn cap on `say`
+#: (`_CAPTURE_POLICY_MAX_CHARS`), and a hook installed before this key existed renders `say` alone and
+#: ignores every other key, so `say` keeps the one-sentence form above. MCP-only clients, which have no
+#: hook, receive the whole block. The rule is one principle (a claim is never saved stronger than its
+#: source made it) and the classes that follow from it. It is not a vocabulary: each class names a
+#: kind of claim the agent judges, never a word the server matches.
+_CAPTURE_RULES = (
+    "Save what a later session will need, at its true strength: never write a claim more certain, more "
+    "general or more settled than its source made it. A held view, interpretation or working hypothesis "
+    "that the evidence does not settle is saved attributed to whoever holds it, with its uncertainty; a "
+    "remark made in passing is not a held view. A person's unsure report that later work could use is "
+    "saved as unsure and attributed, with its doubt, never as fact or as a baseline. A question the work "
+    "leaves open is saved as open, including whether something happened at all. Values a task settled, "
+    "such as times, prices, terms, contacts and limits, are saved in full, never as a pointer to a working "
+    "file. Trivia and one-offs get no note, because nothing later needs them. A write never mentions what "
+    "stays unwritten."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
@@ -450,7 +482,7 @@ CONTRACTS: dict[str, ProminenceContract] = {
             + "Capture at a stepping stone: a durable conclusion, central or recurring "
             "entity with reusable facts, or method that was carried out with a reported "
             "result. Not "
-            "mid-thought exploration, tangents, or unresolved questions. "
+            "mid-thought exploration or tangents; a question the work leaves open is saved as an open question. "
             + _CORRECTION_CAPTURE
             + " "
             + _BASELINE_CAPTURE
@@ -812,6 +844,8 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     Branches only on the closed `proactive_capture` range. Under `off` the block is the meaning
     alone: no class list and no second disposition, so a quiet vault is not handed doctrine it may
     not act on. The routes are the constants bootstrap serves, so the two carriers cannot drift.
+    Every other block carries `say`, the text every hook renders, and `rules`, the full capture rule
+    that a hook built for it renders after `say` and an MCP-only client reads from the dict.
     `link_acceptance` is required: the queue route is only right for the vault's own setting,
     never a default.
     """
@@ -824,7 +858,8 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     return {
         "disposition": disposition,
         "link_acceptance": link_acceptance,
-        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
+        "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_EPISTEMIC_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
+        CAPTURE_RULES_KEY: _CAPTURE_RULES,
     }
 
 

@@ -77,7 +77,7 @@ def _activate(vault: Path, turn: str, **kwargs) -> dict:
 
 
 def _titles(packet: dict) -> list[str]:
-    return [anchor["title"] for anchor in packet["anchors"]]
+    return [anchor["title"] for anchor in packet.get("anchors", ())]
 
 
 # --------------------------------------------------------------------------- #

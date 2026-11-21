@@ -33,7 +33,7 @@ provenance ref that produced it, whole items only under
 `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 6,000) with trailing items dropped
 rather than one cut in half. The stance and skills blocks have their own bounds
 beside that ceiling, and each renders whole once a session. The recorded positions
-block has its own bound too, and renders on each turn that carries it. An `ambiguous` abstention is the one abstention it
+block has its own bound too, renders on each turn that carries it, and leads the rest. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -97,6 +97,11 @@ to additionally allow the slower CLI transport when REST isn't configured or
 fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT /
 KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
 EXOMEM_* names at startup.
+
+Deferred capture reminder. When the Stop hook runs with
+`EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` it leaves the per-turn capture reminder for the
+session instead of blocking. This hook adds that reminder to the session's next prompt once,
+whatever its own gates decided, and drops one older than 6 hours (see `exomem_capture_nudge.py`).
 
 Contract (Claude Code / Codex UserPromptSubmit hook): read the event JSON on
 stdin (incl. `prompt`); on exit 0, print
@@ -204,10 +209,17 @@ _WORKING_SET_MAX_CHARS = 6000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in at most 1,320
-# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
-# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+# The server sends its live capture policy at most once per session or policy change. Its `say` text
+# renders in at most this many characters, above the longest the server sends today, so later server growth
+# within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
+# spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
+# text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
+# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus 1
+# (the separator) plus the rules allowance.
+# A longer text is omitted whole, never cut.
+_CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
@@ -588,6 +600,51 @@ def _state_core():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@lru_cache(maxsize=1)
+def _capture_hook():
+    path = Path(__file__).with_name("exomem_capture_nudge.py")
+    spec = importlib.util.spec_from_file_location("_exomem_capture_nudge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: A deferred capture reminder older than this is dropped unread: advice about a turn that
+#: ended hours ago misleads the agent more than it helps.
+_DEFERRED_REMINDER_MAX_AGE_SEC = 6 * 3600
+
+
+def _deferred_capture_reminder(data: object) -> str:
+    """The capture reminder the Stop hook left for this session's next prompt, or `""`.
+
+    The marker is `_pending_reminder_path` in `exomem_capture_nudge.py`, derived here too so a
+    prompt with nothing waiting loads no sibling script; the test that runs both hooks keeps the
+    two in step. It is consumed once, and a stale one is dropped unread.
+    A prompt with nothing waiting pays one `stat`: no sibling script is loaded. Never raises, so
+    a state or load failure cannot break prompt submission.
+    """
+    try:
+        if not isinstance(data, dict):
+            return ""
+        session_id = str(data.get("session_id") or data.get("sessionId") or "")
+        # The full client and session identity, digested: a sanitised id would join distinct sessions.
+        digest = hashlib.sha256(
+            f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+        ).hexdigest()[:32]
+        marker = _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            return ""  # nothing is waiting, the usual case
+        # Deleted before anything is delivered, so a marker that cannot be deleted is not repeated.
+        _state_core().unlink_nudge_file(marker)
+        if age > _DEFERRED_REMINDER_MAX_AGE_SEC:
+            return ""
+        return _capture_hook().deferred_reminder()
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return ""
 
 
 def _mcp_activation_text() -> str:
@@ -1787,7 +1844,7 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
 
 
 def _capture_policy_text(block: object) -> str:
-    """The served capture policy under its own header, or `""` when the packet carries none.
+    """The served capture policy's `say` under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
     """
@@ -1795,14 +1852,27 @@ def _capture_policy_text(block: object) -> str:
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
-    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
-        return text
-    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
-    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
-    # with the live disposition as one sentence; its first sentence end is the cut.
-    lead = say.strip().split(". ", 1)[0]
-    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
-    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
+    if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+        # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+        # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+        # with the live disposition as one sentence; its first sentence end is the cut.
+        lead = say.strip().split(". ", 1)[0]
+        text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+        if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+            return ""
+    return text
+
+
+def _capture_rules_text(block: object) -> str:
+    """The served full capture rule, or `""` when there is none or it is over its own render budget.
+
+    It renders after `say` and is counted in no other budget: the working set is cut to leave room for `say`
+    alone. A text over the budget is omitted whole, never cut, and `say` is untouched.
+    """
+    rules = block.get("rules") if isinstance(block, dict) else None
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        return rules.strip()
+    return ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -2624,7 +2694,10 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     skills_text = _format_skills_block(packet.get("skills"))
     profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
     positions_text = _format_positions_block(packet.get("positions"))
-    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, positions_text, turn, action)
+    # The positions lead, after the fixed protocol reset, as they lead the service's response. Replays of that response
+    # on a leading yes/no question opened every first answer with the person's position when its block came first,
+    # and in 1 of 8 when it came last. Do not move it back.
+    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
     return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 
@@ -3678,6 +3751,10 @@ def _refresh_main(args, data: object) -> bool:
             context += "\n" + _mcp_activation_context()
     if result["status"] in {"evidence_observed", "association_cleared"} and _prominence() != "off":
         context += "\n" + _REFRESH_GAP_GUIDANCE
+    if event == "UserPromptSubmit":
+        reminder = _deferred_capture_reminder(data)
+        if reminder:
+            context += "\n" + reminder
     output = {"hookEventName": event, "additionalContext": context}
     if result["status"] == "exhausted":
         output.update(
@@ -3754,12 +3831,15 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         hit_count = len(packet.get("anchors") or ())
         delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
         delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-        policy_text = _capture_policy_text(packet.get("capture_policy"))
+        say_text = _capture_policy_text(packet.get("capture_policy"))
+        # The working set gives way to `say` and the delta; the rules follow `say` on their own budget.
         render_cap = max(
             0,
             _working_set_max_chars()
-            - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+            - sum(len(text) + 1 for text in (delta_text, say_text) if text),
         )
+        rules_text = _capture_rules_text(packet.get("capture_policy")) if say_text else ""
+        policy_text = f"{say_text}\n{rules_text}" if rules_text else say_text
         acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice
@@ -3915,18 +3995,33 @@ def main(argv: list[str] | None = None) -> int:
 
     if _refresh_main(args, data):
         return 0
+    additional_context = _prompt_context(data)
+    # Delivered after the retrieval work, so a hook the client kills mid-ladder leaves the marker for the next prompt.
+    reminder = _deferred_capture_reminder(data)
+    if reminder:
+        additional_context = f"{additional_context}\n\n{reminder}" if additional_context else reminder
+    if additional_context:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": additional_context,
+        }}))
+    return 0
+
+
+def _prompt_context(data: dict) -> str:
+    """The `additionalContext` this prompt's retrieval nudge adds; `""` when the hook stays silent."""
     if os.environ.get("EXOMEM_RETRIEVE_NUDGE_DISABLE"):
-        return 0
+        return ""
     preset = _PROMINENCE_PRESETS[_prominence()]
     if preset is None:  # prominence=off — the user asked for explicit invocation only
-        return 0
+        return ""
 
     prompt = _prompt(data)
     if not prompt.strip():
-        return 0
+        return ""
 
     if _is_task_control_event(data):
-        return 0
+        return ""
 
     # Explicit env still wins; the prominence level only moves the default.
     mode = _inject_mode()
@@ -3950,10 +4045,10 @@ def main(argv: list[str] | None = None) -> int:
         mode == _MCP_MODE and "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS" in os.environ
     )
     if length_gate and len(prompt.strip()) < min_chars:  # ("yes", "go", "thanks")
-        return 0
+        return ""
 
     if not referential and _is_obvious_control_prompt(prompt, control_max_chars):
-        return 0
+        return ""
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if mode == _OFF_MODE:
@@ -3968,26 +4063,22 @@ def main(argv: list[str] | None = None) -> int:
         global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
         if reminded_ok:
             if not global_ok:
-                return 0
+                return ""
             text = REMINDER
         elif _prominence() == "maximal":
             text = REMINDER_POINTER
         else:
-            return 0
+            return ""
         _touch(reminded)
         if text == REMINDER and global_cooldown > 0:
             _touch(global_stamp)
         _log(prompt, "off", 0)
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
-        }}))
-        return 0
+        return text
     ok, stamp = _cooldown_ok(session_id, cooldown)
     # Native activation is per turn; reminder cooldowns do not apply. Direct
     # working-set mode also exempts referential turns carrying recent context.
     if not ok and not referential and mode != _MCP_MODE:
-        return 0
+        return ""
 
     # Another tab/session already got the REMINDER recently. In working-set
     # mode that is all it gates: a fresh session's first packet is not the
@@ -3997,7 +4088,7 @@ def main(argv: list[str] | None = None) -> int:
     # turn; legacy reminder/stub modes stay silent here exactly as before.
     global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
     if not global_ok and mode not in {_WORKING_SET_MODE, _MCP_MODE}:
-        return 0
+        return ""
 
     additional_context = REMINDER
     lane, hit_count, session, policy_text = "off", 0, "", ""
@@ -4059,14 +4150,9 @@ def main(argv: list[str] | None = None) -> int:
     if global_cooldown > 0 and REMINDER in additional_context:
         _touch(global_stamp)
     if not additional_context:
-        return 0
+        return ""
     _log(prompt, lane, hit_count, session)
-
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
-        "additionalContext": additional_context,
-    }}))
-    return 0
+    return additional_context
 
 
 if __name__ == "__main__":

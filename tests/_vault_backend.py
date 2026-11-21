@@ -12,7 +12,7 @@ from exomem import epistemic_graph, lexstore, memory_refs, state_migration
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
-from exomem.vault_store import availability, migrate, mode, read, rederive, write
+from exomem.vault_store import migrate, mode, read, rederive, write
 
 _BACKEND = ContextVar("test_vault_backend", default="file")
 
@@ -24,8 +24,6 @@ def vault_backend(request, monkeypatch):
         url = request.getfixturevalue("coordinator_url")
         for key, value in _lease_environment(request.getfixturevalue("tmp_path"), url).items():
             monkeypatch.setenv(key, value)
-        # PR 1 proves readers while the rollout guard still forbids a production store-mode start.
-        monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     try:
         yield request.param
     finally:
