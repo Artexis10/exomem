@@ -876,7 +876,8 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace, *,
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
-        failure = str(getattr(error, "code", None) or type(error).__name__)
+        failure = (error.failure if isinstance(error, media_store.ReplicaAbsent)
+                   else str(getattr(error, "code", None) or type(error).__name__))
         damage = media_store.replica_damage(error) if isinstance(error, media_store.MediaStoreError) else None
     staged.unlink(missing_ok=True)
     if reference is not None and damage is not None:
@@ -885,7 +886,7 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace, *,
 
 
 def _quarantine(vault: Path, row: Row, replica: originals.StoredObject, failure: str) -> None:
-    """Record that a replica fixity downloaded does not decrypt to the binding: no repair reads it again."""
+    """Record a missing or damaged source so a later repair skips it."""
     from . import media_replicas
 
     try:

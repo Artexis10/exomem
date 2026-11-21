@@ -960,13 +960,19 @@ def status(vault: Path) -> dict[str, object]:
             "stores": list(stores.values()), "totals": totals}
 
 
+_CHECK_COLUMNS = (
+    "level, checked_at, decrypted_at, failure, "
+    f"CASE WHEN decrypted_at > 0 AND decrypted_at >= checked_at THEN '{DECRYPTED}' ELSE level END AS proof_level, "
+    "MAX(checked_at, decrypted_at) AS proof_at"
+)
+
+
 def _check_view(row: sqlite3.Row) -> dict[str, object]:
-    """What a replica's checks proved, as an owner reads it: the last scheduled check's level and time, the last
-    decrypt proof, and the finding of a quarantined replica. A replica never checked has no check, not a zero time."""
+    """The latest successful check, the last decrypt time and any failure of the pinned version."""
     quarantined = row["state"] == QUARANTINED
     return {
-        "last_check": ({"level": row["level"], "at": _iso(row["checked_at"])}
-                       if row["level"] is not None and not quarantined else None),
+        "last_check": ({"level": row["proof_level"], "at": _iso(row["proof_at"])}
+                       if row["proof_level"] is not None and not quarantined else None),
         "decrypted_at": _iso(row["decrypted_at"] or None),
         "finding": ({"failed_level": row["level"], "failure": row["failure"], "at": _iso(row["checked_at"])}
                     if quarantined else None),
@@ -995,8 +1001,8 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
                 "SELECT DISTINCT binary_rel FROM media_replicas WHERE binary_rel > ? ORDER BY binary_rel LIMIT ?",
                 (after or "", limit + 1))]
             rows = conn.execute(
-                "SELECT binary_rel, store, object, version, key_version, verified_at, state, level, checked_at, "
-                "decrypted_at, failure FROM media_replicas WHERE binary_rel > ? AND binary_rel <= ? "
+                f"SELECT binary_rel, store, object, version, key_version, verified_at, state, {_CHECK_COLUMNS} "
+                "FROM media_replicas WHERE binary_rel > ? AND binary_rel <= ? "
                 "ORDER BY binary_rel, store",
                 (after or "", paths[min(limit, len(paths)) - 1] if paths else "")).fetchall()
     except (sqlite3.Error, OSError) as error:
@@ -1072,7 +1078,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
             exports = _exports(conn)
             try:
                 recorded = {row["store"]: row for row in conn.execute(
-                    "SELECT store, object, version, verified_at, state, level, checked_at, decrypted_at, failure "
+                    f"SELECT store, object, version, verified_at, state, {_CHECK_COLUMNS} "
                     "FROM media_replicas WHERE binary_rel = ?", (snapshot.path.relative_to(vault).as_posix(),))}
             except sqlite3.OperationalError:
                 recorded = {}
@@ -1086,7 +1092,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
                                              quarantined=checked is not None and checked["state"] == QUARANTINED)
         found.append({
             "store": replica.store, "state": UPLOAD_VERIFIED if checked is None else checked["state"],
-            "verified_at": _iso(row["verified_at"]) if row is not None else None,
+            "verified_at": _iso(checked["verified_at"]) if checked is not None else None,
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "recoverable": recoverable, "reason": reason, "key_version": replica.key_version,
@@ -1335,13 +1341,15 @@ class _ReadCap:
 
         The read's time counts from its start, so the read itself is part of it and only what remains is waited out.
         A failed read is charged its whole size: how much it moved before it failed is unknown, and a store that
-        fails after most of the bytes must not be read faster than the cap for it. A `ValueError` is the store
-        refusing the locator before it reads anything, so it costs nothing.
+        fails after most of the bytes must not be read faster than the cap for it.
+        An invalid locator or a confirmed missing version costs no bytes.
         """
+        from .media_store import ReplicaAbsent
+
         started, charged = time.monotonic(), True
         try:
             yield
-        except ValueError:
+        except (ValueError, ReplicaAbsent):
             charged = False
             raise
         finally:
@@ -1734,11 +1742,15 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 # the bytes match their record: no damage
                 _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)
                 failing += 1
-            except ValueError:
-                # The store refused the locator before it read anything, so nothing was downloaded and nothing is billed.
+            except (ValueError, media_store.ReplicaAbsent) as error:
+                # The store answered before moving ciphertext, so refund the reservation.
                 with closing(ledger._connect()) as conn, conn:
                     _charge(conn, name, month, -replica.ciphertext_size)
-                _failed(vault, row, RECORD_INVALID, attempted=replica, sample=True)
+                if isinstance(error, media_store.ReplicaAbsent):
+                    quarantine(vault, row["binary_rel"], replica, level=DECRYPTED, failure=error.failure)
+                    failing = 0
+                else:
+                    _failed(vault, row, RECORD_INVALID, attempted=replica, sample=True)
             except media_store.MediaStoreError:
                 _failed(vault, row, READ_FAILED, attempted=replica, sample=True)  # unavailable is no proof of loss
                 failing += 1

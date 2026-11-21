@@ -1015,6 +1015,9 @@ def test_a_sample_that_decrypts_to_the_binding_proves_the_key(vault: Path, selec
     assert [proven for _path, proven in _sampled(vault)] == [True]
     assert _replica_row(vault)["state"] == media_replicas.UPLOAD_VERIFIED
     assert media_replicas.status(vault)["totals"]["never_checked"] == 0
+    [mirror] = [item for item in media_replicas.original_view(vault, original.relative_to(vault).as_posix())["replicas"]
+                if item["store"] == MIRROR]
+    assert mirror["last_check"] == {"level": media_replicas.DECRYPTED, "at": mirror["decrypted_at"]}
 
 
 def test_a_sample_writes_no_plaintext_to_disk(vault: Path, selected_store, mirrored: Path, tmp_path: Path,
@@ -1117,20 +1120,23 @@ def test_a_replica_of_another_key_version_is_never_sampled_and_gives_its_reason(
     assert [proven for _path, proven in _sampled(vault)] == [False]
 
 
-def test_a_sample_that_finds_a_stored_replica_damaged_quarantines_it(vault: Path, selected_store, mirrored: Path) -> None:
-    """A replica whose ciphertext no longer matches its record is the finding the sample exists to make."""
+@pytest.mark.parametrize("failure", ["digest_mismatch", "absent"])
+def test_a_sample_that_finds_a_stored_replica_damaged_quarantines_it(
+        vault: Path, selected_store, mirrored: Path, failure: str) -> None:
+    """A sample records a mismatched or missing version. An absent version costs no ciphertext reads."""
     relative, replica = _replicated(vault)
     _unproven(vault)
     [stored] = [path for path in _objects(mirrored) if path.parent.name == replica.object]
-    damaged = bytearray(stored.read_bytes())
-    damaged[-1] ^= 1
-    stored.write_bytes(bytes(damaged))
+    if failure == "absent":
+        stored.unlink()
+    else:
+        _damage_a_byte(stored)
 
     media_replicas.sample(vault)
 
     row = _replica_row(vault)
-    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
-                                                            "digest_mismatch")
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED, failure)
+    assert _mirror_stats(vault)["sample"]["spent_bytes"] == (0 if failure == "absent" else replica.ciphertext_size)
 
 
 def test_the_sample_pick_and_the_month_release_read_the_sample_index_with_no_sort(
@@ -1530,8 +1536,9 @@ def test_a_damaged_pointer_of_an_evicted_original_is_replaced_from_a_replica_and
         assert source.stream.read() == content
 
 
+@pytest.mark.parametrize("failure", ["digest_mismatch", "absent"])
 def test_a_replica_that_fixity_downloads_and_finds_damaged_is_quarantined_with_the_failure(
-        vault: Path, selected_store, mirrored: Path) -> None:
+        vault: Path, selected_store, mirrored: Path, failure: str) -> None:
     """A repair that skipped the finding would try the same bad copy at every later damage, and the owner never learn of it."""
     original = _stored(vault, "Recordings")
     reference = _offload(vault, original)
@@ -1540,13 +1547,18 @@ def test_a_replica_that_fixity_downloads_and_finds_damaged_is_quarantined_with_t
     original_fixity.run_pass(vault)
     original.write_bytes(DAMAGED)
     first = Path(selected_store[0]["root"]) / reference.object / reference.version
-    first.write_bytes(os.urandom(first.stat().st_size))
+    if failure == "absent":
+        first.unlink()
+    else:
+        _damage_a_byte(first)
 
     assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
 
     row = _replica_row(vault, store=reference.store)
-    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED,
-                                                            "digest_mismatch")
+    assert (row["state"], row["level"], row["failure"]) == (media_replicas.QUARANTINED, media_replicas.DECRYPTED, failure)
+    if failure == "absent":
+        [finding] = _findings(vault)
+        assert finding.meta["route"][0]["failed"] == failure
     assert [item[:2] for item in _queued(vault) if item[0] == reference.store] == [(reference.store, media_replicas.RECOPY)]
 
 

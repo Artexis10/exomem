@@ -107,6 +107,8 @@ class ReplicaMismatch(MediaStoreError):
 class ReplicaAbsent(MediaStoreError):
     """The identified store confirms that it does not hold this version."""
 
+    failure = "absent"
+
     def __init__(self):
         super().__init__("MEDIA_STORE_UNAVAILABLE", "the pinned version is absent from the store")
 
@@ -1472,7 +1474,7 @@ def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
 #: The binding states whose bytes are on this volume (`originals` fixes them).
 _BYTES_HERE = ("local", "cached")
 #: The failures of `_head_failure` that say the version is not there to read, as opposed to its bytes differing.
-_ABSENT, _CONDEMNED = "absent", "condemned"
+_ABSENT, _CONDEMNED = ReplicaAbsent.failure, "condemned"
 
 
 def _head_failure(backend: Store, replica: StoredObject) -> str | None:
@@ -1524,12 +1526,8 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> 
 
 
 def replica_damage(error: MediaStoreError) -> str | None:
-    """The failure token when a read of a stored version found its ciphertext different from the record; else None.
-
-    Damage is proved in one place, `_decrypted_chunks`, which raises `ReplicaMismatch` for it. Any other failure of a
-    read is an outage or a key refusal, and neither says the bytes are damaged.
-    """
-    return error.failure if isinstance(error, ReplicaMismatch) else None
+    """The finding from a confirmed absence or a ciphertext mismatch, if the read proved one."""
+    return error.failure if isinstance(error, (ReplicaAbsent, ReplicaMismatch)) else None
 
 
 def _quarantine_found(vault: Path, binary_rels: Sequence[str], reference: StoredObject, failure: str, *,
@@ -2204,11 +2202,8 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
                     except ValueError:
                         continue  # this candidate's locator cannot name an object in its store
                 head, ciphertext = staged.enter_context(_copy_ciphertext(ledger, token, config, candidate, source_backend))
-            except ReplicaAbsent:
-                _quarantine_found(vault, [relative], candidate, _ABSENT, entry=holder)
-                continue
-            except ReplicaMismatch as mismatch:
-                _quarantine_found(vault, [relative], candidate, mismatch.failure, entry=holder)
+            except (ReplicaAbsent, ReplicaMismatch) as finding:
+                _quarantine_found(vault, [relative], candidate, finding.failure, entry=holder)
                 continue
             except MediaStoreError as error:
                 if error.code != "MEDIA_STORE_UNAVAILABLE":

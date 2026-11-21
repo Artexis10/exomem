@@ -134,10 +134,17 @@ class EdgeStore:
             raise _unavailable("the media edge answered without a version") from error
 
     def head(self, name: str, version: str) -> ObjectHead | None:
+        path, params = f"{OBJECTS_PATH}{name}", {"version": version}
         with self._client("head") as client:
-            response = client.head(f"{OBJECTS_PATH}{name}", params={"version": version})
-        if response.status_code == STATUS_ABSENT:
-            return None
+            response = client.head(path, params=params)
+            if response.status_code == STATUS_ABSENT:
+                # HEAD has no body. Ask for one byte so a legacy edge can identify its absence reply.
+                with client.stream("GET", path, params=params, headers={"range": "bytes=0-0"}) as probe:
+                    if probe.status_code == STATUS_ABSENT:
+                        probe.read()
+                        if isinstance(_read_refusal(probe), ReplicaAbsent):
+                            return None
+                raise _unavailable("the media edge did not confirm the missing version")
         if response.status_code != 200:
             raise _refusal(response)
         status = response.headers.get(STATUS_HEADER)

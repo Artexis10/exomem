@@ -93,6 +93,18 @@ def test_a_download_404_proves_absence_only_when_the_edge_names_it(tmp_path: Pat
     assert isinstance(refused.value, ReplicaAbsent) == absent
 
 
+@pytest.mark.parametrize(("body", "absent"), [({"code": ABSENT_CODE}, True), ({"code": "NOT_FOUND"}, False)])
+def test_a_head_404_uses_the_edges_absence_evidence(tmp_path: Path, body, absent):
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        store = _store(host, port, tmp_path)
+        if absent:
+            assert store.head("1" * 64, "version") is None
+        else:
+            with pytest.raises(MediaStoreError) as outage:
+                store.head("1" * 64, "version")
+            assert outage.value.code == "MEDIA_STORE_UNAVAILABLE"
+
+
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)
