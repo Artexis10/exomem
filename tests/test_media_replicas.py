@@ -13,6 +13,8 @@ import json
 import os
 import sqlite3
 import subprocess
+import time
+import types
 from contextlib import closing
 from pathlib import Path
 
@@ -1066,12 +1068,8 @@ def test_eviction_keeps_an_original_whose_pointer_is_quarantined_even_when_the_s
     assert path.exists()
 
 
-def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_damaged_pointer(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pool's eviction path confirms each filing's pointer too: a damaged one must be a finding there as well."""
-    values, _config = selected_store
-    path = _preserved(vault)
-    reference = _offload(vault, path)
+def _pooled(vault: Path, path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Move an offloaded original's bytes into the shared pool, as a pooled vault keeps them; return the object's digest."""
     content = path.read_bytes()
     monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     original_pool.enable(vault)
@@ -1082,6 +1080,16 @@ def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_dama
     assert media_bindings.rebuild(vault)
     with media_store.open_original(vault, path):  # a read records the cache identity that an eviction needs
         pass
+    return digest
+
+
+def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_damaged_pointer(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool's eviction path confirms each filing's pointer too: a damaged one must be a finding there as well."""
+    values, _config = selected_store
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    digest = _pooled(vault, path, monkeypatch)
     _damage_a_byte(Path(values["root"]) / reference.object / reference.version)
 
     assert not media_store.evict(vault, path)
@@ -1089,6 +1097,107 @@ def test_eviction_of_a_shared_original_keeps_its_object_and_quarantines_the_dama
     row = _replica_row(vault, store=reference.store)
     assert (row["binary_rel"], row["state"], row["failure"]) == (path.relative_to(vault).as_posix(),
                                                                  media_replicas.QUARANTINED, "digest_mismatch")
+    assert original_pool.object_path(vault, digest).exists()
+
+
+def _filed_under_many_names(vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, names: int) -> tuple[Path, str]:
+    """Pool the original's object, file it under `names` more names and damage its replica; return the original and the digest."""
+    values, _config = selected_store
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    digest = _pooled(vault, path, monkeypatch)
+    relative = path.relative_to(vault).as_posix()
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        for number in range(names):
+            conn.execute("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
+                         "resident_only, reference FROM media_bindings WHERE binary_rel = ?", (f"Aliases/{number:04d}.txt", relative))
+    _damage_a_byte(Path(values["root"]) / reference.object / reference.version)
+    return path, digest
+
+
+def _quarantined_rows(vault: Path) -> int:
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        return ledger.execute("SELECT COUNT(*) FROM media_replicas WHERE state = ?", (media_replicas.QUARANTINED,)).fetchone()[0]
+
+
+def test_a_damaged_pointer_of_an_object_with_many_filings_is_quarantined_in_a_few_transactions(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pooled object has a filing per name that holds its bytes: one write transaction for each would not scale with them."""
+    names = 300
+    path, _digest = _filed_under_many_names(vault, selected_store, monkeypatch, names)
+    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 3600.0)  # the time bound has its own limit; this test counts transactions
+    transactions, quarantine_all = [], media_replicas.quarantine_all
+
+    def counting(*arguments, **options):
+        transactions.append(len(arguments[1]))  # each call is one write transaction, for this many filings
+        return quarantine_all(*arguments, **options)
+
+    monkeypatch.setattr(media_replicas, "quarantine_all", counting)
+
+    assert not media_store.evict(vault, path)
+
+    assert _quarantined_rows(vault) == names + 1
+    assert len(transactions) <= 1 + -(-names // media_store._ALIAS_PAGE)  # the evicting filing, then a page at a time
+
+
+def test_a_damaged_pointer_of_an_object_with_more_filings_than_the_bound_quarantines_the_bounded_few_and_keeps_the_original(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One eviction attempt must not walk a table's worth of names: the rest waits for the next attempt or check."""
+    path, digest = _filed_under_many_names(vault, selected_store, monkeypatch, 300)
+    monkeypatch.setattr(media_store, "_ALIAS_ROWS", 2 * media_store._ALIAS_PAGE)
+    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 3600.0)
+
+    assert not media_store.evict(vault, path)
+
+    assert 1 < _quarantined_rows(vault) <= 1 + media_store._ALIAS_ROWS
+    assert original_pool.object_path(vault, digest).exists()  # one quarantined filing already keeps the object
+
+
+def test_a_damaged_pointer_of_an_object_with_many_filings_stops_at_the_time_bound_after_a_page(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A slow ledger must not hold an eviction attempt for a table's worth of names: it stops at its time bound."""
+    path, _digest = _filed_under_many_names(vault, selected_store, monkeypatch, 300)
+    monkeypatch.setattr(media_store, "_ALIAS_SECONDS", 0.0)
+
+    assert not media_store.evict(vault, path)
+
+    assert 1 < _quarantined_rows(vault) <= 1 + media_store._ALIAS_PAGE
+
+
+def _quarantined_while_the_store_answers(vault: Path, relative: str, reference: originals.StoredObject,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """A check finds the pointer damaged at the moment eviction asks the store about it: the finding lands during the HEAD."""
+    head = media_store.FilesystemStore.head
+
+    def answering_after_a_finding(store, name, version):
+        media_replicas.quarantine(vault, relative, reference, level=media_replicas.CONTENT, failure="digest_mismatch")
+        return head(store, name, version)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "head", answering_after_a_finding)
+
+
+def test_eviction_keeps_the_local_bytes_when_the_pointer_is_quarantined_while_the_store_answers(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate before the HEAD cannot see a finding that lands after it: the bytes would go with their only good copy doubted."""
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    _quarantined_while_the_store_answers(vault, path.relative_to(vault).as_posix(), reference, monkeypatch)
+
+    assert not media_store.evict(vault, path)
+
+    assert path.exists()
+
+
+def test_eviction_of_a_shared_original_keeps_its_object_when_the_pointer_is_quarantined_while_the_store_answers(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pool's unlink has its own transaction: it needs the same last look as a single original's."""
+    path = _preserved(vault)
+    reference = _offload(vault, path)
+    digest = _pooled(vault, path, monkeypatch)
+    _quarantined_while_the_store_answers(vault, path.relative_to(vault).as_posix(), reference, monkeypatch)
+
+    assert not media_store.evict(vault, path)
+
     assert original_pool.object_path(vault, digest).exists()
 
 
@@ -1192,6 +1301,31 @@ def test_a_replica_that_fixity_downloads_and_finds_damaged_is_quarantined_with_t
     assert [item[:2] for item in _queued(vault) if item[0] == reference.store] == [(reference.store, media_replicas.RECOPY)]
 
 
+def test_a_repair_that_finds_the_binding_rebound_since_its_row_was_read_quarantines_nothing(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The replicas of a rebound binding hold its new bytes: judged against the old digest they would read as damaged."""
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    _replicate_all(vault)
+    sidecar = original.with_name(original.name + ".md")
+    held, stale = hashlib.sha256(TRANSCRIPT).hexdigest(), hashlib.sha256(DAMAGED).hexdigest()
+    sidecar.write_text(sidecar.read_text().replace(held, stale))  # the row is read while the binding names another digest
+    original_fixity.walk(vault)
+    copies = original_fixity._copies
+
+    def rebound_after_the_row_was_read(*arguments):
+        found = copies(*arguments)
+        sidecar.write_text(sidecar.read_text().replace(stale, held))  # the binding names what its replicas hold
+        return found
+
+    monkeypatch.setattr(original_fixity, "_copies", rebound_after_the_row_was_read)
+
+    result = original_fixity.run_pass(vault)
+
+    states = [_replica_row(vault, store=store)["state"] for store in ("test-store", MIRROR)]
+    assert (result.rescheduled, states) == (1, [media_replicas.UPLOAD_VERIFIED] * 2)
+
+
 def test_a_repair_does_not_read_a_quarantined_replica_and_names_it_in_the_route(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The finding is a promise: a quarantined copy is not downloaded again for every repair."""
@@ -1246,6 +1380,22 @@ def test_a_cached_original_whose_pointer_was_replaced_can_still_be_evicted(
     assert originals.original_state(vault, relative).reference != pointer
 
     assert media_store.evict(vault, vault / relative)
+
+
+def test_a_copy_again_reads_a_healthy_replica_when_the_shared_object_of_a_pooled_original_is_short(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A short local object is damage to route around: refusing it at the open would strand the original behind a good copy."""
+    path = _preserved(vault)
+    pointer = _offload(vault, path)
+    _replicate_all(vault)
+    relative = path.relative_to(vault).as_posix()
+    shared = original_pool.object_path(vault, _pooled(vault, path, monkeypatch))
+    shared.write_bytes(shared.read_bytes()[:-1])
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.CONTENT, failure="digest_mismatch")
+
+    replaced = media_store.recopy(vault, path, pointer.store)
+
+    assert (replaced is not None, originals.original_state(vault, relative).reference == replaced != pointer) == (True, True)
 
 
 def test_a_replica_that_went_bad_since_its_last_check_is_not_copied_it_is_quarantined(
@@ -1751,6 +1901,41 @@ def test_the_round_at_the_default_settings_checks_two_stores_of_the_sizing_targe
     # The byte share is a whole number of bytes, so it is short of the exact share by under a millionth.
     assert (rows * rounds >= 500_000, size * rounds >= 25 * 10**12 * 0.999999) == (True, True)
     assert media_replicas._round_seconds(ledger, stores, cycle, rate) * rate >= 2 * size  # both shares, under the one cap
+
+
+def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_store_takes(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wait added after each read holds the average under the cap, so the round ends early and the cycle runs long."""
+    ledger = media_jobs.MediaJobStore(vault)
+    size = 50 * 10**6  # the sizing target's average object: 25 TB over 500,000 replicas
+    with closing(ledger._connect()) as conn, conn:
+        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
+                     (MIRROR, 500_000, 25 * 10**12))
+        for number in range(150):
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
+                         "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
+                         (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", size, media_replicas.UPLOAD_VERIFIED))
+    clock = [0.0]
+    monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
+                        lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+
+    def read_by_the_store(_vault, replica):
+        clock[0] += replica.ciphertext_size / (50 * 10**6)  # a NAS that serves 50 MB a second: about 1 s a replica
+        return None
+
+    monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
+        1, row["store"], "1", row["object"], row["version"], size, "0" * 64)))
+    monkeypatch.setattr(media_store, "check_replica", read_by_the_store)
+    cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
+    limit = clock[0] + media_replicas._round_seconds(ledger, [MIRROR], cycle, rate)
+    share, _bytes = media_replicas._store_budget(ledger, MIRROR, cycle)
+
+    checked = media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle,
+                                          media_replicas._ReadCap(rate, limit), limit)
+
+    assert checked == share == 116
+    assert clock[0] < limit  # the whole share, at the cap, fits the round with the margin that sizes it
 
 
 def test_a_store_that_the_last_round_left_waiting_is_checked_first_in_the_next(

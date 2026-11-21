@@ -127,6 +127,9 @@ _SCHEMA = (
     " size INTEGER, stored INTEGER NOT NULL DEFAULT 0, identity TEXT, state TEXT NOT NULL,"
     " cause TEXT, route TEXT NOT NULL DEFAULT '[]', verified_at REAL, PRIMARY KEY (path, sha256))",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    # The rows that hold a kept copy, by digest: the few unresolved ones, so it costs the walk's inserts nothing. The
+    # literal is the one `_KEPT_NEEDED` repeats: SQLite uses a partial index only when the query states its condition.
+    f"CREATE INDEX IF NOT EXISTS originals_unresolved ON originals(sha256) WHERE state = '{CORRUPT_NO_COPY}'",
 )
 
 
@@ -728,8 +731,15 @@ def _replica_copies(vault: Path, row: Row) -> list[dict[str, str]]:
 
 
 def _listed(vault: Path, row: Row, copy: dict[str, str]) -> originals.StoredObject | None:
-    """The replica that a candidate names, as the binding lists it now; None when the binding no longer lists it."""
+    """The replica that a candidate names, as the binding lists it now; None when the binding no longer lists it.
+
+    The replica and the digest that it must hash to come from one reading of the binding: a binding that names another
+    digest than the row was rebound since the row was read, and its replicas hold other bytes, so nothing here may
+    judge them against the row.
+    """
     snapshot = originals.original_state(vault, row.path)
+    if snapshot.binary_sha256 != row.sha256:
+        raise _Changed
     if copy["source"] == MEDIA_STORE:
         return snapshot.reference
     return next((replica for replica in snapshot.replicas
@@ -861,6 +871,9 @@ def _stage(vault: Path, row: Row, copy: dict[str, str], pace: _Pace) -> Path | s
         if sha256 == row.sha256 and (row.size is None or size == row.size):
             return staged
         failure, damage = "hash_mismatch", media_replicas.PLAINTEXT_MISMATCH
+    except _Changed:
+        staged.unlink(missing_ok=True)
+        raise
     except (OSError, ValueError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError, _Unreadable,
             *_UNDECODABLE) as error:
         log.info("original fixity: a %s copy could not be read: %s", copy["source"], type(error).__name__)
@@ -914,17 +927,26 @@ def _keep(vault: Path, row: Row, staged: Path) -> None:
             staged.unlink(missing_ok=True)
 
 
+#: The kept digests that one lookup of `_KEPT_NEEDED` carries: far under SQLite's limit on bound values.
+_KEPT_BATCH = 200
+#: The unresolved rows among some digests: a lookup of `originals_unresolved` per digest, whatever the table holds.
+_KEPT_NEEDED = f"SELECT sha256 FROM originals WHERE state = '{CORRUPT_NO_COPY}' AND sha256 IN ({{marks}})"
+
+
 def _drop_unneeded_kept_copies(vault: Path, connection: sqlite3.Connection) -> None:
-    """Remove each kept copy whose row restored, changed its hash or retired: only an unresolved row uses one."""
+    """Remove each kept copy whose row restored, changed its hash or retired: only an unresolved row uses one.
+
+    The table is asked about the kept digests only, a bounded batch at a time, never for every unresolved row.
+    """
     folder = table_path(vault).parent
     kept_copies = list(folder.glob(f"*{_KEPT_SUFFIX}")) if folder.is_dir() else []
-    if not kept_copies:
-        return  # almost every pass: the table is not queried for a sweep that has nothing to remove
-    needed = {sha256 for (sha256,) in connection.execute(
-        "SELECT sha256 FROM originals WHERE state = ?", (CORRUPT_NO_COPY,))}
-    for kept in kept_copies:
-        if kept.name.removesuffix(_KEPT_SUFFIX) not in needed:
-            kept.unlink(missing_ok=True)
+    for start in range(0, len(kept_copies), _KEPT_BATCH):  # almost every pass has none: the table is not queried at all
+        batch = {kept.name.removesuffix(_KEPT_SUFFIX): kept for kept in kept_copies[start:start + _KEPT_BATCH]}
+        needed = {sha256 for (sha256,) in connection.execute(
+            _KEPT_NEEDED.format(marks=", ".join("?" for _ in batch)), list(batch))}
+        for sha256, kept in batch.items():
+            if sha256 not in needed:
+                kept.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -950,10 +972,14 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
     for copy in copies:
         replica = copy["source"] in (MEDIA_STORE, REPLICA)
         downloaded = replica or copy["source"] == KEPT_COPY  # a copy that cost a download, now or before
-        if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
-            tried.append({**copy, "failed": reason})
-            continue
-        staged = _stage(vault, row, copy, pace)
+        try:
+            if replica and (reason := _replica_unusable(vault, row, copy)) is not None:
+                tried.append({**copy, "failed": reason})
+                continue
+            staged = _stage(vault, row, copy, pace)
+        except _Changed:
+            result.rescheduled += 1  # The binding was rebound since the row was read: the next pass decides afresh.
+            return
         if isinstance(staged, str):
             if downloaded:
                 tried.append({**copy, "failed": staged})

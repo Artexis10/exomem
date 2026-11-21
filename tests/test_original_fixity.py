@@ -428,6 +428,34 @@ def test_a_kept_copy_that_no_longer_hashes_to_the_binding_is_never_installed(
     assert (tried["source"], tried["failed"], used["source"]) == ("kept_copy", "hash_mismatch", "media_store")
 
 
+def test_the_sweep_of_kept_copies_drops_the_stale_ones_of_every_batch_and_keeps_one_that_is_still_needed(vault: Path) -> None:
+    """The sweep takes the copies a batch at a time: a copy past the first batch must be judged, not skipped or dropped."""
+    digests = [hashlib.sha256(str(number).encode()).hexdigest() for number in range(450)]
+    for digest in digests:
+        original_fixity._kept_path(vault, digest).write_bytes(b"plaintext")
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.execute("INSERT INTO originals(path, sha256, kind, binding, state) VALUES ('needs-its-copy', ?, 'file', "
+                           "'binding', ?)", (digests[-1], original_fixity.CORRUPT_NO_COPY))
+
+        original_fixity._drop_unneeded_kept_copies(vault, connection)
+
+    kept = original_fixity._kept_path(vault, "0" * 64).parent.glob("*.kept")
+    assert [path.name for path in kept] == [f"{digests[-1]}.kept"]
+
+
+def test_the_sweep_of_kept_copies_asks_a_table_of_many_originals_through_an_index(vault: Path) -> None:
+    """A sweep that scanned the table for each batch would cost every pass more as the archive grows."""
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.executemany(
+            "INSERT INTO originals(path, sha256, kind, binding, state) VALUES (?, ?, 'file', 'binding', ?)",
+            [(f"file-{number}", hashlib.sha256(str(number).encode()).hexdigest(),
+              original_fixity.CORRUPT_NO_COPY if number % 100 == 0 else original_fixity.VERIFIED) for number in range(20_000)])
+        plan = " | ".join(step[3] for step in connection.execute(
+            "EXPLAIN QUERY PLAN " + original_fixity._KEPT_NEEDED.format(marks="?, ?"), ("a" * 64, "b" * 64)))
+
+    assert "INDEX originals_unresolved" in plan and "SCAN" not in plan
+
+
 def test_a_kept_copy_goes_when_the_original_is_whole_again(vault: Path, selected_store) -> None:
     """A kept copy is the plaintext of an original: it must not outlive the finding that it served."""
     original, _trash = _damaged_with_a_blocked_trash(vault)

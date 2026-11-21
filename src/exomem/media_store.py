@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1387,7 +1387,7 @@ def replica_damage(error: MediaStoreError) -> str | None:
     return error.failure if isinstance(error, ReplicaMismatch) else None
 
 
-def _quarantine_found(vault: Path, binary_rel: str, reference: StoredObject, mismatch: ReplicaMismatch) -> None:
+def _quarantine_found(vault: Path, binary_rels: Sequence[str], reference: StoredObject, mismatch: ReplicaMismatch) -> None:
     """Record that the store holds another version than `reference` names: eviction's own head found a damaged replica.
 
     The level is the one the store's descriptor lets a check prove, so a store that cannot recompute never reads as
@@ -1397,8 +1397,8 @@ def _quarantine_found(vault: Path, binary_rel: str, reference: StoredObject, mis
 
     entry = originals.store_entry(_settings(vault), reference.store)
     level = media_replicas.scheduled_level(entry) if entry is not None else None
-    media_replicas.quarantine(vault, binary_rel, reference, level=level or media_replicas.PRESENCE,
-                              failure=mismatch.failure)
+    media_replicas.quarantine_all(vault, binary_rels, reference, level=level or media_replicas.PRESENCE,
+                                  failure=mismatch.failure)
 
 
 def _confirmed(store: Store, reference: StoredObject) -> bool:
@@ -2022,7 +2022,7 @@ def _copy_from_replica(vault: Path, ledger: MediaJobStore, token: str, config: d
                 source_backend.require_identity()
             head, version = _copy_ciphertext(ledger, token, config, backend, name, candidate, source_backend)
         except ReplicaMismatch as mismatch:
-            _quarantine_found(vault, relative, candidate, mismatch)
+            _quarantine_found(vault, [relative], candidate, mismatch)
             continue
         except MediaStoreError as error:
             if error.code != "MEDIA_STORE_UNAVAILABLE":
@@ -2068,8 +2068,13 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
             return None
         source = None
         if snapshot.state in ("local", "cached"):  # the binding states whose bytes are on this volume: `originals` fixes them
-            local = held.enter_context(_open_local_original(vault, relative, snapshot))
-            if _digest(local.stream) == ObjectHead(snapshot.binary_size, snapshot.binary_sha256):
+            try:
+                # Every byte is hashed here, so a source of the wrong size is judged by its digest, not refused at the open.
+                local = held.enter_context(_open_local_original(vault, relative, snapshot, check_size=False))
+                whole = _digest(local.stream) == ObjectHead(snapshot.binary_size, snapshot.binary_sha256)
+            except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+                whole = False  # an original that cannot be opened or read is no source; another entry may hold the bytes
+            if whole:
                 local.stream.seek(0)
                 _bind_pin(ledger, token, snapshot, local)
                 source = local
@@ -2857,7 +2862,7 @@ def _evict_one(vault: Path, path: Path) -> str:
     try:
         confirmed = _confirmed(store_for(vault), snapshot.reference)
     except ReplicaMismatch as mismatch:
-        _quarantine_found(vault, ledger._relative(path), snapshot.reference, mismatch)
+        _quarantine_found(vault, [ledger._relative(path)], snapshot.reference, mismatch)
         return KEPT
     except MediaStoreError as error:
         # An unavailable or unverified version cannot authorize removal; an outage also ends the pass.
@@ -2896,6 +2901,9 @@ def _evict_one(vault: Path, path: Path) -> str:
                     or row["owner_read"] is not None and time.time() - row["owner_read"] < float(config["minimum_idle_seconds"])
                     or conn.execute("SELECT 1 FROM media_access WHERE binary_rel = ?", (relative,)).fetchone()
                     or conn.execute(_PINNING_JOB, (relative,)).fetchone()
+                    # A finding recorded while the store was asked: the write lock this transaction holds keeps a
+                    # later one out until the unlink is done, so this is the last word before the bytes go.
+                    or media_replicas.quarantined_in(conn, (snapshot.reference,))
                     or original_state(vault, path) != snapshot or _identity(vault, path) != identity):
                 conn.rollback()
                 return KEPT
@@ -2917,15 +2925,34 @@ def _evict_one(vault: Path, path: Path) -> str:
             conn.close()
 
 
+#: The filings of a shared object that one eviction attempt looks at when its pointer is damaged: a page of this many
+#: to a transaction, for at most `_ALIAS_ROWS` filings and `_ALIAS_SECONDS` seconds.
+_ALIAS_PAGE = 64
+_ALIAS_ROWS = 1024
+_ALIAS_SECONDS = 2.0
+
+
 def _quarantine_shared(vault: Path, ledger: MediaJobStore, key: str, reference: StoredObject,
-                       mismatch: ReplicaMismatch) -> None:
-    """Quarantine `reference` for each original bound to the pooled object `key` whose pointer it is."""
-    with closing(ledger._connect(readonly=True)) as conn:
-        bound = conn.execute("SELECT binary_rel, reference FROM media_bindings WHERE object_key = ? "
-                             "AND reference IS NOT NULL", (key,)).fetchall()
-    for row in bound:
-        if originals.stored_reference(json.loads(row["reference"])) == reference:
-            _quarantine_found(vault, row["binary_rel"], reference, mismatch)
+                       mismatch: ReplicaMismatch, evicting: str) -> None:
+    """Quarantine `reference` for the filings of the pooled object `key` whose pointer it is: the evicting one, then a bounded few.
+
+    One quarantined filing already stops the object's eviction (the gate reads the version), so what the bounds leave
+    for later costs nothing: the next attempt finds the same damage once the first filings have been replaced, and a
+    filing's own check finds it as well. The filings are read in path order from the index of `object_key`.
+    """
+    _quarantine_found(vault, [evicting], reference, mismatch)
+    deadline, after = time.monotonic() + _ALIAS_SECONDS, ""
+    for _page in range(_ALIAS_ROWS // _ALIAS_PAGE):
+        with closing(ledger._connect(readonly=True)) as conn:
+            filings = conn.execute("SELECT binary_rel, reference FROM media_bindings WHERE object_key = ? "
+                                   "AND binary_rel > ? ORDER BY binary_rel LIMIT ?", (key, after, _ALIAS_PAGE)).fetchall()
+        sharing = [row["binary_rel"] for row in filings if row["binary_rel"] != evicting and row["reference"] is not None
+                   and originals.stored_reference(json.loads(row["reference"])) == reference]
+        if sharing:
+            _quarantine_found(vault, sharing, reference, mismatch)
+        if len(filings) < _ALIAS_PAGE or time.monotonic() >= deadline:
+            return
+        after = filings[-1]["binary_rel"]
 
 
 def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, config: dict[str, object]) -> str:
@@ -2953,7 +2980,7 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
                 if not _confirmed(backend, reference):
                     return KEPT
             except ReplicaMismatch as mismatch:
-                _quarantine_shared(vault, ledger, key, reference, mismatch)
+                _quarantine_shared(vault, ledger, key, reference, mismatch, ledger._relative(snapshot.path))
                 return KEPT
     except MediaStoreError as error:
         return UNAVAILABLE if error.code == "MEDIA_STORE_UNAVAILABLE" else KEPT
@@ -2965,7 +2992,8 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
         if (latest is None or latest.checkpoint != facts.checkpoint or not media_bindings.current(vault, conn)
                 or latest.sha256 != facts.sha256 or latest.size != facts.size or latest.references != facts.references
                 or latest.resident_only or not latest.recoverable or latest.pinned
-                or latest.owner_read is not None and time.time() - latest.owner_read < float(config["minimum_idle_seconds"])):
+                or latest.owner_read is not None and time.time() - latest.owner_read < float(config["minimum_idle_seconds"])
+                or media_replicas.quarantined_in(conn, latest.references)):  # see `_evict_one`
             conn.rollback()
             return KEPT
         original_pool.evict_object(vault, facts.sha256, expected_version=version)

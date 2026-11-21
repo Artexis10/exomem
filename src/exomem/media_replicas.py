@@ -16,7 +16,7 @@ import math
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -235,28 +235,36 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
 
 
 def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *, level: str, failure: str) -> None:
-    """Mark `replica` quarantined: the `level` of the check that failed, and why. Nothing trusts it from now on.
+    """Mark `replica` quarantined: the `level` of the check that failed, and why. Nothing trusts it from now on."""
+    quarantine_all(vault, [binary_rel], replica, level=level, failure=failure)
 
-    The row is written first when the table does not know the store's replica (a publication whose write was lost), so
+
+def quarantine_all(vault: Path, binary_rels: Sequence[str], replica: originals.StoredObject, *, level: str,
+                   failure: str) -> None:
+    """Mark `replica` quarantined for each of these originals, in one transaction: the filings that share one version.
+
+    A row is written first when the table does not know the store's replica (a publication whose write was lost), so
     a finding is never dropped for want of a row. A row that names another version is left alone: it is a newer
     replica, not the one that failed. The same write queues the new copy that the worker makes.
     """
+    now, changed = time.time(), False
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
-                     "state, seen) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM media_replica_generation "
-                     "WHERE id = 1)) ON CONFLICT(binary_rel, store) DO NOTHING",
-                     (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
-                      replica.ciphertext_size, UPLOAD_VERIFIED))
-        changed = conn.execute(
-            "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
-            "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
-            (QUARANTINED, level, failure, time.time(), time.time(), binary_rel, replica.store, replica.object,
-             replica.version)).rowcount
-        if changed:
-            conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?) "
-                         "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
-                         "code = NULL, attempts = 0, retry_at = 0",
-                         (replica.store, binary_rel, PENDING, RECOPY))
+        for binary_rel in binary_rels:
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, "
+                         "state, seen) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, (SELECT value FROM media_replica_generation "
+                         "WHERE id = 1)) ON CONFLICT(binary_rel, store) DO NOTHING",
+                         (binary_rel, replica.store, replica.object, replica.version, replica.key_version,
+                          replica.ciphertext_size, UPLOAD_VERIFIED))
+            if conn.execute(
+                    "UPDATE media_replicas SET state = ?, level = ?, failure = ?, checked_at = ?, sample_from = ? "
+                    "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
+                    (QUARANTINED, level, failure, now, now, binary_rel, replica.store, replica.object,
+                     replica.version)).rowcount:
+                conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind) VALUES (?, ?, ?, ?) "
+                             "ON CONFLICT(store, binary_rel) DO UPDATE SET state = excluded.state, kind = excluded.kind, "
+                             "code = NULL, attempts = 0, retry_at = 0",
+                             (replica.store, binary_rel, PENDING, RECOPY))
+                changed = True
     if changed:
         wake()
 
@@ -265,14 +273,19 @@ def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *,
 _DAMAGED = f"SELECT 1 FROM media_replicas WHERE state = '{QUARANTINED}' AND object = ? AND version = ? LIMIT 1"
 
 
-def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:
-    """Whether the table holds any of these stored versions as quarantined: what eviction asks before it trusts a pointer.
+def quarantined_in(conn: sqlite3.Connection, references: Iterable[originals.StoredObject]) -> bool:
+    """Whether the table holds any of these stored versions as quarantined, read on `conn`'s own transaction.
 
     One lookup per reference through the index of quarantined rows. An object has a handful of versions, never a
     number that grows with the store.
     """
+    return any(conn.execute(_DAMAGED, (reference.object, reference.version)).fetchone() for reference in references)
+
+
+def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:
+    """Whether the table holds any of these stored versions as quarantined: what eviction asks before it trusts a pointer."""
     with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
-        return any(conn.execute(_DAMAGED, (reference.object, reference.version)).fetchone() for reference in references)
+        return quarantined_in(conn, references)
 
 
 #: One replica as the table holds it, quarantined: the primary-key lookup that tells a copy again whether its finding stands.
@@ -1075,7 +1088,7 @@ def check_read_rate() -> float:
 
 
 class _ReadCap:
-    """Keeps a round's reads under the read-rate cap: each read earns its own wait, and time spent elsewhere earns no burst.
+    """Keeps a round's reads under the read-rate cap: each read earns its own time, and time spent elsewhere earns no burst.
 
     A store's `head` and a sample read whole objects, so the cap applies per object, after its read.
     """
@@ -1083,13 +1096,16 @@ class _ReadCap:
     def __init__(self, rate: float, limit: float) -> None:
         self.rate, self.limit, self.due = rate, limit, 0.0
 
-    def spend(self, size: int) -> bool:
-        """Account for a read of `size` bytes and wait out its share; False when the wait would pass the round's end."""
-        now = time.monotonic()
-        self.due = max(self.due, now) + size / self.rate
+    def spend(self, size: int, started: float) -> bool:
+        """Account for a read of `size` bytes that began at `started`; False when its time would pass the round's end.
+
+        The read's time counts from its start, so the read itself is part of it and only what remains is waited out: a
+        wait added after the read would hold the average rate below the cap and stretch the cycle.
+        """
+        self.due = max(self.due, started) + size / self.rate
         if self.due >= self.limit:
             return False
-        foreground_priority.wait_for_retry(max(0.0, self.due - now))
+        foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
         return True
 
 
@@ -1249,6 +1265,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 _failed(vault, row, bound)
                 continue
             replica = bound[1]
+            started = time.monotonic()
             try:
                 failure = media_store.check_replica(vault, replica)
             except ValueError:
@@ -1270,7 +1287,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 quarantine(vault, row["binary_rel"], replica, level=level, failure=failure)
             if level == CONTENT:
                 spent += replica.ciphertext_size
-                if not cap.spend(replica.ciphertext_size):
+                if not cap.spend(replica.ciphertext_size, started):
                     return attempted  # The cap would hold the worker past the round: the next round goes on.
     return attempted
 
@@ -1423,6 +1440,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 _charge(conn, name, month, replica.ciphertext_size)
             reads += 1
             sampled += 1
+            started = time.monotonic()
             try:
                 damage = media_store.sample_replica(
                     vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
@@ -1446,7 +1464,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     _released(vault, row, replica)
                 else:
                     _proved(vault, row, replica, name)
-            if failing >= _STORE_FAILURES or not cap.spend(replica.ciphertext_size):
+            if failing >= _STORE_FAILURES or not cap.spend(replica.ciphertext_size, started):
                 break  # a store or key that fails three in a row is the likelier cause; the next round tries again
     return sampled
 
