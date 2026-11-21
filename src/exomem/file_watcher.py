@@ -46,7 +46,7 @@ import weakref
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from . import (
     call_spans,
@@ -2072,7 +2072,7 @@ class FileWatcher:
         try:
             with foreground_priority.bulk(stop=self._stop):
                 if (
-                    self._importer is None and self._carried_graph is None
+                    self._importer is None and self._current_startup_graph(finished=True) is None
                     and not self._validate_existing_graph_on_seed()
                 ):
                     return
@@ -2185,7 +2185,7 @@ class FileWatcher:
 
         epistemic_graph.recover_suspended_graph(self._vault_root)
 
-    def _await_admissible_graph(self, graph) -> bool:
+    def _await_admissible_graph(self, graph) -> bool | Literal["full_marker_required"]:
         """Wait for the actual writer, or use the graph owner's fenced verdict."""
         from . import foreground_priority
 
@@ -2198,30 +2198,15 @@ class FileWatcher:
 
     def _validate_existing_graph_on_seed(self) -> bool:
         """Recover stable startup incoherence after exact disk baselines."""
-        from . import epistemic_graph, graph_sync
-        from . import find as find_module
-        from . import vault as vault_module
+        from . import epistemic_graph
 
-        if not epistemic_graph.sidecar_path(self._vault_root).exists():
+        if (
+            not epistemic_graph.graph_enabled()
+            or not epistemic_graph.sidecar_path(self._vault_root).exists()
+        ):
             return True
         graph = epistemic_graph.EpistemicGraphIndex(self._vault_root)
-        try:
-            if not epistemic_graph.graph_enabled() or self._await_admissible_graph(graph):
-                return True
-            find_module.evict_resolver_caches(self._vault_root)
-            vault_module.evict_inbound_index(self._vault_root)
-            if not index_sync.recover_full_receipt_graph_epoch(self._vault_root, build=False):
-                raise RuntimeError("startup graph epoch recovery did not complete")
-            graph.rebuild_all()
-            if not graph.available():
-                raise RuntimeError("startup graph rebuild did not publish availability")
-            return True
-        except graph_sync.GraphRebuildInProgress:
-            log.info("file watcher: startup graph validation joined an active external owner")
-            return False
-        except Exception:  # noqa: BLE001 - leave any established fence to recovery
-            log.exception("file watcher: startup graph validation failed")
-            return False
+        return graph.recover_startup_graph(self._await_admissible_graph(graph))
 
     def _dispatch_reconcile_delta(
         self,
@@ -2752,8 +2737,9 @@ class FileWatcher:
         succeeded = False
         try:
             succeeded = self._reconcile_once(seed=True)
-            if succeeded and self._carried_graph is not None:
-                self._carried_graph.bind(self._vault_root)
+            carried = self._current_startup_graph()
+            if succeeded and carried is not None:
+                carried.bind(self._vault_root)
         except Exception:  # noqa: BLE001 - completion must unblock activation
             log.exception("file watcher: startup freshness seed failed")
         finally:
@@ -2934,29 +2920,43 @@ class FileWatcher:
     def carry_startup_graph(self, proof) -> None:
         self._carried_graph = proof
 
-    def promotion_observation_stamp(self) -> tuple[str, int] | None:
-        if self._observer is None or not self._observer.is_alive() or self._stop.is_set():
+    def _current_startup_graph(self, *, finished: bool = False):
+        carried = self._carried_graph
+        current = carried is not None and carried.handoff_current(self._vault_root, finished=finished)
+        if finished or not current:
+            self._carried_graph = None
+        return carried if current else None
+
+    def promotion_observation_stamp(self) -> tuple[object, int] | None:
+        observer = self._observer
+        if observer is None or not observer.is_alive() or self._stop.is_set():
             return None
+        keep_running = getattr(observer, "should_keep_running", None)
+        if keep_running is not None and not keep_running():
+            return None
+        emitters = getattr(observer, "emitters", None)
+        backends = None if emitters is None else frozenset(emitters)
+        if backends is not None:
+            if not backends or not all(e.is_alive() and e.should_keep_running() for e in backends):
+                return None
         with self._raw_witness.lock:
-            return self._raw_witness.instance, self._raw_witness.epoch
+            if self._observer is not observer:
+                return None
+            return (observer, backends, self._raw_witness.instance), self._raw_witness.epoch
 
     def start(self) -> bool:
         """Start dispatch and seed, or reconcile-only polling without an observer."""
+        self._current_startup_graph()
         if not self._vault_root.is_dir() or not self._kb_root.is_dir():
             return False
         arming = self._observer_arming
         if arming is not None:
             if self._stop.is_set():
                 return False
-            observation_started = arming.is_alive() or self._observer is not None
+            observation_started = arming.is_alive() or self.promotion_observation_stamp() is not None
         else:
             observation_started = self._arm_observer()
         if not observation_started:
-            if self._carried_graph is not None:
-                from . import epistemic_graph
-
-                epistemic_graph.require_startup_source_proof(self._vault_root)
-                self._carried_graph = None
             if not self._runs_reconcile():
                 return False
             self._start_reconcile_thread()

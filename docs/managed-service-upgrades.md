@@ -575,12 +575,16 @@ line repeats it. A `current` graph promotion carries both `graph_handoff` and
 `startup_validation`. The worker arms its normal file watcher after taking ownership.
 Promotion then replays the source proof and binds it to that observer.
 The watcher seeds from disk and replays its buffered events without repeating the graph proof.
+If that observer stops or changes before startup finishes, the worker proves the sources again.
 
 If the proof finds a bounded set of changed pages, `residue_applied` records
 the number queued for repair. Graph reads wait for the drain to publish those rows.
 If observation or proof cannot complete, `startup_validation` is `pending`.
 Startup proves the graph origin through the normal recovery path.
 Any canonical writes that reach graph dispatch in the meantime queue their graph work.
+When the canonical floor and checkpoint agree, a full graph rebuild can replace a damaged metadata table.
+If SQLite cannot read the graph file as a database, graph reads stay fenced and rebuild debt remains.
+The startup log reports `graph_sidecar_requires_replacement` for this case.
 A quarantine can settle an exact checkpoint after the drain proves the held page's
 admission and topology. The graph retains that page's last-readable rows. The
 write reports pending graph repair, and the doctor reports the quarantine.

@@ -246,9 +246,9 @@ _replacement_pending: dict[
 # readers can then fail closed in O(1) until that exact queued generation has
 # been published through the event-maintained corpus fan-out.
 #
-# `_external_pending` is the aggregate: root -> the latest epoch still
-# unrepaired, which is what every read-side fence and the watcher's
-# compare-and-ack consult. The two maps below say *what* is unrepaired, because
+# `_external_pending` keeps the highest epoch of the current pending interval.
+# Retiring part of the interval cannot introduce unseen work. The two maps
+# below say *what* is unrepaired, because
 # a mark's scope decides whether it may fence a governed write
 # (`seamless-managed-worker-handoff` D3). A mark carrying paths fences only
 # those paths; an unscoped mark -- an access-policy edit, a registry loss, an
@@ -974,15 +974,8 @@ def _external_path_key(path: Path | str) -> str:
         return str(path)
 
 
-def _refresh_external_aggregate_locked(root: str) -> None:
-    """Recompute one root's latest unrepaired epoch from its surviving marks."""
-    epochs = [*_external_pending_paths.get(root, {}).values()]
-    unscoped = _external_pending_unscoped.get(root)
-    if unscoped is not None:
-        epochs.append(unscoped)
-    if epochs:
-        _external_pending[root] = max(epochs)
-    else:
+def _finish_external_pending_if_empty_locked(root: str) -> None:
+    if root not in _external_pending_paths and root not in _external_pending_unscoped:
         _external_pending.pop(root, None)
 
 
@@ -1008,7 +1001,7 @@ def mark_external_pending(vault_root: Path, *, paths: Iterable[Path | str] = ())
                 marked[key] = epoch
         else:
             _external_pending_unscoped[root] = epoch
-        _refresh_external_aggregate_locked(root)
+        _external_pending[root] = epoch
         for scope in SCOPES:
             _recall_publications.pop((root, scope), None)
         return epoch
@@ -1027,7 +1020,7 @@ def clear_external_pending(vault_root: Path, *, through: int) -> None:
         unscoped = _external_pending_unscoped.get(root)
         if unscoped is not None and unscoped <= through:
             _external_pending_unscoped.pop(root, None)
-        _refresh_external_aggregate_locked(root)
+        _finish_external_pending_if_empty_locked(root)
 
 
 def external_pending(vault_root: Path) -> bool:
@@ -1061,6 +1054,8 @@ def retire_external_pending_paths(
     The repair owner calls this after commit while retaining canonical authority.
     Exact epochs prevent a later event on the same path from losing its fence.
     """
+    if not observed:
+        return
     with _lock:
         root = _canon(vault_root)
         marked = _external_pending_paths.get(root)
@@ -1070,7 +1065,7 @@ def retire_external_pending_paths(
                     marked.pop(path)
             if not marked:
                 _external_pending_paths.pop(root, None)
-        _refresh_external_aggregate_locked(root)
+        _finish_external_pending_if_empty_locked(root)
 
 
 def external_pending_unscoped(vault_root: Path) -> bool:
@@ -1098,7 +1093,8 @@ def external_pending_only_for(vault_root: Path, paths: Iterable[Path | str]) -> 
         root = _canon(vault_root)
         if root in _external_pending_unscoped:
             return False
-        return set(_external_pending_paths.get(root, {})) <= own
+        marked = _external_pending_paths.get(root)
+        return marked is None or (len(marked) <= len(own) and all(key in own for key in marked))
 
 
 def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
@@ -1134,7 +1130,7 @@ def external_observation_stamp() -> int:
 
 
 def external_pending_epoch(vault_root: Path) -> int | None:
-    """Return the latest observed unpublished generation for one vault."""
+    """Return the newest observation in the current pending interval."""
     with _lock:
         return _external_pending.get(_canon(vault_root))
 

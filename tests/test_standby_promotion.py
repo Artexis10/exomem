@@ -175,36 +175,6 @@ def test_promotion_records_a_checkpoint_that_moved_under_the_standby(
 
 
 
-def test_a_failed_reproof_promotes_anyway_and_records_the_rebuild(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """A re-proof that fails must not strand the service unpromoted.
-
-    The coalesced rebuild path owns that repair; refusing to promote would leave
-    nobody serving at all.
-    """
-    from exomem import epistemic_graph
-
-    monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
-    monkeypatch.setattr(service_standby, "_acquire_ownership", lambda: None)
-    monkeypatch.setattr(service_standby, "snapshot_token", lambda root: "checkpoint-1")
-    _stub_adoption(monkeypatch)
-    monkeypatch.setattr(
-        service_standby,
-        "_reprove",
-        lambda root: epistemic_graph.SnapshotAdoption(False, reason="snapshot_proof_declined"),
-    )
-    activation = _Activation()
-    service_standby.enter_standby()
-    service_standby.register_activation(activation)
-    service_standby.prove_graph_snapshot(tmp_path)
-    record = service_standby.promote(tmp_path, migrated=True)
-    assert record["snapshot"] == "rebuild-after-promotion"
-    assert record["residue_applied"] == 0
-    assert activation.released is True
-    assert service_standby.promoted() is True
-
-
 def test_promotion_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service_standby.warmup, "model_preload_allowed", lambda *a: False)
     calls: list[str] = []

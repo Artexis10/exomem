@@ -76,8 +76,8 @@ promote_midproof = len(sys.argv) > 2 and sys.argv[2] == "midproof"
 advanced = len(sys.argv) > 2 and sys.argv[2] == "advanced"
 arm = sys.argv[2]
 watcher_boot_seed = arm in ("seed", "retry", "reproof", "midproof", "advanced", "migration")
-silent_edit = arm in ("silent", "no-observer", "deadline", "cold", "residue-refused")
-fallback = arm in ("no-observer", "deadline", "cold", "residue-refused")
+fallback = arm in ("no-observer", "deadline", "cold", "residue-refused", "reproof-declined")
+silent_edit = arm == "silent" or fallback
 generated = root / GENERATED
 
 passes = []
@@ -161,6 +161,16 @@ if silent_edit:
 if arm == "residue-refused":
     apply_residue = EpistemicGraphIndex.apply_adopted_residue
     EpistemicGraphIndex.apply_adopted_residue = lambda self, paths: False
+if arm == "reproof-declined":
+    from exomem.epistemic_graph import SnapshotAdoption
+
+    reproofs = []
+
+    def decline_reproof(vault_root, **_kwargs):
+        reproofs.append(vault_root)
+        return SnapshotAdoption(False, reason="sources_kept_moving")
+
+    service_standby._reprove = decline_reproof
 if arm == "no-observer":
     os.environ["EXOMEM_DISABLE_FILE_WATCHER"] = "1"
 if arm == "deadline":
@@ -235,6 +245,9 @@ elif arm == "cold":
     # Restart as an ordinary worker over the same inherited graph.
     service_standby.reset_for_tests()
     activation = server_runtime.LocalRuntimeActivation(root, deferred=False)
+    # Use real activation admission and drive the watcher after the first write.
+    activation._activate = lambda: None
+    activation.start()
     from exomem import readiness as service_readiness
     for component in service_readiness.COMPONENTS:
         service_readiness.mark_ready(component)
@@ -244,6 +257,9 @@ else:
     promotion = service_standby.promote(root, migrated=arm == "migration")
 if arm == "residue-refused":
     EpistemicGraphIndex.apply_adopted_residue = apply_residue
+if arm == "reproof-declined":
+    assert reproofs == [root], promotion
+    assert activation.file_watcher.promotion_observation_stamp() is not None
 if observer is not None:
     observer.join(5)
     assert not observer.is_alive()
@@ -417,7 +433,9 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     _assert_incremental_latency(report["acknowledgements"])
 
 
-@pytest.mark.parametrize("arm", ["silent", "no-observer", "deadline", "cold", "residue-refused"])
+@pytest.mark.parametrize(
+    "arm", ["silent", "no-observer", "deadline", "cold", "residue-refused", "reproof-declined"],
+)
 def test_promotion_accounts_for_a_silent_edit_before_an_unrelated_first_write(
     handoff_vault: Path, tmp_path: Path, arm: str,
 ) -> None:
@@ -431,6 +449,9 @@ def test_promotion_accounts_for_a_silent_edit_before_an_unrelated_first_write(
         assert "startup_validation" not in promotion["carried_from_standby"], promotion
         if arm == "residue-refused":
             assert promotion["reproof_declined"] == "residue_enqueue_failed", promotion
+        if arm == "reproof-declined":
+            assert promotion["reproved"] and promotion["snapshot"] == "rebuild-after-promotion"
+            assert promotion["reproof_declined"] == "sources_kept_moving", promotion
     assert report["rebuilds"] == 0, report
     assert report["available"] and not report["queued_after_drain"], report
     _seed_live_freshness(handoff_vault)
@@ -445,6 +466,89 @@ def test_migration_promotion_reproves_the_source_with_the_live_observer(
     assert promotion["migrated"] and promotion["reproved"], promotion
     assert promotion["startup_validation"] == "carried", promotion
     assert report["available"] and not report["rebuilds"], report
+
+
+def test_a_watcherless_restart_repairs_a_persisted_graph_fence_before_serving_relations(
+    handoff_vault: Path, tmp_path: Path,
+) -> None:
+    from test_product_e2e_helpers import e2e_product_loop
+
+    from exomem import graph_sync, vault
+    from exomem.epistemic_graph import EpistemicGraphIndex
+
+    root = handoff_vault
+    path = root / GENERATED / "generated-note-0000.md"
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(path, path.read_text(encoding="utf-8") + "\n- Queued [[generated-note-0003]]\n")],
+        vault_root=root,
+        post_commit_fanout=False,
+    )
+    required = graph_sync.read_checkpoint(root)
+    assert required is not None
+    assert graph_sync.acknowledged_generation(root) < required.generation
+    EpistemicGraphIndex(root).suspend_reads()
+
+    home = tmp_path / "worker"
+    home.mkdir()
+    environment = e2e_product_loop._clean_env(home, root)
+    environment["EXOMEM_STATE_ROOT"] = os.environ["EXOMEM_STATE_ROOT"]
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(Path(__file__).resolve().parents[1] / "src"), str(Path(__file__).parent))
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", '''
+import sys, time
+from pathlib import Path
+from exomem import deferred_index, epistemic_graph, graph_drain, graph_sync, index_sync, server_runtime
+from test_graph_post_handoff_writes import GENERATED, _governed_write
+
+root = Path(sys.argv[1])
+activation = server_runtime.LocalRuntimeActivation(root)
+start = activation._start_component
+
+def graph_component(name, component):
+    if name == "file watcher recovery":
+        before = deferred_index.snapshot_graph(root)
+        assert before and epistemic_graph.startup_source_proof_pending(root)
+        assert index_sync.drain_graph_work(root, limit=64) == 0
+        assert deferred_index.snapshot_graph(root) == before
+        assert not graph_drain.per_path_repair_raced(root)
+    if name in ("file watcher", "file watcher recovery", "graph drain"):
+        start(name, component)
+
+activation._start_component = graph_component
+try:
+    activation.start()
+    activation._thread.join(30)
+    assert not activation._thread.is_alive(), "startup still waiting"
+    assert activation.file_watcher is None
+    assert activation.graph_drain is not None
+    assert not epistemic_graph.startup_source_proof_pending(root), "startup left its source fence"
+    graph = epistemic_graph.EpistemicGraphIndex(root)
+    assert graph.available()
+
+    path = root / GENERATED / "generated-note-0001.md"
+    _governed_write(root, path, "After restart [[generated-note-0004]]")
+    deadline = time.monotonic() + 15
+    while deferred_index.list_graph_paths(root) or not graph.available():
+        assert time.monotonic() < deadline, "governed relation did not converge"
+        time.sleep(0.05)
+    checkpoint = graph_sync.read_checkpoint(root)
+    assert graph_sync.acknowledged_checkpoint(root) == graph_sync.GraphBuildOutcome.covering(checkpoint)
+    assert epistemic_graph.graph_context(root, path=path.relative_to(root).as_posix())["available"]
+finally:
+    activation._shutdown.set()
+    activation._stop_background_workers()
+''', str(root)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=65,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-6000:]
+    _seed_live_freshness(root)
+    _assert_matches_a_fresh_rebuild(root)
 
 
 def test_a_promotion_during_a_reproof_keeps_the_held_proof(

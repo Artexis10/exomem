@@ -1555,7 +1555,9 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     raise GraphEpochIncoherent("graph floor/checkpoint/ack epoch is not coherent for publication")
 
 
-def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
+def canonical_publication_epoch(
+    vault_root: Path, *, deadline: float | None = None,
+) -> GraphPublicationEpoch:
     """Read the bounded canonical epoch used by a private publication ticket.
 
     This deliberately consults only the floor and checkpoint artifacts, so it
@@ -1566,8 +1568,12 @@ def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     publication's ticket does this, once, because the acknowledgement it keeps
     is what its publication must not move.
     """
-    floor_status, floor = floor_state(vault_root)
-    checkpoint_status, checkpoint = checkpoint_state(vault_root)
+    floor_status, floor = (
+        floor_state(vault_root) if deadline is None else floor_state(vault_root, deadline=deadline)
+    )
+    checkpoint_status, checkpoint = (
+        checkpoint_state(vault_root) if deadline is None else checkpoint_state(vault_root, deadline=deadline)
+    )
     if floor_status == "absent" and checkpoint_status == "absent":
         return GraphPublicationEpoch(None, None, None)
     if floor_status == "absent" and checkpoint_status == "valid" and checkpoint is not None:

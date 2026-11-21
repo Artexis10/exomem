@@ -759,6 +759,8 @@ def _connect_created_owned(
     ):
         if column not in failure_columns:
             conn.execute(f"ALTER TABLE graph_failures ADD COLUMN {column} {declaration}")
+    if "read_grace_since" not in graph_columns:
+        _install_graph_read_grace(conn)
     _ensure_derived_batch_schema(conn)
     _ensure_vocabulary_provenance_schema(conn)
     if publish:
@@ -773,6 +775,45 @@ def _connect_created_owned(
             conn.close()
             raise
     return conn
+
+
+def _install_graph_read_grace(conn: sqlite3.Connection) -> None:
+    """Index receipt-local permission failures without a queue scan on every retry."""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if any(row[1] == "read_grace_since" for row in conn.execute("PRAGMA table_info(graph_upserts)")):
+            return
+        # Older rows acquire an exact classification on their next isolated failure.
+        conn.execute("ALTER TABLE graph_upserts ADD COLUMN read_grace_since REAL")
+        conn.execute("CREATE INDEX graph_upserts_read_grace ON graph_upserts(read_grace_since)")
+        conn.execute("CREATE INDEX graph_upserts_oldest ON graph_upserts(created_at)")
+        conn.execute(
+            "CREATE TRIGGER graph_upserts_clear_read_grace "
+            "AFTER UPDATE OF revision, graph_generation, rel_path ON graph_upserts "
+            "WHEN NEW.read_grace_since IS NOT NULL AND "
+            "(OLD.revision IS NOT NEW.revision OR OLD.graph_generation IS NOT NEW.graph_generation "
+            "OR OLD.rel_path IS NOT NEW.rel_path) "
+            "BEGIN UPDATE graph_upserts SET read_grace_since = NULL WHERE rel_path = NEW.rel_path; END"
+        )
+        # The unreadable cause is the closed permission-grace outcome of graph repair.
+        # Releasing a quarantine leaves a fresh receipt to classify.
+        for name, event, condition in (
+            ("insert", "INSERT", ""),
+            ("update", "UPDATE OF first_failed_at, failure_revision, failure_cause, quarantined",
+             "AND OLD.quarantined = 0 "),
+        ):
+            conn.execute(
+                f"CREATE TRIGGER graph_failures_read_grace_{name} AFTER {event} ON graph_failures "
+                "BEGIN UPDATE graph_upserts SET read_grace_since = CASE WHEN "
+                "NEW.failure_revision = revision AND NEW.failure_cause = 'unreadable' "
+                f"AND NEW.quarantined = 0 {condition}THEN NEW.first_failed_at END "
+                "WHERE rel_path = NEW.rel_path; END"
+            )
+        conn.execute(
+            "CREATE TRIGGER graph_failures_read_grace_delete AFTER DELETE ON graph_failures "
+            "BEGIN UPDATE graph_upserts SET read_grace_since = NULL "
+            "WHERE rel_path = OLD.rel_path AND read_grace_since IS NOT NULL; END"
+        )
 
 
 def semantic_isolation_cursors(vault_root: Path) -> dict[str, dict[str, str]]:
@@ -2081,14 +2122,26 @@ def graph_receipts_in_read_grace(vault_root: Path, *, seconds: float) -> bool:
     try:
         with closing(_connect_readonly(vault_root)) as conn:
             return conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM graph_upserts) AND NOT EXISTS ("
-                "SELECT 1 FROM graph_upserts q LEFT JOIN graph_failures f USING (rel_path) "
-                "WHERE f.failure_revision IS NULL OR f.failure_revision != q.revision "
-                "OR f.failure_cause IS NOT 'unreadable' OR f.first_failed_at <= ?)",
+                # SQLite orders NULL first. A missing classification or the
+                # earliest failure outside the grace makes the queue ineligible.
+                "SELECT read_grace_since > ? FROM graph_upserts INDEXED BY graph_upserts_read_grace "
+                "ORDER BY read_grace_since LIMIT 1",
                 (time.time() - seconds,),
             ).fetchone() == (1,)
     except (OSError, sqlite3.Error):
         return False
+
+
+def graph_oldest_receipt_age(vault_root: Path) -> float | None:
+    """Read the scheduler's age without counting the diagnostic queue depth."""
+    if not store_path(vault_root).exists():
+        return None
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            row = conn.execute("SELECT min(created_at) FROM graph_upserts").fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    return max(0.0, time.time() - row[0]) if row and row[0] is not None else None
 
 
 def note_graph_failure(

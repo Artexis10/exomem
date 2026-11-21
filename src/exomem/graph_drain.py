@@ -495,8 +495,8 @@ def _external_change_stood(vault_root: Path) -> bool:
     The watcher repairs an external change and clears its mark, which ends the
     wait. A mark that outlives the whole backoff ladder with no newer one and no
     clear means the watcher is dead or exhausted, and only then is the graph's
-    availability debt the drain's to rebuild. "The same change" is the latest
-    pending epoch: a newer mark is a live watcher's input and restarts the wait.
+    availability debt the drain's to rebuild. A new observation restarts the
+    wait. Partial retirement keeps the same pending interval.
     """
     from . import freshness
 

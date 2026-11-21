@@ -132,6 +132,7 @@ class LocalRuntimeActivation:
         # admission nor arms the liveness fallback that would start schedulers
         # beside the worker still serving (`seamless-managed-worker-handoff` D7).
         self._deferred = deferred
+        self._needs_cold_graph_proof = not deferred
         if warmup.warmup_enabled() and not deferred:
             readiness.manage_runtime()
         self.vault_root = vault_root
@@ -166,12 +167,16 @@ class LocalRuntimeActivation:
         # `/upload/sessions`; a stdio server never resumes their commits.
         self.serves_upload_sessions = False
         if not deferred:
-            from . import epistemic_graph
-
-            if epistemic_graph.sidecar_path(vault_root).exists():
-                epistemic_graph.require_startup_source_proof(vault_root)
             self._bind_graph_rebuild_lifetime()
             self._commit_recall_reembed()
+
+    def _fence_cold_graph_origin(self) -> None:
+        if self._needs_cold_graph_proof:
+            from . import epistemic_graph
+
+            if epistemic_graph.sidecar_path(self.vault_root).exists():
+                epistemic_graph.require_startup_source_proof(self.vault_root)
+            self._needs_cold_graph_proof = False
 
     def _bind_graph_rebuild_lifetime(self) -> None:
         from . import graph_sync, working_set_runtime
@@ -200,6 +205,7 @@ class LocalRuntimeActivation:
         with self._lock:
             if self._started or self._shutdown.is_set() or self._deferred:
                 return
+            self._fence_cold_graph_origin()
             self._started = True
             timer = self._timer
             thread = threading.Thread(
@@ -683,7 +689,12 @@ class LocalRuntimeActivation:
             return
         graph = epistemic_graph.EpistemicGraphIndex(vault_root)
         with foreground_priority.bulk(stop=self._shutdown):
-            while graph.validate_startup_snapshot() is None:
+            while True:
+                foreground_priority.check_cancelled()
+                admission = graph.validate_startup_snapshot()
+                if admission is not None:
+                    graph.recover_startup_graph(admission)
+                    return
                 foreground_priority.wait_for_retry(0.25)
 
     async def _finish_shutdown(self) -> None:
@@ -759,6 +770,8 @@ class LocalRuntimeActivation:
             timer.daemon = True
             with self._lock:
                 if not self._started and not self._deferred:
+                    # HTTP can serve before the liveness endpoint starts workers.
+                    self._fence_cold_graph_origin()
                     self._timer = timer
                     timer.start()
             try:

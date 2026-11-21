@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1267,6 +1269,55 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (object, object))
     w = file_watcher.FileWatcher(tmp_path)
     assert w.start() is False
+
+
+@pytest.mark.parametrize("lost", ["observer", "emitter"])
+def test_a_lost_promotion_observer_refences_graph_reads_before_dispatch(
+    vault: Path, lost: str,
+) -> None:
+    page = vault / "Knowledge Base" / "Notes" / "observer-gap.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Before\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    epistemic_graph.require_startup_source_proof(vault)
+    try:
+        deadline = time.monotonic() + 8
+        assert watcher.arm_promotion_observation(deadline=deadline)
+        observe = watcher.promotion_observation_stamp
+        initial = graph.promotion_proof_stamp(observe)
+        assert initial is not None
+        proof = graph.adopt_published_snapshot(
+            apply_residue=False, prime_resolver=False, deadline=deadline,
+        )
+        carried, reason = graph.seal_promoted_snapshot(
+            initial, proof, observe=observe, deadline=deadline,
+        )
+        assert carried is not None, reason
+        carried.bind(vault)
+        watcher.carry_startup_graph(carried)
+        assert graph.available()
+        observer = watcher._observer
+        assert observer is not None
+        stopped = observer if lost == "observer" else next(iter(observer.emitters))
+        stopped.stop()
+        stopped.join(2)
+        assert not stopped.is_alive()
+        assert observer.is_alive() is (lost == "emitter")
+        page.write_text("# Edited\n", encoding="utf-8")
+
+        assert epistemic_graph.startup_source_proof_pending(vault)
+        assert not graph.available()
+        assert watcher.start()
+        assert watcher.wait_until_seeded(10)
+        watcher.finish_startup_recovery()
+        assert not epistemic_graph.startup_source_proof_pending(vault)
+        assert graph.available()
+        assert not epistemic_graph.graph_drift(vault)
+    finally:
+        watcher.stop()
 
 
 @pytest.mark.parametrize("cancelled", [False, True], ids=["deadline", "shutdown"])
@@ -2531,6 +2582,79 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
         "durable incoherence must short-circuit ahead of the O(corpus) source proof; "
         f"observed call order: {events}"
     )
+
+
+@pytest.mark.parametrize("damage", ["missing_metadata", "not_a_database"])
+def test_startup_finishes_with_a_stably_damaged_graph(
+    vault: Path, damage: str,
+) -> None:
+    from exomem import graph_sync
+
+    rel = "Knowledge Base/Notes/graph-recovery.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Before\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(page, "# Canonical title\n")],
+        vault_root=vault, post_commit_fanout=False,
+    )
+    graph.rebuild_all()
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None and checkpoint.generation > 0
+    assert graph_sync.acknowledged_checkpoint(vault) == graph_sync.GraphBuildOutcome.covering(checkpoint)
+    canonical = {
+        path: path.read_bytes() for path in (graph_sync.floor_path(vault), graph_sync.checkpoint_path(vault))
+    }
+
+    with closing(sqlite3.connect(graph.path)) as conn:
+        if damage == "missing_metadata":
+            conn.execute("DROP TABLE graph_meta")
+            conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if damage == "not_a_database":
+        graph.path.write_bytes(b"unreadable graph sidecar\n")
+    damaged_family = {
+        path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")
+    }
+    epistemic_graph.require_startup_source_proof(vault)
+
+    dispatches = []
+
+    def finish_startup() -> None:
+        with epistemic_graph.observe_full_marker_dispatches() as observed:
+            watcher.finish_startup_recovery()
+        dispatches.extend(observed)
+
+    startup = threading.Thread(target=finish_startup)
+    startup.start()
+    try:
+        startup.join(12)
+        assert not startup.is_alive(), "settled damage kept startup waiting"
+        assert all(path.read_bytes() == content for path, content in canonical.items())
+        assert [result.code for result in dispatches] == [
+            "graph_rebuild_completed" if damage == "missing_metadata"
+            else "graph_sidecar_requires_replacement"
+        ]
+        if damage == "missing_metadata":
+            assert not epistemic_graph.startup_source_proof_pending(vault)
+            assert graph.available()
+            assert any(row.get("title") == "Canonical title" for row in graph.nodes(path=rel))
+            assert graph_sync.acknowledged_checkpoint(vault) == graph_sync.GraphBuildOutcome.covering(checkpoint)
+            assert deferred_index.graph_full_rebuild_pending(vault) is None
+        else:
+            assert epistemic_graph.startup_source_proof_pending(vault)
+            assert not graph.available()
+            assert not dispatches[0].whole_vault_attempted
+            assert deferred_index.graph_full_rebuild_pending(vault) is not None
+            after = {path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")}
+            assert after == damaged_family
+    finally:
+        watcher.stop()
+        startup.join(2)
 
 
 @pytest.mark.parametrize("stop_at", ["row", "publication", "replacement"])

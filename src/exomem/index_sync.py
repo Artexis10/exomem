@@ -1240,6 +1240,8 @@ def _drain_graph_receipts(
     """
     from . import epistemic_graph, graph_drain
 
+    if epistemic_graph.startup_source_proof_pending(vault_root):
+        return 0, False
     admission = index.drain_epoch_admission()
     if admission is None:
         return 0, graph_drain.note_covered_contention(vault_root)
@@ -1268,6 +1270,8 @@ def _drain_graph_receipts(
             return 0, refusal == _BUSY_BOUNDARY_CODE and graph_drain.note_covered_contention(vault_root)
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
+    if report.get("startup_pending"):
+        return 0, False
     if report.get("requires_rebuild"):
         # Deliberately not escalated to a rebuild marker. Every condition that
         # produces this is transient -- no sidecar yet, no live recall registry,
@@ -1342,6 +1346,8 @@ def _drain_graph_receipts(
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
             continue
+        if single.get("startup_pending"):
+            return processed, False
         if single.get("moved") or single.get("requires_rebuild") or single.get("disabled"):
             # A race or a vault not ready: the page is not the problem, and
             # counting it would quarantine a page for being written to.

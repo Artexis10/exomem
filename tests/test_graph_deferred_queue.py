@@ -37,6 +37,7 @@ Red-first: these describe the seams Phase 2 builds. They fail until it does.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import logging
 import os
@@ -340,6 +341,55 @@ def test_a_committed_drain_retires_only_its_scoped_external_observations(
         assert not freshness.external_pending(vault)
         assert EpistemicGraphIndex(vault).available()
     _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_silent_edit_after_rechecking_partial_coverage_keeps_its_repair_queued(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pages = {
+        f"Knowledge Base/Notes/Insights/repair-{i:02}.md": _page(f"Repair {i}", "Before.")
+        for i in range(graph_drain.DRAIN_LIMIT + 1)
+    }
+    for rel, text in pages.items():
+        (vault / rel).write_text(text, encoding="utf-8")
+    _seed_live_freshness(vault)
+    graph = EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    generation = _write_without_graph_repair(
+        vault, monkeypatch, {rel: text.replace("Before.", "Queued.") for rel, text in pages.items()},
+    )
+    assert index_sync.drain_graph_work(vault, limit=graph_drain.DRAIN_LIMIT) == graph_drain.DRAIN_LIMIT
+    assert _acknowledged(vault) < generation
+    (last,) = deferred_index.list_graph_paths(vault)
+    covered = next(rel for rel in pages if rel != last)
+    path = vault / covered
+    updated = pages[covered].replace("Before.", "Changed outside the watcher.")
+    drain_source = EpistemicGraphIndex._drain_source
+    edited = False
+
+    def edit_after_read(self: EpistemicGraphIndex, rel: str):
+        nonlocal edited
+        source = drain_source(self, rel)
+        if rel == covered and not edited:
+            path.write_text(updated, encoding="utf-8")
+            edited = True
+        return source
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(EpistemicGraphIndex, "_drain_source", edit_after_read)
+        graph.drain_paths([vault / last])
+    assert edited
+    assert _acknowledged(vault) < generation
+    assert not graph.available()
+    assert set(deferred_index.list_graph_paths(vault)) == {covered, last}
+    assert index_sync.drain_graph_work(vault, limit=graph_drain.DRAIN_LIMIT) == 2
+    assert _acknowledged(vault) == generation
+    assert graph.available()
+    with sqlite3.connect(graph.path) as conn:
+        row = conn.execute(
+            "SELECT source_hash FROM graph_nodes WHERE kind = 'file' AND path = ?", (covered,),
+        ).fetchone()
+    assert row == (hashlib.sha256(updated.encode()).hexdigest(),)
 
 
 def test_same_stat_observed_retitle_refreshes_warm_search_and_graph(
@@ -2667,6 +2717,26 @@ def test_cold_resume_requires_byte_binding_for_an_unreadable_held_page(
         assert verdict is False
         assert _acknowledged(vault) < checkpoint.generation
         assert not graph.available()
+
+
+def test_a_legacy_requeue_cannot_inherit_the_previous_receipts_read_grace(vault: Path) -> None:
+    (original,) = deferred_index.add_graph_receipts(vault, [PAGE_A], generation=1)
+    deferred_index.note_graph_failure(vault, PAGE_A, revision=original.revision, cause="unreadable")
+    assert deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
+
+    # An older client bumps the queue revision without changing the failure row.
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        conn.execute("UPDATE graph_upserts SET revision = revision + 1 WHERE rel_path = ?", (PAGE_A,))
+    assert not deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
+    assert deferred_index.clear_graph_receipts(vault, [original]) == 0
+
+    (requeued,) = deferred_index.snapshot_graph(vault)
+    deferred_index.note_graph_failure(vault, PAGE_A, revision=requeued.revision, cause="unreadable")
+    assert deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
+    assert not deferred_index.graph_receipts_in_read_grace(vault, seconds=0)
+    assert deferred_index.quarantine_graph_receipt(vault, requeued, signature=None)
+    deferred_index.release_graph_quarantine(vault, [PAGE_A])
+    assert not deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
 
 
 def test_classified_permission_failure_keeps_its_grace_past_the_generic_stall(

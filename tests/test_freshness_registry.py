@@ -549,3 +549,20 @@ def test_a_path_repair_keeps_newer_outside_and_unscoped_observations(vault: Path
     assert str(first.resolve()) not in freshness.external_pending_paths(vault)
     assert str(outside.resolve()) in freshness.external_pending_paths(vault)
     assert freshness.external_pending_unscoped(vault)
+
+
+def test_retiring_the_latest_path_keeps_the_pending_interval_until_every_path_clears(
+    vault: Path,
+) -> None:
+    earlier, latest = "early.md", "late.md"
+    first = freshness.mark_external_pending(vault, paths=[earlier])
+    last = freshness.mark_external_pending(vault, paths=[latest])
+    freshness.retire_external_pending_paths(
+        vault, freshness.external_pending_path_epochs(vault, [latest]),
+    )
+    assert freshness.external_pending_epoch(vault) == last
+    assert not freshness.external_pending_for(vault, [latest])
+    assert freshness.external_pending_for(vault, [earlier])
+
+    freshness.clear_external_pending(vault, through=first)
+    assert freshness.external_pending_epoch(vault) is None

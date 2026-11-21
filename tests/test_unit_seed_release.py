@@ -153,8 +153,9 @@ def test_context_path_validation_ignores_a_denied_parent(vault, configured_bound
 def test_denied_earlier_vocabulary_cannot_select_the_admitted_unit_meaning(
     vault, private_instances
 ):
-    from exomem.vocabulary import instances, registry_spec
     from test_connector_boundary import SCOPE
+
+    from exomem.vocabulary import instances, registry_spec
 
     full, limited = private_instances("full"), private_instances("limited")
     hidden = vault / "Knowledge Base/Notes/aa-private.md"
@@ -446,6 +447,36 @@ def test_mcp_path_named_unit_seeds_of_a_withheld_page_answer_like_an_absent_page
 
     assert withheld == absent
     assert not any("IDLESS" in text for text in withheld)
+
+
+def test_a_withheld_unit_seed_answers_like_absence_while_startup_graph_is_unproved(
+    vault: Path,
+) -> None:
+    _idless_seeds(vault)
+    _withhold_insights(vault)
+    unit_ref = f"exomem://source/{quote(NOID[:-3])}#q-1"
+    limited = principal_module.RequestPrincipal(audience_id=CF_AUDIENCE, surface="mcp")
+    mcp = server.build_server(require_auth=False)
+
+    def restricted_context() -> dict:
+        epistemic_graph.require_startup_source_proof(vault)
+        with principal_module.request_scope(limited):
+            result = asyncio.run(mcp.call_tool(
+                "connect_memory", {"operation": "context", "unit_ref": unit_ref},
+                run_middleware=False,
+            ))
+        return result.structured_content["result"]
+
+    withheld = restricted_context()
+    _remove_idless(vault)
+    absent = restricted_context()
+    assert withheld == absent
+    assert absent["graph"]["available"] is False
+    assert "unit_ref" not in absent["seed"]
+
+    with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
+        owner = commands.op_connect_memory(vault, operation="context", unit_ref=unit_ref)
+    assert owner["seed"]["unit_ref"] == unit_ref
 
 
 # ---------------------------------------------------------------------------
