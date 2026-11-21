@@ -16,6 +16,7 @@ what it cannot prove.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import logging
 import os
@@ -192,10 +193,51 @@ def stage(
             _remove(lock_path)
 
 
+#: Whether this platform can pin the stage directory by descriptor. Where it cannot (Windows), the sweep
+#: keeps to paths and the root check below.
+_PINNABLE = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and {os.open, os.stat, os.unlink} <= os.supports_dir_fd
+    and os.scandir in os.supports_fd
+)
+_FileId = tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _StageDirectory:
+    """The stage directory as the sweep reaches it: one descriptor held for the whole sweep where the platform
+    has one, otherwise its path. A name resolved through the descriptor cannot be redirected by renaming the
+    directory or planting a link at its old name, which resolving the path again for each entry could not rule out.
+    """
+
+    path: Path
+    fd: int | None
+
+    def name(self, leaf: str) -> str:
+        """The argument for a `dir_fd=` call: the bare name against a descriptor, the full path without one."""
+        return leaf if self.fd is not None else os.fspath(self.path / leaf)
+
+    def scan(self) -> contextlib.AbstractContextManager[Iterator[os.DirEntry[str]]]:
+        return os.scandir(self.fd if self.fd is not None else self.path)
+
+    def remove(self, leaf: str, expected: _FileId) -> bool:
+        """Unlink `leaf` while it is still the regular file the scan saw. False means it changed and stays."""
+        try:
+            info = os.stat(self.name(leaf), dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True  # gone already: the state the sweep wants
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+            return False
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(self.name(leaf), dir_fd=self.fd)
+        return True
+
+
 @contextlib.contextmanager
-def _probe_lock(lock_path: Path) -> Iterator[bool | None]:
+def _probe_lock(directory: _StageDirectory, leaf: str, expected: _FileId) -> Iterator[bool | None]:
     """Yield True while this process holds an existing lock nobody else holds, False when another process
-    does, and None when this host cannot say.
+    does, and None when this host cannot say or the file is no longer the one the scan saw.
 
     The probe never creates, truncates or follows a link: it opens the existing file as it is, so a planted
     link cannot make the sweep write outside the stage root. A host whose `flock` is unsupported (or a
@@ -204,7 +246,7 @@ def _probe_lock(lock_path: Path) -> Iterator[bool | None]:
     try:
         import fcntl
     except ImportError:  # no fcntl on this platform: only the library's own lock can be probed
-        probe = FileLock(lock_path, timeout=0, thread_local=False)
+        probe = FileLock(directory.path / leaf, timeout=0, thread_local=False)
         try:
             probe.acquire()
         except Timeout:
@@ -219,11 +261,17 @@ def _probe_lock(lock_path: Path) -> Iterator[bool | None]:
             probe.release()
         return
     try:
-        descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(
+            directory.name(leaf), os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=directory.fd
+        )
     except OSError:
         yield None
         return
     try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+            yield None
+            return
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -237,52 +285,83 @@ def _probe_lock(lock_path: Path) -> Iterator[bool | None]:
         os.close(descriptor)
 
 
+def _open_directory(root: Path) -> _StageDirectory | SweepReport:
+    """Pin the stage root, or say why the sweep ends: no root is an empty sweep, a link or file is not ours."""
+    if _PINNABLE:
+        try:
+            descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+            return _StageDirectory(root, descriptor)
+        except FileNotFoundError:
+            return SweepReport()
+        except OSError as error:
+            if error.errno not in {errno.ELOOP, errno.ENOTDIR}:  # a link refused by O_NOFOLLOW, or a file
+                raise
+    else:
+        try:
+            if stat.S_ISDIR(os.lstat(root).st_mode):
+                return _StageDirectory(root, None)
+        except FileNotFoundError:
+            return SweepReport()
+    # A symlinked or replaced stage root is not ours to walk: nothing under it can be proven an orphan.
+    log.warning("upload stage root is not a plain directory; the sweep left it alone")
+    return SweepReport(unproven=1)
+
+
 def sweep(vault_root: Path) -> SweepReport:
     """Remove each stage whose owner is proven gone; leave every other entry where it is.
 
     Run once at serving activation. A stage is removed only when its lock can be taken, which means the
     process that held it is dead. A held lock is a live stage and stays; a `.part` whose lock file is missing
-    cannot be proven either way and stays too, reported as `unproven`.
+    cannot be proven either way and stays too, reported as `unproven`. The directory is held open for the
+    whole sweep and each file is checked against what the scan saw before it is touched.
     """
-    root = stage_root(vault_root)
+    opened = _open_directory(stage_root(vault_root))
+    if isinstance(opened, SweepReport):
+        return opened
     try:
-        root_info = os.lstat(root)
-    except FileNotFoundError:
-        return SweepReport()
-    if not stat.S_ISDIR(root_info.st_mode):
-        # A symlinked or replaced stage root is not ours to walk: nothing under it can be proven an orphan.
-        log.warning("upload stage root is not a plain directory; the sweep left it alone")
-        return SweepReport(unproven=1)
-    try:
-        scanner = os.scandir(root)
-    except FileNotFoundError:
-        return SweepReport()
-    parts: set[str] = set()
-    locks: set[str] = set()
+        return _sweep(opened)
+    finally:
+        if opened.fd is not None:
+            os.close(opened.fd)
+
+
+def _sweep(directory: _StageDirectory) -> SweepReport:
+    parts: dict[str, _FileId] = {}
+    locks: dict[str, _FileId] = {}
     truncated = False
-    with scanner:
+    with directory.scan() as scanner:
         for index, entry in enumerate(scanner):
             if index >= SWEEP_ENTRY_LIMIT:
                 truncated = True
                 break
             named = _STAGE_NAME.fullmatch(entry.name)
-            if named is not None and not entry.is_symlink():
-                (parts if named["kind"] == _PART_SUFFIX else locks).add(named["stem"])
+            if named is None:
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue  # removed since it was listed
+            if stat.S_ISREG(info.st_mode):  # a link or a directory under a stage name is not a stage
+                (parts if named["kind"] == _PART_SUFFIX else locks)[named["stem"]] = (info.st_dev, info.st_ino)
     removed = live = unproven = 0
-    for stem in sorted(parts | locks):
+    for stem in sorted(parts.keys() | locks.keys()):
         if stem in parts and stem not in locks:
             unproven += 1
             continue
-        lock_path = root / f"{stem}{_LOCK_SUFFIX}"
-        with _probe_lock(lock_path) as free:
+        lock_leaf, part_leaf = f"{stem}{_LOCK_SUFFIX}", f"{stem}{_PART_SUFFIX}"
+        with _probe_lock(directory, lock_leaf, locks[stem]) as free:
             if free is None:
                 unproven += 1
                 continue
             if not free:
                 live += 1
                 continue
-            _remove(root / f"{stem}{_PART_SUFFIX}")
-        _remove(lock_path)
+            if stem in parts and not directory.remove(part_leaf, parts[stem]):
+                unproven += 1
+                continue
+        if not directory.remove(lock_leaf, locks[stem]):
+            unproven += 1
+            continue
         removed += 1
     report = SweepReport(removed=removed, live=live, unproven=unproven, truncated=truncated)
     if removed or unproven or truncated:

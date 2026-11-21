@@ -130,4 +130,3 @@ An upload commit SHALL copy, hash and flush every payload byte into a private re
 - **WHEN** the process stops after staging and before the install
 - **THEN** the vault holds no new canonical file
 - **AND** the next serving start removes the orphaned stage and leaves any stage whose owner is alive
-

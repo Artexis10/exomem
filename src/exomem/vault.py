@@ -3197,8 +3197,9 @@ class _BatchWorkspace:
     ) -> PathIdentity:
         """Rename an adopted stage onto its missing destination, reading nothing.
 
-        Nothing after the rename can raise: the identity comes from the descriptor already held, so a
-        caller never has to recover a destination that this method installed and then lost track of.
+        The identity comes from the descriptor already held. The rename also flushes the directories, and
+        that can fail once the stage is installed: the caller then binds the destination through
+        `_bind_adopted_installation`, which needs the artifact still open and still in the census.
         """
         absolute_final = Path(os.path.abspath(final))
         filesystem, parent, directory = self.held_filesystem, self.held_parent, self.held_directory
@@ -3557,6 +3558,8 @@ class _BatchWorkspace:
             if absolute_final.parent != self.parent:
                 return None
             if self.held_filesystem is not None and self.held_parent is not None:
+                if artifact.adopted:
+                    return self._bind_adopted_installation(artifact, absolute_final)
                 self.recheck()
                 artifact.recheck()
                 current = self.held_filesystem.file(
@@ -3647,6 +3650,38 @@ class _BatchWorkspace:
             return artifact.identity
         except (OSError, PathGuardError):
             return None
+
+    def _bind_adopted_installation(
+        self, artifact: _WorkspaceArtifact, absolute_final: Path
+    ) -> PathIdentity | None:
+        """Record an adopted stage that the rename installed before the install call raised.
+
+        The rename consumed the stage's workspace name, so neither the artifact's name recheck nor the
+        workspace census can prove it any more. The artifact's open descriptor still holds the inode: a
+        destination that is that inode, with no other link and the bound bytes, is the installed stage.
+        The artifact leaves the census here so that the rollback's workspace recheck passes.
+        """
+        assert self.held_filesystem is not None and self.held_parent is not None
+        self.recheck_identity()
+        if artifact.closed or not _same_identity(artifact.identity, os.fstat(artifact.descriptor)):
+            return None
+        current = self.held_filesystem.file(self.held_parent, absolute_final.name)
+        if not current.ok:
+            return None
+        with current.require() as installed:
+            descriptor = getattr(installed, "descriptor", None)
+            if not isinstance(descriptor, int) or installed.identity.link_count != 1:
+                return None
+            info = os.fstat(descriptor)
+            if not _same_identity(artifact.identity, info):
+                return None
+            installed_identity = _identity(absolute_final.name, info)
+            if _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
+                return None
+        artifact.close()
+        self.artifacts.pop(artifact.name, None)
+        self.recheck()
+        return installed_identity
 
     def unlink_installed(
         self, final: Path, expected: _BatchArtifactGuard, *, inverse_recheck: Callable[[], None]

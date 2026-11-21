@@ -195,4 +195,3 @@ def test_a_note_saved_while_a_big_upload_is_staging_is_neither_refused_nor_made_
     assert waited < 0.5, f"the save waited {waited:.2f} s for the boundary while the upload staged"
     assert isinstance(outcome[0], dict), outcome[0]
     assert recording.holding.is_set()
-
