@@ -18,7 +18,7 @@ from fastmcp import Client
 from lifecycle_fixtures import PLANNING_PATH, planning_manifest
 from test_collection_store_service import service  # noqa: F401 - the SQLite workflow uses this fixture
 from test_connector_boundary import INBOX, PRIVATE, SCOPE, configured_boundary  # noqa: F401 - configured_boundary is a fixture
-from test_governance_postfilter import AWS_KEY
+from test_governance_postfilter import AWS_KEY, HIGH_ENTROPY
 
 from exomem import call_ledger, state_migration, writer_lease
 from exomem import server as server_module
@@ -355,11 +355,12 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
     host = json.loads(config.read_text(encoding="utf-8"))
     host["capture_paths"].append(manifest.parent.relative_to(vault).as_posix())
     config.write_text(json.dumps(host), encoding="utf-8")
-    declared = json.dumps([PRIVATE, AWS_KEY, True])
+    declared = json.dumps([f"See [[{PRIVATE}]]", AWS_KEY, HIGH_ENTROPY, True])
     manifest.write_text(record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
-        f"    word_count: {{type: enum, enum: {declared}}}\n"
-        f"    group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n",
+        f"    release_hash: {{type: enum, enum: {declared}}}\n"
+        f"    group: {{type: enum, enum: {json.dumps([AWS_KEY])}}}\n"
+        f"    {AWS_KEY}: {{type: enum, enum: [false]}}\n",
     ), encoding="utf-8")
     authority = state_migration.assert_offline_migration_authority(source="restricted enum fixture")
     state_migration.arm_connector_boundary_offline(vault, authority=authority)
@@ -370,25 +371,31 @@ def test_restricted_enum_hints_follow_terminal_filtering(build, configured_bound
         inspected = await _call(client, "inspect_memory", {
             "operation": "records.inspect", "arguments": target})
         assert "contract" in inspected, inspected
+        projection = inspected["contract"]["declared_enums"]
+        assert projection["truncated"] is True
+        assert projection["values"] == {"release_hash": [True]}
+        assert type(projection["values"]["release_hash"][0]) is bool
+        item = record_fixtures.ledger_item(release_hash="invalid")
+        del item["word_count"]
         refused = await _call(client, "add_record", {
-            **target, "why": "Log an entry", "item": record_fixtures.ledger_item(word_count="invalid")})
+            **target, "why": "Log an entry", "item": item})
         assert refused.get("error", {}).get("code") == "SCHEMA_ENUM", refused
         choices = refused["error"]["candidates"]
         assert choices == [True] and type(choices[0]) is bool
         retry = refused["error"]["retry"]["arguments"]
         saved = await _call(client, "add_record", {
-            **target, "why": "Correct the entry", "held": retry["held"], "item": {"word_count": choices[0]}})
+            **target, "why": "Correct the entry", "held": retry["held"], "item": {"release_hash": choices[0]}})
         assert "error" not in saved, saved
+        bad_target = {**item, "release_hash": True, "slug": "second-entry", AWS_KEY: "invalid"}
+        blocked = await _call(client, "add_record", {**target, "why": "Log another entry", "item": bad_target})
+        assert blocked.get("error", {}).get("code") == "SCHEMA_ENUM", blocked
+        assert "candidates" not in blocked["error"] and "retry" not in blocked["error"], blocked
         rows = await _call(client, "query_records", target)
-        return inspected, refused, rows
+        return inspected, refused, blocked, rows
 
-    inspected, refused, rows = _session(build(), scenario)
-    projection = inspected["contract"]["declared_enums"]
-    assert projection["truncated"] is True
-    assert projection["values"] == {"word_count": [True]}
-    assert type(projection["values"]["word_count"][0]) is bool
-    assert all(target not in json.dumps([inspected, refused]) for target in (PRIVATE, AWS_KEY))
-    assert [row["word_count"] for row in rows["rows"]] == [True]
+    inspected, refused, blocked, rows = _session(build(), scenario)
+    assert all(target not in json.dumps([inspected, refused, blocked]) for target in (PRIVATE, AWS_KEY, HIGH_ENTROPY))
+    assert [row["release_hash"] for row in rows["rows"]] == [True]
 
 
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:

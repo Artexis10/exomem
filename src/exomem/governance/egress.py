@@ -39,7 +39,7 @@ import sqlite3
 import textwrap
 import time
 import uuid
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -6268,29 +6268,26 @@ def _record_enum_declarations(response: Any) -> dict[str, Any] | None:
 
 
 def _released_enum_choices(before: Any, after: Any) -> list[Any]:
-    """Keep only offered scalars that survive both terminal filters exactly."""
-    if not isinstance(before, list) or not isinstance(after, list):
+    """Both text filters preserve scalar positions and may rewrite text in place."""
+    if not isinstance(before, list) or not isinstance(after, list) or len(before) != len(after):
         return []
-    # Record enums carry bounded JSON scalars. Counts keep a replacement
-    # that coincides with an original value from adding a duplicate.
-    available = Counter((type(choice), choice) for choice in before)
-    kept = []
-    for choice in after:
-        identity = (type(choice), choice)
-        if available[identity]:
-            kept.append(choice)
-            available[identity] -= 1
-    return kept
+    return [choice for original, choice in zip(before, after, strict=True)
+            if type(choice) is type(original) and choice == original]
 
 
-def _reconcile_record_enum_declarations(before: dict[str, Any], after: dict[str, Any]) -> None:
+def _reconcile_record_enum_declarations(
+    before: dict[str, Any], after: dict[str, Any], scan_text: Callable[[list[Any]], Any],
+) -> None:
     declared, released = before.get("values"), after.get("values")
     delivered = {}
     if isinstance(declared, Mapping) and isinstance(released, Mapping):
         for field, choices in released.items():
-            if kept := _released_enum_choices(declared.get(field), choices):
+            admitted = _released_enum_choices(declared.get(field), choices)
+            if admitted and (kept := _released_enum_choices(admitted, scan_text(admitted))):
                 delivered[field] = kept
-    after.update(values=delivered, truncated=True)
+    after["values"] = delivered
+    if delivered != declared:
+        after["truncated"] = True
 
 
 def _postfilter(
@@ -6391,7 +6388,9 @@ def _postfilter(
     # have been removed; scanning an ordinary released page body would change
     # the content the page decision explicitly authorized.
     scan_all = command_name in {"continue_adoption", "adoption_run", "adoption_runs", "adoption_studio"}
-    if (scan_all or isinstance(result, str) or not artifact_scan_demand.complete
+    if record_enums is not None and _record_enum_declarations(result) is not None:
+        result = gate_artifact_references(vault_root, result, _scan_record_enums=True)
+    elif (scan_all or isinstance(result, str) or not artifact_scan_demand.complete
             or artifact_scan_demand.required):
         result = gate_artifact_references(vault_root, result, scan_all=scan_all)
     if hasattr(result, "content") and hasattr(result, "structured_content"):
@@ -6401,13 +6400,20 @@ def _postfilter(
             _record_credential_block()
         return cleaned
     with call_spans.span("egress.scrub"):
+        gated_enums = _record_enum_declarations(result) if record_enums is not None else None
         cleaned, blocked = scrubber.scrub_value(result)
+        if gated_enums is not None and (released_enums := _record_enum_declarations(cleaned)) is not None:
+            def scrub_choices(choices: list[Any]) -> Any:
+                nonlocal blocked
+                scanned, hit = scrubber.scrub_value(choices)
+                blocked = blocked or hit
+                return scanned
+
+            _reconcile_record_enum_declarations(gated_enums, released_enums, scrub_choices)
+            if released_enums != record_enums:
+                released_enums["truncated"] = True
     if blocked:
         _record_credential_block()
-    if record_enums is not None:
-        released_enums = _record_enum_declarations(cleaned)
-        if released_enums is not None and released_enums != record_enums:
-            _reconcile_record_enum_declarations(record_enums, released_enums)
     if isinstance(cleaned, dict) and "relevant_due_refs" in cleaned:
         from .. import due_state
 
@@ -6589,8 +6595,11 @@ def postfilter_error(
         cleaned = _clean(value)
         if (command_name == "record_memory" and code == "SCHEMA_ENUM" and name == "details"
                 and isinstance(value, Mapping) and isinstance(cleaned, dict)):
-            choices = _released_enum_choices(value.get("allowed"), cleaned.get("allowed"))
-            if choices:
+            # The refusal's fixed `allowed` list already passed as ordinary text, independent of the field name.
+            if value.get("field") != cleaned.get("field") or value.get("retry_with") != cleaned.get("retry_with"):
+                cleaned.pop("retry_with", None)
+                cleaned.pop("allowed", None)
+            elif choices := _released_enum_choices(value.get("allowed"), cleaned.get("allowed")):
                 cleaned["allowed"] = choices
             else:
                 cleaned.pop("allowed", None)
@@ -7961,6 +7970,7 @@ def gate_artifact_references(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     scan_all: bool = False,
+    _scan_record_enums: bool = False,
 ) -> Any:
     """Recursively gate nested prompt/resource payloads with one verdict cache."""
     started = cpu_started = None
@@ -7973,7 +7983,15 @@ def gate_artifact_references(
             pass
     try:
         gate = _ArtifactReferenceGate(Path(vault_root), principal=principal, purpose=purpose)
-        return gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
+        gated = gate.gate_payload(payload, scan_strings=scan_all or isinstance(payload, str))
+        if _scan_record_enums:
+            declared = _record_enum_declarations(payload)
+            released = _record_enum_declarations(gated)
+            if declared is not None and released is not None:
+                _reconcile_record_enum_declarations(
+                    declared, released, lambda choices: gate.gate_payload(choices, scan_strings=True),
+                )
+        return gated
     finally:
         if started is not None:
             # These fields measure the fixed artifact-gate API, never returned text or authority.
