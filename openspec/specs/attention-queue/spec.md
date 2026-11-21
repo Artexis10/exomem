@@ -1590,3 +1590,35 @@ item now has.
 - **THEN** the item's path is `A` and its contradiction reason carries
   `related_paths=[A,B]`
 - **AND** `B` is not surfaced as its own item unless `B` is independently flagged
+
+### Requirement: A custody Source is listed only by name
+
+The `custody_source` family SHALL be registered as an attention category, so a client lists it by naming it. It SHALL NOT join the default attention set or the due-state projection, so neither recall nor a write reply pushes a custody Source. Its findings SHALL stay at `info` severity. An audit or attention request that names only `custody_source` SHALL return no finding of another family.
+
+#### Scenario: A custody Source is never pushed
+
+- **WHEN** a Source marked `custody_only: true` has no live page compiling it
+- **THEN** the default attention view and the served due-state block do not list it
+- **AND** an attention request that names `custody_source` lists it at `info` severity
+
+#### Scenario: A request for the custody count returns only that family
+
+- **WHEN** a vault holds one custody Source and one ordinary Source that no note compiles, and a caller asks the audit for `custody_source`
+- **THEN** the reply lists only the custody Source and counts no `unprocessed_source`
+
+### Requirement: An uncorrected identity conflict joins the default attention union
+
+Attention SHALL compose the `source_identity_conflict` audit family in its default union, after `original_fixity`.
+Each finding SHALL name the Source, the DOIs the document shows, the DOI its `url` claims and the metadata-only correction call.
+The family SHALL report only Sources whose recorded `identity_check.state` is `conflict`, so a vault whose Sources predate the identity check sees no finding from it.
+A correction receipt for the Source SHALL resolve the finding.
+
+#### Scenario: A conflict nobody corrected reaches the owner
+
+- **WHEN** a Source records `identity_check.state: conflict` and has no correction receipt
+- **THEN** default attention lists one `source_identity_conflict` finding for it, with the correction call
+
+#### Scenario: Sources captured before the check stay quiet
+
+- **WHEN** a vault holds Sources with no recorded `identity_check`
+- **THEN** default attention lists no `source_identity_conflict` finding for them
