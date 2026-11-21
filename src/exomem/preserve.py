@@ -38,7 +38,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, BinaryIO
+from typing import IO, TYPE_CHECKING, Any, BinaryIO
 
 from . import (
     capture_metadata,
@@ -55,7 +55,7 @@ from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .capture_metadata import CaptureFacts
 from .kbdir import managed_join, managed_relative
 from .ocr_facts import OcrFacts, engine_with_ocr_text
-from .source_inspection import Inspection, inspect_source
+from .source_inspection import Inspection, inspect_source, is_dataset_name
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -518,6 +518,23 @@ def evidence_artifact(
     return evidence_folder(vault_root, scope, category) / name, protected
 
 
+def too_large(limit: int) -> PreserveError:
+    """The refusal for bytes past `limit`, raised while they are copied in and again when an upload door stages them."""
+    return PreserveError(code="TOO_LARGE", missing=["file"], reason=f"upload exceeds the {limit:,}-byte limit")
+
+
+def pools_evidence_original(vault_root: Path, artifact_name: str) -> bool:
+    """Whether a binary filed as `artifact_name` goes to the shared original pool.
+
+    A dataset stays an ordinary resident file beside its notes (design D1); every other binary of an
+    activated archive pools. An upload door asks before the boundary, for its upload to stage the pool
+    object there, and `preserve` asks again under the boundary: this is the one rule.
+    """
+    from .add import pools_named_original
+
+    return pools_named_original(vault_root, artifact_name) and not is_dataset_name(artifact_name)
+
+
 def preserve(
     vault_root: Path,
     *,
@@ -527,6 +544,7 @@ def preserve(
     content_base64: str | None = None,
     content: str | None = None,
     content_stream: BinaryIO | None = None,
+    staged: Any | None = None,
     content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
@@ -550,6 +568,10 @@ def preserve(
     `media_pending` stores a media stub in the pending state `media_processing.reconcile_media`
     would give it. A caller that reconciles the original straight after sets it, so that
     reconcile only queues the job instead of committing the page a second time.
+
+    `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
+    (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
+    `content_stream`: nothing is copied here, and the batch renames the stage into place.
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
@@ -577,7 +599,7 @@ def preserve(
         missing.append("filename")
         reasons.append(_EMPTY_FILENAME)
 
-    if sum(x is not None for x in (content_base64, content, content_stream)) != 1:
+    if sum(x is not None for x in (content_base64, content, content_stream, staged)) != 1:
         return _raise(
             "INVALID_PRESERVE",
             ["content"],
@@ -643,9 +665,9 @@ def preserve(
             )
         artifact_bytes = decoded
         artifact_text = None
-    elif content_stream is not None:
-        # Large binary: copied into a bounded private spool below, so no canonical
-        # path becomes visible before governance preflight and held publication.
+    elif content_stream is not None or staged is not None:
+        # Large binary: copied into a bounded private spool below, or already in an upload
+        # stage, so no canonical path becomes visible before governance preflight and held publication.
         artifact_bytes = None
         artifact_text = None
     else:
@@ -674,12 +696,18 @@ def preserve(
 
     container_stack = ExitStack()
     container_metadata = None
-    artifact_stage = tempfile.SpooledTemporaryFile(
-        max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
-        mode="w+b",
+    artifact_stage = (
+        staged.open()
+        if staged is not None
+        else tempfile.SpooledTemporaryFile(
+            max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
+            mode="w+b",
+        )
     )
     try:
-        if content_stream is not None:
+        if staged is not None:
+            artifact_size, artifact_hash = staged.size, staged.sha256
+        elif content_stream is not None:
             # Stream into a process-private spool first. It spills to disk above
             # 8 MiB, so large uploads stay bounded in RAM while no canonical path
             # becomes visible before governance preflight succeeds.
@@ -706,6 +734,7 @@ def preserve(
                 artifact_stage,
                 artifact_size,
                 artifact_hash,
+                staged=staged,
             )
         writes: list[PlannedWrite] = [
             PlannedWrite(
@@ -734,12 +763,8 @@ def preserve(
         elif text_clean:
             # An explicit uploader extraction keeps its existing behavior.
             inspection = None
-        from .add import pools_original
-
-        # A dataset stays an ordinary resident file beside its notes (design D1); other binaries pool.
         pooled_artifact = (isinstance(staged_content, PreparedBinaryContent)
-                           and not (inspection is not None and inspection.dataset_format)
-                           and pools_original(vault_root, artifact_path))
+                           and pools_evidence_original(vault_root, artifact_path.name))
         if pooled_artifact:
             writes = [write for write in writes if write.path != artifact_path]
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
@@ -979,7 +1004,8 @@ def preserve(
                 from .add import staged_pool_publication
 
                 publish_original = staged_pool_publication(
-                    pooled_stack, vault_root, artifact_stage, artifact_hash, artifact_size)
+                    pooled_stack, vault_root, artifact_stage, artifact_hash, artifact_size,
+                    prepared=staged.pool if staged is not None else None)
                 # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
                 pooled_guards = (PathGuard.capture(vault_root, rel_artifact, leaf_policy="absent"),)
             batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
@@ -1039,7 +1065,8 @@ def preserve_stream(
     scope: str,
     category: str,
     filename: str,
-    stream: BinaryIO,
+    stream: BinaryIO | None = None,
+    staged: Any | None = None,
     content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
@@ -1051,6 +1078,9 @@ def preserve_stream(
     media_pending: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
+
+    A `staged` binary (an upload door's own copy, made before the mutation boundary) is committed
+    in place of a `stream`: the commit takes the boundary only to plan and install it.
 
     The bytes arrive out-of-band (multipart over HTTP) and are copied to disk in
     chunks, so a multi-hundred-MB upload never materializes fully in RAM — peak
@@ -1067,6 +1097,7 @@ def preserve_stream(
         category=category,
         filename=filename,
         content_stream=stream,
+        staged=staged,
         content_type=content_type,
         description=description,
         text=text,
@@ -1142,7 +1173,7 @@ def _copy_stream(
             break
         written += len(buf)
         if written > limit:
-            _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
+            raise too_large(limit)
         digest.update(buf)
         destination.write(buf)
     return written, digest.hexdigest()

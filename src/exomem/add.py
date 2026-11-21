@@ -24,7 +24,7 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from . import (
     call_spans,
@@ -208,6 +208,9 @@ class SourceArtifact:
     staged_path: Path | IO[bytes]
     filename: str
     content_type: str | None = None
+    #: The same bytes in a private upload stage (`upload_stage.StagedUpload`), already hashed before the
+    #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
+    staged: Any | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -296,7 +299,7 @@ def artifact_identity(path: Path | IO[bytes], *, ceiling: int | None = None) -> 
 
 
 def artifact_binary_write(
-    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int
+    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int, *, staged: Any | None = None
 ) -> tuple[PlannedWrite, IO[bytes]]:
     """The create-only write that publishes staged bytes at `artifact_path`.
 
@@ -305,13 +308,18 @@ def artifact_binary_write(
     batch checks the bytes against `digest` and `size`, so a file that changed
     after the identity read fails the whole batch instead of publishing.
     A supplied stream remains caller-owned; a Path opens a stream for the caller.
+    An upload `staged` before the boundary is opened through its own identity check and carried
+    on the write, so the batch renames it in rather than copying `staged_path`.
     """
-    stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
+    if staged is not None:
+        stream = staged.open()
+    else:
+        stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
     stream.seek(0)
     return (
         PlannedWrite(
             path=artifact_path,
-            content=PreparedBinaryContent(stream, size, digest),
+            content=PreparedBinaryContent(stream, size, digest, staged=staged),
             create_only=True,
             expected_hash=MISSING_CONTENT_HASH,
         ),
@@ -319,9 +327,11 @@ def artifact_binary_write(
     )
 
 
-def pools_original(vault_root: Path, artifact_path: Path) -> bool:
-    """Whether a new filing's bytes go to the shared original pool rather than its logical path.
+def pools_named_original(vault_root: Path, name: str) -> bool:
+    """Whether a new filing named `name` has its bytes in the shared original pool rather than at its logical path.
 
+    The rule reads only the name's suffix and the pool's marker, so an upload door asks it before the
+    boundary, for the name the filing will take, and the filing asks it again under the boundary.
     Notes stay ordinary pages. Every other original of an activated archive is pooled; its
     companion alone binds the logical path. A name with no suffix stays an ordinary file
     (`originals.may_share_bytes`), like a dataset.
@@ -329,17 +339,22 @@ def pools_original(vault_root: Path, artifact_path: Path) -> bool:
     from . import original_pool
     from .originals import is_note_path, may_share_bytes
 
-    relative = artifact_path.relative_to(vault_root).as_posix()
-    return not is_note_path(relative) and may_share_bytes(relative) and original_pool.enabled(vault_root)
+    return not is_note_path(name) and may_share_bytes(name) and original_pool.enabled(vault_root)
+
+
+def pools_original(vault_root: Path, artifact_path: Path) -> bool:
+    """`pools_named_original` for the file at `artifact_path`."""
+    return pools_named_original(vault_root, artifact_path.name)
 
 
 def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, stream: IO[bytes],
-                            digest: str, size: int) -> Callable[[], None]:
+                            digest: str, size: int, *, prepared: Any | None = None) -> Callable[[], None]:
     """Stage and verify every byte now; return the publication the batch runs before its first install.
 
     The stack keeps the stage and its physical pin until the filing commits. A concurrent
     identical upload that publishes first makes this filing retry instead of hashing the
-    winner under the canonical boundary.
+    winner under the canonical boundary. A `prepared` stage that the caller made before the
+    boundary (`upload_stage.stage(pooled=True)`, which also owns its pin) is published as it is.
     """
     from . import held_fs, original_pool
 
@@ -348,7 +363,8 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
         while chunk := stream.read(1024 * 1024):
             yield chunk
 
-    prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
+    if prepared is None:
+        prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
 
     def publish() -> None:
         try:
@@ -612,7 +628,11 @@ def add(
     if artifact is not None:
         safe_name = source_artifact_name(artifact.filename)
         artifact_suffix = source_artifact_suffix(artifact.filename)
-        artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
+        if artifact.staged is not None:
+            # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
+            artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
+        else:
+            artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
@@ -909,7 +929,7 @@ def add(
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
-            artifact.staged_path, artifact_path, artifact_digest, artifact_size
+            artifact.staged_path, artifact_path, artifact_digest, artifact_size, staged=artifact.staged
         )
         pooled_artifact = pools_original(vault_root, artifact_path)
         if not pooled_artifact:
@@ -940,8 +960,11 @@ def add(
         if pooled_artifact:
             assert artifact_stream is not None and artifact_digest is not None and artifact_size is not None
             publish_original = staged_pool_publication(
-                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size)
+                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size,
+                prepared=artifact.staged.pool if artifact.staged is not None else None)
         if artifact_stream is not None and document_containers.is_container(artifact_path):
+            # Known residual: reading a document container's members still grows with the payload, under the
+            # boundary. Only the upload copy, hash and install moved out of it.
             container_plan = container_stack.enter_context(document_containers.plan(
                 vault_root, parent=artifact_path.relative_to(vault_root).as_posix(),
                 parent_page=source_path.relative_to(vault_root).as_posix(), digest=artifact_digest,
