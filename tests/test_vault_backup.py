@@ -668,6 +668,43 @@ def test_staging_keeps_the_locks_of_the_service_s_own_open_connection(vault: Pat
         service.close()
 
 
+_DAMAGE_PAGE_SIZE = """
+import sys
+# Bytes 16-17 of a database header hold the page size; 3 is no valid size, so SQLite reads the file as no database.
+with open(sys.argv[1], "r+b") as database:
+    database.seek(16)
+    database.write(b"\\x00\\x03")
+"""
+
+
+def test_staging_keeps_the_locks_on_a_live_database_whose_header_is_damaged(vault: Path, tmp_path: Path) -> None:
+    # SQLite refuses a damaged header as no database while the service's own connection still holds the file, so
+    # any plain read of it in this process would drop that connection's locks.
+    pytest.importorskip("fcntl")
+    database = _state_dir(vault) / ".governance.sqlite"
+    service = sqlite3.connect(database)
+    service.execute("PRAGMA journal_mode=WAL")
+    service.execute("CREATE TABLE grants (id INTEGER)")
+    service.execute("INSERT INTO grants VALUES (1)")
+    service.commit()
+    service.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    service.execute("SELECT * FROM grants").fetchall()
+    subprocess.run([sys.executable, "-c", _DAMAGE_PAGE_SIZE, str(database)], check=True)
+
+    def probe() -> str:
+        return subprocess.run([sys.executable, "-c", _HOLDS_SHARED_LOCK, str(database)],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    try:
+        assert probe() == "held"
+        _, findings = vault_backup.stage_state(vault, tmp_path / "stage")
+        assert probe() == "held"
+        assert {"kind": "state", "path": ".governance.sqlite", "code": "state_copy_failed"} in findings
+        assert not (tmp_path / "stage" / ".governance.sqlite").exists()
+    finally:
+        service.close()
+
+
 def test_staging_copies_a_one_byte_file_as_it_is(vault: Path, tmp_path: Path) -> None:
     # SQLite reads a 1-byte file as an empty database, so a staging that asked SQLite first would back up the
     # media worker's lock file, or any 1-byte state file, as a new 4 KB database and report nothing.

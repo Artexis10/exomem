@@ -25,6 +25,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -397,15 +398,67 @@ def _write_record(vault: Path, record: dict[str, Any]) -> None:
 # --- staging the state that cannot be rebuilt -------------------------------------------------
 
 
-def _has_sqlite_header(path: Path) -> bool:
-    """Whether a file starts with SQLite's header. Call it only on a file that SQLite refused to open as a database.
+#: Copies the files that SQLite refused, in a child process. Closing any descriptor of a file drops every POSIX lock
+#: the process that opened it holds on that file, and the service's own connections lock their databases: a
+#: database whose header is damaged reads as no database while a connection here still holds it. A child process
+#: holds no lock, so its reads and copies cannot drop one. It takes SQLite's header as hex in its argument, reads
+#: JSON `[[source, target], ...]` on stdin and writes one result token per pair: `ok`, `gone`, `sqlite_header`
+#: (left uncopied) or `error`.
+_PLAIN_COPIER = r"""
+import json, os, shutil, sys
+magic = bytes.fromhex(sys.argv[1])
+results = []
+for source, target in json.load(sys.stdin):
+    try:
+        with open(source, "rb") as origin:
+            if origin.read(len(magic)) == magic:
+                results.append("sqlite_header")
+                continue
+            origin.seek(0)
+            try:
+                with open(target, "xb") as copy:
+                    shutil.copyfileobj(origin, copy, 1 << 20)
+                os.chmod(target, 0o600)
+            except OSError:
+                try:
+                    os.unlink(target)  # a part copy must not reach the snapshot
+                except OSError:
+                    pass
+                raise
+        results.append("ok")
+    except FileNotFoundError:
+        results.append("gone")
+    except OSError:
+        results.append("error")
+json.dump(results, sys.stdout)
+"""
+#: The longest the child may take for one backup's plain files.
+_PLAIN_COPY_TIMEOUT = 3600.0
 
-    Closing any descriptor of a file drops every POSIX lock this process holds on it, and the service's own
-    connections lock their databases. SQLite shares one descriptor per file among its connections, so only a
-    descriptor opened outside SQLite drops them; a file SQLite refused is one that no connection here holds.
-    """
-    with path.open("rb") as source:
-        return source.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+
+def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, str]]) -> int:
+    """Copy each `(source, target, name)` in one child process; the count copied. A failure becomes a finding."""
+    if not pending:
+        return 0
+    try:
+        completed = subprocess.run([sys.executable, "-I", "-c", _PLAIN_COPIER, _SQLITE_MAGIC.hex()], check=True,
+                                   capture_output=True, timeout=_PLAIN_COPY_TIMEOUT,
+                                   input=json.dumps([[str(source), str(target)] for source, target, _ in pending]).encode())
+        results = json.loads(completed.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        results = None
+    if not isinstance(results, list) or len(results) != len(pending):
+        # The child stopped or answered wrongly: no copy it made is trusted, and each file is a finding.
+        for _, target, _ in pending:
+            target.unlink(missing_ok=True)
+        results = ["error"] * len(pending)
+    copied = 0
+    for (_, _, name), result in zip(pending, results, strict=True):
+        if result == "ok":
+            copied += 1
+        elif result != "gone":  # a removal after the listing; the next backup sees the new file
+            findings.append({"kind": "state", "path": name, "code": "state_copy_failed"})
+    return copied
 
 
 def _copy_sqlite(source: Path, target: Path) -> bool:
@@ -425,22 +478,21 @@ def _copy_sqlite(source: Path, target: Path) -> bool:
         return copy.execute("PRAGMA quick_check(1)").fetchone() == ("ok",)
 
 
-def _copy_whole(source: Path, target: Path) -> None:
-    with source.open("rb") as origin, target.open("xb") as copy:
-        shutil.copyfileobj(origin, copy, _HASH_CHUNK)
-    os.chmod(target, 0o600)
+def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop: threading.Event,
+                plain: list[tuple[Path, Path, str]]) -> int:
+    """Stage one state file or tree; the count of databases and empty files staged. A file that SQLite refuses goes
+    to `plain`, for `_copy_plain`. A file it cannot stage becomes a finding. A stop ends it between files.
 
-
-def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop: threading.Event) -> int:
-    """Stage one state file or tree; the count of files staged. A file it cannot stage becomes a finding. A stop
-    ends it between files."""
+    This process opens a state file only through SQLite, which shares one descriptor per file among its connections,
+    so staging never drops a lock that the service's connections hold (see `_PLAIN_COPIER`).
+    """
     if stop.is_set():
         raise BackupError("stopped", "staging")
     if source.is_symlink():
         return 0
     if source.is_dir():
         target.mkdir(mode=0o700)
-        return sum(_stage_tree(child, target / child.name, findings, stop) for child in sorted(source.iterdir()))
+        return sum(_stage_tree(child, target / child.name, findings, stop, plain) for child in sorted(source.iterdir()))
     if not source.is_file():
         return 0
     name = source.name
@@ -448,30 +500,28 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop
     if any(name.endswith(suffix) and (source.parent / name[:-len(suffix)]).is_file() for suffix in _SQLITE_SIDECARS):
         return 0
     try:
-        # SQLite opens every file first, so no descriptor outside SQLite ever touches a live database (see
-        # `_has_sqlite_header`). A file that SQLite refuses as no database is copied whole. SQLite reads a file of 0
-        # or 1 bytes as an empty database (its unix layer reports a 1-byte file as empty) and would stage a new one.
-        # A database holds at least one page, so such a file is no database: an empty one is staged unopened, and a
-        # 1-byte one is copied whole.
+        # SQLite reads a file of 0 or 1 bytes as an empty database (its unix layer reports a 1-byte file as empty) and
+        # would stage a new one. A database holds at least one page, so such a file is no database: an empty one is
+        # staged unopened, and a 1-byte one is copied whole.
         size = source.stat().st_size
         if size == 0:
             target.touch(mode=0o600, exist_ok=False)
             return 1
         if size == 1:
-            _copy_whole(source, target)
-            return 1
+            plain.append((source, target, name))
+            return 0
         try:
             intact = _copy_sqlite(source, target)
         except sqlite3.DatabaseError as error:
             target.unlink(missing_ok=True)
             if not source.exists():
                 return 0  # removed after the listing, as below
-            if getattr(error, "sqlite_errorname", None) != "SQLITE_NOTADB" or _has_sqlite_header(source):
+            if getattr(error, "sqlite_errorname", None) != "SQLITE_NOTADB":
                 raise
-            _copy_whole(source, target)
-        else:
-            if not intact:
-                findings.append({"kind": "state", "path": name, "code": "state_integrity"})
+            plain.append((source, target, name))
+            return 0
+        if not intact:
+            findings.append({"kind": "state", "path": name, "code": "state_integrity"})
     except FileNotFoundError:
         return 0  # an atomic replace or a removal between the listing and the copy; the next backup sees the new file
     except (OSError, sqlite3.Error):
@@ -495,11 +545,12 @@ def stage_state(vault: Path, stage: Path, stop: threading.Event | None = None) -
     except FileNotFoundError:
         return 0, findings
     staged = 0
+    plain: list[tuple[Path, Path, str]] = []
     for name in names:
         if reserved_paths.classify_logical(name).descriptor_id in kept:
             staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings,
-                                  stop or threading.Event())
-    return staged, findings
+                                  stop or threading.Event(), plain)
+    return staged + _copy_plain(plain, findings), findings
 
 
 # --- originals --------------------------------------------------------------------------------

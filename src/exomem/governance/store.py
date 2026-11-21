@@ -1,10 +1,12 @@
 """Per-machine governance sidecar and its monotonic schema owner.
 
-`.governance.sqlite` is never the enforcement authority (design decision D6):
-its compiled policy is rebuildable at any time from `_Governance/**.yaml`,
-it is never synced, and `policy.load`/`membership.evaluate`/`decisions.decide`
-never consult it — those run entirely in-process off the parsed YAML. The
-file also keeps state that nothing else records: the receipt chain head and
+`.governance.sqlite` is never synced, and its compiled policy is rebuildable
+at any time from `_Governance/**.yaml`. In schema v3 it is never the
+enforcement authority (design decision D6): `policy.load`,
+`membership.evaluate` and `decisions.decide` run entirely in-process off the
+parsed YAML. In an enrolled schema v4 store, `policy.load` reads the active
+policy generation from it (`schema_v4.load_active_policy`). The file also
+keeps state that nothing else records: the receipt chain head and
 its key, withhold tokens and their signing key, grants, proposals and
 journals, and, from schema v4 (`schema_v4`), authorization sessions. So the
 file as a whole is not rebuildable, and the vault backup keeps it.
