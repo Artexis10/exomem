@@ -38,7 +38,6 @@ import functools
 import itertools
 import json
 import logging
-import math
 import os
 import platform
 import re
@@ -1076,24 +1075,15 @@ def _diarizer_child_env() -> dict[str, str]:
     return env
 
 
-def _read_diarizer_turns(path: Path) -> list[tuple[float, float, str]]:
-    data = json.loads(path.read_text(encoding="utf-8"))["turns"]
-    if not isinstance(data, list):
-        raise ValueError("diarizer turns must be an array")
-    turns = []
-    for turn in data:
-        start, end = _seconds(turn["start"]), _seconds(turn["end"])
-        label = turn["label"]
-        if start is None or end is None or not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end):
-            raise ValueError("diarizer turn must have finite, ordered timestamps")
-        if not isinstance(label, str) or not label.strip():
-            raise ValueError("diarizer turn must have a speaker label")
-        turns.append((start, end, label))
-    return turns
-
-
 def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
-    """Read speaker turns from the isolated sidecar, or return None for a plain transcript."""
+    """Run diarization in the isolated CPU-torch sidecar subprocess → `[(start, end, raw_label), …]`.
+
+    Soft-fail: returns None on ANY failure (sidecar venv absent, spawn error, nonzero exit, timeout,
+    or unparseable output) so `_transcribe` falls back to the plain transcript. Never raises. The
+    subprocess inherits this process's env — so `HUGGINGFACE_TOKEN` / `EXOMEM_DIARIZE_MODEL` flow
+    through — with CUDA forced off and HF progress bars silenced. The result crosses the boundary as
+    a JSON out-file (not stdout, which pyannote/lightning/tqdm can pollute).
+    """
     py = _diarizer_sidecar_python()
     if py is None:
         log.warning(
@@ -1104,45 +1094,35 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
     out_fd, out_name = tempfile.mkstemp(prefix="kb_diar_", suffix=".json")
     os.close(out_fd)
     out_path = Path(out_name)
-    session = None
     try:
         try:
-            env = _diarizer_child_env()
-            # Automatic routing measures free VRAM. A resident sidecar must not skew that decision.
-            if env.get("EXOMEM_DIARIZE_DEVICE", "").lower() == "cuda" and env.get("CUDA_VISIBLE_DEVICES") != "":
-                session = diarizer_sidecar.current_worker_session.get()
-            command = [str(py), str(_diarizer_worker_script()), str(path), str(out_path)]
-            timeout = _diarizer_timeout(path)
-            if session is not None:
-                session.run(command, env=env, timeout=timeout)
-            else:
-                proc = subprocess.run(
-                    command, capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=timeout, env=env,
-                )
-                if proc.returncode != 0:
-                    tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
-                    log.warning("diarizer sidecar exited %s for %s: %s", proc.returncode, path.name, tail)
-                    return None
-        except (subprocess.TimeoutExpired, TimeoutError):
-            if session is not None:
-                session.close()
+            proc = subprocess.run(
+                [str(py), str(_diarizer_worker_script()), str(path), str(out_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_diarizer_timeout(path),
+                env=_diarizer_child_env(),
+            )
+        except subprocess.TimeoutExpired:
             log.warning("diarizer sidecar timed out for %s; using plain transcript", path.name)
             return None
-        except Exception:  # noqa: BLE001 — sidecar failure must soft-fail to plain ASR
-            if session is not None:
-                session.close()
+        except Exception:  # noqa: BLE001 — spawn failure must soft-fail, not crash extraction
             log.warning(
-                "diarizer sidecar failed for %s; using plain transcript",
+                "diarizer sidecar spawn failed for %s; using plain transcript",
                 path.name,
                 exc_info=True,
             )
             return None
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
+            log.warning("diarizer sidecar exited %s for %s: %s", proc.returncode, path.name, tail)
+            return None
         try:
-            return _read_diarizer_turns(out_path)
+            turns = json.loads(out_path.read_text(encoding="utf-8"))["turns"]
+            return [(float(t["start"]), float(t["end"]), str(t["label"])) for t in turns]
         except Exception:  # noqa: BLE001 — missing/garbled output must soft-fail to plain ASR
-            if session is not None:
-                session.close()
             log.warning(
                 "diarizer sidecar produced no parseable turns for %s; using plain transcript",
                 path.name,
