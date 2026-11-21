@@ -2350,7 +2350,8 @@ def _store_resident_entry(
     every commit moves them, so a census that holds them equal needs no row of the store: the stored
     pages are those that the entry was built or advanced from (``advance_corpus_for_store_commit``).
     The files that the store does not own have no such revision, so a walk proves them. This needs no
-    freshness registry: a store-mode watcher seeds none.
+    freshness registry: a store-mode watcher seeds none. A file's entry holds what its build reads of it
+    besides its bytes (``_file_entry``), so a chmod or a new hard link fails the proof as an edit does.
     """
     if _store_census_owns(root) is None:
         return None
@@ -2665,7 +2666,22 @@ def _markdown_name(name: str) -> bool:
     return len(name) > 3 and name.casefold().endswith(".md")
 
 
-def _disk_page_census(root: Path) -> frozenset[tuple[str, str, int, int]] | None:
+_FileEntry = tuple[str, str, int, int, int, int, int, int]
+
+
+def _file_entry(rel: str, info: os.stat_result) -> _FileEntry:
+    """The census entry of a Markdown file, from the one stat that the walk takes of it.
+
+    Size and mtime say that its bytes may have changed. The mode (type and permission bits), the link
+    count and the owner say what a build makes of it: the vault walk leaves out a file that has another
+    hard link, and a page that the process cannot read has no title. A chmod, a link or a chown moves
+    neither size nor mtime. An access-control list or a security label is in no stat result, so no entry
+    carries it.
+    """
+    return (rel, "f", info.st_size, info.st_mtime_ns, info.st_mode, info.st_nlink, info.st_uid, info.st_gid)
+
+
+def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
     """Stat census of every Markdown file that ``build_corpus_context`` reads from the disk.
 
     Mirrors both production walks — ``_build_identity_census`` (every canonical
@@ -2678,7 +2694,7 @@ def _disk_page_census(root: Path) -> frozenset[tuple[str, str, int, int]] | None
     errors.
     """
     request_budget.checkpoint()
-    entries: set[tuple[str, str, int, int]] = set()
+    entries: set[_FileEntry] = set()
     kb = vault.kb_root(root)
     owned = _store_census_owns(root)
 
@@ -2723,7 +2739,7 @@ def _disk_page_census(root: Path) -> frozenset[tuple[str, str, int, int]] | None
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add((rel, "f", info.st_size, info.st_mtime_ns))
+            entries.add(_file_entry(rel, info))
 
     def loose_walk(directory: Path, directory_rel: str) -> None:
         # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
@@ -2749,7 +2765,7 @@ def _disk_page_census(root: Path) -> frozenset[tuple[str, str, int, int]] | None
                     # that vanished between the listing and the stat is not in
                     # this snapshot.
                     continue
-                entries.add((rel, "f", info.st_size, info.st_mtime_ns))
+                entries.add(_file_entry(rel, info))
 
     try:
         try:
@@ -3132,7 +3148,7 @@ def _patch_markdown_census(
         except FileNotFoundError:
             entries.pop(rel_path, None)
         else:
-            entries[rel_path] = (rel_path, "f", info.st_size, info.st_mtime_ns)
+            entries[rel_path] = _file_entry(rel_path, info)
     return tuple(sorted(entries.values()))
 
 
@@ -3159,11 +3175,14 @@ def _registries_match_disk(
 def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | None:
     """Return changed Markdown paths, or ``None`` for a non-page delta.
 
-    Census entries are ``(path, kind, size, mtime_ns)``. A removed path only
+    Census entries are ``(path, kind, size, mtime_ns, ...)``; a file's carry its mode, link count and
+    owner after those (``_file_entry``). A removed path only
     exists in ``before`` and an added path only in ``after``; both remain safe
     incremental page changes when their surviving entry is a page's
     (``_is_page_entry``). The store revision names no page: the stored pages'
-    entries say what its move changed, so it is no delta of its own.
+    entries say what its move changed, so it is no delta of its own. A file whose mode, links or owner
+    moved is none either: a delta reads bytes, and cannot tell whether the walk still admits the file
+    or whether the process can still read it, as the build from nothing does.
     """
     before_by_path = {str(entry[0]): entry for entry in _without_store_revision(before)}
     after_by_path = {str(entry[0]): entry for entry in _without_store_revision(after)}
@@ -3180,6 +3199,8 @@ def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | Non
         if (old is not None and not _is_page_entry(old)) or (
             new is not None and not _is_page_entry(new)
         ):
+            return None
+        if old is not None and new is not None and old[1] == new[1] == "f" and old[4:] != new[4:]:
             return None
     return changed
 

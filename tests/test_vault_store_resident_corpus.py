@@ -8,6 +8,7 @@ the files that it does not own. The cost gate is ``test_vault_store_write_cost``
 
 from __future__ import annotations
 
+import os
 from contextlib import closing
 
 import pytest
@@ -230,6 +231,35 @@ def test_a_link_to_a_file_that_cannot_be_parsed_is_stored_as_a_build_over_the_di
         from_disk = remember("Disk linker")
     assert resident == from_disk
     assert any("[[Reference/Latin]]" in line for line in resident[0]), resident
+
+
+@pytest.mark.parametrize(("rel", "mode_before", "change"), [
+    pytest.param("Reference/Readable.md", 0o644, lambda path: path.chmod(0), id="a-page-the-process-can-no-longer-read"),
+    pytest.param("Reference/Locked.md", 0, lambda path: path.chmod(0o644), id="a-page-the-process-can-read-again"),
+    pytest.param("Reference/Manual.md", 0o644, lambda path: os.link(path, path.with_suffix(".bin")), id="a-page-that-gains-a-second-link"),
+])
+def test_a_change_to_a_files_mode_or_links_reaches_the_writers_resolver(warm, rel, mode_before, change):  # noqa: F811
+    """Defect that this guards: a resident proof that compares the size and mtime of the files and so misses a
+    change that neither moves (a page's permissions, or a second hard link) but that decides whether a build
+    over the disk reads its title or indexes it at all. After each change, with no commit and no event, the
+    writer's resolver equals a build over the disk, before and after the next build of the corpus."""
+    path = keep_file(warm, rel, "---\ntitle: Distinctive Manual\n---\n# Manual\n")
+    path.chmod(mode_before)
+    try:
+        semantic_contract.reset_corpus_context_cache()
+        edit(warm, create(warm, "Rewarm"))
+        semantic_contract.build_corpus_context(warm)
+        before = semantic_contract.current_store_writer_resolver(warm)
+        assert before is not None, "the resident route was not live, so this proved nothing about its proof"
+        assert maps(before) == maps(vault_module.WikilinkResolver(warm))
+        change(path)
+        assert maps(find.writer_resolver_snapshot(warm)) == maps(vault_module.WikilinkResolver(warm))
+        # The build that the save runs next reconciles the corpus with the change; the resolver that it leaves
+        # resident for the save after it is the disk's too.
+        semantic_contract.build_corpus_context(warm)
+        assert maps(find.writer_resolver_snapshot(warm)) == maps(vault_module.WikilinkResolver(warm))
+    finally:
+        path.chmod(0o644)
 
 
 @pytest.mark.parametrize("imported", [True, False], ids=["importer-refresh-commit", "no-commit-yet"])
