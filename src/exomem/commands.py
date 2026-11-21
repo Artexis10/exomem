@@ -7414,6 +7414,8 @@ def op_activate_context(
                         block = active_budget.as_response_block() if active_budget is not None else None
                         if block is not None:
                             packet["request_budget"] = block
+                    # Last, after every consumer above read the arrays.
+                    context_views_module.drop_empty_anchors_mode_arrays(packet)
                     if "map" in packet and isinstance(packet.get("budget"), dict):
                         packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
                     return packet

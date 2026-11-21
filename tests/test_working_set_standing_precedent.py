@@ -151,7 +151,7 @@ def study_vault(vault: Path) -> Path:
 
 
 def _paths(packet: dict) -> set[str]:
-    return {u["provenance"]["path"] for u in packet["units"]}
+    return {u["provenance"]["path"] for u in packet.get("units", ())}
 
 
 def _resolved(packet: dict) -> list[str]:

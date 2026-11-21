@@ -1239,6 +1239,24 @@ def map_packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(line for line in lines if line))
 
 
+ANCHORS_MODE_ARRAYS = (  # nosemgrep: ep-word-set -- The anchors packet specification fixes these wire fields.
+    "recent_context", "anchors", "roles", "units", "pointers", "current_state", "missing", "ambiguity",
+)
+
+
+def drop_empty_anchors_mode_arrays(packet: dict[str, Any]) -> None:
+    """Remove the anchors packet's arrays that a `maps` packet leaves empty.
+
+    A maps packet answers through `map` and `turn_slice`. Its shell still carried the anchors arrays,
+    all empty, and an agent read `anchors: []` as a recall that found nothing. A non-empty array stays.
+    """
+    if "map" not in packet:
+        return
+    for key in ANCHORS_MODE_ARRAYS:
+        if packet.get(key) == []:
+            del packet[key]
+
+
 def serialized_chars(packet: Mapping[str, Any]) -> int:
     """The length of the packet's compact JSON form, the form the MCP layer sends, without a `serialized_chars` field."""
     value = dict(packet)
