@@ -290,6 +290,6 @@ The design's epistemics check is a separate outcome evaluation, run in its own s
 ## Open Questions
 
 - Whether append-only pages such as `log.md` should become rows that the projection renders, so a write appends one row instead of re-indexing a 1.3 MB page. Measure the transaction with and without that file first.
-- Switch timing: before or after the public release. The owner decides from these numbers.
+- Switch timing: decided on 2026-11-21. The gate lift ships in a normal release, store mode stays opt-in through `exomem store-mode migrate`, and the owner's vault switches when the switch path in tasks.md holds.
 - Whether a Cloud cell projects Markdown at all, or exports only on request.
 - Whether recall keeps the one-hop graph lane before task 5.4 or the outcome evaluation shows a gain. In the live logs of 2026-09-09 to 2026-11-07, 4.6% of returned hits came from that lane alone, and agents read them within 30 s at about a sixth of the rate of other hits at the same ranks.

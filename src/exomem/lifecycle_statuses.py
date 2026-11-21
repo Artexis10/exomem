@@ -293,7 +293,7 @@ class Basis:
     @property
     def dependency(self) -> tuple[str, str]:
         if self._unavailable:
-            return ("unavailable", "")
+            return (registry.UNAVAILABLE, "")
         if not self._snapshots:
             return ("public", registry.load(SPEC, None).effective_digest)
         # This closed dependency format binds operation-local instance witnesses, not authority.

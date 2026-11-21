@@ -54,7 +54,7 @@ from . import (
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
 from .capture_metadata import CaptureFacts
 from .kbdir import managed_join, managed_relative
-from .ocr_facts import OcrFacts
+from .ocr_facts import OcrFacts, engine_with_ocr_text
 from .source_inspection import Inspection, inspect_source
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -1883,8 +1883,8 @@ def render_sidecar_extraction(
     part pages that hold the rest, as `extraction_parts.layout` gives it.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
-    survive into the new one. `ocr` records the confidence of an image's OCR and holds the
-    words it withheld under `## Low-confidence OCR`; an extraction without it records neither.
+    survive into the new one. `ocr` records confidence and withheld words. The engine label
+    carries any OCR text availability measurement.
     `capture` is what the original states about its capture; without it the page's capture fields stay as they are.
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
@@ -1904,7 +1904,7 @@ def render_sidecar_extraction(
     content = before
     if reset_speakers:
         content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
-    content = _set_frontmatter_field(content, "extracted_by", engine)
+    content = _set_frontmatter_field(content, "extracted_by", engine_with_ocr_text(engine, ocr))
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -2025,7 +2025,7 @@ def asr_language_pin(content: str) -> tuple[str | None, bool]:
 
 
 def _set_ocr_confidence(content: str, ocr: OcrFacts | None) -> str:
-    """Record the mean word confidence of this extraction's OCR, or drop the one an earlier extraction left."""
+    """Record the mean OCR word confidence or remove the measurement from the earlier extraction."""
     if ocr is None or ocr.confidence is None:
         return _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
     return _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
