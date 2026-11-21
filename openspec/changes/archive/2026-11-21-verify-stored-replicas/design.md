@@ -54,7 +54,7 @@ Only a download and decrypt proves that the key version still opens the replica 
 
 A sample uses the replica read that fixity already uses (`write_stored_original`) into a sink that only hashes. No plaintext reaches disk. It runs only where repair could read the replica: an `immediate` store and a key version whose identity this install can read. Any other replica reads "sample not possible" with the reason.
 
-The sample runs only where checks run (D1), so a store with no declared descriptor is never sampled and never charged. It takes the replica whose sample turn came longest ago, never-sampled first, that fits the month's remaining budget. A replica larger than the remaining budget is skipped for the month, and the status counts the skips. The media ledger records the bytes spent per store and calendar month (UTC). A sample charges a replica's bytes before it downloads them, so a sample that stops part-way is still paid for.
+The sample runs only where checks run (D1), so a store with no declared descriptor is never sampled and never charged. It takes the replica whose sample turn came longest ago, never-sampled first, that fits the month's remaining budget. A replica larger than the remaining budget is skipped for the month, and the status counts the skips. The media ledger records the bytes spent per store and calendar month (UTC). A sample charges a replica's bytes before it downloads them, so a sample that stops part-way is still paid for. The charge is one statement that adds the bytes only while the month's spend stays within the budget, so runtimes that read the same remainder cannot both spend it; a replica that no longer fits is skipped for the month.
 
 ### D3: Check results live in the derived table and survive its rebuild
 

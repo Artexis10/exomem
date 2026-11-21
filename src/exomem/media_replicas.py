@@ -1627,9 +1627,19 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         conn.execute("DELETE FROM media_damaged_digests WHERE ciphertext_sha256 = ?", (digest,))
 
 
-def _charge(conn: sqlite3.Connection, store: str, month: int, size: int) -> None:
-    conn.execute("INSERT INTO media_replica_samples(store, month, bytes) VALUES (?, ?, ?) "
-                 "ON CONFLICT(store, month) DO UPDATE SET bytes = bytes + excluded.bytes", (store, month, size))
+def _charge(conn: sqlite3.Connection, store: str, month: int, size: int, budget: int | None = None) -> bool:
+    """Add `size` bytes to what `store` has spent in `month`, and say whether they were added.
+
+    With a `budget`, the add is one statement that reads the balance under the write lock it takes, and it adds nothing
+    when the sum would pass the budget: two runtimes that read the same remainder cannot both spend it. Without one (a
+    refund) the add is unconditional.
+    """
+    return bool(conn.execute(
+        "INSERT INTO media_replica_samples(store, month, bytes) SELECT :store, :month, :size "
+        "WHERE :budget IS NULL OR :size <= :budget "
+        "ON CONFLICT(store, month) DO UPDATE SET bytes = bytes + excluded.bytes "
+        "WHERE :budget IS NULL OR bytes + excluded.bytes <= :budget",
+        {"store": store, "month": month, "size": size, "budget": budget}).rowcount)
 
 
 def sample(vault: Path, *, deadline: float | None = None) -> int:
@@ -1697,15 +1707,17 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 _mark_sample(vault, row, _UNSAMPLEABLE, attempted=replica)
                 skips += 1
                 continue
-            if replica.ciphertext_size > remaining:
+            reserved = False
+            if replica.ciphertext_size <= remaining:
+                if not cap.ready():
+                    break  # an earlier round's read is not yet paid for: nothing is charged or read until it is
+                with closing(ledger._connect()) as conn, conn:  # the balance read above may be stale: reserve against the budget
+                    reserved = _charge(conn, name, month, replica.ciphertext_size, entry.sample_bytes_per_month)
+            if not reserved:  # it does not fit the month's remainder, or another runtime spent the remainder meanwhile
                 if not quarantined:
                     _mark_sample(vault, row, month, attempted=replica)
                     skips += 1
                 continue
-            if not cap.ready():
-                break  # an earlier round's read is not yet paid for: nothing is charged or read until it is
-            with closing(ledger._connect()) as conn, conn:
-                _charge(conn, name, month, replica.ciphertext_size)
             reads += 1
             sampled += 1
             try:
