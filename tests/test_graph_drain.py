@@ -2162,28 +2162,36 @@ def test_drain_rejects_a_resolver_prepared_before_a_concurrent_write(
     queued = [path.relative_to(vault).as_posix()]
     deferred_index.add_graph(vault, queued)
     assert deferred_index.list_graph_paths(vault) == queued
-    real_snapshot = find_module.recall_resolver_snapshot
-    passes: list[bool] = []
+    nodes = "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file' ORDER BY path"
+    acknowledgement = (
+        "SELECT key, value FROM graph_meta WHERE key IN "
+        "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint') ORDER BY key"
+    )
+    with closing(sqlite3.connect(index.path)) as connection:
+        before = (connection.execute(nodes).fetchall(), connection.execute(acknowledgement).fetchall())
+    real_borrow = find_module.borrow_recall_resolver
+    raced = False
 
-    def racing_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        resolver = real_snapshot(*args, **kwargs)
-        sibling.write_text(_page("Renamed B", "A new link target."), encoding="utf-8")
-        if dispatch_event:
-            freshness.on_files_changed(vault, changed=[sibling])
-        else:
-            freshness.mark_external_pending(vault, paths=[sibling])
-        return resolver
+    def racing_borrow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal raced
+        borrowed = real_borrow(*args, **kwargs)
+        if borrowed is not None and not raced:
+            raced = True
+            sibling.write_text(_page("Renamed B", "A new link target."), encoding="utf-8")
+            if dispatch_event:
+                freshness.on_files_changed(vault, changed=[sibling])
+            else:
+                freshness.mark_external_pending(vault, paths=[sibling])
+        return borrowed
 
-    def forbidden_pass(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        passes.append(True)
-        return {"indexed_files": 0, "nodes": 0, "edges": 0}
-
-    monkeypatch.setattr(find_module, "recall_resolver_snapshot", racing_snapshot)
-    monkeypatch.setattr(index, "_refresh_paths_pass", forbidden_pass)
+    monkeypatch.setattr(find_module, "borrow_recall_resolver", racing_borrow)
     report = index.drain_paths([path])
+    assert raced
     assert report.get("moved") == 1
     assert report["published"] is False
-    assert passes == []
+    with closing(sqlite3.connect(index.path)) as connection:
+        after = (connection.execute(nodes).fetchall(), connection.execute(acknowledgement).fetchall())
+    assert after == before
     assert deferred_index.list_graph_paths(vault) == [path.relative_to(vault).as_posix()]
 
 
