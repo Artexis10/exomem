@@ -202,6 +202,30 @@ def test_episode_receipt_names_the_saved_source(build) -> None:
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("current_version", [False, True], ids=["stale-item", "unreleased-title"])
+def test_receipt_title_requires_the_committed_version_and_release(tmp_path, monkeypatch, current_version) -> None:
+    from exomem.governance import egress
+
+    path = "An item.md"
+    raw = "---\ntitle: Panel shipment\n---\n"
+    (tmp_path / path).write_text(raw, encoding="utf-8")
+    checks = []
+
+    def withheld(_root, page, *, snapshot_content):
+        checks.append((page["path"], snapshot_content))
+        return {"path": page["path"], "content_hash": page["content_hash"]}
+
+    monkeypatch.setattr(egress, "annotate_page", withheld)
+    receipt = {
+        "user_summary": f"Updated -> {path} (personal Exomem)",
+        "paths": [path],
+        "after_item_hash": vault_module.content_hash(raw if current_version else raw + "\n"),
+    }
+
+    assert page_names.name_released_write_summary(tmp_path, receipt) == receipt
+    assert checks == ([(path, raw.encode("utf-8"))] if current_version else [])
+
+
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(
     tmp_path: Path,
 ) -> None:

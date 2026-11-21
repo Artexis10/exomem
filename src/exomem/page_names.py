@@ -492,7 +492,7 @@ def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
     return identity.id
 
 
-def _name_write(root: Path, reply: dict[str, Any], *, summary_only: bool = False) -> dict[str, Any]:
+def _name_write(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
     source = reply.get("source")
     path = reply.get("path")
     paths = reply.get("paths")
@@ -501,19 +501,9 @@ def _name_write(root: Path, reply: dict[str, Any], *, summary_only: bool = False
         wanted += [item for item in paths if isinstance(item, str)]
     if isinstance(source, Mapping) and isinstance(source.get("path"), str):
         wanted.append(source["path"])
-    summary = reply.get("user_summary")
-    if summary_only and isinstance(summary, str):
-        wanted = [item for item in wanted if item in summary]
     found = {item: read_identity(root, item) for item in dict.fromkeys(wanted)}
     named = {item: identity for item, identity in found.items() if identity is not None}
     if not named:
-        return reply
-    if isinstance(summary, str):
-        # Replace each exact reported path, longest first to avoid clipping one into another.
-        for item in sorted(named, key=len, reverse=True):
-            summary = summary.replace(item, named[item].title)
-        reply = {**reply, "user_summary": summary}
-    if summary_only:
         return reply
     swaps: dict[str, Mapping[str, Any]] = {}
     moved: dict[str, Any] = {}
@@ -543,6 +533,13 @@ def _name_write(root: Path, reply: dict[str, Any], *, summary_only: bool = False
         swaps["source"] = {"source": {"title": picked.title, "id": picked.id}}
         moved["source_path"] = source["path"]
     out = _renamed(reply, swaps)
+    summary = out.get("user_summary")
+    if isinstance(summary, str):
+        # The summary names each page once, by the exact path `_user_summary` was given; the longest
+        # goes first so that no path is cut by another that is part of it.
+        for item in sorted(named, key=len, reverse=True):
+            summary = summary.replace(item, named[item].title)
+        out["user_summary"] = summary
     diagnostics = out.get("diagnostics")
     if moved and isinstance(diagnostics, Mapping):
         operational = diagnostics.get("operational")
@@ -553,10 +550,49 @@ def _name_write(root: Path, reply: dict[str, Any], *, summary_only: bool = False
     return out
 
 
+def _released_item_title(root: Path, path: str, version: str) -> str | None:
+    from . import request_budget
+    from .record_formats import _MAX_ITEM_BYTES
+
+    try:
+        raw, guard = vault.read_bounded_guarded_bytes(root, path, limit=_MAX_ITEM_BYTES)
+        # A queued store projection can still contain the previous version.
+        if guard.expected_content_hash != version:
+            return None
+        front, body, _ = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
+        page = egress.annotate_page(root, {
+            "path": path, "frontmatter": front, "body": body, "content_hash": version,
+        }, snapshot_content=raw)
+    except (OSError, UnicodeError, request_budget.ReadBudgetExhausted, vault.FrontmatterError, vault.PathGuardError):
+        return None
+    if page is None or page.get("content_hash") != version or not isinstance(page.get("frontmatter"), Mapping):
+        return None
+    title = page["frontmatter"].get("title")
+    return title if isinstance(title, str) and title.strip() else None
+
+
 def name_released_write_summary(root: Path, reply: dict[str, Any]) -> dict[str, Any]:
-    """Name released Markdown pages in the summary while keeping receipt references."""
-    if isinstance(reply.get("user_summary"), str):
-        return _name_write(Path(root), reply, summary_only=True)
+    """Name the released committed item in prose while retaining receipt references."""
+    from .governance import scrubber
+
+    summary = reply.get("user_summary")
+    if not isinstance(summary, str):
+        return reply
+    source = reply.get("source")
+    if isinstance(source, Mapping) and isinstance(source.get("title"), str):
+        # An episode already carries its released title as part of the committed source.
+        path, title = source.get("path"), source["title"]
+    else:
+        paths, version = reply.get("paths"), reply.get("after_item_hash")
+        if not isinstance(paths, list) or len(paths) != 1 or not isinstance(version, str):
+            return reply
+        path = paths[0]
+        if not isinstance(path, str) or not path.endswith(".md") or path not in summary:
+            return reply
+        title = _released_item_title(Path(root), path, version)
+    if isinstance(path, str) and path and path in summary and title:
+        summary, _ = scrubber.scrub_value(summary.replace(path, title))
+        return {**reply, "user_summary": summary}
     return reply
 
 
