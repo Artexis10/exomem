@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .find_types import ParsedPage, RankingPage
+from .semantic_blocks import _HEADING_RE as ATX_HEADING
 from .semantic_units import SemanticUnit
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
@@ -164,9 +165,12 @@ def stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
 
 
 def _chunk_carries_prose(chunk: str) -> bool:
-    """Whether a chunk holds enough text outside its Markdown heading lines to say what its page holds."""
+    """Whether a chunk holds enough text outside its Markdown heading lines to say what its page holds.
+
+    A heading line is an ATX heading by the parser's own rule, so a `#tag` or a `#1 priority` line is prose.
+    """
     prose = " ".join(
-        line.strip() for line in chunk.splitlines() if line.strip() and not line.lstrip().startswith("#")
+        line.strip() for line in chunk.splitlines() if line.strip() and ATX_HEADING.match(line) is None
     )
     return len(prose) >= MIN_CHUNK_EXCERPT_CHARS
 

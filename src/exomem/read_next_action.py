@@ -81,51 +81,16 @@ def move(packet: Mapping[str, Any], *, search: bool = False) -> dict[str, Any] |
     return result
 
 
-_LEAD_TITLES = 3
-_LEAD_TITLE_CHARS = 60
-
-
-def maps_outcome(packet: Mapping[str, Any]) -> str | None:
-    """One sentence for a maps packet whose turn slice found leads, for the agent to repeat as it is.
-
-    A maps packet has no anchors to count, so an agent read its empty shell as "nothing returned".
-    """
-    if "map" not in packet:
-        return None
-    sliced = packet.get("turn_slice") or {}
-    titles = [
-        str(item["title"])[:_LEAD_TITLE_CHARS]
-        for item in sliced.get("items") or ()
-        if isinstance(item, Mapping) and item.get("title")
-    ]
-    if sliced.get("state") != "ready" or not titles:
-        return None
-    count = len(sliced["items"])
-    named = ", ".join(titles[:_LEAD_TITLES])
-    more = f" and {count - _LEAD_TITLES} more" if count > _LEAD_TITLES else ""
-    text = f"{count} lead{'' if count == 1 else 's'} for this turn: {named}{more}. Read a ref before relying on it."
-    return text if len(text) <= MAX_CHARS else None
-
-
 def attach(packet: dict[str, Any], *, search: bool = False) -> None:
     try:
         action = move(packet, search=search)
-        # With no move to make, the room that the move reserved holds the maps outcome instead.
-        text = action["say"] if action is not None else (None if search else maps_outcome(packet))
-        budget = packet.get("budget")
-        if text is not None and action is None and budget is not None:
-            # An outcome line is optional: a packet with no room for it goes without, with no diagnostic.
-            if budget.get("used_chars", 0) + len(text) > budget["limit_chars"]:
-                text = None
-        if text is not None:
+        if action is not None:
+            budget = packet.get("budget")
             if budget is not None:
                 used = budget.get("used_chars", 0)
-                if used + len(text) > budget["limit_chars"]:
+                if used + len(action["say"]) > budget["limit_chars"]:
                     raise ValueError("no room for the reserved next action")
-                budget["used_chars"] = used + len(text)
-            if action is not None:
-                packet["next_action"] = action
-            else:
-                packet["user_summary"] = text
+                budget["used_chars"] = used + len(action["say"])
+            packet["next_action"] = action
     except Exception:  # noqa: BLE001 - an optional move never fails the read
         packet.setdefault("diagnostics", []).append("next_action_unavailable")

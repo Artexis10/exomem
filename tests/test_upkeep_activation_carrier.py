@@ -561,7 +561,7 @@ def test_any_carrier_error_attaches_nothing(
     monkeypatch.setattr(dreamer_store, "read_view", boom)
     packet = commands.op_activate_context(vault, turn="how is the orbit pump doing")
     assert "upkeep" not in packet
-    assert packet["recent_context"] is not None
+    assert "map" in packet
 
 
 def test_policy_constants_are_the_decided_caps() -> None:

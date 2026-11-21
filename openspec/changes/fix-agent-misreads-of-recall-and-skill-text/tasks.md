@@ -2,14 +2,13 @@
 
 ## 1. Recall output
 
-- [x] 1.1 Drop the empty anchors-mode arrays from a `maps` packet after every consumer has read them, and update the one test that pinned `anchors == []`.
-- [x] 1.2 Lead a `maps` packet whose slice is `ready` with one outcome sentence, charged to the next-action reserve, with a test for the ready, empty and no-room cases.
-- [x] 1.3 Serve the matched chunk as a page-hit excerpt only when it holds prose beyond its headings, with a test.
+- [x] 1.1 Drop the empty anchors-mode arrays from a served `maps` packet after every consumer has read them, and update the tests that pinned them.
+- [x] 1.2 Serve the matched chunk as a page-hit excerpt only when it holds prose beyond its headings, with a test.
 
-## 2. Guidance text
+## 2. Guidance and hook
 
-- [x] 2.1 Name "a declared Entity facet" in the capture guidance and its doc copies, within the carrier byte ceilings.
-- [x] 2.2 Limit the read-only rule in the skill scaffold to vault content, and regenerate the skill contract, the plugin tree and the cloud plugin copies.
+- [x] 2.1 Limit the read-only rule in the skill scaffold to vault content, and regenerate the skill contract, the plugin tree and the cloud plugin copies.
+- [x] 2.2 Count a written file that the reply names as a hand-over in the Stop nudge, with tests, and regenerate the packaged hook copies.
 
 ## 3. Delivery
 

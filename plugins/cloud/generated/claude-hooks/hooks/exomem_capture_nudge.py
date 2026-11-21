@@ -741,6 +741,39 @@ def _successful_landing(tool: dict) -> bool:
     return any(_landing_command(command) for command in _tool_commands(tool))
 
 
+#: File-writing tools that the clients fix (Claude's own, Codex's patch tool), matched on the lowercased name.
+_FILE_WRITE_TOOLS = frozenset({"write", "edit", "multiedit", "notebookedit", "apply_patch"})
+#: The file headers of Codex's patch format, a closed grammar that the client fixes.
+_PATCH_FILE_HEADER = re.compile(r"^\*\*\* (?:Add|Update) File: (.+)$", re.M)
+
+
+def _written_paths(tool: dict) -> list[str]:
+    """The file paths one successful file-writing call wrote, or none."""
+    if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
+        return []
+    tool_input = tool.get("input")
+    if isinstance(tool_input, str):
+        return _PATCH_FILE_HEADER.findall(tool_input)
+    if not isinstance(tool_input, dict):
+        return []
+    paths = [tool_input[key] for key in ("file_path", "notebook_path", "path") if isinstance(tool_input.get(key), str)]
+    patch = tool_input.get("input") or tool_input.get("patch") or tool_input.get("source")
+    return paths + (_PATCH_FILE_HEADER.findall(patch) if isinstance(patch, str) else [])
+
+
+def _handed_over_file(tools: list[dict], reply: str) -> bool:
+    """Whether the turn wrote a file that its reply names: a hand-over that no commit or push marks.
+
+    A reply that names the file it just wrote has delivered work to the user, the same as a landing does.
+    A file the reply never mentions is working state, and stays silent.
+    """
+    return any(
+        path.rsplit("/", 1)[-1] in reply
+        for tool in tools
+        for path in _written_paths(tool)
+    )
+
+
 #: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
 #: hooks take effect for the CURRENT session, but the MCP server they reference
 #: is not loaded until the client restarts — so on a fresh install the very
@@ -1280,8 +1313,8 @@ def main(argv: list[str] | None = None) -> int:
     if level == "maximal":  # the most aggressive level keeps the length gate
         if len(assistant_text.strip()) < min_chars:
             return 0
-    elif not any(_successful_landing(tool) for tool in tools):
-        return 0  # nothing landed: Q&A, reading and watching turns stay silent
+    elif not any(_successful_landing(tool) for tool in tools) and not _handed_over_file(tools, assistant_text):
+        return 0  # nothing landed or was handed over: Q&A, reading and watching turns stay silent
 
     ok, stamp = _cooldown_ok(session_id, cooldown)
     if not ok:  # fired recently this session — keep cost bounded

@@ -87,19 +87,14 @@ def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monke
     assert encode(identity="i", roles_hash="h", conventions_hash="c", generation=2, refs=["p"], roles=["r"]) == base64.urlsafe_b64encode(expected.encode()).decode().rstrip("=")
 
 
-def test_a_maps_packet_names_its_leads_and_carries_no_empty_anchors_arrays(vault: Path) -> None:
+def test_a_served_maps_packet_carries_no_empty_anchors_arrays(vault: Path) -> None:
     """An agent read the empty anchors arrays of a maps packet as a recall that found nothing."""
     _seed_structure(vault)
     _built(vault).close()
     _activate(vault, turn="What are the Cargo Sled constraints?")  # warm the published recall inputs
     found = _activate(vault, turn="What are the Cargo Sled constraints?")
-    assert all(key not in found for key in context_views.ANCHORS_MODE_ARRAYS)
-    assert found["turn_slice"]["state"] == "ready"
-    assert found["user_summary"].startswith("1 lead for this turn: Cargo Sled.")
-    assert "next_action" not in found
-    nothing = _activate(vault, turn="hello there")
-    assert nothing["turn_slice"]["state"] == "empty"
-    assert "user_summary" not in nothing and nothing["next_action"]["state"] == "slice_empty"
+    assert "map" in found and all(key not in found for key in context_views.ANCHORS_MODE_ARRAYS)
+    assert found["turn_slice"]["items"]
 
 
 @pytest.mark.parametrize("mode", ["anchors", "maps"])
