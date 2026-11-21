@@ -2801,6 +2801,37 @@ def test_a_finding_of_another_cause_moves_the_filings_of_a_wrong_plaintext_to_th
     assert media_replicas.has_quarantined(vault, (pointer,))
 
 
+def test_a_finding_that_changes_the_cause_of_a_version_moves_every_quarantined_filing_of_it_so_no_release_strands_one(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    """The version's record names one cause, the newest: a filing that kept an older one would outlive the record's release.
+
+    Two filings share a version that a check found damaged. A later finding of a wrong plaintext changes the record's
+    cause, and the filing of the other name that stayed quarantined as damaged would be left with no record when a sample
+    proves the ciphertext and releases it: no gate would see that row, and eviction would drop the bytes that it must copy.
+    """
+    first = _preserved(vault, category="first")
+    pointer = _offload(vault, first)
+    second = _preserved(vault, category="second")
+    assert _offload(vault, second) == pointer
+    held = {original: original.relative_to(vault).as_posix() for original in (first, second)}
+    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.CONTENT, failure="digest_mismatch")
+    assert _replica_row_of(vault, second, pointer.store)["failure"] == "digest_mismatch"
+
+    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+
+    for original in (first, second):  # the record names a wrong plaintext now, so each filing says the same
+        assert _replica_row_of(vault, original, pointer.store)["failure"] == media_replicas.PLAINTEXT_MISMATCH
+    _unproven(vault)
+
+    media_replicas.sample(vault)  # the ciphertext decrypts to the binding: a false alarm for the whole version
+
+    for original in (first, second):
+        assert _replica_row_of(vault, original, pointer.store)["state"] == media_replicas.UPLOAD_VERIFIED
+    assert not media_replicas.has_quarantined(vault, (pointer,))
+    assert _requests(vault) == []
+
+
 def test_a_sample_that_decrypts_a_copy_of_a_version_found_wrong_leaves_the_filing_whose_version_was_found_lost_since(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The proof is that the ciphertext decrypts. It answers nothing about a version that the store has since lost."""
