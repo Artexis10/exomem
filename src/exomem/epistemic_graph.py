@@ -3522,7 +3522,7 @@ class EpistemicGraphIndex:
                 return None
             if residue and not self.apply_adopted_residue(residue):
                 return None
-            sealed = initial
+            sealed: _GraphStartupState | None = initial
             if residue:
                 freshness.mark_external_pending(self.vault_root, paths=residue)
                 sealed = self._startup_state()
@@ -6592,7 +6592,7 @@ class EpistemicGraphIndex:
             operation="epistemic_graph_suspend_reads",
             holder_kind="graph",
         ):
-            options = {"timeout": 0.0} if identity_deadline is not None else {}
+            options: dict[str, Any] = {"timeout": 0.0} if identity_deadline is not None else {}
             conn = self._connect_existing(
                 readonly=False, identity_deadline=identity_deadline, **options,
             )
