@@ -15,6 +15,7 @@ import pytest
 import yaml
 from test_activate_context_maps import _activate
 from test_context_catalogue import INSIGHTS, _built, _page
+from test_governance_egress import _external, write_rule, write_scope
 from test_task_context_links import _discover, _discover_packet, _lead, _linked
 
 from exomem import (
@@ -28,6 +29,7 @@ from exomem import (
 )
 from exomem import vault as vault_module
 from exomem.governance import egress
+from exomem.governance.principal import request_scope
 
 
 def _warm_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,3 +458,28 @@ def test_a_line_inside_an_origin_carrier_is_never_quoted_as_a_reason(vault: Path
     listed, _omitted = served[seed]
     reasons = " ".join(connection.why for connection in listed)
     assert "confidential interview transcript" not in reasons
+
+
+def test_an_excerpt_only_page_supplies_a_connection_without_its_prose(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = _page(vault, "visit-capture", body=LEAD_BODY)
+    report = _page(vault, "visit-report", body=(
+        "The revised visit report. " * 30 + "\n\n"
+        f"- supersedes [[{seed.removesuffix('.md')}]] after a second inspection\n"
+    ))
+    write_scope(vault, paths=report.removeprefix("Knowledge Base/"))
+    write_rule(vault, ceiling=egress.LEVEL_EXCERPT)
+    catalogue = _built(vault)
+    by_path = {entry.path: entry for entry in catalogue.task_entries() if entry.path}
+    catalogue.close()
+    _warm_resolver(monkeypatch)
+
+    with request_scope(_external()):
+        visible = egress.restricted_release_filter(vault)
+        served = working_set.read_connections(vault, [seed], by_path=by_path, visible=visible, per_seed=4)
+
+    listed, _omitted = served[seed]
+    inbound = next(connection for connection in listed if connection.direction == "inbound")
+    assert inbound.target_path == report
+    assert inbound.why == "supersedes (inbound)"

@@ -2030,6 +2030,18 @@ def read_connections(
     if not ranked:
         return {}
     # The `why` reads pages, so it is built only for the connections a seed will serve.
+    selected = {
+        seed: sorted(targets.values(), key=lambda value: value[:3])[:per_seed]
+        for seed, targets in ranked.items()
+    }
+    reason_paths = set(selected)
+    reason_paths.update(
+        connection.target_path
+        for ordered in selected.values()
+        for _tier, _open_flag, _position, connection in ordered
+    )
+    with egress.release_decision_context(vault_root):
+        text_bounds = egress.page_text_bounds(vault_root, reason_paths)
     resolver = find.borrow_query_resolver(Path(vault_root), visible)
     seed_paths = set(seeds)
 
@@ -2039,6 +2051,10 @@ def read_connections(
 
     def _body(rel: str) -> str | None:
         """The page's prose for this caller, egressed under the path it was read from."""
+        # A connection can select prose anywhere in a page. An excerpt-only release
+        # authorizes only the canonical excerpt, so it can contribute a pointer without prose.
+        if text_bounds[rel] is not None:
+            return None
         page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
         if page is None:
             return None
@@ -2052,10 +2068,12 @@ def read_connections(
         authoring_rel = seed if connection.direction == "outbound" else connection.target_path
         target_rel = connection.target_path if connection.direction == "outbound" else seed
         try:
+            authoring_body = _body(authoring_rel)
+            lede_body = authoring_body if authoring_rel == connection.target_path else _body(connection.target_path)
             return _connection_why(
                 Path(vault_root), relation=connection.relation, direction=connection.direction,
                 authoring_rel=authoring_rel, target_rel=target_rel,
-                authoring_body=_body(authoring_rel), lede_body=_body(connection.target_path),
+                authoring_body=authoring_body, lede_body=lede_body,
                 resolver=resolver, seen=_seen,
             )
         except egress.ReaderViewUnavailable:
@@ -2072,11 +2090,10 @@ def read_connections(
                 out.append(replace(connection, why=_reason(seed, connection)))
         return out
 
-    result: dict[str, tuple[list[Connection], int]] = {}
-    for seed, targets in ranked.items():
-        ordered = [value for _target, value in sorted(targets.items(), key=lambda pair: pair[1][:3])]
-        result[seed] = (_serve(seed, ordered[:per_seed]), max(0, len(ordered) - per_seed))
-    return result
+    return {
+        seed: (_serve(seed, ordered), len(ranked[seed]) - len(ordered))
+        for seed, ordered in selected.items()
+    }
 
 
 def _conclusion_pages(
