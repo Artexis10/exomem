@@ -1005,9 +1005,10 @@ def _sampled(vault: Path) -> list[tuple[str, int]]:
 
 def test_a_sample_that_decrypts_to_the_binding_proves_the_key(vault: Path, selected_store, mirrored: Path) -> None:
     """Only a decrypt shows that the key still opens a replica; a hash of its ciphertext cannot."""
-    _replicated(vault)
-    _due_again(vault)  # no recorded HEAD proof for either version
-    _unproven(vault)
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_store.replicate(vault, original, MIRROR)
+    media_replicas.rebuild(vault)
 
     assert media_replicas.sample(vault) == 2  # the eviction store's pointer and the mirror's replica
 
@@ -2415,9 +2416,10 @@ def test_the_status_reports_a_replica_of_an_unscheduled_store_with_the_reason_an
 
 def test_the_status_counts_a_replica_that_no_check_has_reached_as_never_checked(
         vault: Path, selected_store, mirrored: Path) -> None:
-    _replicated(vault)
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_store.replicate(vault, original, MIRROR)
     media_replicas.rebuild(vault)
-    _due_again(vault)  # as a replica that a new version or a rebuild left with no history
 
     mirror = _mirror_stats(vault)
 
