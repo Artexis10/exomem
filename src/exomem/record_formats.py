@@ -164,13 +164,6 @@ class _HeadingGrammar:
     separator: str
     note: _HeadingNote | None
 
-    @property
-    def status_note_field(self) -> str | None:
-        # Older logs can put the note in an ordinary heading column.
-        if self.note is not None:
-            return self.note.field
-        return next((field.name for field in self.fields if field.name == "note"), None)
-
 
 class CollectionAdapter(Protocol):
     mutable: bool
@@ -349,7 +342,7 @@ class MarkdownLogAdapter(_BaseAdapter):
                 raise collections.CollectionError(
                     "INVALID_RECORD_HEADING", "record heading does not match its manifest grammar"
                 )
-            values.update(_status_values(descriptor, values.get(grammar.status_note_field)))
+            values.update(_status_values(descriptor, values.get("note")))
             children = _child_rows(
                 block, item.start, prefix, delimiter, child_fields, _MAX_CHILD_ROWS - child_count
             )
@@ -800,10 +793,28 @@ def read_log_block_stamp(data: bytes) -> dict[str, str | int] | None:
     return found[0] if len(found) == 1 else None
 
 
-def _render_log_heading(
-    grammar: _HeadingGrammar, values: Mapping[str, Any],
-) -> tuple[str, dict[str, Any]]:
-    """Render the heading and read it through the same grammar as the file reader."""
+def render_markdown_log_item(
+    manifest: collections.CollectionManifest,
+    values: Mapping[str, Any],
+    item_key: str,
+    newline: str,
+    audit_correlation: str | None = None,
+    *,
+    view_stamp: Mapping[str, str | int] | None = None,
+) -> str:
+    """Render one declared log block without reading or rewriting its container."""
+    if newline not in {"\n", "\r\n"}:
+        raise collections.CollectionError("INVALID_RECORD_SOURCE", "unsupported newline sequence")
+    descriptor = manifest.storage.descriptor
+    heading = descriptor.get("item_heading")
+    if not isinstance(heading, Mapping):
+        raise collections.CollectionError(
+            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid"
+        )
+    grammar = _heading_grammar(heading)
+    prefix, delimiter, fields, container = _child_grammar(
+        descriptor.get("child_rows"), manifest.schema
+    )
     parts: list[str] = []
     for heading_field in grammar.fields:
         value = values.get(heading_field.name)
@@ -827,8 +838,8 @@ def _render_log_heading(
             )
         parts.append(rendered)
     title = grammar.separator.join(parts)
-    note = values.get(grammar.note.field) if grammar.note is not None else None
     if grammar.note is not None:
+        note = values.get(grammar.note.field)
         if note is not None:
             if (
                 not isinstance(note, str)
@@ -841,40 +852,8 @@ def _render_log_heading(
                 raise collections.CollectionError(
                     "UNREPRESENTABLE_RECORD_VALUE", "note cannot render"
                 )
-            note = note.strip()
-            title += f"{grammar.note.open}{note}{grammar.note.close}"
-    parsed = _log_values(title.strip(), grammar)
-    if parsed is None or (grammar.note is not None and parsed.get(grammar.note.field) != note):
-        raise collections.CollectionError(
-            "UNREPRESENTABLE_RECORD_VALUE", "heading note does not read back identically",
-        )
-    return title, parsed
-
-
-def render_markdown_log_item(
-    manifest: collections.CollectionManifest,
-    values: Mapping[str, Any],
-    item_key: str,
-    newline: str,
-    audit_correlation: str | None = None,
-    *,
-    view_stamp: Mapping[str, str | int] | None = None,
-) -> str:
-    """Render one declared log block without reading or rewriting its container."""
-    if newline not in {"\n", "\r\n"}:
-        raise collections.CollectionError("INVALID_RECORD_SOURCE", "unsupported newline sequence")
-    descriptor = manifest.storage.descriptor
-    heading = descriptor.get("item_heading")
-    if not isinstance(heading, Mapping):
-        raise collections.CollectionError(
-            "INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid"
-        )
-    grammar = _heading_grammar(heading)
-    prefix, delimiter, fields, container = _child_grammar(
-        descriptor.get("child_rows"), manifest.schema
-    )
-    title, parsed_heading = _render_log_heading(grammar, values)
-    derived = _status_values(descriptor, parsed_heading.get(grammar.status_note_field))
+            title += f"{grammar.note.open}{note.strip()}{grammar.note.close}"
+    derived = _status_values(descriptor, values.get(grammar.note.field) if grammar.note else None)
     for name, value in derived.items():
         if values.get(name) != value:
             raise collections.CollectionError(
@@ -3148,7 +3127,6 @@ class LogGrammarTokens:
     heading_string_fields: tuple[str, ...]
     separator: str
     note_field: str | None
-    status_note_field: str | None
     note_open: str | None
     note_close: str | None
     container_field: str
@@ -3183,26 +3161,12 @@ def log_grammar_tokens(
         ),
         separator=grammar.separator,
         note_field=note.field if note is not None else None,
-        status_note_field=grammar.status_note_field,
         note_open=note.open if note is not None else None,
         note_close=note.close if note is not None else None,
         container_field=container,
         child_fields=fields,
         delimiter=delimiter,
     )
-
-
-def log_derived_values(
-    manifest: collections.CollectionManifest, values: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Values the candidate will read back from its defaults and heading note."""
-    descriptor = manifest.storage.descriptor
-    heading = descriptor.get("item_heading")
-    if not isinstance(heading, Mapping):
-        raise collections.CollectionError("INVALID_STORAGE_DESCRIPTOR", "item heading grammar is invalid")
-    grammar = _heading_grammar(heading)
-    _, parsed = _render_log_heading(grammar, values)
-    return _status_values(descriptor, parsed.get(grammar.status_note_field))
 
 
 def _heading_grammar(value: Mapping[str, Any]) -> _HeadingGrammar:

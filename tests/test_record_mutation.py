@@ -2247,12 +2247,11 @@ def test_the_whole_journey_runs_through_the_record_memory_surface(tmp_path: Path
 _LOG_HELD_DIRECTORY = "Knowledge Base/Records/Health/X3/Held"
 
 
-def _refuse_log_append(tmp_path: Path, *, fixture: Path | None = None, **overrides: object):
+def _refuse_log_append(tmp_path: Path, **overrides: object):
     """Refuse one X3 (Markdown-log) append and return the error."""
     from exomem import records
 
-    if fixture is None:
-        fixture = copy_x3_fixture(tmp_path)
+    fixture = copy_x3_fixture(tmp_path)
     _activity_log(tmp_path)
     manifest = _manifest(tmp_path, fixture)
     parsed = record_formats.load_adapter(tmp_path, manifest).read()
@@ -2277,117 +2276,6 @@ def _refuse_log_append(tmp_path: Path, *, fixture: Path | None = None, **overrid
 def _log_held_files(tmp_path: Path) -> list[Path]:
     directory = tmp_path / _LOG_HELD_DIRECTORY
     return sorted(directory.glob("*.md")) if directory.is_dir() else []
-
-
-def test_a_log_enum_refusal_offers_the_status_derived_from_the_held_note(tmp_path: Path) -> None:
-    from exomem import records
-
-    fixture = copy_x3_fixture(tmp_path)
-    manifest_file = fixture / "_collection.md"
-    manifest_file.write_text(
-        manifest_file.read_text(encoding="utf-8").replace("field: note\n", "field: annotation\n"),
-        encoding="utf-8",
-    )
-    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", annotation=" Partial ")
-
-    assert error.code == "SCHEMA_ENUM"
-    assert error.details["allowed"] == ["partial"]
-    manifest = _manifest(tmp_path, fixture)
-    result = records.append_record(
-        tmp_path, manifest.path, held=error.details["held"]["held_id"],
-        item={"status": "partial"}, why="correct the derived status",
-    )
-    assert result["outcome"] == "committed"
-    readback = record_formats.load_adapter(tmp_path, manifest).read()
-    recent = next(row for row in readback.records if row.values["occurred_on"] == "2026-08-03")
-    assert recent.values["status"] == "partial"
-
-
-def test_a_log_with_note_as_an_ordinary_heading_field_keeps_its_status(tmp_path: Path) -> None:
-    from exomem import records
-
-    fixture = copy_x3_fixture(tmp_path)
-    manifest_file = fixture / "_collection.md"
-    text = manifest_file.read_text(encoding="utf-8").replace(
-        '    note:\n      field: note\n      open: " ("\n      close: ")"\n', "",
-    ).replace(
-        '    separator: " · "\n', '      - name: note\n        type: string\n    separator: " · "\n',
-    ).replace(
-        "  fields:\n    occurred_on:", "  fields:\n    note: {type: string}\n    occurred_on:",
-    )
-    manifest_file.write_text(text, encoding="utf-8")
-    (fixture / "Training Log.md").write_text(
-        "## Sessions (newest first)\n\n### 2026-08-02 · Pull · Partial\n", encoding="utf-8",
-    )
-
-    manifest = _manifest(tmp_path, fixture)
-    adapter = record_formats.load_adapter(tmp_path, manifest)
-    [record] = adapter.read().records
-    assert record.values["status"] == "partial"
-    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note=" Partial ")
-    assert error.details["allowed"] == ["partial"]
-    resumed = records.append_record(
-        tmp_path, manifest.path, held=error.details["held"]["held_id"],
-        item={"status": "partial"}, why="correct the status",
-    )
-    assert resumed["outcome"] == "committed"
-    assert [entry.values["status"] for entry in adapter.read().records] == ["partial", "partial"]
-
-
-def test_held_log_retry_refuses_a_heading_that_loses_its_note(tmp_path: Path) -> None:
-    from exomem import records
-
-    fixture = copy_x3_fixture(tmp_path)
-    manifest_file = fixture / "_collection.md"
-    manifest_file.write_text(
-        manifest_file.read_text(encoding="utf-8").replace('close: ")"', 'close: ") "'),
-        encoding="utf-8",
-    )
-    source = fixture / "Training Log.md"
-    before = source.read_bytes()
-    error = _refuse_log_append(tmp_path, fixture=fixture, status="pending", note=" Partial ")
-    assert error.code == "SCHEMA_ENUM"
-    assert "allowed" not in error.details
-
-    with pytest.raises(collections.CollectionError, match="UNREPRESENTABLE_RECORD_VALUE"):
-        records.append_record(
-            tmp_path, _manifest(tmp_path, fixture).path, held=error.details["held"]["held_id"],
-            item={"status": "partial"}, why="correct the status",
-        )
-    assert source.read_bytes() == before
-
-
-def test_held_log_retry_offers_renderable_choices_for_the_child_cell(tmp_path: Path) -> None:
-    from exomem import records
-
-    fixture = copy_x3_fixture(tmp_path)
-    manifest_file = fixture / "_collection.md"
-    manifest_file.write_text(
-        manifest_file.read_text(encoding="utf-8").replace(
-            "      items:\n        type: object\n",
-            '      items:\n        type: object\n        properties:\n'
-            '          band: {type: enum, enum: [blue short, green short, "needs\\nreview", "red|blue", 42]}\n',
-        ),
-        encoding="utf-8",
-    )
-    _activity_log(tmp_path)
-    manifest = _manifest(tmp_path, fixture)
-    row = {"movement": "Row", "band": "not\ndeclared", "repetitions": "18"}
-    with pytest.raises(collections.CollectionError) as caught:
-        records.append_record(
-            tmp_path, manifest.path, why="record a training session",
-            item={"occurred_on": "2026-08-03", "title": "Pull", "status": "completed", "movements": [row]},
-            expected_container_hash=record_formats.load_adapter(tmp_path, manifest).read().source_versions[-1].hash,
-        )
-
-    error = caught.value
-    assert error.code == "SCHEMA_ENUM"
-    assert error.details["field"] == "movements[0].band"
-    assert error.details["allowed"] == ["blue short", "green short"]
-    arguments = records.resume_with("append", error.details["held"]["held_id"], error.details["issues"])
-    assert list(arguments["item"]) == ["movements"]
-    arguments["item"]["movements"] = [{**row, "band": error.details["allowed"][1]}]
-    assert records.append_record(tmp_path, manifest.path, why="correct the band", **arguments)["outcome"] == "committed"
 
 
 def test_a_child_row_carrying_the_row_delimiter_is_addressed_and_held(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 import yaml
 from conftest import initialize_vault_state_offline
-from test_collection_store_summary import summary_text
+from test_collection_store_summary import sqlite_text, summary_text
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 
@@ -81,56 +81,43 @@ def release_document(basis, who=GUEST):
             "surface": who.surface, "issuer_family": who.issuer_family, "purpose": None, "release_version": 1}})
 
 
-def test_inspection_only_shows_enum_choices_for_released_members(store):
+def test_inspection_admits_enum_declarations_only_for_released_fields(store):
+    """A guest who can inspect the collection must not see its withheld field's declarations."""
     from exomem.governance.policy import governance_root
     from exomem.init import _SCAFFOLD
 
     initialize_vault_state_offline(store.root, source="enum release fixture")
     governance_root(store.root).mkdir(parents=True, exist_ok=True)
     (governance_root(store.root) / "README.md").write_bytes((_SCAFFOLD / "_Governance/README.md").read_bytes())
-    front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
-    front["item_schema"]["fields"]["count"]["items"] = {
-        "type": "enum", "enum": ["unused"], "classification": "location",
-    }
-    front["item_schema"]["fields"]["update"] = {
-        "type": "object",
-        "properties": {
-            "state": {"type": "enum", "enum": ["complete", "awaiting"]},
-            "room": {"type": "enum", "enum": ["north", "south"], "classification": "location"},
-        },
-    }
-    front["item_schema"]["fields"]["visits"] = {
-        "type": "array",
-        "items": {
-            "type": "object", "classification": "location",
-            "properties": {"zone": {"type": "enum", "enum": ["near", "far"]}},
-        },
-    }
+    front, body, _ = vault.parse_frontmatter(sqlite_text(manifest_text()), strict=True)
+    front["item_schema"]["fields"].update({
+        "state": {"type": "enum", "enum": ["complete", "awaiting"]},
+        "room": {"type": "enum", "enum": ["north", "south"], "classification": "location"},
+        "context": {"type": "object", "properties": {"zone": {"type": "enum", "enum": ["near", "far"]}}},
+    })
     text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
     store.create_collection(manifest_path(), text, why="declare workflow fields", scaffold=False)
     store.append_record(
-        CID, item={"title": "Survey", "update": {"state": "complete", "room": "north"}},
+        CID, item={"title": "Survey", "state": "complete", "room": "north"},
         item_key=KEY, why="record the survey",
     )
 
     owner = tool(store, "record_memory", action="inspect", collection=CID)
     guest = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
-
-    state = {"path": ["update", "properties", "state"], "choices": ["complete", "awaiting"]}
-    room = {"path": ["update", "properties", "room"], "choices": ["north", "south"]}
-    zone = {"path": ["visits", "items", "properties", "zone"], "choices": ["near", "far"]}
-    assert owner["contract"]["enum_fields"] == {"values": [state, room, zone], "truncated": False}
-    assert guest["contract"]["enum_fields"] == {"values": [state], "truncated": False}
+    state = ["complete", "awaiting"]
+    room = ["north", "south"]
+    assert owner["contract"]["declared_enums"] == {"values": {"state": state, "room": room}, "truncated": False}
+    assert guest["contract"]["declared_enums"] == {"values": {"state": state}, "truncated": False}
 
     basis = owner["field_release_basis"]
     document = yaml.safe_load(release_document(basis))
-    document["field_release"]["paths"] = [{"path": "visits", "subtree": True}]
-    proposal = govern(store, operation="propose", intent="Release the reviewed visit information",
-        documents={"grants/visit-fields.yaml": yaml.safe_dump(document)},
+    document["field_release"]["paths"] = [{"path": "room", "subtree": False}]
+    proposal = govern(store, operation="propose", intent="Release the reviewed room information",
+        documents={"grants/room-field.yaml": yaml.safe_dump(document)},
         selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
     govern(store, operation="commit", proposal_id=proposal["proposal_id"])
     released = tool(store, "record_memory", action="inspect", collection=CID, who=GUEST)
-    assert released["contract"]["enum_fields"] == {"values": [state, zone], "truncated": False}
+    assert released["contract"]["declared_enums"] == {"values": {"state": state, "room": room}, "truncated": False}
 
 
 def test_recipient_queries_metrics_and_nested_projection_before_hidden_value_decoding(store, monkeypatch):

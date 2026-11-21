@@ -156,8 +156,6 @@ class CollectionError(ValueError):
     code: str
     reason: str
     details: dict[str, Any] = field(default_factory=dict)
-    # Keep the declaration by reference. The caller that selects a public refusal bounds it once.
-    enum_choices: tuple[Any, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         self.details = dict(self.details)
@@ -1103,6 +1101,11 @@ class CollectionManifest:
     #: How the store derives this collection's item keys. It is store state, not manifest text: the store
     #: records it at creation and the writer overlays it on every manifest it hands out.
     item_key_scheme: str = item_keys.HASHED_V1
+
+    @property
+    def supports_item_enum_guidance(self) -> bool:
+        """Whether enum guidance applies to this collection's writable Records item rows."""
+        return self.semantic_profile == "records" and self.storage.item_rows and not self.derived
 
 
 def ignored_recipes_diagnostic(manifest: CollectionManifest) -> CollectionDiagnostic | None:
@@ -3603,7 +3606,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}", enum_choices=spec.enum)
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:

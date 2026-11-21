@@ -4578,7 +4578,7 @@ def _validate_values(
     if not issues and manifest.storage.strategy == "markdown-items" and not manifest.derived:
         _collect_round_trip_issues(manifest, value, issues)
     if issues:
-        raise _issue_refusal(manifest, value, issues)
+        raise _issue_refusal(manifest, issues)
     return value
 
 
@@ -4599,8 +4599,6 @@ class _Issue:
     #: would claim an address the failure does not have.
     scope: str = ""
     enum_choices: tuple[Any, ...] = ()
-    enum_members: tuple[str, ...] = ()
-    retry_field: str = ""
 
     def as_detail(self) -> dict[str, str]:
         detail: dict[str, str] = {}
@@ -4608,14 +4606,12 @@ class _Issue:
             detail["field"] = self.field
         if self.scope:
             detail["scope"] = self.scope
-        if self.retry_field:
-            detail["retry_field"] = self.retry_field
         detail.update({"code": self.code, "reason": self.reason, "received": self.received})
         return detail
 
 
 def _issue_refusal(
-    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue],
+    manifest: collections.CollectionManifest, issues: list[_Issue],
 ) -> collections.CollectionError:
     first = issues[0]
     details: dict[str, Any] = {}
@@ -4623,58 +4619,20 @@ def _issue_refusal(
         details["field"] = first.field
     if first.scope:
         details["scope"] = first.scope
-    if first.enum_choices:
+    if first.code == "SCHEMA_ENUM" and first.enum_choices and manifest.supports_item_enum_guidance:
         allowed, _ = collections.enum_choices_for_wire(first.enum_choices)
-        tokens = record_formats.log_grammar_tokens(manifest)
-        allowed = [
-            choice for choice in allowed
-            if _enum_choice_can_render(manifest, tokens, values, first.enum_members, choice)
-        ]
+        if manifest.storage.strategy == "markdown-items":
+            renderable = []
+            for choice in allowed:
+                problems: list[_Issue] = []
+                _collect_round_trip_issues(manifest, {first.field: choice}, problems)
+                if not problems:
+                    renderable.append(choice)
+            allowed = renderable
         if allowed:
             details["allowed"] = allowed
     details["issues"] = [issue.as_detail() for issue in issues]
     return collections.CollectionError(first.code, first.headline or first.reason, details)
-
-
-def _enum_choice_can_render(
-    manifest: collections.CollectionManifest, tokens: record_formats.LogGrammarTokens | None,
-    held_values: Mapping[str, Any], members: tuple[str, ...], choice: Any,
-) -> bool:
-    field = members[0]
-    problems: list[_Issue] = []
-    _collect_value_representation(field, field, choice, manifest.storage.item_rows, problems)
-    spec = manifest.schema.fields[field]
-    if manifest.storage.strategy == "markdown-items":
-        # The file writer may change the YAML type of numbers and inline array members.
-        if spec.type == "enum":
-            _collect_round_trip_issues(manifest, {field: choice}, problems)
-        elif spec.type == "array" and spec.items is not None and spec.items.type == "enum":
-            _collect_round_trip_issues(manifest, {field: [choice]}, problems)
-    if tokens is not None:
-        if len(members) == 1:
-            changes_note = field == tokens.status_note_field
-            try:
-                derived = record_formats.log_derived_values(manifest, {**held_values, field: choice})
-            except ValueError:
-                return False
-            if field in derived:
-                expected = derived[field]
-                return not problems and type(choice) is type(expected) and choice == expected
-            if changes_note and any(held_values.get(name) != expected for name, expected in derived.items()):
-                return False
-            if field not in tokens.heading_string_fields and field != tokens.note_field:
-                return False
-            if not isinstance(choice, str) or choice != choice.strip():
-                return False
-            values = {field: choice}
-        elif len(members) == 2 and field == tokens.container_field:
-            if members[1] not in tokens.child_fields or not isinstance(choice, str) or choice != choice.strip():
-                return False
-            values = {field: [{members[1]: choice}]}
-        else:
-            return False
-        _collect_log_grammar_issues(tokens, values, problems)
-    return not problems
 
 
 def _value_class(value: Any) -> str:
@@ -4734,7 +4692,7 @@ def _collect_field_issues(
         return
     except collections.CollectionError as error:
         failure = error
-    located = _locate_field_failure(path, name, value, spec, non_null, (name,), failure.code)
+    located = _locate_field_failure(path, name, value, spec, non_null)
     if not located:
         issues.append(
             _Issue(
@@ -4742,36 +4700,33 @@ def _collect_field_issues(
                 code=failure.code,
                 reason=failure.reason,
                 received=_value_class(value),
-                enum_choices=failure.enum_choices,
-                enum_members=(name,),
+                # Only the top-level schema can supply retry choices. A rendered path can also name an array member.
+                enum_choices=spec.enum,
             )
         )
         return
-    for sub_path, sub_value, sub_failure, members in located:
+    for sub_path, sub_value, sub_failure in located:
         issues.append(
             _Issue(
                 field=sub_path,
                 code=sub_failure.code,
                 reason=sub_failure.reason,
                 received=_value_class(sub_value),
-                enum_choices=sub_failure.enum_choices,
-                enum_members=members,
-                retry_field=path,
             )
         )
 
 
 def _locate_field_failure(
-    path: str, name: str, value: Any, spec: collections.FieldSpec, non_null: bool, members: tuple[str, ...], code: str,
-) -> list[tuple[str, Any, collections.CollectionError, tuple[str, ...]]]:
+    path: str, name: str, value: Any, spec: collections.FieldSpec, non_null: bool
+) -> list[tuple[str, Any, collections.CollectionError]]:
     if spec.type == "array" and isinstance(value, list) and spec.items is not None:
-        found = []
+        found: list[tuple[str, Any, collections.CollectionError]] = []
         for index, entry in enumerate(value):
             try:
                 collections.validate_field_value(name, entry, spec.items, non_null=non_null)
             except collections.CollectionError as error:
-                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items, non_null, members, error.code)
-                found.extend(deeper or [(f"{path}[{index}]", entry, error, members)])
+                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items, non_null)
+                found.extend(deeper or [(f"{path}[{index}]", entry, error)])
         return found
     if spec.type == "object" and isinstance(value, Mapping):
         offending = _non_json_path(path, value)
@@ -4784,21 +4739,8 @@ def _locate_field_failure(
                     collections.CollectionError(
                         "SCHEMA_FIELD_TYPE", f"field has wrong type: {name}"
                     ),
-                    members,
                 )
             ]
-        if code == "SCHEMA_ENUM":
-            for key, child in spec.properties.items():
-                if key not in value:
-                    continue
-                child_name, child_path, child_members = f"{name}.{key}", f"{path}.{key}", (*members, key)
-                try:
-                    collections.validate_field_value(child_name, value[key], child, non_null=non_null)
-                except collections.CollectionError as error:
-                    deeper = _locate_field_failure(
-                        child_path, child_name, value[key], child, non_null, child_members, error.code,
-                    )
-                    return deeper or [(child_path, value[key], error, child_members)]
     return []
 
 
@@ -4892,13 +4834,13 @@ def _collect_representation_issues(
     for name, value in values.items():
         if name in already:
             continue
-        _collect_value_representation(name, name, value, line_breaks_allowed, issues)
-    if tokens := record_formats.log_grammar_tokens(manifest):
-        _collect_log_grammar_issues(tokens, values, issues)
+        _collect_value_representation(name, value, line_breaks_allowed, issues)
+    if manifest.storage.strategy == "markdown-log":
+        _collect_log_grammar_issues(manifest, values, issues)
 
 
 def _collect_log_grammar_issues(
-    tokens: record_formats.LogGrammarTokens, values: Mapping[str, Any], issues: list[_Issue]
+    manifest: collections.CollectionManifest, values: Mapping[str, Any], issues: list[_Issue]
 ) -> None:
     """Refuse candidate values that carry the log grammar's own tokens.
 
@@ -4906,13 +4848,16 @@ def _collect_log_grammar_issues(
     unrepresentable in this strategy as a line break; judging them here gives
     the caller the field path and lets the refusal hold the candidate.
     """
+    tokens = record_formats.log_grammar_tokens(manifest)
+    if tokens is None:
+        return
     seen = {issue.field for issue in issues}
 
-    def refuse(path: str, reason: str, value: Any, retry_field: str = "") -> None:
+    def refuse(path: str, reason: str, value: Any) -> None:
         if path in seen:
             return
         seen.add(path)
-        issues.append(_unrepresentable(path, reason, value, retry_field=retry_field))
+        issues.append(_unrepresentable(path, reason, value))
 
     for name in tokens.heading_string_fields:
         value = values.get(name)
@@ -4944,38 +4889,36 @@ def _collect_log_grammar_issues(
                         f"{tokens.container_field}[{index}].{name}",
                         "a child row value cannot carry the row delimiter",
                         cell,
-                        retry_field=tokens.container_field,
                     )
 
 
 def _collect_value_representation(
-    name: str, path: str, value: Any, line_breaks_allowed: bool, issues: list[_Issue]
+    path: str, value: Any, line_breaks_allowed: bool, issues: list[_Issue]
 ) -> None:
     if isinstance(value, str):
         if len(value.encode("utf-8")) > _MAX_VALUE_BYTES:
-            issues.append(_unrepresentable(path, "record value exceeds the byte limit", value, retry_field=name))
+            issues.append(_unrepresentable(path, "record value exceeds the byte limit", value))
         elif not line_breaks_allowed and ("\r" in value or "\n" in value):
             issues.append(
                 _unrepresentable(
-                    path, "this storage strategy cannot carry a line break in a value", value, retry_field=name,
+                    path, "this storage strategy cannot carry a line break in a value", value
                 )
             )
     elif isinstance(value, Mapping):
         for key, item in value.items():
-            _collect_value_representation(name, f"{path}.{key}", item, line_breaks_allowed, issues)
+            _collect_value_representation(f"{path}.{key}", item, line_breaks_allowed, issues)
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            _collect_value_representation(name, f"{path}[{index}]", item, line_breaks_allowed, issues)
+            _collect_value_representation(f"{path}[{index}]", item, line_breaks_allowed, issues)
 
 
-def _unrepresentable(path: str, reason: str, value: Any, *, retry_field: str = "") -> _Issue:
+def _unrepresentable(path: str, reason: str, value: Any) -> _Issue:
     return _Issue(
         field=path,
         code="UNREPRESENTABLE_RECORD_VALUE",
         reason=reason,
         received=_value_class(value),
         headline="record value cannot render losslessly",
-        retry_field=retry_field if retry_field != path else "",
     )
 
 
@@ -5522,14 +5465,13 @@ def resume_with(action: str, held_id: str, issues: Sequence[Mapping[str, Any]]) 
     field. An undeclared field can only be removed; for any other failure the right value is the
     caller's to supply, so the override is a placeholder that the schema refuses until it is replaced.
     """
-    overrides = {}
-    for issue in issues:
-        # The held writer merges whole fields. An array index only locates the failure.
-        field = issue.get("retry_field") or issue.get("field")
-        if field:
-            overrides[str(field)] = (
-                None if issue.get("code") == "SCHEMA_UNKNOWN_FIELD" else f"<corrected {field}>"
-            )
+    overrides = {
+        str(issue["field"]): None
+        if issue.get("code") == "SCHEMA_UNKNOWN_FIELD"
+        else f"<corrected {issue['field']}>"
+        for issue in issues
+        if issue.get("field")
+    }
     resume: dict[str, Any] = {"held": held_id}
     if overrides:
         resume["changes" if action == "update" else "item"] = overrides

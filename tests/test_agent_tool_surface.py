@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from shutil import copytree
 
 import pytest
 import record_fixtures
+from conftest import FIXTURE_VAULT
 from fastmcp import Client
 from lifecycle_fixtures import PLANNING_PATH, planning_manifest
+from test_collection_store_service import service  # noqa: F401 - the SQLite workflow uses this fixture
 
 from exomem import call_ledger, writer_lease
 from exomem import server as server_module
@@ -27,10 +30,23 @@ LISTED = {
 
 
 @pytest.fixture
-def build(vault, monkeypatch, tmp_path):
+def agent_vault(request):
+    strategy = getattr(request, "param", "markdown-items")
+    if strategy == "sqlite":
+        root = request.getfixturevalue("service").root
+        schema = "Knowledge Base/_Schema"
+        copytree(FIXTURE_VAULT / schema, root / schema, dirs_exist_ok=True)
+    else:
+        request.getfixturevalue("vault")
+    return strategy
+
+
+@pytest.fixture
+def build(agent_vault, monkeypatch, tmp_path):
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
+    if agent_vault != "sqlite":
+        monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease"))
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     call_ledger.reset_chain_cache()
@@ -276,67 +292,48 @@ def test_an_agent_adds_queries_and_edits_a_record_by_its_id(build, vault) -> Non
     assert "word_count: 50" in items and "word_count: 60" not in items
 
 
-@pytest.mark.parametrize(
-    ("declaration", "invalid", "path", "choices", "offered", "corrected", "truncated", "fallback_yaml"),
-    [
-        (
-            "{type: enum, enum: [42, 1.0e+20, short, long]}", "medium", ["word_count"],
-            [42, 1.0e20, "short", "long"], [42, "short", "long"], 42, False, False,
-        ),
-        (
-            "{type: array, items: {type: enum, enum: [42, " + "x" * 17_000 + ", true, short]}}",
-            ["medium"], ["word_count", "items"], [42, True, "short"], ["short"], ["short"], True, False,
-        ),
-        (
-            r'{type: enum, enum: ["\uD800", 42]}',
-            "medium", ["word_count"], [42], [42], 42, True, True,
-        ),
-    ],
-    ids=["field", "array-item-with-oversized-choice", "unencodable-choice-on-yaml-fallback"],
-)
-def test_an_agent_can_repair_a_record_with_a_declared_enum_value(
-    build, monkeypatch, declaration, invalid, path, choices, offered, corrected, truncated, fallback_yaml,
-) -> None:
-    if fallback_yaml:
-        import yaml
-        from exomem import vault as vault_module
-
-        class PythonSafeLoader(yaml.SafeLoader):
-            pass
-
-        PythonSafeLoader.add_constructor(
-            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, vault_module._construct_unique_mapping
-        )
-        monkeypatch.setattr(vault_module, "_UniqueKeySafeLoader", PythonSafeLoader)
-
+@pytest.mark.parametrize("agent_vault", ["sqlite", "markdown-items"], indirect=True)
+def test_an_agent_can_repair_a_record_with_a_declared_enum_value(build, agent_vault) -> None:
+    """An enum refusal used to leave an agent without values it could use to resume the held write."""
+    declaration = "[42, true, 1.0e+20, low, high]"
+    offered = [42, True, "low", "high"]
+    if agent_vault == "sqlite":
+        declaration = declaration[:-1] + ", " + "x" * 17_000 + "]"
+        offered = [42, True, 1.0e20, "low", "high"]
     manifest = record_fixtures.LEDGER_MANIFEST_TEXT.replace(
         "    word_count:\n      type: integer\n",
-        f"    word_count: {declaration}\n",
-    )
+        f"    severity: {{type: enum, enum: {declaration}}}\n",
+    ).replace("strategy: markdown-items", f"strategy: {agent_vault}")
+    item = record_fixtures.ledger_item(severity="undecided")
+    del item["word_count"]
 
     async def scenario(client):
         created = await _call(client, "manage_memory", {"operation": "records.create", "arguments": {
             "manifest_path": record_fixtures.LEDGER_COLLECTION_PATH,
             "manifest_text": manifest, "why": "Track published entries", "scaffold": True}})
         assert "error" not in created, created
-        args = {"collection": "Publications ledger", "why": "Log a published entry"}
-        refusal = await _call(client, "add_record", {
-            **args, "item": record_fixtures.ledger_item(word_count=invalid)})
-        inspection = await _call(client, "inspect_memory", {
-            "operation": "records.inspect", "arguments": {"collection": args["collection"]}})
+        target = {"collection": "Publications ledger"}
+        inspection = await _call(client, "inspect_memory", {"operation": "records.inspect", "arguments": target})
+        assert inspection["contract"]["storage"]["strategy"] == agent_vault
+        assert inspection["contract"]["declared_enums"] == {
+            "values": {"severity": [42, True, 1.0e20, "low", "high"]},
+            "truncated": agent_vault == "sqlite",
+        }
+        refusal = await _call(client, "add_record", {**target, "why": "Log a published entry", "item": item})
         assert refusal["error"]["code"] == "SCHEMA_ENUM", refusal
         assert refusal["error"]["candidates"] == offered
-        enums = inspection["contract"]["enum_fields"]
-        assert enums == {"values": [{"path": path, "choices": choices}], "truncated": truncated}
+        suggested = refusal["error"]["candidates"][1]
+        assert type(suggested) is bool
         retry = refusal["error"]["retry"]["arguments"]
-        assert list(retry["item"]) == ["word_count"]
+        assert list(retry["item"]) == ["severity"]
         added = await _call(client, "add_record", {
-            **args, "held": retry["held"], "item": {"word_count": corrected}})
+            **target, "why": "Correct the severity", "held": retry["held"], "item": {"severity": suggested}})
         assert "error" not in added, added
-        return await _call(client, "query_records", {"collection": args["collection"]})
+        return await _call(client, "query_records", target)
 
     rows = _session(build(), scenario)["rows"]
-    assert [row["word_count"] for row in rows] == [corrected]
+    assert [row["severity"] for row in rows] == [True]
+    assert type(rows[0]["severity"]) is bool
 
 
 def test_an_agent_adds_a_plan_item_and_moves_it_by_status(build, vault) -> None:
