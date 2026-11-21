@@ -1,4 +1,4 @@
-"""What a vault in store mode refuses while nothing can serve its pages (OpenSpec make-vault-store-canonical, task 1.6).
+"""Protect the pages of a vault in store mode (OpenSpec make-vault-store-canonical, task 1.6).
 
 A store-mode vault keeps its pages in the collection store, so each path that would serve stale
 Markdown, copy pages to another host, or swap the live store for a copy without pages must refuse.
@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 
 from .. import state_migration
-from ..collection_store import connection, schema
+from ..collection_store import capability, connection, schema
 from . import mode
 
 log = logging.getLogger(__name__)
@@ -24,9 +24,15 @@ OFF_THREAD = "VAULT_STORE_OFF_THREAD"
 SERVICE_REQUIRED = "VAULT_STORE_SERVICE_REQUIRED"
 PAGES_AT_RISK = "VAULT_STORE_PAGES_AT_RISK"
 STORE_ELSEWHERE = "VAULT_STORE_ELSEWHERE"
+CLAIM_DISPLACED = "VAULT_STORE_CLAIM_DISPLACED"
+CLAIM_UNKNOWN = "VAULT_STORE_CLAIM_UNKNOWN"
 WRITER_UNROUTED = "VAULT_STORE_WRITER_UNROUTED"
 
 ROLLBACK = "`exomem store-mode rollback`"
+ROLLBACK_HELD = (
+    "Stop the service and run `exomem store-mode rollback --apply --export-held "
+    "--export-to EXPORT_DIR --why REASON` on this state root."
+)
 ELSEWHERE_REASON = (
     "The vault's replica says another state root holds this vault's pages in the collection store, "
     "so a file-mode service here would write Markdown beside them."
@@ -88,14 +94,11 @@ def require_supported_lease(config) -> None:
 
 
 def require_servable(vault_root: Path) -> None:
-    """Refuse to start a service on a store-mode vault: no build serves its pages from the store yet.
+    """Admit a store-mode vault on a supported build with a single-host writer lease.
 
-    It prevents a service from answering reads out of Markdown that the store has replaced. A false
-    refusal needs a store-mode vault on a build that cannot serve it, and the owner's way out is the
-    rollback this message names. A file-mode vault starts, and the crash state that
-    ``marker_inconsistency`` names is logged on the way: it is reachable after a crash, so it warns
-    and never refuses. The one refusal of a file-mode vault is ``require_no_store_elsewhere``: its
-    replica says another state root holds the store.
+    A root that lost its store claim cannot serve stale pages or commit new writes.
+    An unreadable decision needs a compatible build. File mode warns about an
+    interrupted mode change and checks whether another root holds the store.
     """
     if not mode.store_mode_active(vault_root):
         inconsistency = marker_inconsistency(vault_root)
@@ -104,12 +107,25 @@ def require_servable(vault_root: Path) -> None:
         require_no_store_elsewhere(vault_root)
         return
     from .. import writer_lease
+    from . import marker
 
     require_supported_lease(writer_lease.LeaseConfig.from_env())
-    raise connection.CollectionStoreError(
-        NOT_SERVED,
-        f"this vault's pages live in the collection store and this build cannot serve them yet: run {ROLLBACK} "
-        "to return them to files, or start a build that serves store mode")
+    if not capability.vault_store_enabled():
+        raise connection.CollectionStoreError(
+            NOT_SERVED,
+            f"this vault's pages live in the collection store and this build cannot serve them: run {ROLLBACK} "
+            "to return them to files, or start a build that serves store mode")
+    claim = marker.view(vault_root).claim(in_store_mode=True)
+    if claim == marker.DISPLACED:
+        raise connection.CollectionStoreError(
+            CLAIM_DISPLACED, f"This root's store claim no longer stands. {ROLLBACK_HELD}"
+        )
+    if claim == marker.UNKNOWN:
+        raise connection.CollectionStoreError(
+            CLAIM_UNKNOWN,
+            "This build cannot read the store-mode decision. "
+            f"Use a compatible build before you roll back. {ROLLBACK_HELD}",
+        )
 
 
 def require_no_store_elsewhere(vault_root: Path) -> None:

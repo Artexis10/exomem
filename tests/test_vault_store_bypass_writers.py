@@ -1,9 +1,8 @@
 """A writer that bypasses ``batch_atomic_write`` commits to the store in a store-mode vault.
 
 OpenSpec make-vault-store-canonical task 2.2. The vault is the migration suite's generated vault in
-store mode, and the writer is bound as the store thread binds it (``require_servable`` still refuses
-a store-mode service start, so no service holds the store here). The projector is off unless a test
-runs its pass by hand: nothing writes a stored page to disk, so each answer comes from the store.
+store mode. The fixture binds the writer as the store thread does. Each answer comes from the
+store. The projector runs only when a test calls it.
 """
 
 from __future__ import annotations

@@ -1,14 +1,14 @@
 """Which CLI subcommands touch a vault's pages, and the refusal that a store-mode vault gives them (OpenSpec make-vault-store-canonical, task 3.1).
 
-The registry path refuses a store-mode vault in ``product_invoke`` (``availability.require_servable``). The
+The registry path checks store admission in ``product_invoke`` (``availability.require_servable``). The
 subcommands that ``exomem.__main__`` dispatches before that path read or write pages, projections or
 file-mode indexes themselves, so a store-mode vault would answer them from the Markdown that the store
 replaced. Each subcommand declares here what it touches, and each declared handler calls ``require`` with the
 vault it resolved, at the point where it resolves it. The declaration lives here, not in ``__main__``, because
 the handlers that resolve a vault sit in other modules, and the lean ``cell-media-*`` routes must not load the CLI.
 
-A ``PAGES`` entry refuses a store-mode vault for good, whether or not the build serves store mode: the command
-works outside the service, and no rollout gate changes that. Each entry names what its owner does instead.
+A ``PAGES`` entry refuses a store-mode vault because the command works outside the service.
+Each entry names the command or tool the owner can use.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ ACCESS: dict[str, Declaration] = {
     "personalize": _pages(),
     "install-hook": _NONE,
     # With --vault it runs doctor, find, get and audit on that vault; without, on a bundled sample.
-    "demo": _pages("Ask the service instead: `ask_memory` and `read_memory` answer from the store."),
+    "demo": _pages("Run `exomem ask_memory QUERY` or `exomem read_memory PAGE` to read from the store."),
     # Prints a URL.
     "studio": _NONE,
     # The terminal UI backend calls require_servable when it starts its runtime.
@@ -78,13 +78,15 @@ ACCESS: dict[str, Declaration] = {
     # Reports resource posture and the store's own mode record.
     "status": _NONE,
     # With --vault it warms the vault's lexical caches, which are file-mode projections.
-    "warm": _pages("Start the service: it reads the store's own rows, so no cache needs warming."),
+    "warm": _pages("Run `exomem` to start the service. It reads the store's rows directly."),
     # Per-machine settings.
     "mode": _NONE,
     "dreamer": _NONE,
     "prominence": _NONE,
     # Writes sidecar companions and indexes beside the vault's media files.
-    "backfill-media": _pages("Ask the service instead: `process_media` without a path extracts governed media from the store."),
+    "backfill-media": _pages(
+        "Call `manage_memory` with operation `media.process` and no path to process governed media."
+    ),
     # Builds the file-mode vector index from the vault's Markdown.
     "index": _pages(),
     # The voice-profile store is per-machine state.
@@ -111,7 +113,9 @@ ACCESS: dict[str, Declaration] = {
     # `collections` is one parser whose subcommands differ in what they touch, so each declares its own access.
     "collections backup": _NONE,
     "collections adopt-local": _pages(
-        "Ask the service instead: `maintain_memory` with mode `collections-store-adopt-local`."),
+        "Call `inspect_memory` with operation `maintenance.adopt_local` to preview recovery. "
+        "Call `manage_memory` with the same operation to apply it.",
+    ),
     "collections create": _pages(),
     "collections rollback": _pages(),
     "collections migrate": _pages(),
@@ -156,10 +160,9 @@ def require(command: str, vault_root: Path) -> None:
     """Refuse a store-mode vault for a subcommand that declares page access, and name what to do instead.
 
     ``command`` is the declared name, and an undeclared one raises ``KeyError``. A subcommand that creates its
-    vault passes because a missing vault is not in store mode. A store-mode vault refuses on the mode itself, not
-    on ``availability.require_servable``: that one lifts when a build serves store mode, and these commands
-    still work outside the service. A false refusal costs the owner the rollback or the service tool that the
-    message names. A file-mode vault keeps ``require_servable``'s one refusal, the store held by another root.
+    vault passes because a missing vault is in file mode. The command refuses when the vault already
+    uses the store because it works outside the service. The message names the rollback or service
+    tool the owner can use. A file-mode vault refuses if another root holds the store.
     An unreadable manifest refuses in one line, because an unknown mode must never pass for file mode.
     """
     declared = ACCESS[command]
