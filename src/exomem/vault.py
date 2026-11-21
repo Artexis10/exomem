@@ -9535,7 +9535,7 @@ class WikilinkResolver:
                         continue  # deleted since the corpus was listed
                     self._add_entry(rel, *_keyed_title(display_title_from_bytes(page.body, rel)))
                 else:
-                    self._add_entry(rel, *_keyed_title(self._read_title(md)))
+                    self._add_entry(rel, *_keyed_title(self.read_title(md)))
 
     @classmethod
     def from_maps(
@@ -9689,10 +9689,11 @@ class WikilinkResolver:
         abs_path = vault_root / rel_path
         if not abs_path.is_file():
             return False, None
-        return True, self._read_title(abs_path)
+        return True, self.read_title(abs_path)
 
     @staticmethod
-    def _read_title(abs_path: Path) -> str | None:
+    def read_title(abs_path: Path) -> str | None:
+        """The display title that a build indexes for a file; None when it cannot be read as text."""
         try:
             raw = abs_path.read_bytes()
         except OSError:
