@@ -42,6 +42,10 @@ def supports(path: str | Path) -> bool:
     return kind == "image" or kind == "video"
 
 
+def store_path(vault: Path) -> Path:
+    return state_paths.vault_state_dir(vault) / STORE
+
+
 def _record_path(root: Path, relative: str) -> Path:
     key = hashlib.sha256(relative.encode("utf-8")).hexdigest()
     return root / key[:2] / f"{key}.json"
@@ -65,7 +69,7 @@ def _load(path: Path) -> dict | None:
 def read(vault: Path, relative: str, digest: str) -> bytes | None:
     """Look up exactly one private record for a caller that has proved this original."""
     try:
-        record = _load(_record_path(state_paths.vault_state_dir(vault) / STORE, relative))
+        record = _load(_record_path(store_path(vault), relative))
         if record is None or record.get("version") != _FORMAT:
             return None
         if record.get("path") != relative or record.get("sha256") != digest:
@@ -174,7 +178,7 @@ def recover(
     from .vault import MALFORMED_FRONTMATTER_ERRORS
     from .writer_lease import get_manager
 
-    root = state_paths.vault_state_dir(vault) / STORE
+    root = store_path(vault)
 
     def missing_record(relative: str) -> bool:
         return not os.path.lexists(_record_path(root, relative))
@@ -260,7 +264,7 @@ def confirm_install(vault: Path, job: MediaJob) -> bool:
         if read(vault, relative, job.preview_sha256) is None:
             return False
         try:
-            _sync_record(_record_path(state_paths.vault_state_dir(vault) / STORE, relative), existing=True)
+            _sync_record(_record_path(store_path(vault), relative), existing=True)
         except OSError as error:
             log.warning("preview acknowledgement unavailable (%s)", type(error).__name__)
             return False
@@ -426,7 +430,7 @@ def _retire(vault: Path, root: Path, paths: Sequence[Path]) -> None:
 
 def retire(vault: Path, relative: str) -> None:
     """Retire the old preview after removal, unless its filing still holds the recorded original."""
-    root = state_paths.vault_state_dir(vault) / STORE
+    root = store_path(vault)
     path = _record_path(root, relative)
     if path.exists():
         _retire(vault, root, (path,))
@@ -446,7 +450,7 @@ def _scan(root: Path) -> Generator[Path, None, None]:
 def reconcile(vault: Path) -> None:
     """Walk at most one bounded slice of preview state each pass."""
     global _sweep
-    root = state_paths.vault_state_dir(vault) / STORE
+    root = store_path(vault)
     with _SWEEP_LOCK:
         # One media runtime serves one vault. Switching vaults releases the old scan handle.
         if _sweep is None or _sweep[0] != root:
