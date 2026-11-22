@@ -74,6 +74,12 @@ Moving a stored Markdown original SHALL reserve room for its database and search
 - **THEN** another upload or hydration cannot spend that room
 - **AND** a space refusal during commit leaves the full original available to the background retry
 
+#### Scenario: An outside rename meets the floor
+
+- **WHEN** the importer pairs an outside rename of a stored Markdown original and the move would cross the floor
+- **THEN** it retains the source and destination pairing across restart and continues unrelated imports
+- **AND** a retry revalidates both paths before committing the move
+
 ### Requirement: The owner status shows what eviction keeps and why
 
 The owner status SHALL report the count and plaintext bytes of local and evicted bound physical originals as of its last complete inventory. Filings of one shared object SHALL contribute one physical original. The status SHALL report the result and time of the latest attempt separately. The last eviction pass can report `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. An unreadable value SHALL show as unknown.
