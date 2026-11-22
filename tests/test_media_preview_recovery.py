@@ -22,6 +22,7 @@ from test_image_view import _photo
 from test_vault_store_projector import NOTES
 
 from exomem import (
+    artifact_recovery,
     client_artifacts,
     file_watcher,
     media_engines,
@@ -40,8 +41,8 @@ from exomem import (
 )
 from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
-from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
-from exomem.vault_store import importer, read
+from exomem.vault import PlannedWrite, parse_frontmatter, render_frontmatter_document, serialize_frontmatter
+from exomem.vault_store import batch, importer, read
 from exomem.vault_store import media as store_media
 from exomem.writer_lease import get_manager
 
@@ -103,6 +104,64 @@ def test_store_worker_publishes_and_rebuilds_a_missing_preview(stored, store_thr
     run_worker()
     assert media_previews.read(stored, relative, digest) is not None
     assert read.owned_bytes(stored, sidecar) == captured_page
+
+
+@pytest.mark.parametrize("change", ["unchanged", "binding", "access"])
+def test_buffered_store_preview_rechecks_live_release_after_original_close(stored, store_thread, monkeypatch, change):
+    from test_access_read_paths import _write_cfg
+
+    relative = f"{NOTES}/buffered-preview-fixture.jpg"
+    original = _photo(900, 600)
+    (stored / relative).write_bytes(original)
+    importer.Importer(stored, run=store_thread.run).import_paths([relative])
+    ledger = media_jobs.MediaJobStore(stored)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.media_type == media_jobs.PREVIEW_MEDIA_TYPE
+    media_worker.MediaWorker(stored, execution_mode="process")._process(claim)
+    companion = claim.sidecar_path.relative_to(stored).as_posix()
+    before = read.owned_bytes(stored, companion)
+    assert before is not None and claim.preview_sha256 is not None
+    expected_jpeg = media_previews.read(stored, relative, claim.preview_sha256)
+    assert expected_jpeg is not None
+    hold_original = media_store.hold_original
+
+    @contextmanager
+    def change_on_close(*args, **kwargs):
+        with hold_original(*args, **kwargs) as held:
+            yield held
+        if change == "binding":
+            rebound = before.decode().replace(claim.preview_sha256, hashlib.sha256(b"new original").hexdigest())
+            store_thread.run(lambda writer: batch.commit_batch(
+                writer, [PlannedWrite(claim.sidecar_path, rebound)], vault_root=stored,
+            ))
+            assert read.owned_bytes(stored, companion) == before
+        elif change == "access":
+            _write_cfg(stored, 'excluded:\n  - "Notes"\n')
+
+    monkeypatch.setattr(media_store, "hold_original", change_on_close)
+    if change == "unchanged":
+        digest_fd = reserved_paths._digest_fd
+        original_inode = (stored / relative).stat().st_ino
+        original_reads = 0
+
+        def count_original_reads(fd, **kwargs):
+            nonlocal original_reads
+            if os.fstat(fd).st_ino == original_inode:
+                original_reads += 1
+            return digest_fd(fd, **kwargs)
+
+        monkeypatch.setattr(reserved_paths, "_digest_fd", count_original_reads)
+        with library_scope(), read.request_snapshot(stored):
+            descriptor, jpeg = media_previews.show(stored, relative)
+        assert descriptor["sha256"] == claim.preview_sha256 and jpeg == expected_jpeg
+        assert original_reads == 1
+        return
+
+    with library_scope(), read.request_snapshot(stored), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        media_previews.show(stored, relative)
+
+    if change == "binding":
+        assert read.owned_bytes(stored, companion) != before
 
 
 def test_reconciliation_recovers_intent_after_filing_survives_a_held_ledger(vault, monkeypatch):
@@ -343,7 +402,7 @@ def test_preview_publication_requires_the_resident_binding_after_source_close(va
 
 @pytest.mark.parametrize("replacement_during", [
     "lookup", "existing_record", "lookup_fault", "staging", "companion", "malformed_scalar",
-    "busy_pin_cleanup", "busy_pin_boundary",
+    "busy_pin_cleanup", "busy_pin_boundary", "pin_cleanup", "acquisition_malformed",
 ])
 def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkeypatch, replacement_during):
     from test_shared_originals import _pooled_capture
@@ -358,7 +417,7 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
     claim = ledger.claim_next()
     assert claim is not None and claim.media_type == media_jobs.PREVIEW_MEDIA_TYPE
     existing = None
-    if replacement_during in {"existing_record", "lookup_fault"}:
+    if replacement_during in {"existing_record", "lookup_fault", "acquisition_malformed"}:
         assert media_previews.generate(vault, claim, ledger, deadline=None)
         [record] = media_previews.store_path(vault).glob("*/*.json")
         existing = record.read_bytes(), record.stat().st_ino
@@ -373,7 +432,25 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
                 assert claim is not None and claim.id == prior.id
 
     replacement = _photo(634, 914)
-    if replacement_during in {"busy_pin_cleanup", "busy_pin_boundary"}:
+    if replacement_during == "pin_cleanup":
+        pin = media_store._pin
+
+        @contextmanager
+        def replace_during_pin_cleanup(*args, **kwargs):
+            with pin(*args, **kwargs) as pinned:
+                yield pinned
+                binary.write_bytes(replacement)
+
+        monkeypatch.setattr(media_store, "_pin", replace_during_pin_cleanup)
+    elif replacement_during == "acquisition_malformed":
+        open_original = media_store.open_original
+
+        def malform_before_open(*args, **kwargs):
+            claim.sidecar_path.write_text("---\ninvalid: !!bool unexpected\n---\n")
+            return open_original(*args, **kwargs)
+
+        monkeypatch.setattr(media_store, "open_original", malform_before_open)
+    elif replacement_during in {"busy_pin_cleanup", "busy_pin_boundary"}:
         while claim.attempts < media_jobs.MAX_PREVIEW_ATTEMPTS:
             assert ledger.recover_interrupted() == 1
             claim = ledger.claim_next()
@@ -438,7 +515,7 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
 
     if replacement_during == "companion":
         assert claim.sidecar_path.read_bytes() == b"\xff"
-    elif replacement_during == "malformed_scalar":
+    elif replacement_during in {"malformed_scalar", "acquisition_malformed"}:
         assert claim.sidecar_path.read_text() == "---\ninvalid: !!bool unexpected\n---\n"
     else:
         assert binary.read_bytes() == replacement

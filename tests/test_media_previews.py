@@ -7,6 +7,8 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
+from contextlib import closing, contextmanager
 
 import pytest
 from test_cloud_video_frames import codec_video as codec_video
@@ -21,6 +23,7 @@ from exomem import (
     media_jobs,
     media_previews,
     media_processing,
+    media_store,
     media_worker,
 )
 
@@ -212,7 +215,9 @@ def test_a_raw_preview_denial_keeps_the_original_evicted(
     assert originals.evicted(vault, captured.path)
 
 
-@pytest.mark.parametrize("drift", ["access", "binding", "binding_teardown", "after_pixel_check"])
+@pytest.mark.parametrize("drift", [
+    "access", "binding", "binding_teardown", "after_pixel_check", "malformed_before_hold", "malformed_during_release",
+])
 def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch, drift):
     from test_access_read_paths import _write_cfg
 
@@ -234,6 +239,12 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
         assert digest in content
         sidecar.write_text(content.replace(digest, "0" * 64), encoding="utf-8")
 
+    def malform_companion():
+        reconciled.sidecar_path.write_text("---\ninvalid: !!bool unexpected\n---\n")
+
+    if drift == "malformed_before_hold":
+        malform_companion()
+
     if drift == "after_pixel_check":
         from exomem import access
 
@@ -247,15 +258,15 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
 
         monkeypatch.setattr(access, "refuse_if_excluded", change_after_check)
     elif drift == "binding_teardown":
-        require_current = artifact_recovery.require_current
+        hold_original = media_store.hold_original
 
-        def rebind_after_release(*args, **kwargs):
-            result = require_current(*args, **kwargs)
-            if kwargs.get("selected") == path:
-                rebind_companion()
-            return result
+        @contextmanager
+        def rebind_on_close(*args, **kwargs):
+            with hold_original(*args, **kwargs) as held:
+                yield held
+            rebind_companion()
 
-        monkeypatch.setattr(artifact_recovery, "require_current", rebind_after_release)
+        monkeypatch.setattr(media_store, "hold_original", rebind_on_close)
     reading_preview = False
 
     def drift_during_lookup(*args):
@@ -267,6 +278,8 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
             _write_cfg(vault, 'excluded:\n  - "Evidence"\n')
         elif drift == "binding":
             rebind_companion()
+        elif drift == "malformed_during_release":
+            malform_companion()
         return jpeg
 
     monkeypatch.setattr(media_previews, "read", drift_during_lookup)
@@ -275,7 +288,7 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
     assert all(block.type != "image" for block in result.content)
 
 
-@pytest.mark.parametrize("replacement_during", ["lookup", "teardown"])
+@pytest.mark.parametrize("replacement_during", ["lookup", "teardown", "busy_pin_cleanup"])
 def test_pooled_preview_refuses_a_resident_replacement(vault, served, tmp_path, monkeypatch, replacement_during):
     from test_shared_originals import _pooled_capture
 
@@ -299,16 +312,40 @@ def test_pooled_preview_refuses_a_resident_replacement(vault, served, tmp_path, 
             return jpeg
 
         monkeypatch.setattr(media_previews, "read", replace_during_lookup)
+    elif replacement_during == "teardown":
+        hold_original = media_store.hold_original
+
+        @contextmanager
+        def replace_on_close(*args, **kwargs):
+            with hold_original(*args, **kwargs) as held:
+                yield held
+            (vault / path).write_bytes(replacement)
+
+        monkeypatch.setattr(media_store, "hold_original", replace_on_close)
     else:
         require_current = artifact_recovery.require_current
+        connect = media_jobs.MediaJobStore._connect
+        ledger = media_jobs.MediaJobStore(vault)
+        refusing = False
 
-        def replace_after_release(*args, **kwargs):
-            result = require_current(*args, **kwargs)
-            if kwargs.get("selected") == path:
-                (vault / path).write_bytes(replacement)
-            return result
+        def replace_before_release(*args, **kwargs):
+            nonlocal refusing
+            (vault / path).write_bytes(replacement)
+            refusing = True
+            return require_current(*args, **kwargs)
 
-        monkeypatch.setattr(artifact_recovery, "require_current", replace_after_release)
+        def busy_pin_cleanup(*args, **kwargs):
+            nonlocal refusing
+            if refusing:
+                refusing = False
+                with closing(sqlite3.connect(ledger.path, timeout=0)) as holder, holder:
+                    holder.execute("BEGIN IMMEDIATE")
+                    with closing(sqlite3.connect(ledger.path, timeout=0)) as contender, contender:
+                        contender.execute("BEGIN IMMEDIATE")
+            return connect(*args, **kwargs)
+
+        monkeypatch.setattr(artifact_recovery, "require_current", replace_before_release)
+        monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", busy_pin_cleanup)
 
     result = _call(mcp, {"kind": "preview", "path": path})
 

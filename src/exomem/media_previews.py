@@ -332,16 +332,20 @@ def generate(
             jpeg = _read_record(path, relative, expected.sha256)
         except OSError as error:
             raise InitialRecordUnavailable from error
-        current = originals.original_state(vault, relative)
+        current = media_store._read_state(vault, relative, strict_custody=True)
         if not current.present or current.binary_sha256 != expected.sha256:
             return False
     with ExitStack() as original:
-        opened = original.enter_context(media_store.open_original(vault, relative, job=job, deadline=deadline))
+        opened = original.enter_context(
+            media_store.open_original(vault, relative, job=job, deadline=deadline, strict_custody=True),
+        )
         if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
             return False
         held = reserved_paths.prove_held_binary(
             vault, relative, opened, deadline=deadline,
-            recorded_sha256=lambda version: media_store.cached_sha256(vault, job.binary_path, version),
+            recorded_sha256=lambda version: media_store.cached_sha256(
+                vault, job.binary_path, version, strict_custody=True,
+            ),
         )
         if (held.sha256, held.size) != (expected.sha256, expected.size):
             return False
@@ -376,6 +380,8 @@ def generate(
             def install() -> bool:
                 if _current_intent(vault, relative, job.preview_sha256) != (job.sidecar_path, expected):
                     return False
+                with reserved_paths.revalidate_held_binary(held):
+                    pass
                 if temporary is not None:
                     os.replace(temporary, path)
                 _sync_record(path, existing=existing)
@@ -415,10 +421,7 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
         preflight=possible, additional_release=allows_pixels,
     ) as (held, descriptor):
         jpeg = read(vault, selected, held.sha256)
-        artifact_recovery.require_current(
-            vault, held, who, byte_proofs=proofs, selected=selected, additional_release=allows_pixels,
-        )
-        return descriptor, jpeg
+    return descriptor, jpeg
 
 
 def _obsolete_paths(vault: Path, root: Path, paths: Sequence[Path]) -> list[Path]:

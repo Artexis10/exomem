@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,7 +117,10 @@ def native_max_bytes() -> int:
 
 
 def _companion(root: Path, path: str) -> tuple[str, dict]:
-    found = originals.bound_companion(root, path)
+    try:
+        found = originals.bound_companion(root, path)
+    except vault.MALFORMED_FRONTMATTER_ERRORS as error:
+        raise RecoveryUnavailable from error
     if found is None:
         raise reserved_paths.ReservedPathLeafError("MISSING")
     companion, frontmatter, _data = found
@@ -223,30 +226,35 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy,
 
 def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict,
              allow_capture: bool, selected: str | None = None,
-             additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None) -> tuple:
+             additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
+             revalidate_closed: bool = False, expected_descriptor: dict | None = None) -> tuple:
     def fresh():
-        for proof in byte_proofs.values():
-            reserved_paths.require_generic_copy_source_version(proof)
-        check_access = additional_release is not None
-        before = _admission_revision(root, who, copied, check_access=check_access)
-        with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
-            allowed = egress.release_allows_download(
-                root, copied.relative_path, principal=who, artifact_copy=copied
-            )
-            if allowed and additional_release is not None:
-                allowed = additional_release(copied)
-            if allowed and selected is not None:
-                path, metadata = ((selected, _companion(root, selected)[1]) if selected == copied.relative_path
-                                  else _resolve(root, selected))
-                if path != copied.relative_path:
-                    raise RecoveryUnavailable
-                _descriptor(path, metadata, copied)
-        after = _admission_revision(root, who, copied, check_access=check_access)
-        for proof in byte_proofs.values():
-            reserved_paths.require_generic_copy_source_version(proof)
-        if not allowed or before != after:
-            raise RecoveryUnavailable
-        return after
+        source = reserved_paths.revalidate_held_binary(copied) if revalidate_closed else nullcontext(copied)
+        with source as current:
+            for proof in byte_proofs.values():
+                reserved_paths.require_generic_copy_source_version(proof)
+            check_access = additional_release is not None
+            before = _admission_revision(root, who, current, check_access=check_access)
+            with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
+                allowed = egress.release_allows_download(
+                    root, current.relative_path, principal=who, artifact_copy=current
+                )
+                if allowed and additional_release is not None:
+                    allowed = additional_release(current)
+                if allowed and selected is not None:
+                    path, metadata = ((selected, _companion(root, selected)[1]) if selected == current.relative_path
+                                      else _resolve(root, selected))
+                    if path != current.relative_path:
+                        raise RecoveryUnavailable
+                    descriptor = _descriptor(path, metadata, current)
+                    if expected_descriptor is not None and descriptor != expected_descriptor:
+                        raise RecoveryUnavailable
+            after = _admission_revision(root, who, current, check_access=check_access)
+            for proof in byte_proofs.values():
+                reserved_paths.require_generic_copy_source_version(proof)
+            if not allowed or before != after:
+                raise RecoveryUnavailable
+            return after
 
     # Nested resolution scopes share a memo. An empty context forces this final pass to read live host authority.
     try:
@@ -319,7 +327,7 @@ def stage(
                     stack.enter_context(media_store.local_originals(root, (path,), read=True))
 
                 def recorded(version):
-                    return media_store.cached_sha256(root, path, version)
+                    return media_store.cached_sha256(root, path, version, strict_custody=strict_exit)
 
                 try:
                     # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
@@ -359,12 +367,13 @@ def stage(
                     raise RecoveryUnavailable
                 yield held, descriptor
                 if strict_exit:
-                    stack.close()  # Translate a final custody refusal before the caller returns the response.
-                    try:
-                        if binding() != (path, metadata):
-                            raise RecoveryUnavailable
-                    except vault.MALFORMED_FRONTMATTER_ERRORS as error:
-                        raise RecoveryUnavailable from error
+                    # Close the pin before checking the live file and authority in a fresh release scope.
+                    stack.close()
+                    _release(
+                        root, held, who, byte_proofs={} if byte_proofs is None else byte_proofs,
+                        selected=selected, allow_capture=True, additional_release=additional_release,
+                        revalidate_closed=True, expected_descriptor=descriptor,
+                    )
             except (
                 reserved_paths.ReservedPathLeafError,
                 media_store.MediaStoreError,

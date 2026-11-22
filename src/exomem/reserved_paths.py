@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from dataclasses import replace as dataclass_replace
@@ -249,6 +249,7 @@ class GenericBinarySource:
     version: held_fs.FileVersion
     _check: Callable[[], None]
     _probe: Callable[[], held_fs.FileVersion]
+    _reopen: Callable[[], AbstractContextManager[GenericBinarySource]] | None = None
 
     def require_current(self) -> None:
         self._check()
@@ -1804,7 +1805,10 @@ def open_generic_binary(vault_root: Path, value: object, *, physical: bool = Fal
 
             require_current()
             with os.fdopen(os.dup(file.descriptor), "rb") as stream:
-                yield GenericBinarySource(stream, version, require_current, file.version)
+                yield GenericBinarySource(
+                    stream, version, require_current, file.version,
+                    functools.partial(open_generic_binary, vault_root, value, physical=physical),
+                )
                 require_current()
     except held_fs.HeldFsError as error:
         raise ReservedPathLeafError(error.code) from error
@@ -1977,6 +1981,21 @@ def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.File
             if current != copied.source_version:
                 raise ReservedPathLeafError("IO_REFUSED")
             return current
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+@contextmanager
+def revalidate_held_binary(copied: GenericFileCopy) -> Iterator[GenericFileCopy]:
+    """Reacquire the source after teardown and reuse its digest only at the same exact version."""
+    _copy_deadline(copied.deadline)
+    if copied.held is None or copied.held._reopen is None:
+        raise ReservedPathLeafError("IO_REFUSED")
+    try:
+        with copied.held._reopen() as source:
+            if source.version != copied.source_version:
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            yield dataclass_replace(copied, held=source)
     except (OSError, held_fs.HeldFsError) as error:
         raise ReservedPathLeafError("IO_REFUSED") from error
 
