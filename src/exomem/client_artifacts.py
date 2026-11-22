@@ -1774,7 +1774,7 @@ def _commit_staged_sources(
     outcomes: list[dict | None],
     source_fields: Mapping[str, object],
     import_key: str | None = None,
-    correction_original: Path | None = None,
+    correction_speech_original: Path | None = None,
 ) -> dict:
     """Capture each staged file as a Source under the mutation guard, releasing the staged bytes.
 
@@ -1870,10 +1870,13 @@ def _commit_staged_sources(
                         )
                     if duplicate is None:
                         diarize = artifact.diarize
-                        if correction_original is not None and media_jobs.job_store_path(vault_root).is_file():
+                        if (
+                            correction_speech_original is not None
+                            and media_jobs.job_store_path(vault_root).is_file()
+                        ):
                             # A request can update the queue while we copy the original.
                             store = media_jobs.MediaJobStore(vault_root, create=False)
-                            pending = store.get_by_binary(correction_original, readonly=True)
+                            pending = store.get_by_binary(correction_speech_original, readonly=True)
                             if pending is not None and pending.do_ocr and pending.diarize is not None:
                                 diarize = pending.diarize
                         result = add_module.add(
@@ -2005,7 +2008,7 @@ def capture_source_correction(
     applies: the historical page hash, one successor per predecessor, canonical identity, authority and egress.
     """
     from . import add as add_module
-    from . import media_store, reserved_paths, source_capture, source_corrections
+    from . import media_engines, media_store, media_types, reserved_paths, source_capture, source_corrections
     from .governance import raw_protection as raw_guard
 
     plan = source_corrections.prepare_correction(vault_root, correction)
@@ -2059,9 +2062,13 @@ def capture_source_correction(
         str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
         diarize=diarize_pin(plan.old_source),
     )
+    original_path = vault_root.resolve() / stored
+    speech_original = (
+        original_path if media_types.media_type_for(original_path) in media_engines.SPEECH_KINDS else None
+    )
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
-        correction_original=vault_root.resolve() / stored,
+        correction_speech_original=speech_original,
         source_fields={
             **source_fields,
             # The plan read above, so `add` commits it without scanning every canonical Source again.

@@ -186,6 +186,32 @@ def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, s
     assert preserve.diarize_pin((vault / corrected["page"]).read_text()) is (override is True)
 
 
+def test_non_speech_source_correction_does_not_depend_on_the_media_ledger(upload_env, source_schema):
+    from exomem import commands, media_jobs
+    from exomem.vault import content_hash
+
+    vault, who, *_ = upload_env
+    data = b"original binary bytes"
+    ticket = _prepare(upload_env, data, lane="source")
+    uploaded = _post(upload_env, ticket, data, filename="original.bin", lane="source")
+    assert uploaded.status_code == 201, uploaded.text
+    with principal.request_scope(who):
+        [stored] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Original", source_kind="session",
+            files=[uploaded.json()["file"]],
+        )["files"]
+        media_jobs.MediaJobStore(vault)
+        media_jobs.job_store_path(vault).write_bytes(b"unreadable ledger")
+        old_hash = content_hash((vault / stored["page"]).read_text())
+        [corrected] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Corrected original",
+            correction={"supersedes": stored["ref"], "expected_hash": old_hash, "reason": "Correct the title."},
+        )["files"]
+
+    assert corrected["outcome"] == "stored"
+    assert (vault / corrected["stored_path"]).read_bytes() == data
+
+
 def test_revoked_expired_and_foreign_tickets_share_one_refusal(upload_env, monkeypatch):
     from exomem import upload_handoff
     revoked = _prepare(upload_env)
