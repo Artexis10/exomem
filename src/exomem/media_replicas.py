@@ -154,11 +154,12 @@ _EXPORT_EVIDENCE_UNAVAILABLE = "key export evidence unavailable"
 
 def _initialize_export_coverage(conn: sqlite3.Connection, existing: set[str]) -> None:
     # The receipt table and its triggers can be recreated. Keep their lost history separately in the ledger.
-    projected = bool(existing.intersection(_STATUS_TABLES)) or conn.execute(
-        "SELECT 1 FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
+    recorded = conn.execute("SELECT 1 FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
+    projected = bool(existing.intersection((*_STATUS_TABLES, *_EXPORT_STATUS_TRIGGERS)))
     missing_table = "media_key_exports" not in existing
     lost = (missing_table and "media_replicas" in existing
-            or projected and (missing_table or not _EXPORT_STATUS_TRIGGERS.issubset(existing)))
+            or (projected or recorded)
+            and (not recorded or missing_table or not _EXPORT_STATUS_TRIGGERS.issubset(existing)))
     conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value "
                  "WHERE excluded.value = 'incomplete' AND meta.value <> excluded.value",
                  (_EXPORT_COVERAGE_KEY, "incomplete" if lost else "complete"))
@@ -168,7 +169,7 @@ def _export_coverage_complete(conn: sqlite3.Connection, schema: set[str]) -> boo
     if "media_key_exports" not in schema or not _EXPORT_STATUS_TRIGGERS.issubset(schema):
         return False
     coverage = conn.execute("SELECT value FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone()
-    return coverage is None or coverage[0] == "complete"
+    return coverage is not None and coverage[0] == "complete"
 
 
 def _proof_level(row: str = "") -> str:
@@ -1600,20 +1601,22 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         code = None
         try:
             copy = media_store.recopy if row["kind"] == RECOPY else media_store.replicate
-            try:
-                with mutation_lock.absorbing_busy():
-                    copy(vault, vault / row["binary_rel"], row["store"])
-                    _reconcile_copy(ledger, row)
-            except sqlite3.Error as error:
-                raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE,
-                                                  "the copy's replica record could not be settled") from error
+            with mutation_lock.absorbing_busy():
+                copy(vault, vault / row["binary_rel"], row["store"])
+                _reconcile_copy(ledger, row)
+        except sqlite3.Error as error:
+            # SQLite attaches extended result codes. Their low byte identifies the primary condition.
+            result_code = getattr(error, "sqlite_errorcode", None)
+            if result_code is None or result_code & 0xFF not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise
+            code = media_store.STORE_BUSY_CODE
         except media_store.MediaStoreError as error:
             code = error.code
         except OpError as error:
             if error.code != "MUTATION_BUSY" or error.details.get("committed") is not False:
                 raise
             code = media_store.STORE_BUSY_CODE
-        except (OSError, ValueError, sqlite3.Error) as error:
+        except (OSError, ValueError) as error:
             code = type(error).__name__
         if code is None:
             settled += 1
@@ -1787,12 +1790,12 @@ class _ReadCap:
         fails after most of the bytes must not be read faster than the cap for it.
         An invalid locator or a confirmed missing version costs no bytes.
         """
-        from .media_store import ReplicaAbsent
+        from .media_store import ReplicaAbsent, SampleReadPending
 
         started, charged = time.monotonic(), True
         try:
             yield
-        except (ValueError, ReplicaAbsent):
+        except (ValueError, ReplicaAbsent, SampleReadPending):
             charged = False
             raise
         finally:
@@ -2253,6 +2256,10 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 with cap.reading(replica.ciphertext_size):
                     damage = media_store.sample_replica(
                         vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256), deadline=limit)
+            except media_store.SampleReadPending:
+                with closing(ledger._connect()) as conn, conn:
+                    _charge(conn, name, month, -replica.ciphertext_size)
+                return sampled - 1
             except media_store.KeyRefused:
                 # the bytes match their record: no damage
                 _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)

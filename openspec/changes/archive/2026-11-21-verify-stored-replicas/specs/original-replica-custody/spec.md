@@ -39,6 +39,13 @@ The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL 
 - **THEN** the replica's last check reads `decrypted` with its time
 - **AND** the replica does not count as never checked, even if no `head` check has reached it
 
+#### Scenario: A sampled read does not return before its deadline
+
+- **WHEN** a pending store read outlasts the sample window
+- **THEN** the worker ends its wait and records an incomplete read without quarantining the replica
+- **AND** the pending operation holds one sample slot until its handles close
+- **AND** a later sample deferred by that slot spends no budget
+
 #### Scenario: The budget is spent
 
 - **WHEN** a store's sampled checks have used its monthly budget

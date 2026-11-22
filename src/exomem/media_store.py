@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path, PurePosixPath
+from queue import Empty, Queue
 from typing import TYPE_CHECKING, BinaryIO, Protocol
 
 from . import (
@@ -1598,6 +1599,48 @@ class _NullSink:
         return None
 
 
+class SampleReadPending(MediaStoreError):
+    """A preceding sample still owns the transport slot."""
+
+    def __init__(self) -> None:
+        super().__init__(STORE_BUSY_CODE, "a preceding replica sample is still releasing its read")
+
+
+# A stalled syscall can outlive the sample deadline. One disposable reader owns
+# this slot until its handles close, so later rounds cannot accumulate readers.
+_sample_reader = threading.BoundedSemaphore(1)
+
+
+def _bounded_sample(read: Callable[[], str | None], deadline: float) -> str | None:
+    _require_transfer_time(deadline)
+    if not _sample_reader.acquire(blocking=False):
+        raise SampleReadPending()
+    completed: Queue[tuple[str | None, BaseException | None]] = Queue(maxsize=1)
+
+    def read_and_release() -> None:
+        try:
+            outcome = (read(), None)
+        except BaseException as error:  # noqa: BLE001 - report on the calling thread
+            outcome = (None, error)
+        finally:
+            _sample_reader.release()
+        completed.put_nowait(outcome)
+
+    try:
+        threading.Thread(target=read_and_release, name="media-replica-sample", daemon=True).start()
+    except BaseException:
+        _sample_reader.release()
+        raise
+    try:
+        finding, failure = completed.get(timeout=max(0.0, deadline - time.monotonic()))
+    except Empty as error:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the sampled read exceeded its deadline") from error
+    _require_transfer_time(deadline)
+    if failure is not None:
+        raise failure
+    return finding
+
+
 def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead, *, deadline: float | None = None) -> str | None:
     """Download and decrypt `replica` and hash its plaintext against `expected`: None when it matches, else why not.
 
@@ -1608,11 +1651,14 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead, *, 
     """
     from . import media_replicas
 
-    try:
-        head = write_stored_original(vault, replica, _NullSink(), store=replica.store, prove=True, deadline=deadline)
-    except ReplicaMismatch as mismatch:
-        return mismatch.failure
-    return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
+    def read() -> str | None:
+        try:
+            head = write_stored_original(vault, replica, _NullSink(), store=replica.store, prove=True, deadline=deadline)
+        except ReplicaMismatch as mismatch:
+            return mismatch.failure
+        return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
+
+    return read() if deadline is None else _bounded_sample(read, deadline)
 
 
 def replica_damage(error: MediaStoreError) -> str | None:

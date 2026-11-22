@@ -410,6 +410,43 @@ def test_the_retry_after_a_failed_trash_move_reads_the_kept_copy_and_downloads_n
     assert not original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest()).exists()
 
 
+def test_a_busy_restore_reuses_the_verified_download(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem.cli_ops import OpError
+
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    original.write_bytes(DAMAGED)
+    downloads = _count_downloads(monkeypatch)
+    guard = media_store._guard
+
+    def temporarily_busy(root, operation):
+        if operation == "original_fixity_restore":
+            raise OpError("MUTATION_BUSY", "the vault boundary is busy", details={"committed": False})
+        return guard(root, operation)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(media_store, "_guard", temporarily_busy)
+        original_fixity.run_pass(vault, budget=0)
+
+    assert original.read_bytes() == DAMAGED
+    assert len(downloads) == 1
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    assert kept.read_bytes() == TRANSCRIPT
+    [failed] = _findings(vault)
+    assert failed.meta["route"][-1]["code"] == "MUTATION_BUSY"
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert len(downloads) == 1
+    assert not kept.exists()
+    [restored] = _findings(vault)
+    assert [step["source"] for step in restored.meta["route"]] == ["kept_copy"]
+
+
 def test_a_kept_copy_that_no_longer_hashes_to_the_binding_is_never_installed(
         vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
     """The kept copy sits in private state for days: bytes that changed there must not replace the owner's original."""

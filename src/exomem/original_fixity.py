@@ -1010,10 +1010,15 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         keep = False
         try:
             identity = install(vault, row, hashed, staged, cause, kept=kept, trashed=trashed)
-        except (_Changed, OpError):
+        except _Changed:
             result.rescheduled += 1  # The next pass hashes the file again and decides afresh.
             return
-        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+        except (OSError, ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError, OpError) as error:
+            if isinstance(error, OpError) and (
+                not downloaded or error.code != "MUTATION_BUSY" or error.details.get("committed") is not False
+            ):
+                result.rescheduled += 1
+                return
             keep = downloaded
             # The copy verified but could not be put in place. The row keeps its last identity and
             # verification time, so the next pass finds it changed or due, and tries again.

@@ -1561,7 +1561,8 @@ def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
         with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute("CREATE TRIGGER test_projection_down BEFORE INSERT ON media_replicas "
                          "BEGIN SELECT RAISE(ABORT, 'simulated projection failure'); END")
-        assert media_replicas.drain(vault) == 0
+        with pytest.raises(sqlite3.IntegrityError, match="simulated projection failure"):
+            media_replicas.drain(vault)
         with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute("DROP TRIGGER test_projection_down")
 
@@ -1589,6 +1590,32 @@ def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
         replacement.object, replacement.version, media_replicas.UPLOAD_VERIFIED, None,
     )
     assert not _queued(vault)
+
+
+def test_a_busy_copy_settlement_keeps_its_pending_request_and_attempt_budget(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, damaged = _replicated(vault)
+    media_replicas.quarantine(vault, relative, damaged, level=media_replicas.CONTENT, failure="digest_mismatch")
+    path = media_jobs.MediaJobStore(vault).path
+
+    def contend_at_settlement(*_args):
+        with closing(sqlite3.connect(path, timeout=0)) as owner, closing(sqlite3.connect(path, timeout=0)) as contender:
+            owner.execute("BEGIN IMMEDIATE")
+            contender.execute("BEGIN IMMEDIATE")
+
+    with closing(sqlite3.connect(path)) as conn:
+        before = conn.execute("SELECT state, attempts, retry_at, token FROM media_replica_queue").fetchall()
+    with monkeypatch.context() as held:
+        held.setattr(media_replicas, "_reconcile_copy", contend_at_settlement)
+        assert media_replicas.drain(vault) == 0
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT state, attempts, retry_at, token FROM media_replica_queue").fetchall() == before
+
+    replacement = _entry(vault, relative, MIRROR)
+    assert replacement != damaged
+    assert media_replicas.drain(vault) == 1
+    assert _entry(vault, relative, MIRROR) == replacement
+    assert _queued(vault) == []
 
 
 def test_sample_release_leaves_a_sealed_repair_pending_for_guarded_cleanup(
@@ -1650,7 +1677,8 @@ def test_a_first_copy_keeps_its_job_when_the_published_replica_cannot_record_its
     monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
     with monkeypatch.context() as failed:
         failed.setattr(media_store, "_note_replica", fail_the_row_after_publication)
-        assert media_replicas.drain(vault) == 0
+        with pytest.raises(sqlite3.IntegrityError, match="simulated projection failure"):
+            media_replicas.drain(vault)
     published = _entry(vault, relative, MIRROR)
     assert published.ciphertext_sha256 == pointer.ciphertext_sha256
     [mirror] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
@@ -1787,6 +1815,31 @@ def test_export_coverage_loss_survives_ledger_recovery_and_preserves_positive_re
         current = media_replicas.status(vault)
         assert current["totals"]["recoverable"] == 2
         assert current["state"] == "partial"  # The confirmed key does not restore the table's history.
+
+
+def test_export_coverage_marker_loss_stays_unknown_across_current_writer_initialization(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, _replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault)
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DROP TABLE media_key_exports")
+    media_jobs.MediaJobStore(vault)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DELETE FROM meta WHERE key = ?", (media_replicas._EXPORT_COVERAGE_KEY,))
+
+    for reopen in (False, True):
+        if reopen:
+            # Simulate the first open in a new runtime so schema initialization runs again.
+            monkeypatch.delitem(media_jobs._CURRENT_SCHEMA, str(path), raising=False)
+            media_jobs.MediaJobStore(vault)
+        exact = media_replicas.original_view(vault, relative)
+        assert [item["recoverable"] for item in exact["replicas"]] == [None, None]
+        aggregate = media_replicas.status(vault)
+        assert aggregate["totals"]["not_recoverable"] == 0
+        assert aggregate["totals"]["recoverability_unknown"] == 2
+        [listed] = media_replicas.page(vault)["originals"]
+        assert [item["recoverable"] for item in listed["replicas"]] == [None, None]
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -4245,6 +4298,62 @@ def test_a_sample_stops_mid_download_without_quarantining_the_replica(
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         assert ledger.execute("SELECT bytes FROM media_replica_samples WHERE store = ?", (MIRROR,)).fetchone() == (
             replica.ciphertext_size,)
+
+
+def test_a_blocked_sample_returns_by_its_deadline_and_allocates_one_read(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, replica, _path = _large_replicated(vault, mirrored)
+    expected = originals.original_state(vault, relative)
+    plaintext = media_store.ObjectHead(expected.binary_size, expected.binary_sha256)
+    entered, release, left, returned = (threading.Event() for _ in range(4))
+    reads, failures = [], []
+    opened = media_store.FilesystemStore.open
+
+    @contextmanager
+    def blocked_open(backend, name, version):
+        with opened(backend, name, version) as stream:
+            def read(size):
+                reads.append(name)
+                entered.set()
+                release.wait(15)
+                return stream.read(size)
+
+            try:
+                yield types.SimpleNamespace(read=read)
+            finally:
+                left.set()
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", blocked_open)
+    limit = time.monotonic() + 1.5
+
+    def sample():
+        try:
+            media_store.sample_replica(vault, replica, plaintext, deadline=limit)
+        except media_store.MediaStoreError as error:
+            failures.append(error.code)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=sample, daemon=True)
+    caller.start()
+    try:
+        assert entered.wait(5)
+        assert returned.wait(2.5), "the worker still waits for the pending store read"
+        assert failures == ["MEDIA_STORE_UNAVAILABLE"]
+        with pytest.raises(media_store.SampleReadPending):
+            media_store.sample_replica(vault, replica, plaintext, deadline=time.monotonic() + 1.5)
+        _unproven(vault)
+        with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+            charges = ledger.execute("SELECT SUM(bytes) FROM media_replica_samples WHERE bytes > 0").fetchone()
+            assert media_replicas.sample(vault, deadline=time.monotonic() + 1.5) == 0
+            assert ledger.execute("SELECT SUM(bytes) FROM media_replica_samples WHERE bytes > 0").fetchone() == charges
+        assert reads == [replica.object]
+        _due_again(vault)
+        assert media_replicas.check(vault) == 2
+    finally:
+        release.set()
+        caller.join(5)
+        assert left.wait(5)
 
 
 def test_a_sample_under_a_wrong_key_still_finds_a_large_replica_that_is_damaged(
