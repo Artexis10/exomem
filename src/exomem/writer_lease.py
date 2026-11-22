@@ -1438,6 +1438,16 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
                     "Its graph relations will update after the page can be read and repaired."
                 ),
             }
+        try:
+            full_rebuild = deferred_index.graph_full_rebuild_details(
+                vault_root, deadline=time.monotonic() + 0.05,
+            )
+        except deferred_index.GraphFullRebuildStateUnavailable:
+            return graph_sync.committed_graph_unavailable(committed)
+        if full_rebuild is not None:
+            if full_rebuild.fatal_family is not None:
+                return graph_sync.committed_graph_unavailable(committed)
+            return graph_sync.committed_graph_queued(committed)
         if acknowledged is not None and acknowledged.covers(committed):
             if state == "unavailable":
                 return graph_sync.committed_graph_unavailable(committed)

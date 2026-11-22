@@ -13642,10 +13642,6 @@ def upsert_after_write(
                 reason="startup_source_unproved" if startup_pending else "outside_observation",
                 graph_checkpoint=required,
             ):
-                if required is not None:
-                    graph_sync.register_deferred(
-                        vault_root, required, state_root=mutation_coordinator.state_root,
-                    )
                 if covered_gap and not _caller_can_carry_pending(vault_root, mutation_coordinator):
                     return GraphDispatchResult("deferred", "graph_repair_covered_gap", required)
                 return _startup_source_repair_result(required, queued=True)
@@ -14029,7 +14025,7 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> Graph
                 scope, reason="startup_source_unproved", graph_checkpoint=required,
             ):
                 return GraphDispatchResult("failed", "graph_startup_source_unproved", required)
-            if required is not None:
+            if required is not None and not graph_scheduling_enabled():
                 graph_sync.register_deferred(
                     vault_root, required, state_root=mutation_coordinator.state_root,
                 )
