@@ -621,9 +621,7 @@ def _selected_methods(
                     "name": str(manifest.title or path), "path": path, "kind": COLLECTION_KIND,
                     "description_of": _body_text, "max_chars": COLLECTION_DESCRIPTION_CHARS,
                 })
-    except TaskDeadline:
-        raise
-    except Exception:  # noqa: BLE001 - a carrier list that cannot be read is a failed judgment, never a failed turn
+    except Exception:  # noqa: BLE001 - a carrier list that cannot be read in time is a failed judgment, never a failed turn
         log.warning("method-fit carriers unreadable", exc_info=True)
         return [], {"state": "unavailable"}
     chosen, state = context_fit.select_methods(
