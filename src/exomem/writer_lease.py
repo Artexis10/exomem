@@ -1427,6 +1427,27 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
         state, acknowledged = graph_sync.acknowledgement_state(vault_root, require_available=True)
         if deferred_index.list_graph_paths(vault_root, limit=1):
             return graph_sync.committed_graph_queued(committed)
+        if deferred_index.held_graph_proofs(
+            vault_root, digest=committed.checkpoint_sha256, paths=(rel for rel, _ in committed.paths),
+        ):
+            return {
+                **graph_sync.committed_graph_unavailable(committed),
+                "graph_sync_code": "GRAPH_SYNC_PAGE_HELD",
+                "graph_sync_remediation": (
+                    "The write is durable. A page in this write is held for graph repair. "
+                    "Its graph relations will update after the page can be read and repaired."
+                ),
+            }
+        try:
+            full_rebuild = deferred_index.graph_full_rebuild_details(
+                vault_root, deadline=time.monotonic() + 0.05,
+            )
+        except deferred_index.GraphFullRebuildStateUnavailable:
+            return graph_sync.committed_graph_unavailable(committed)
+        if full_rebuild is not None:
+            if full_rebuild.fatal_family is not None:
+                return graph_sync.committed_graph_unavailable(committed)
+            return graph_sync.committed_graph_queued(committed)
         if acknowledged is not None and acknowledged.covers(committed):
             if state == "unavailable":
                 return graph_sync.committed_graph_unavailable(committed)

@@ -64,7 +64,7 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, overload
@@ -246,9 +246,9 @@ _replacement_pending: dict[
 # readers can then fail closed in O(1) until that exact queued generation has
 # been published through the event-maintained corpus fan-out.
 #
-# `_external_pending` is the aggregate: root -> the latest epoch still
-# unrepaired, which is what every read-side fence and the watcher's
-# compare-and-ack consult. The two maps below say *what* is unrepaired, because
+# `_external_pending` keeps the highest epoch of the current pending interval.
+# Retiring part of the interval cannot introduce unseen work. The two maps
+# below say *what* is unrepaired, because
 # a mark's scope decides whether it may fence a governed write
 # (`seamless-managed-worker-handoff` D3). A mark carrying paths fences only
 # those paths; an unscoped mark -- an access-policy edit, a registry loss, an
@@ -974,15 +974,8 @@ def _external_path_key(path: Path | str) -> str:
         return str(path)
 
 
-def _refresh_external_aggregate_locked(root: str) -> None:
-    """Recompute one root's latest unrepaired epoch from its surviving marks."""
-    epochs = [*_external_pending_paths.get(root, {}).values()]
-    unscoped = _external_pending_unscoped.get(root)
-    if unscoped is not None:
-        epochs.append(unscoped)
-    if epochs:
-        _external_pending[root] = max(epochs)
-    else:
+def _finish_external_pending_if_empty_locked(root: str) -> None:
+    if root not in _external_pending_paths and root not in _external_pending_unscoped:
         _external_pending.pop(root, None)
 
 
@@ -1001,14 +994,14 @@ def mark_external_pending(vault_root: Path, *, paths: Iterable[Path | str] = ())
         _external_pending_clock += 1
         epoch = _external_pending_clock
         root = _canon(vault_root)
-        keys = [_external_path_key(path) for path in paths]
+        keys = [_external_path_key(Path(root) / path) for path in paths]
         if keys:
             marked = _external_pending_paths.setdefault(root, {})
             for key in keys:
                 marked[key] = epoch
         else:
             _external_pending_unscoped[root] = epoch
-        _refresh_external_aggregate_locked(root)
+        _external_pending[root] = epoch
         for scope in SCOPES:
             _recall_publications.pop((root, scope), None)
         return epoch
@@ -1027,7 +1020,7 @@ def clear_external_pending(vault_root: Path, *, through: int) -> None:
         unscoped = _external_pending_unscoped.get(root)
         if unscoped is not None and unscoped <= through:
             _external_pending_unscoped.pop(root, None)
-        _refresh_external_aggregate_locked(root)
+        _finish_external_pending_if_empty_locked(root)
 
 
 def external_pending(vault_root: Path) -> bool:
@@ -1040,6 +1033,49 @@ def external_pending_paths(vault_root: Path) -> frozenset[str]:
     """The path-scoped external marks still unrepaired for one vault."""
     with _lock:
         return frozenset(_external_pending_paths.get(_canon(vault_root), {}))
+
+
+def bounded_external_pending_paths(vault_root: Path, *, limit: int) -> tuple[str, ...] | None:
+    """Copy bounded scoped marks. None means the scoped set exceeds the limit."""
+    root = _canon(vault_root)
+    with _lock:
+        if root in _external_pending_unscoped:
+            return ()  # No scoped proof is available while the unscoped mark stands.
+        marked = _external_pending_paths.get(root, {})
+        return None if len(marked) > limit else tuple(marked)
+
+
+def external_pending_path_epochs(
+    vault_root: Path, paths: Iterable[Path | str]
+) -> dict[str, int]:
+    """Snapshot exact observations, with lookups bounded by the repair batch."""
+    root = _canon(vault_root)
+    own = {_external_path_key(Path(root) / path) for path in paths}
+    with _lock:
+        marked = _external_pending_paths.get(root, {})
+        return {path: marked[path] for path in own if path in marked}
+
+
+def retire_external_pending_paths(
+    vault_root: Path, observed: Mapping[str, int]
+) -> None:
+    """Retire committed path repairs without clearing newer or unscoped observations.
+
+    The repair owner calls this after commit while retaining canonical authority.
+    Exact epochs prevent a later event on the same path from losing its fence.
+    """
+    if not observed:
+        return
+    with _lock:
+        root = _canon(vault_root)
+        marked = _external_pending_paths.get(root)
+        if marked is not None:
+            for path, epoch in observed.items():
+                if marked.get(path) == epoch:
+                    marked.pop(path)
+            if not marked:
+                _external_pending_paths.pop(root, None)
+        _finish_external_pending_if_empty_locked(root)
 
 
 def external_pending_unscoped(vault_root: Path) -> bool:
@@ -1062,12 +1098,13 @@ def external_pending_only_for(vault_root: Path, paths: Iterable[Path | str]) -> 
     too, so only the batch that holds all of them may skip its own fencing.
     """
     # Resolved before the lock: one filesystem lookup per path must not hold it.
-    own = {key for path in paths for key in (str(path), _external_path_key(path))}
+    own = {_external_path_key(vault_root / path) for path in paths}
     with _lock:
         root = _canon(vault_root)
         if root in _external_pending_unscoped:
             return False
-        return set(_external_pending_paths.get(root, {})) <= own
+        marked = _external_pending_paths.get(root)
+        return marked is None or (len(marked) <= len(own) and all(key in own for key in marked))
 
 
 def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
@@ -1084,13 +1121,26 @@ def external_pending_for(vault_root: Path, paths: Iterable[Path | str]) -> bool:
         if not marked:
             return False
         for path in paths:
-            if str(path) in marked or _external_path_key(path) in marked:
+            if _external_path_key(vault_root / path) in marked:
                 return True
         return False
 
 
+@contextmanager
+def external_observation_guard():
+    """Seal observation admission across the graph's final commit."""
+    with _lock:
+        yield
+
+
+def external_observation_stamp() -> int:
+    """A mark followed by retirement still changes the observation stamp."""
+    with _lock:
+        return _external_pending_clock
+
+
 def external_pending_epoch(vault_root: Path) -> int | None:
-    """Return the latest observed unpublished generation for one vault."""
+    """Return the newest observation in the current pending interval."""
     with _lock:
         return _external_pending.get(_canon(vault_root))
 
@@ -1889,6 +1939,8 @@ def on_files_changed(
     vault_root: Path,
     changed: Iterable[Path] = (),
     deleted: Iterable[Path] = (),
+    *,
+    observed: Iterable[Path] = (),
 ) -> None:
     """Patch the live scope maps for a batch of filesystem changes.
 
@@ -1909,6 +1961,9 @@ def on_files_changed(
         vr = vault_root.resolve()
     except OSError:
         vr = vault_root
+    observed_paths = {
+        str(_canonicalize_event_path(vault_root, vr, Path(path))) for path in observed
+    }
     # Phase 1 — classify + stat OUTSIDE the lock. `scopes_for` is stat-free;
     # only changed paths stat. A big external burst (a git pull / Obsidian Sync
     # landing hundreds of files) must not stat under the lock, or it would block
@@ -1942,6 +1997,8 @@ def on_files_changed(
         try:
             signature: FileSignature | None = stat_signature(p)
         except OSError:
+            if str(p) in observed_paths:
+                raise
             signature = None  # created then gone before we could stat — treat as absent
         chg_items.append(
             (
@@ -2013,6 +2070,17 @@ def on_files_changed(
                 elif previous is not None:
                     recall.pop(sp, None)
                     _recall_triples[self_key] = None
+                    recall_touched.setdefault(self_key, set()).add(sp)
+        # A guarded observed event names exact changed bytes even if the
+        # stored signature (or already-absent map entry) compares equal.
+        for sp, in_kb, in_vault in (*del_items, *(item[:1] + item[2:4] for item in chg_items)):
+            if sp not in observed_paths:
+                continue
+            for scope, member in (("kb", in_kb), ("vault", in_vault)):
+                self_key = _key(vault_root, scope)
+                if member and self_key in _live:
+                    touched.setdefault(self_key, set()).add(sp)
+                if member and self_key in _recall_live:
                     recall_touched.setdefault(self_key, set()).add(sp)
         for self_key, paths in touched.items():
             _record_event(self_key, paths)

@@ -850,11 +850,9 @@ def test_public_terminal_publishes_warming_then_current_vocabulary_work(
 
     operational = terminal["diagnostics"]["operational"]
     assert operational["state"] == "committed"
-    assert operational["vocabulary_sync"]["state"] == "unavailable"
+    assert operational["vocabulary_sync"]["state"] == "warming"
+    assert operational["vocabulary_sync"]["reason"] == "source_discovery_pending"
     with library_scope():
-        epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
-        warming = vocabulary_delivery.recover(tmp_path)
         recovered = vocabulary_delivery.recover(tmp_path)
-    assert warming == {"state": "warming", "processed": 1, "coverage": "bounded-pass"}
     assert recovered == {"state": "current", "processed": 1, "coverage": "bounded-pass"}
     assert VocabularyState(tmp_path).page()["items"]

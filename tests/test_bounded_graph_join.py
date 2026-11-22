@@ -656,9 +656,11 @@ def test_a_write_whose_repair_is_queued_says_the_graph_is_catching_up(
     assert operational["graph_sync_remediation"]
 
 
-@pytest.mark.parametrize("repair", ["settled", "queued", "withdrawn"])
+@pytest.mark.parametrize(
+    "repair", ["settled", "queued", "withdrawn", "marker", "fatal_marker", "unreadable_marker"],
+)
 def test_a_covering_acknowledgement_does_not_hide_outstanding_graph_repair(
-    vault: Path, repair: str
+    vault: Path, repair: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Committed bytes stay successful while queued or withdrawn graph work stays pending."""
     from exomem import index_sync
@@ -683,6 +685,16 @@ def test_a_covering_acknowledgement_does_not_hide_outstanding_graph_repair(
             deferred_index.add_graph(root, [PAGE_A], generation=committed.generation)
         elif repair == "withdrawn":
             EpistemicGraphIndex(root).suspend_reads()
+        elif repair in {"marker", "fatal_marker"}:
+            deferred_index.mark_graph_full_rebuild(
+                root, generation=committed.generation,
+                fatal_family="a" * 64 if repair == "fatal_marker" else None,
+            )
+        elif repair == "unreadable_marker":
+            def unreadable(*args: Any, **kwargs: Any) -> Any:
+                raise deferred_index.GraphFullRebuildStateUnavailable("Graph marker unavailable.")
+
+            monkeypatch.setattr(deferred_index, "graph_full_rebuild_details", unreadable)
         return {"status": "committed", "mutated": True}
 
     compact = manager.invoke(
@@ -696,7 +708,8 @@ def test_a_covering_acknowledgement_does_not_hide_outstanding_graph_repair(
     assert operational["graph_sync"] == ("completed" if repair == "settled" else "pending")
     if repair != "settled":
         assert operational["graph_sync_code"] == (
-            "GRAPH_SYNC_REPAIR_QUEUED" if repair == "queued" else "GRAPH_SYNC_UNAVAILABLE"
+            "GRAPH_SYNC_REPAIR_QUEUED"
+            if repair in {"queued", "marker"} else "GRAPH_SYNC_UNAVAILABLE"
         )
 
 

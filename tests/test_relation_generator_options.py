@@ -184,7 +184,7 @@ def _decided_choice(
 
 
 def _accept_as(
-    call, group: dict[str, Any], item: dict[str, Any], relation: str, binding: dict[str, str]
+    vault: Path, call, group: dict[str, Any], item: dict[str, Any], relation: str, binding: dict[str, str]
 ) -> dict[str, Any]:
     """Accept with a chosen relation. A vocabulary-bound write needs an explicit idempotency key."""
     arguments = {
@@ -197,6 +197,7 @@ def _accept_as(
 
     async def keyed() -> dict[str, Any]:
         async with Client(call.mcp) as client:
+            assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
             result = await client.call_tool(
                 "decide_review_item",
                 arguments,
@@ -216,7 +217,7 @@ def test_an_offered_relation_the_agent_decided_is_written_as_one_typed_edge(
     group, item = _shared_source_item(call, person, organization)
     binding = _decided_choice(call, group, item, "member_of")
 
-    accepted = _accept_as(call, group, item, "member_of", binding)
+    accepted = _accept_as(vault, call, group, item, "member_of", binding)
 
     assert "error" not in accepted, accepted
     relations = [
@@ -236,7 +237,7 @@ def test_a_choice_recorded_before_the_registry_changed_is_refused_and_writes_not
     before = (vault / person).read_bytes()
     _save_extension(call, "vault.keeps", _extension("owns"))
 
-    refused = _accept_as(call, group, item, "member_of", binding)
+    refused = _accept_as(vault, call, group, item, "member_of", binding)
 
     assert refused["error"]["code"] == "VOCABULARY_DECISION_STALE", refused
     assert (vault / person).read_bytes() == before

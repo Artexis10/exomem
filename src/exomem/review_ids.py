@@ -88,6 +88,11 @@ def bind(
         except (ValueError, OpError):
             # A queue this principal or vault cannot read holds no item to bind; the next one may.
             continue
+        if modes == RELATION_QUEUE_MODES and isinstance(reply, Mapping) and reply.get("retryable") is True:
+            raise OpError(
+                "REVIEW_REFRESH_REQUIRED",
+                "The relation queue cannot confirm candidates yet. List the relation suggestions again and retry.",
+            )
         held = [
             candidate for candidate in _items(reply)
             if page_ids.part_head(str(candidate["ref"])) == head
