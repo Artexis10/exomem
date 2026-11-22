@@ -3224,6 +3224,44 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     assert calls == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX change time for closed receipt reuse")
+def test_lifecycle_reuses_closed_receipt_evidence_after_an_append(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import lifecycle
+
+    receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2000-01-01T00:00:00Z",
+    )
+    rel = "Knowledge Base/Notes/Insights/settled-evidence.md"
+    (vault / rel).write_text("# Settled evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/settled-evidence.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    assert rel in lifecycle.tombstoned_paths(vault)
+
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    closed = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    opened = []
+    open_month = receipts._open_month_fd
+
+    def count_open(directory, name, **kwargs):
+        opened.append(directory / name)
+        return open_month(directory, name, **kwargs)
+
+    monkeypatch.setattr(receipts, "_open_month_fd", count_open)
+    assert rel in lifecycle.tombstoned_paths(vault)
+    assert closed not in opened
+
+    original = closed.read_bytes()
+    old_stat = closed.stat()
+    corrupted = original.replace(b'"durable":false', b'"durable":true ', 1)
+    assert original != corrupted and len(original) == len(corrupted)
+    closed.write_bytes(corrupted)
+    os.utime(closed, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstoned_paths(vault)
+
+
 def test_marker_revision_tracks_pending_edits_but_skips_ordinary_disclosure(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

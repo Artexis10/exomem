@@ -963,6 +963,7 @@ def _verified_lifecycle_markers(vault_root: Path) -> list[dict[str, Any]] | None
         )
         records = receipts.event_records(
             vault_root, checkpoint=foreground_priority.check_cancelled if cooperative else None,
+            lifecycle_only=True,
         )
     except Exception:  # noqa: BLE001 - unverifiable guard evidence must fail closed
         return None

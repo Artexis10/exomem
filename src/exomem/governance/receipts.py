@@ -639,6 +639,70 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
         os.close(directory_fd)
 
 
+def _read_evidence_file(
+    instance_dir: Path, name: str, *, checkpoint: Callable[[], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    records: list[dict[str, Any]] = []
+    issues: list[dict[str, str]] = []
+    path = instance_dir / name
+    try:
+        with _open_month_fd(instance_dir, name) as fd:
+            source = os.fdopen(fd, "rb", closefd=False)
+            try:
+                offset = 0
+                line_no = 0
+                saw_data = False
+                final_newline = True
+                while True:
+                    if checkpoint is not None:
+                        checkpoint()
+                    raw_line = source.readline(MAX_RECORD_BYTES + 1)
+                    if not raw_line:
+                        break
+                    saw_data = True
+                    line_no += 1
+                    line_offset = offset
+                    offset += len(raw_line)
+                    oversized = len(raw_line) > MAX_RECORD_BYTES
+                    while oversized and not raw_line.endswith(b"\n"):
+                        if checkpoint is not None:
+                            checkpoint()
+                        chunk = source.readline(8192)
+                        if not chunk:
+                            break
+                        offset += len(chunk)
+                        raw_line = chunk
+                    if oversized:
+                        issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
+                        final_newline = raw_line.endswith(b"\n")
+                        continue
+                    final_newline = raw_line.endswith(b"\n")
+                    line = raw_line[:-1] if final_newline else raw_line
+                    if line.endswith(b"\r"):
+                        line = line[:-1]
+                    try:
+                        value = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
+                        continue
+                    if not isinstance(value, dict):
+                        issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
+                        continue
+                    value["_path"] = str(path)
+                    value["_offset"] = line_offset
+                    records.append(value)
+                if saw_data and not final_newline:
+                    issues.append({"code": "truncated_evidence", "path": str(path), "detail": "nonempty JSONL file is missing its final newline"})
+            finally:
+                source.close()
+    except ReceiptError as exc:
+        code = "evidence_path_escape" if "evidence path" in str(exc) else "read_error"
+        issues.append({"code": code, "path": str(path), "detail": str(exc)})
+    except OSError as exc:
+        issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
+    return records, issues
+
+
 def _read_records(
     instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
@@ -651,64 +715,9 @@ def _read_records(
     for name in names:
         if checkpoint is not None:
             checkpoint()
-        path = instance_dir / name
-        try:
-            with _open_month_fd(instance_dir, name) as fd:
-                source = os.fdopen(fd, "rb", closefd=False)
-                try:
-                    offset = 0
-                    line_no = 0
-                    saw_data = False
-                    final_newline = True
-                    while True:
-                        if checkpoint is not None:
-                            checkpoint()
-                        raw_line = source.readline(MAX_RECORD_BYTES + 1)
-                        if not raw_line:
-                            break
-                        saw_data = True
-                        line_no += 1
-                        line_offset = offset
-                        offset += len(raw_line)
-                        oversized = len(raw_line) > MAX_RECORD_BYTES
-                        while oversized and not raw_line.endswith(b"\n"):
-                            if checkpoint is not None:
-                                checkpoint()
-                            chunk = source.readline(8192)
-                            if not chunk:
-                                break
-                            offset += len(chunk)
-                            raw_line = chunk
-                        if oversized:
-                            issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
-                            final_newline = raw_line.endswith(b"\n")
-                            continue
-                        final_newline = raw_line.endswith(b"\n")
-                        line = raw_line[:-1] if final_newline else raw_line
-                        if line.endswith(b"\r"):
-                            line = line[:-1]
-                        try:
-                            value = json.loads(line)
-                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                            issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
-                            continue
-                        if not isinstance(value, dict):
-                            issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
-                            continue
-                        value["_path"] = str(path)
-                        value["_offset"] = line_offset
-                        records.append(value)
-                    if saw_data and not final_newline:
-                        issues.append({"code": "truncated_evidence", "path": str(path), "detail": "nonempty JSONL file is missing its final newline"})
-                finally:
-                    source.close()
-        except ReceiptError as exc:
-            code = "evidence_path_escape" if "evidence path" in str(exc) else "read_error"
-            issues.append({"code": code, "path": str(path), "detail": str(exc)})
-            continue
-        except OSError as exc:
-            issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
-            continue
+        found, errors = _read_evidence_file(instance_dir, name, checkpoint=checkpoint)
+        records.extend(found)
+        issues.extend(errors)
     return records, issues
 
 
@@ -716,10 +725,15 @@ def _chain_state(
     instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records, issues = _read_records(instance_dir, checkpoint=checkpoint)
+    return _verify_records(records, issues, checkpoint=checkpoint)
+
+
+def _verify_records(
+    records: list[dict[str, Any]], issues: list[dict[str, str]], *,
+    expected_hash: str = GENESIS_HASH, expected_seq: int = 1,
+    previous_month: str | None = None, checkpoint: Callable[[], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     valid_records: list[dict[str, Any]] = []
-    expected_hash = GENESIS_HASH
-    expected_seq = 1
-    previous_month: str | None = None
     for record in records:
         if checkpoint is not None:
             checkpoint()
@@ -756,6 +770,81 @@ def _chain_state(
         record["_offset"] = offset
         valid_records.append(record)
     return valid_records, issues
+
+
+@dataclass(frozen=True)
+class _LifecycleReceiptSegment:
+    last_seq: int
+    last_hash: str
+    last_month: str | None
+    intents: tuple[dict[str, Any], ...]
+
+
+_LIFECYCLE_SEGMENTS: OrderedDict[tuple, _LifecycleReceiptSegment] = OrderedDict()
+_LIFECYCLE_SEGMENTS_LOCK = threading.Lock()
+_LIFECYCLE_SEGMENTS_CAPACITY = 256
+
+
+def _receipt_file_signature(path: Path) -> tuple[int, int, int, int, int, int]:
+    entry = path.lstat()
+    if not stat.S_ISREG(entry.st_mode) or getattr(entry, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ReceiptError("receipt evidence path is unsafe")
+    return entry.st_dev, entry.st_ino, entry.st_mode, entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns
+
+
+def _lifecycle_instance_intents(
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None,
+) -> list[dict[str, Any]]:
+    names, issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+    if issues:
+        raise ReceiptError("receipt chain requires reconciliation")
+    anchor = _LifecycleReceiptSegment(0, GENESIS_HASH, None, ())
+    signatures: list[tuple[Path, tuple]] = []
+    intents: list[dict[str, Any]] = []
+    for name in names:
+        if checkpoint is not None:
+            checkpoint()
+        path = instance_dir / name
+        signature = _receipt_file_signature(path)
+        signatures.append((path, signature))
+        key = path, signature, anchor.last_seq, anchor.last_hash, anchor.last_month
+        # POSIX ctime changes on edits that restore mtime. The Windows stat ctime is creation time.
+        reusable = os.name != "nt" and name != names[-1]
+        with _LIFECYCLE_SEGMENTS_LOCK:
+            cached = _LIFECYCLE_SEGMENTS.get(key) if reusable else None
+            if cached is not None:
+                _LIFECYCLE_SEGMENTS.move_to_end(key)
+        if cached is None:
+            records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint)
+            valid, faults = _verify_records(
+                records, faults, expected_hash=anchor.last_hash, expected_seq=anchor.last_seq + 1,
+                previous_month=anchor.last_month, checkpoint=checkpoint,
+            )
+            if faults or _receipt_file_signature(path) != signature:
+                raise ReceiptError("receipt chain requires reconciliation")
+            tail = valid[-1] if valid else None
+            cached = _LifecycleReceiptSegment(
+                int(tail["seq"]) if tail is not None else anchor.last_seq,
+                str(tail["hash"]) if tail is not None else anchor.last_hash,
+                path.stem if tail is not None else anchor.last_month,
+                tuple(record for record in valid if record["event_type"] == "critical" and record["phase"] == "intent"),
+            )
+            if reusable:
+                with _LIFECYCLE_SEGMENTS_LOCK:
+                    _LIFECYCLE_SEGMENTS[key] = cached
+                    if len(_LIFECYCLE_SEGMENTS) > _LIFECYCLE_SEGMENTS_CAPACITY:
+                        _LIFECYCLE_SEGMENTS.popitem(last=False)
+        intents.extend(cached.intents)
+        anchor = cached
+    for path, signature in signatures:
+        if checkpoint is not None:
+            checkpoint()
+        if _receipt_file_signature(path) != signature:
+            raise ReceiptError("receipt evidence changed while reading")
+    latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+    if faults or latest != names:
+        raise ReceiptError("receipt evidence changed while reading")
+    return intents
 
 
 def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> None:
@@ -2093,9 +2182,9 @@ def unregister_state_resolver(operation: str) -> None:
 
 
 def event_records(
-    vault_root: Path, *, checkpoint: Callable[[], None] | None = None,
+    vault_root: Path, *, checkpoint: Callable[[], None] | None = None, lifecycle_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return verified content-free records without mutating chain or sidecar."""
+    """Return verified records or just the critical intents that bind lifecycle markers."""
     root = _events_root(Path(vault_root))
     if not root.exists():
         return []
@@ -2110,9 +2199,12 @@ def event_records(
         if checkpoint is not None:
             checkpoint()
         instance_dir = _instance_dir(vault_root, candidate.name)
-        instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
-        if issues:
-            raise ReceiptError("receipt chain requires reconciliation")
+        if lifecycle_only:
+            instance_records = _lifecycle_instance_intents(instance_dir, checkpoint=checkpoint)
+        else:
+            instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
+            if issues:
+                raise ReceiptError("receipt chain requires reconciliation")
         for record in instance_records:
             if checkpoint is not None:
                 checkpoint()
