@@ -46,10 +46,14 @@ from . import cell_deletion_grant, held_fs
 from .cloud_cell import CELL_ID_PATTERN
 from .media_edge_b2 import (
     B2,
+    DEFAULT_PART_BYTES,
     FileInfo,
+    MAX_PARTS,
+    NONCE_INFO,
     ProviderError,
     ProviderRejected,
     ProviderUncertain,
+    SHA256_INFO,
     stream_body,
 )
 from .media_edge_protocol import (
@@ -83,10 +87,6 @@ _CLAIMS = frozenset({"v", "aud", "sub", "ver", "issued_ms"})
 # A cell ID becomes a path segment of the object prefix. This checks its shape only;
 # the active set decides which cells exist.
 _CELL_ID = re.compile(CELL_ID_PATTERN)
-# The provider limits a large file to 10,000 parts.
-_MAX_PARTS = 10_000
-_NONCE_INFO = "exomem_nonce"
-_SHA256_INFO = "exomem_sha256"
 _BLOCK = 64 * 1024
 # The provider's list actions (closed by its API): a `start` entry is an unfinished large file, which the
 # bucket rule cancels, so it never decides whether a name is current.
@@ -109,7 +109,7 @@ class EdgeConfig:
     max_object_bytes: int
     state_dir: Path
     port: int = EDGE_PORT
-    part_bytes: int = 8 * 1024 * 1024
+    part_bytes: int = DEFAULT_PART_BYTES
     request_seconds: float = 3600.0
     idle_seconds: float = 30.0
     max_writes: int = 4
@@ -467,8 +467,8 @@ class MediaEdge:
             if intent.kind == "small":
                 # Writes to one name are serial, so the newest version is this write's or none of them.
                 head = await self.provider.head_name(intent.key)
-                if (head is not None and head.info.get(_NONCE_INFO) == intent.nonce
-                        and head.size == intent.size and head.info.get(_SHA256_INFO) == intent.sha256):
+                if (head is not None and head.info.get(NONCE_INFO) == intent.nonce
+                        and head.size == intent.size and head.info.get(SHA256_INFO) == intent.sha256):
                     return Outcome(True, head.file_id)
                 return Outcome(False)  # an absent HEAD does not prove that the write will never land
             assert intent.file_id is not None
@@ -557,7 +557,7 @@ class MediaEdge:
             raise Reply(409, _UNAVAILABLE)
 
     async def _store(self, cell: str, generation: int, key: str, size: int, sha256: str, reader: _Body) -> str:
-        part = max(self.config.part_bytes, await self.provider.minimum_part_bytes(), -(-size // _MAX_PARTS))
+        part = max(self.config.part_bytes, await self.provider.minimum_part_bytes(), -(-size // MAX_PARTS))
         if size <= part:
             return await self._store_small(cell, generation, key, size, sha256, reader)
         return await self._store_large(cell, generation, key, size, sha256, part, reader)
@@ -570,7 +570,7 @@ class MediaEdge:
         intent = Intent(uuid.uuid4().hex, cell, key, generation, "small", size, sha256, nonce=uuid.uuid4().hex)
         await self._persist(intent)
         return await self._dispatch(intent, lambda: self.provider.upload_file(
-            target, key, data, _sha1(data), {_SHA256_INFO: sha256, _NONCE_INFO: intent.nonce}))
+            target, key, data, _sha1(data), {SHA256_INFO: sha256, NONCE_INFO: intent.nonce}))
 
     async def _abandon(self, file_id: str) -> None:
         """Cancel a large file that was never finished. It cannot become a version, so this only tidies."""
@@ -584,7 +584,7 @@ class MediaEdge:
         # called for a file ID that a persisted intent holds (below and in `_resolve`). A lost reply,
         # or a crash before the intent, leaves an unfinished file that can never become a version.
         # The bucket's lifecycle rule and the operator's cleanup bound those files (design D6).
-        file_id = await self.provider.start_large(key, {_SHA256_INFO: sha256})
+        file_id = await self.provider.start_large(key, {SHA256_INFO: sha256})
         try:
             digest, part_sha1, sent = hashlib.sha256(), [], 0
             while sent < size:
@@ -623,7 +623,7 @@ class MediaEdge:
             if head is None:
                 return False
             intent = Intent(uuid.uuid4().hex, cell, key, generation, "hide", head.size,
-                            head.info.get(_SHA256_INFO, ""), file_id=head.file_id)
+                            head.info.get(SHA256_INFO, ""), file_id=head.file_id)
             await self._persist(intent)
 
             async def hide() -> str:
@@ -699,7 +699,7 @@ class MediaEdge:
         info: FileInfo | None = await self.provider.file_info(version)
         if info is None or info.name != key or info.action != "upload":
             raise Reply(STATUS_ABSENT, ABSENT_CODE)
-        sha256 = info.info.get(_SHA256_INFO, "")
+        sha256 = info.info.get(SHA256_INFO, "")
         if not is_sha256(sha256):
             raise Reply(503, _UNAVAILABLE)
         # A hide or a newer version makes this version non-current, and the bucket rule deletes a non-current one.

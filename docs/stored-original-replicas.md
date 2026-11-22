@@ -25,6 +25,14 @@ The `decrypted` level is a sample, because it costs a download.
 It runs only where checks run (a store whose descriptor states `head_recomputes`), for a store with `retrieval_class` `immediate`, and for a key version whose identity this install can read.
 A store whose checks are not scheduled is never sampled and is never charged bytes.
 
+## Declare a Backblaze B2 replica store
+
+Add an adapter named `b2` to the vault's `stores` list. Supply the exact `bucket`, `bucket_id`, and nonempty `prefix` allowed by its application key. Set the store's `retrieval_class` to `immediate` and `head_recomputes` to `false`. Set `failure_domain` to the location's independent failure domain.
+
+Set `credential_file` to an absolute path on the serving host. Keep `key_id` and `application_key` in that private JSON file. Use a bucket-and-prefix restricted key with read and write access and no delete permission. Keep the bucket's referenced versions available for recovery.
+
+Use the existing replica operation to request copies. A direct B2 store serves replica copies and exact-version restore. Keep the vault's primary eviction store configured separately.
+
 ## Set the cycle and the read rate
 
 Each replica is checked about once in 30 days, oldest check first.

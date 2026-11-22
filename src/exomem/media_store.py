@@ -7,6 +7,7 @@ Jobs share the media ledger; protection records outlive those jobs.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import json
@@ -22,7 +23,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -220,9 +221,35 @@ def _declared_chunks(stream: BinaryIO, size: int, sha256: str):
         raise MediaStoreError("MEDIA_UPLOAD_MISMATCH", "the uploaded bytes differ from the declared size or digest")
 
 
+class StreamReader:
+    def __init__(self, chunks: Iterator[bytes]):
+        self._chunks = chunks
+        self._buffer = bytearray()
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            chunk = next(self._chunks, None)
+            if chunk is None:
+                break
+            self._buffer.extend(chunk)
+        count = len(self._buffer) if size < 0 else size
+        block = bytes(self._buffer[:count])
+        del self._buffer[:count]
+        return block
+
+
+_ReadValue = TypeVar("_ReadValue")
+
+
+async def before_deadline(deadline: float, read: Awaitable[_ReadValue]) -> _ReadValue:
+    async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+        return await read
+
+
 #: The adapter name of a local disk or a mounted NAS, and its earlier name, which stays accepted.
 FILESYSTEM_ADAPTER = "filesystem"
 FILESYSTEM_ADAPTER_ALIAS = "filesystem-test"
+B2_REPLICA_ADAPTER = "b2"
 #: The file in a filesystem store's root that names the store that the root is. Only `declare_store` writes it.
 STORE_MARKER = ".exomem-store"
 _MARKER_SCHEMA = 1
@@ -418,6 +445,10 @@ def _adapter(connection: dict[str, object], name: str) -> Store:
             from .media_edge_store import EdgeStore
 
             return EdgeStore.from_configuration(connection)
+        if adapter == B2_REPLICA_ADAPTER:
+            from .media_b2_store import B2ReplicaStore
+
+            return B2ReplicaStore.from_configuration(connection)
         root = connection.get("root")
         if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(root, str):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
@@ -460,8 +491,14 @@ def connection_refusal(entry: originals.StoreEntry) -> str | None:
     so a declared further store of that adapter would silently be the store that serves eviction again: a replica in
     the same place, counted as a second failure domain.
     """
-    if not entry.serves_eviction and entry.connection.get("adapter") == "media-edge":
+    adapter = entry.connection.get("adapter")
+    if not entry.serves_eviction and adapter == "media-edge":
         return "a media-edge store has no connection of its own: only the store that serves eviction uses the edge"
+    if adapter == B2_REPLICA_ADAPTER:
+        if entry.serves_eviction:
+            return "a B2 store can only hold replicas"
+        if entry.head_recomputes is not False or entry.retrieval_class != originals.IMMEDIATE:
+            return "a B2 replica store requires immediate retrieval and a metadata-only HEAD"
     return None
 
 
@@ -1561,13 +1598,14 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
 def _verified_head(store: Store, reference: StoredObject, *, deadline: float | None = None,
                    scheduled: ScheduledRead | None = None) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
+    from .media_b2_store import B2ReplicaStore
     from .media_edge_store import EdgeStore
 
     with _transport("head"):
         if isinstance(store, FilesystemStore):
             head = store.head(reference.object, reference.version, expected_size=reference.ciphertext_size,
                               deadline=deadline, scheduled=scheduled)
-        elif deadline is not None and isinstance(store, EdgeStore):
+        elif deadline is not None and isinstance(store, (EdgeStore, B2ReplicaStore)):
             head = store.head(reference.object, reference.version, deadline=deadline)
         else:
             head = store.head(reference.object, reference.version)
@@ -2200,17 +2238,19 @@ def require_replica_store(vault: Path, name: str, *, serves_eviction: bool = Fal
     return entry
 
 
-def store_reachable(vault: Path, name: str) -> bool | None:
-    """Whether the store answers as itself now; None when its adapter has no cheap check (a remote store is not probed)."""
+def store_reachable(vault: Path, name: str, deadline: float | None = None) -> bool | None:
+    """Whether the store answers as itself now. None means the adapter has no cheap identity check."""
+    from .media_b2_store import B2ReplicaStore
+
     try:
         backend = store_for(vault, name)
+        if isinstance(backend, B2ReplicaStore):
+            backend.require_identity(deadline=deadline)
+        elif isinstance(backend, FilesystemStore):
+            backend.require_identity()
+        else:
+            return None
     except (MediaStoreError, ValueError):
-        return False
-    if not isinstance(backend, FilesystemStore):
-        return None
-    try:
-        backend.require_identity()
-    except MediaStoreError:
         return False
     return True
 
@@ -2219,6 +2259,8 @@ def _copy_backend(
     vault: Path, name: str, *, serves_eviction: bool = False,
 ) -> tuple[dict[str, object], originals.StoreEntry, Store]:
     """Validate destination setup and confirm identity before reading or protecting the source."""
+    from .media_b2_store import B2ReplicaStore
+
     try:
         config = _settings(vault)
         entry = require_replica_store(vault, name, serves_eviction=serves_eviction)
@@ -2227,11 +2269,14 @@ def _copy_backend(
         if error.code != "MEDIA_STORE_UNAVAILABLE":
             raise
         raise CopyStoreUnavailable(error.reason) from error
-    if isinstance(backend, FilesystemStore):
+    if isinstance(backend, (FilesystemStore, B2ReplicaStore)):
         from . import media_replicas
 
+        until = time.monotonic() + STORE_PROBE_SECONDS
+        check = (partial(backend.require_identity, deadline=until) if isinstance(backend, B2ReplicaStore)
+                 else backend.require_identity)
         try:
-            wait_store_read(vault, name, backend.require_identity, timeout=STORE_PROBE_SECONDS)
+            wait_store_read(vault, name, check, timeout=STORE_PROBE_SECONDS)
         except StoreReadPending:
             raise
         except MediaStoreError as error:
@@ -2946,12 +2991,17 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
 
 def _stored_chunks(backend: Store, reference: StoredObject, *, deadline: float | None = None) -> Iterator[bytes]:
     # Only backend operations are transport failures; local staging writes keep their own errors.
+    from .media_b2_store import B2ReplicaStore
     from .media_edge_store import EdgeStore
 
     _require_transfer_time(deadline)
-    opened = (backend.open(reference.object, reference.version, deadline=deadline)
-              if deadline is not None and isinstance(backend, EdgeStore)
-              else backend.open(reference.object, reference.version))
+    if isinstance(backend, B2ReplicaStore):
+        opened = backend.open(reference.object, reference.version, expected_size=reference.ciphertext_size,
+                              deadline=deadline)
+    elif deadline is not None and isinstance(backend, EdgeStore):
+        opened = backend.open(reference.object, reference.version, deadline=deadline)
+    else:
+        opened = backend.open(reference.object, reference.version)
     with _transport("read"), opened as stream:
         remaining = reference.ciphertext_size
         while True:
