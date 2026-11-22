@@ -82,6 +82,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     render_frontmatter_document,
     render_title_links,
     rewritable_link_ranges,
@@ -160,6 +161,7 @@ def _resolve_date_iso(
         raise EditError(error.code, [], error.reason) from error
 
 
+@semantic_contract.share_writer_disk_census()
 def edit(
     vault_root: Path,
     *,
@@ -1140,20 +1142,27 @@ def commit_edit(
     # Opportunistic sub-index refresh — surfacing any drift on every write
     # keeps the indexes self-healing.
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     top_index = kb / "index.md"
-    if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
-        current_top, top_guard = read_guarded_text(vault_root, top_index)
-        sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_text=current_top
-        )
-        if new_top is not None and new_top != current_top:
-            writes.append(
-                PlannedWrite(path=top_index, content=new_top, guard=top_guard)
+    # Read the navigation pages and counts at one revision. The snapshot ends
+    # before preflight, and the commit still rechecks every write guard.
+    with store_read.request_snapshot(vault_root):
+        if (
+            store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
+            and connector_boundary.effect_admission(vault_root)(top_index)
+        ):
+            current_top, top_guard = read_guarded_text(vault_root, top_index)
+            sub_writes, new_top = indexes.compute_subindex_writes(
+                vault_root, top_index_text=current_top
             )
-            derived_auxiliary_writes.append(("index", writes[-1]))
-        writes.extend(sub_writes)
-        derived_auxiliary_writes.extend(("index", write) for write in sub_writes)
+            if new_top is not None and new_top != current_top:
+                writes.append(
+                    PlannedWrite(path=top_index, content=new_top, guard=top_guard)
+                )
+                derived_auxiliary_writes.append(("index", writes[-1]))
+            writes.extend(sub_writes)
+            derived_auxiliary_writes.extend(("index", write) for write in sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
     recorded = temporal.parse(date_iso)
@@ -1208,24 +1217,22 @@ def commit_edit(
             try:
                 from .relation_census import operation_provenance
 
-                log_plan = plan_log_writes(
-                    vault_root,
-                    date_iso=date_iso,
-                    op=op,
-                    rel_path_no_ext=rel_no_ext,
-                    body=log_body,
-                    provenance=operation_provenance(preflight),
-                    operation_token=(
-                        "edit:"
-                        + content_hash(
-                            # Keyed on the calendar day, not the stamp: this token is
-                            # what makes a replayed edit idempotent, and a
-                            # second-granularity value would mint a fresh key on every
-                            # attempt and defeat the dedup entirely.
-                            f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                with store_read.request_snapshot(vault_root):
+                    log_plan = plan_log_writes(
+                        vault_root,
+                        date_iso=date_iso,
+                        op=op,
+                        rel_path_no_ext=rel_no_ext,
+                        body=log_body,
+                        provenance=operation_provenance(preflight),
+                        operation_token=(
+                            "edit:"
+                            + content_hash(
+                                # The day keeps a replay idempotent across timestamps.
+                                f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                            )
                         )
-                    ),
-                )
+                    )
             except (OSError, UnicodeError, ValueError) as error:
                 raise EditError(
                     "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"

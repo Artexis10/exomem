@@ -153,6 +153,7 @@ _KB_WRITES = (
     "manage_memory:records.discard",
     "manage_memory:records.import",
     "manage_memory:records.rebaseline",
+    "manage_memory:records.retract",
     "manage_memory:records.revise",
     "save_episode",
     "save_evidence",

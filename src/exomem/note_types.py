@@ -581,7 +581,7 @@ class Basis:
             return (
                 ("effective", self._snapshot.effective_digest)
                 if self._snapshot is not None and not self._snapshot.findings
-                else ("unavailable", "")
+                else (registry.UNAVAILABLE, "")
             )
         return ("public", registry.load(SPEC, None).effective_digest)
 

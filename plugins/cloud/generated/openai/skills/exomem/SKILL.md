@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: 66b38cc640f8e851bcb6ff73848bc1aba50116b057ef6d6fb2dcaa10a663850c
+  skill_contract: 8fe7d420e5443cd2d7fa79d55c2c102232843831b1dbc5d0b3a6189eb961ed7f
   version: "0.32.0"
 ---
 
@@ -198,9 +198,11 @@ A landing includes a durable conclusion, a recurring entity with reusable facts,
 a method actually carried out for which the user reports the result, an explicit
 intent/commitment, or an observed event. A reusable method, parameter comparison,
 and diagnosed failure route respectively to a how-to note, experiment, and failure.
-A landing also includes a held view (attributed, with its uncertainty, not as fact), a
-question left open (as an open question, not a person's unsure report of an event),
-and settled values (in full, not file pointers). Mid-thought exploration, tentative events, and incidental names stay unwritten, and no write mentions them.
+A landing also includes, saved at its true strength (never more certain, more general
+or more settled than its source made it), a held view or an unsure report (attributed,
+with its uncertainty, never as fact), a question left open (as an open question,
+including whether something happened), and settled values (in full, not file pointers).
+Mid-thought exploration and incidental names get no note, and no write mentions them.
 Capture unambiguous landings under the current disposition and existing scope
 approval, then report the write; ask only for missing decisions or confirmation
 required by the envelope. Raw capture is not automatic compilation. At a

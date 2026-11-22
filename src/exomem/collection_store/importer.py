@@ -2966,19 +2966,27 @@ def _log_member(
     )
 
 
+def _moved_rows_since(conn, cid: str, after_txn: int) -> bool:
+    """Whether a transaction after ``after_txn`` retracted a row or brought a retracted row back."""
+    return bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM txns t WHERE t.collection_id=? AND t.txn_id>? AND (t.operation='retract' "
+        "OR EXISTS(SELECT 1 FROM audit_effects e WHERE e.txn_id=t.txn_id AND e.effect='insert' "
+        "AND e.version_before IS NOT NULL)))", (cid, after_txn)).fetchone()[0])
+
+
 def _row_count(conn, cid: str) -> int:
     """The collection's row count, read from its last import log row forward.
 
-    Items are never deleted and a new item's row id exceeds every earlier one, so the
-    rows created since that log row's transaction are the newest by row id: the walk
-    reads those, whatever wrote them, and stops. Only a collection's first log row counts
-    the whole collection.
+    A new item's row id exceeds every earlier one, so the rows created since that log row's
+    transaction are the newest by row id: the walk reads those, whatever wrote them, and stops.
+    A retraction or re-admission since that log row moves a row the walk cannot see, so it
+    counts the current rows through the partial index instead, as does a collection's first log row.
     """
     last = conn.execute(
         "SELECT row_count_after, txn_id FROM import_members WHERE collection_id=? ORDER BY seq DESC LIMIT 1",
         (cid,),
     ).fetchone()
-    if last is None:
+    if last is None or _moved_rows_since(conn, cid, last[1]):
         return conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]
     count, logged = last
     newest = conn.execute(

@@ -44,6 +44,7 @@ from exomem import (
     extraction_parts,
     graph_drain,
     media_jobs,
+    media_replicas,
     media_store,
     media_worker,
     mutation_lock,
@@ -491,16 +492,14 @@ def test_a_media_store_offload_publishes_its_reference_through_the_served_door(
     assert media_store.original_state(stored, PICTURE).state == "cached"
 
 
-def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_next_one_releases(
+def test_a_quarantined_eviction_pointer_waits_for_a_busy_boundary_before_repair(
     stored, service, selected_store, monkeypatch, caplog
 ):
-    """An eviction whose absent stored version must be released while another holder keeps the
-    vault boundary: ``MEDIA_STORE_BUSY`` escapes to the worker, which logs a failure or (at start)
-    skips the rest of its scan, or the reference to the lost copy is never released."""
+    """Preserve the pointer and bytes while the served boundary is busy, then publish a verified replacement."""
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([PICTURE])
     reference = _offload(stored, stored / PICTURE)
-    # The stored copy is gone, so the eviction must release the reference instead of evicting.
+    # The stored copy is gone. Eviction leaves its pointer for the repair worker.
     (Path(selected_store[0]["root"]) / reference.object / reference.version).unlink()
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, stored / PICTURE))
     monkeypatch.setattr(store_media, "BUSY_WAIT_SECONDS", 0.5)
@@ -509,13 +508,17 @@ def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_ne
     with held_elsewhere(stored):
         assert media_store.evict_to_target(stored) == 0
         media_worker._evict(stored)
+        assert media_replicas.has_quarantined(stored, (reference,))
+        assert media_replicas.drain(stored) == 0
 
     assert reference.object.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    media_worker._evict(stored)
+    assert media_replicas.drain(stored) == 1
 
-    assert reference.object.encode() not in read.owned_bytes(stored, f"{PICTURE}.md")
+    repaired = media_store.original_state(stored, PICTURE).reference
+    assert repaired is not None and repaired != reference
+    assert media_store.check_replica(stored, repaired) is None
     assert (stored / PICTURE).read_bytes() == PICTURE_BYTES
 
 
@@ -566,19 +569,6 @@ def test_a_stop_drains_no_longer_than_its_bound_and_the_next_start_projects_the_
     assert queued(stored) == set()
 
 
-def rollout_override():
-    """The journey's `sitecustomize.py`, which opens the two store-mode rollout fences in a child
-    process, as the store-mode fixtures open them in this one."""
-    import importlib.util
-
-    script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_product_loop.py"
-    spec = importlib.util.spec_from_file_location("e2e_product_loop_for_replicas", script)
-    journey = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = journey  # registered before it runs, as its dataclasses need
-    spec.loader.exec_module(journey)
-    return journey._ROLLOUT_OVERRIDE
-
-
 REST_KEY = "replica-rest-key"
 
 
@@ -594,23 +584,12 @@ def http_replica(root, tmp_path, name, *, activation_after=None):
     import subprocess
     import urllib.request
 
-    shim = tmp_path / f"rollout-{name}"
-    shim.mkdir(exist_ok=True)
-    override = rollout_override()
-    if activation_after is not None:
-        override += (
-            "\n_OPENERS['exomem.server_runtime'] = lambda module: "
-            "module.LocalRuntimeActivation.__init__.__kwdefaults__.update("
-            f"fallback_seconds={float(activation_after)!r})\n"
-        )
-    (shim / "sitecustomize.py").write_text(override, encoding="utf-8")
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     port = listener.getsockname()[1]
     listener.close()
     env = {
         **os.environ,
-        "PYTHONPATH": os.pathsep.join(filter(None, (str(shim), os.environ.get("PYTHONPATH")))),
         "EXOMEM_REST_API_KEY": REST_KEY,
         "EXOMEM_WRITER_LEASE_REPLICA_ID": name,
         "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / f"lease-{name}"),
@@ -623,9 +602,24 @@ def http_replica(root, tmp_path, name, *, activation_after=None):
     }
     log_path = tmp_path / f"{name}.log"
     script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_http_server.py"
+    command = [sys.executable, str(script)]
+    if activation_after is not None:
+        # This case controls the fallback timer while exercising real startup admission.
+        command = [
+            sys.executable, "-c", """
+import runpy
+import sys
+from exomem.server_runtime import LocalRuntimeActivation
+
+delay = float(sys.argv.pop(1))
+script = sys.argv.pop(1)
+LocalRuntimeActivation.__init__.__kwdefaults__["fallback_seconds"] = delay
+runpy.run_path(script, run_name="__main__")
+""", str(activation_after), str(script),
+        ]
     with log_path.open("w", encoding="utf-8") as console:
         process = subprocess.Popen(
-            [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
+            [*command, "--host", "127.0.0.1", "--port", str(port)],
             env=env, stdout=console, stderr=subprocess.STDOUT,
         )
         url = f"http://127.0.0.1:{port}"

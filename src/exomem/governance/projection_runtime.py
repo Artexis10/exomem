@@ -285,6 +285,7 @@ class ProjectedFindResult:
     warming_components: tuple[str, ...] = ()
     declared_purpose: str | None = None
     continuation: str | None = None
+    incomplete_source_passages: bool = False
 
 
 class ProjectedContinuationUnavailable(ValueError):
@@ -327,6 +328,7 @@ def _projected_request_digest(
     auto_rerank: bool,
     prefer_compiled: bool,
     prefer_active: bool,
+    prefer_source_passages: bool = False,
 ) -> str:
     value = {
         "auto_rerank": auto_rerank,
@@ -335,6 +337,7 @@ def _projected_request_digest(
         "mode": mode,
         "prefer_active": prefer_active,
         "prefer_compiled": prefer_compiled,
+        "prefer_source_passages": prefer_source_passages,
         "query": query,
         "rerank": rerank,
         "scope": scope,
@@ -380,13 +383,25 @@ def _visible_authorization_digest(
 def _visible_snapshot_digest(
     ordered_identities: tuple[str, ...],
     selected_variants: Mapping[str, projections.ProjectionVariant],
+    transcript_hits: Mapping[str, projected_retrieval.ProjectedLexicalHit] | None = None,
 ) -> str:
+    if transcript_hits is None:
+        transcript_hits = {}
     return _framed_pairs_digest(
         _VISIBLE_SNAPSHOT_DOMAIN,
         tuple(
             (
                 identity,
-                selected_variants[identity].projection_variant_id,
+                selected_variants[identity].projection_variant_id + (
+                    "" if identity not in transcript_hits else hashlib.sha256(
+                        projections.canonical_jcs([
+                            transcript_hits[identity].transcript[0],
+                            transcript_hits[identity].transcript[1].start,
+                            transcript_hits[identity].transcript[1].end,
+                            transcript_hits[identity].transcript[1].text,
+                        ])
+                    ).hexdigest()
+                ),
             )
             for identity in ordered_identities
         ),
@@ -1122,6 +1137,7 @@ def _wire_hit(
     variant: projections.ProjectionVariant | None = None,
     part: projections.ProjectionPart | None = None,
     query: str = "",
+    transcript_hit: projected_retrieval.ProjectedLexicalHit | None = None,
 ) -> Hit:
     decision = selection.decision
     if decision is None or decision.level != hit.decision_level:
@@ -1139,13 +1155,25 @@ def _wire_hit(
     if lane_ranks is None:
         bm25_rank = None if keyword else rank
         keyword_rank = rank if keyword else None
+    passage = (
+        projected_retrieval.matched_passage(variant, part, query, semantic="vector" in ranks)
+        if variant is not None else {}
+    )
+    timestamp = None
+    excerpt = hit.snippet
+    if transcript_hit is not None and transcript_hit.transcript is not None:
+        number, match = transcript_hit.transcript
+        passage = {"matched_part": number, "passage": {**match.passage(), "part": number}}
+        timestamp = match.timestamp
+        excerpt = " ".join(match.text.split())[:320]
     return Hit(
         path=path,
         type=fields.get("type"),
         scope="kb" if inside_kb else "vault",
         title=fields.get("title") or PurePosixPath(path).stem,
         updated=fields.get("updated", ""),
-        excerpt=hit.snippet,
+        excerpt=excerpt,
+        transcript_ts=timestamp,
         bm25_rank=bm25_rank,
         keyword_rank=keyword_rank,
         vector_rank=ranks.get("vector"),
@@ -1168,11 +1196,7 @@ def _wire_hit(
         status=fields.get("status"),
         snapshot_hash=selection.content_hash,
         decision=decision,
-        **(
-            projected_retrieval.matched_passage(variant, part, query, semantic="vector" in ranks)
-            if variant is not None
-            else {}
-        ),
+        **passage,
     )
 
 
@@ -1297,7 +1321,7 @@ def _retain_projected_bm25_hits(
             retained.append(hit)
             continue
         text = (
-            hit.part.text if hit.part is not None else _projected_text(hit.search_fields)
+            hit.part.text if hit.part is not None else projected_retrieval.searchable_text(hit.search_fields)
         )
         present, total, content_present = find_policy.stem_word_coverage(
             frozenset(bm25.tokenize(text)),
@@ -1309,13 +1333,6 @@ def _retain_projected_bm25_hits(
         if 2 * present > total and content_present > 0:
             retained.append(hit)
     return tuple(retained)
-
-
-def _projected_text(search_fields: Mapping[str, str]) -> str:
-    return " ".join(
-        search_fields[key]
-        for key in sorted(search_fields, key=lambda value: value.encode("utf-16-be"))
-    )
 
 
 def _matched_parts(
@@ -1377,7 +1394,7 @@ def _guard_projected_lexical_votes(
         if identity not in views:
             part = matched_parts.get(identity)
             views[identity] = _ProjectedTextView(
-                part.text if part is not None else _projected_text(fields[identity])
+                part.text if part is not None else projected_retrieval.searchable_text(fields[identity])
             )
         return views[identity]
 
@@ -1460,6 +1477,7 @@ def _find_projected_hits_pinned(
     rerank: bool | None,
     auto_rerank: bool = False,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     rank_config: ranking_config.RankingConfig = ranking_config.DEFAULT_RANKING,
     principal: RequestPrincipal,
@@ -1468,7 +1486,7 @@ def _find_projected_hits_pinned(
 ) -> ProjectedFindResult:
     """Acquire public candidates without opening a raw corpus/index lane."""
 
-    from .. import readiness
+    from .. import find_results, readiness, transcript_passages
 
     if not isinstance(runtime, ActiveProjectionRuntime):
         raise ProjectionRuntimeUnavailable(
@@ -1538,6 +1556,7 @@ def _find_projected_hits_pinned(
         auto_rerank=auto_rerank,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
+        prefer_source_passages=prefer_source_passages,
     )
     if continuation_record is not None and (
         continuation_record.principal_binding != principal_binding
@@ -1640,6 +1659,8 @@ def _find_projected_hits_pinned(
     lane_hits: dict[str, tuple[projected_retrieval.ProjectedLexicalHit, ...]] = {}
     warming: set[str] = set()
     embeddings_module = None
+    query_vector = None
+    vector_index = runtime.vector_index
 
     if mode == "keyword":
         lane_hits["keyword"] = runtime.lexical_index.search_keyword(
@@ -1660,7 +1681,6 @@ def _find_projected_hits_pinned(
         )
 
     if mode in {"hybrid", "vector"}:
-        vector_index = runtime.vector_index
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             lane_hits["vector"] = ()
         elif readiness.should_defer("embeddings"):
@@ -1859,13 +1879,7 @@ def _find_projected_hits_pinned(
                         decision_level=selected_variants[identity].decision_level,
                         score=float(graph_degrees[identity]),
                         search_fields=selected_variants[identity].search_fields,
-                        snippet=" ".join(
-                            selected_variants[identity].search_fields[key]
-                            for key in sorted(
-                                selected_variants[identity].search_fields,
-                                key=lambda value: value.encode("utf-16-be"),
-                            )
-                        )[:320].rstrip(),
+                        snippet=projected_retrieval.projection_text(selected_variants[identity])[:320].rstrip(),
                     )
                     for identity in graph_ranking
                 )
@@ -1920,6 +1934,44 @@ def _find_projected_hits_pinned(
         [weights_by_lane[lane] for lane in active_lanes],
         k=rank_config.rrf_k,
     )
+    transcript_hits = {}
+    incomplete_passages = False
+    neutral_prefix = ()
+    if prefer_source_passages and mode == "hybrid" and query_vector is not None and vector_index is not None:
+        from heapq import nsmallest
+
+        from . import transcript_banks
+
+        scores = {hit.item_identity: hit.score for hit in lane_hits.get("vector", ())}
+        candidates = nsmallest(
+            3,
+            (
+                (identity, score * _projected_rank_multiplier(
+                    selected_variants[identity].search_fields, rank_config, prefer_compiled=False,
+                    prefer_active=prefer_active, status_basis=status_basis, type_basis=type_basis,
+                ))
+                for identity, score in fused
+            ),
+            key=lambda row: (-row[1], row[0]),
+        )
+        neutral_prefix = tuple(identity for identity, _ in candidates)
+        for identity in neutral_prefix:
+            variant = selected_variants[identity]
+            if (
+                identity not in scores or projected_retrieval.TIMED_SOURCE_FIELD not in variant.search_fields
+                or not transcript_passages.allows_window(variant.search_fields.get("type"), type_basis)
+            ):
+                continue
+            try:
+                hit, partial = vector_index.match_transcript(
+                    Path(vault_root), variant, query_vector, scores[identity],
+                )
+            except transcript_banks.TranscriptBankUnavailable:
+                incomplete_passages = True
+            else:
+                incomplete_passages |= partial
+                if hit is not None:
+                    transcript_hits[identity] = hit
     fused = [
         (
             identity,
@@ -2027,6 +2079,21 @@ def _find_projected_hits_pinned(
                 "governed projected retrieval is unavailable"
             ) from error
 
+    candidate = next((identity for identity in neutral_prefix if identity in transcript_hits), None)
+    if candidate is not None:
+        def cites(identity: str) -> bool:
+            fields = selected_variants[identity].search_fields
+            links = fields.get("sources", "").splitlines()
+            links.extend(find_results.wikilink_targets(fields.get("body", "")))
+            return type_basis.selects(fields.get("type"), note_types.ranks_as_compiled) and transcript_passages.cites_path(
+                links, candidate, kb_name=knowledge_base_name,
+            )
+
+        position = transcript_passages.preferred_position(ordered_identities, candidate, cites)
+        order = [identity for identity in ordered_identities if identity != candidate]
+        order.insert(position, candidate)
+        ordered_identities = tuple(order)
+
     ordered_identities = _order_projected_scope(
         ordered_identities,
         scope=scope,
@@ -2037,7 +2104,7 @@ def _find_projected_hits_pinned(
     if continuation_record is not None:
         visible_snapshot_digest = _visible_snapshot_digest(
             ordered_identities,
-            selected_variants,
+            selected_variants, transcript_hits,
         )
         if (
             continuation_record.visible_snapshot_digest
@@ -2057,7 +2124,7 @@ def _find_projected_hits_pinned(
         if visible_snapshot_digest is None:
             visible_snapshot_digest = _visible_snapshot_digest(
                 ordered_identities,
-                selected_variants,
+                selected_variants, transcript_hits,
             )
         next_continuation = _register_projected_continuation(
             Path(vault_root),
@@ -2134,6 +2201,7 @@ def _find_projected_hits_pinned(
                 variant=selected_variants.get(identity),
                 part=matched_parts.get(identity),
                 query=query,
+                transcript_hit=transcript_hits.get(identity),
             )
         )
     return ProjectedFindResult(
@@ -2144,6 +2212,7 @@ def _find_projected_hits_pinned(
         ),
         declared_purpose=declared_purpose,
         continuation=next_continuation,
+        incomplete_source_passages=incomplete_passages,
     )
 
 
@@ -2159,6 +2228,7 @@ def find_projected_hits(
     rerank: bool | None,
     auto_rerank: bool = False,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     rank_config: ranking_config.RankingConfig = ranking_config.DEFAULT_RANKING,
     principal: RequestPrincipal,
@@ -2185,6 +2255,7 @@ def find_projected_hits(
             rerank=rerank,
             auto_rerank=auto_rerank,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             rank_config=rank_config,
             principal=principal,

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import state_migration, state_paths
 from ..collection_store import capability, connection, schema
+from . import resident_catalogue
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
 FILE_MODE = "file"
@@ -153,8 +154,12 @@ def store_mode_or_unreadable(vault_root: Path) -> tuple[bool, str | None]:
 
 
 def forget_read_mode(vault_root: Path) -> None:
-    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records.
+
+    The vault has left store mode, so the commit's resident catalogue resolver goes with the answer.
+    """
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
+    resident_catalogue.forget(vault_root)
     if _held_mode(vault_root) is not None:
         _REQUEST_MODE.set(None)
 
@@ -224,7 +229,9 @@ STORE_FIGURES = (
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
-    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash
+    A file-mode vault reports the mode, migration gate and vault-side marker. The gate says
+    whether this build and platform allow migration. ``migration_refusal`` names a platform refusal
+    when present. Migration preflight checks the vault. A crash
     window reports its own state. A store-mode vault adds the figures that an operator checks before
     a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
     queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
@@ -249,7 +256,11 @@ def status(vault_root: Path) -> dict:
     """
     from . import marker
 
-    report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
+    platform_refusal = capability.vault_store_migration_platform_refusal()
+    can_migrate = capability.vault_store_enabled() and platform_refusal is None
+    report: dict = {"gate": "on" if can_migrate else "off"}
+    if platform_refusal:
+        report["migration_refusal"] = platform_refusal
     # A damaged manifest raises here, so the command refuses and names it.
     recorded = state_migration.vault_store_recorded(vault_root)
     try:

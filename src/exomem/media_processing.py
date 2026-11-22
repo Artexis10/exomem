@@ -133,6 +133,7 @@ class ReconcileResult:
     requeued: int = 0
     attached: bool = False  # the job row carries the request that reconcile_media was given
     document_container: dict | None = None
+    preview_intent_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -361,6 +362,7 @@ def reconcile_media(
     defer_fanout_to_terminal: bool = False,
     request: ExtractionRequest | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    enqueue_preview: bool = True,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -412,7 +414,7 @@ def reconcile_media(
                 return None
         for child in children:
             reconcile_media(vault, child, explicit=False, commit_guard=commit_guard,
-                            defer_fanout_to_terminal=defer_fanout_to_terminal)
+                            defer_fanout_to_terminal=defer_fanout_to_terminal, enqueue_preview=enqueue_preview)
         return ReconcileResult("asic-e", "pending", sidecar, None, document_container=metadata)
 
     media_type = classify_media(binary)
@@ -456,13 +458,17 @@ def reconcile_media(
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
                                        commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
-                                       request=request, queue_guard=queue_guard)
+                                       request=request, queue_guard=queue_guard, enqueue_preview=enqueue_preview)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
+            from . import media_previews
+
             text = _read_sidecar_text(vault, stored.sidecar_path)
             if text is not None and has_completed_transcript(text, media_type=media_type):
                 _retire_completed_ocr(vault, binary, stored.sidecar_path, media_type)
+                if enqueue_preview:
+                    media_previews.enqueue(vault, binary, expected_sha256=stored.binary_sha256)
                 return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
             store = media_jobs.MediaJobStore(vault)
             job = store.get_by_binary(binary)
@@ -472,6 +478,8 @@ def reconcile_media(
                     store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request
                 )
                 job = store.get(job_id)
+            if enqueue_preview:
+                media_previews.enqueue(vault, binary, expected_sha256=stored.binary_sha256)
             return ReconcileResult(
                 media_type,
                 job.state if job else "pending",
@@ -528,6 +536,17 @@ def reconcile_media(
             original=original,
         )
     )
+    from . import media_previews
+
+    preview_intent_written = False
+    if pending is not None:
+        marked = media_previews.stamp_intent(pending, rel_binary, provenance.sha256, previous=original)
+        preview_intent_written = marked != pending
+        pending = marked
+    if repaired is not None:
+        marked = media_previews.stamp_intent(repaired, rel_binary, provenance.sha256, previous=original)
+        preview_intent_written = marked != repaired
+        repaired = marked
     writes_sidecar = repaired is not None or (pending is not None and original != pending)
     queue_only = queue_guard is not None and commit_guard is not None and not writes_sidecar
 
@@ -760,8 +779,13 @@ def reconcile_media(
     if rerun_with_commit_hold:
         return reconcile_media(
             vault, binary, explicit=explicit, commit_guard=commit_guard,
-            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request,
+            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request, enqueue_preview=enqueue_preview,
         )
+    if result is not None:
+        if enqueue_preview:
+            media_previews.enqueue(vault, binary, expected_sha256=provenance.sha256)
+        elif preview_intent_written:
+            result = replace(result, preview_intent_sha256=provenance.sha256)
     if early:
         return result
 
@@ -785,17 +809,22 @@ def reconcile_all_media(
     Each artifact is independent: one unreadable or racing file is logged and
     does not prevent later candidates from converging.
     """
+    from . import media_previews
     from .vault_store.projector import BoundaryBusy
 
     if isinstance(limit, bool) or limit <= 0:
         raise ValueError("media reconciliation limit must be a positive integer")
     vault = Path(vault_root).resolve()
+    try:
+        media_previews.reconcile(vault)
+    except (OSError, ValueError) as error:
+        log.warning("preview reconciliation deferred (%s)", type(error).__name__)
     if originals.binding_for(vault) is not None:
         from . import media_store
 
         media_store.enqueue_offloads(vault)
     reconcile_one = reconcile_one or (
-        lambda binary: reconcile_media(vault, binary, explicit=False)
+        lambda binary: reconcile_media(vault, binary, explicit=False, enqueue_preview=False)
     )
     kb = managed_root(vault)
     if not kb.is_dir():
@@ -809,6 +838,7 @@ def reconcile_all_media(
     attempted = 0
     last_examined: Path | None = None
     held = False
+    preview_intents: dict[Path, tuple[Path, str]] | None = {} if media_engines.preview_generation_enabled() else None
     for binary in _iter_rotating_governed_media(
         vault,
         kb,
@@ -819,10 +849,17 @@ def reconcile_all_media(
         if examined >= limit:
             break
         examined += 1
-        if _needs_reconciliation(vault, binary, store):
+        if preview_intents is None:
+            needs_reconcile = _needs_reconciliation(vault, binary, store)
+        else:
+            needs_reconcile = _needs_reconciliation(vault, binary, store, preview_intents=preview_intents)
+        if needs_reconcile:
             attempted += 1
             try:
-                reconcile_one(binary)
+                result = reconcile_one(binary)
+                if (preview_intents is not None and isinstance(result, ReconcileResult)
+                        and result.preview_intent_sha256 is not None):
+                    preview_intents[binary] = result.sidecar_path, result.preview_intent_sha256
             except BoundaryBusy as busy:
                 # Ordinary contention in a store-mode vault: the cursor stops before this file.
                 if propagate_transient_errors:
@@ -847,6 +884,10 @@ def reconcile_all_media(
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
         if not held:
             last_examined = binary
+    if preview_intents:
+        store = media_previews.recover(
+            vault, store, [(binary, sidecar, digest) for binary, (sidecar, digest) in preview_intents.items()],
+        )
     if last_examined is not None and store is not None:
         store.set_discovery_cursor(last_examined)
     return attempted
@@ -959,6 +1000,8 @@ def _needs_reconciliation(
     vault: Path,
     binary: Path,
     store: media_jobs.MediaJobStore | None,
+    *,
+    preview_intents: dict[Path, tuple[Path, str]] | None = None,
 ) -> bool:
     try:
         sidecar = originals.original_state(vault, binary).sidecar_path
@@ -977,6 +1020,12 @@ def _needs_reconciliation(
     frontmatter, body, raw_frontmatter = parse_frontmatter(original)
     if raw_frontmatter is None:
         return True
+    if preview_intents is not None:
+        from . import media_previews
+
+        digest = media_previews.requested_digest(frontmatter, binary.relative_to(vault).as_posix())
+        if digest is not None:
+            preview_intents[binary] = sidecar, digest
     if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
         return store is not None and store.has_pending_ocr(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):

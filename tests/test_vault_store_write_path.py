@@ -1,9 +1,8 @@
 """A governed write to a store-mode vault commits in the store and writes no Markdown.
 
 OpenSpec make-vault-store-canonical tasks 2.2 and 2.3. The vault is the migration suite's generated
-vault in store mode, and the writer is bound as the store thread binds it (`require_servable` still
-refuses a store-mode service start, so no service holds the store here). The projector is off:
-nothing writes a stored page to disk, so every answer below comes from the store.
+vault in store mode. The fixture binds the writer as the store thread does. The projector is off,
+so every answer comes from the store.
 """
 
 from __future__ import annotations

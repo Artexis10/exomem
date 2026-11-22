@@ -217,40 +217,77 @@ def _count_markdown_pages(
     return count
 
 
-def _stored_index_listing(
-    directory: Path, *, on_error: Callable[[OSError], None] | None = None
-):
-    """Stored count inputs plus the same unowned directory entries the file counters see."""
-    from .vault_store import mode, ownership, read
+def _stored_index_folders(
+    *directories: Path, on_error: Callable[[OSError], None] | None = None
+) -> dict[Path, dict[str, int]] | None:
+    """Direct page counts by folder, combining store rows with the loose disk entries."""
+    from .vault_store import mode, read
 
-    if not is_managed_root_name(directory.parent.name):
+    if not is_managed_root_name(directories[0].parent.name):
         return None  # Standalone directory counters have no vault whose mode they can inspect.
-    root = directory.parents[1]
+    root = directories[0].parents[1]
     if not mode.store_mode_for_reads(root):
         return None
-    prefix = directory.relative_to(root).as_posix() + "/"
-    with read.snapshot(root) as view:
-        pages = {meta.path[len(prefix):] for meta in view.pages(prefix)}
-    folders = {
-        "/".join(parts[:depth])
-        for path in pages
-        for parts in [path.split("/")]
-        for depth in range(1, len(parts))
+    by_prefix = {
+        directory.relative_to(root).as_posix() + "/": directory for directory in directories
     }
-    pending = [directory]
+    counts: dict[Path, dict[str, int]] = {directory: {} for directory in directories}
+    loose_pages: set[str] = set()
+    for prefix, directory in by_prefix.items():
+        folders, pages = _loose_index_entries(directory, prefix, on_error)
+        counts[directory].update(dict.fromkeys(folders, 0))
+        loose_pages.update(prefix + page for page in pages)
+
+    area_paths = tuple(prefix[:-1] for prefix in by_prefix)
+    with read.snapshot(root) as view:
+        for prefix, parent, count in view.index_folder_counts(area_paths):
+            counts[by_prefix[prefix]][parent[len(prefix):].removesuffix("/")] = count
+        for prefix, directory in by_prefix.items():
+            direct = counts[directory]
+            for folder in tuple(direct):
+                parent = folder.rpartition("/")[0]
+                while parent and parent not in direct:
+                    direct[parent] = 0
+                    parent = parent.rpartition("/")[0]
+            # The index also counts folders named like pages, including those only in the store.
+            loose_pages.update(
+                prefix + folder for folder in direct
+                if folder.endswith(".md") and folder.rsplit("/", 1)[-1] != "index.md"
+            )
+        # Counts used to be over the union of stored and loose paths. Count a loose path only
+        # once when it matches a stored page, for example a directory named like that page.
+        unmatched = loose_pages - view.held_pages(loose_pages) if loose_pages else loose_pages
+    for prefix, directory in by_prefix.items():
+        direct = counts[directory]
+        for page in unmatched:
+            if page.startswith(prefix):
+                parent = page[len(prefix):].rpartition("/")[0]
+                direct[parent] = direct.get(parent, 0) + 1
+    return counts
+
+
+def _loose_index_entries(
+    directory: Path, prefix: str, on_error: Callable[[OSError], None] | None,
+) -> tuple[set[str], set[str]]:
+    from .vault_store import ownership
+
+    folders = set()
+    pages = set()
+    owns_page = ownership.page_classifier()
+    pending = [(os.fspath(directory), "")]
     while pending:
-        current = pending.pop()
+        current, parent = pending.pop()
         try:
             with os.scandir(current) as entries:
                 for entry in entries:
-                    rel = Path(entry.path).relative_to(directory).as_posix()
-                    if ownership.classify(prefix + rel) is ownership.Ownership.PAGE:
+                    rel = parent + entry.name
+                    if owns_page(prefix + rel):
                         continue
-                    if entry.name.endswith(".md"):
+                    if entry.name.endswith(".md") and entry.name != "index.md":
                         pages.add(rel)
                     if entry.is_dir(follow_symlinks=False):
                         folders.add(rel)
-                        pending.append(Path(entry.path))
+                        pending.append((entry.path, rel + "/"))
         except FileNotFoundError:
             continue
         except OSError as error:
@@ -258,27 +295,28 @@ def _stored_index_listing(
             if on_error is not None:
                 on_error(error)
             continue
-    # The file counters count a directory ending in .md as well as its descendants.
-    pages.update(folder for folder in folders if folder.endswith(".md"))
-    return read.Listing(tuple(pages), tuple(folders))
+    return folders, pages
 
 
 def _count_sources(
-    sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None
+    sources_dir: Path, *, on_error: Callable[[OSError], None] | None = None,
+    stored_folders: Mapping[str, int] | None = None,
 ) -> dict[str, int]:
     """Per top-level source-type count, including themed nested folders."""
-    stored = _stored_index_listing(sources_dir, on_error=on_error)
-    if stored is not None:
+    if stored_folders is None:
+        stored = _stored_index_folders(sources_dir, on_error=on_error)
+        if stored is not None:
+            stored_folders = stored[sources_dir]
+    if stored_folders is not None:
         out = {
-            name: 0 for name in stored.folders
-            if "/" not in name and not name.startswith("_")
+            name: 0 for name in stored_folders
+            if name and "/" not in name and not name.startswith("_")
             and not is_scan_skipped_runtime_name(name)
         }
-        for rel in stored.pages:
-            parts = rel.split("/")
-            if (len(parts) > 1 and parts[0] in out and parts[-1] != "index.md"
-                    and rel.endswith(".md") and not any(p.startswith("_") for p in parts[1:-1])):
-                out[parts[0]] += 1
+        for parent, count in stored_folders.items():
+            first, _, nested = parent.partition("/")
+            if first in out and not any(part.startswith("_") for part in nested.split("/")):
+                out[first] += count
         return out
     out: dict[str, int] = {}
     try:
@@ -360,7 +398,10 @@ def _owner_of(owners: tuple[_NotesOwner, ...], parts: tuple[str, ...]) -> _Notes
     return best
 
 
-def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> dict[str, int]:
+def _count_notes(
+    notes_dir: Path, *, home_set: homes.HomeSet | None = None,
+    stored_folders: Mapping[str, int] | None = None,
+) -> dict[str, int]:
     """Per-folder compiled-note count, recursing into project/domain/medium subfolders.
 
     Returns a dict keyed by the token of each folder's `index.md` Counts row: the type's
@@ -368,18 +409,17 @@ def _count_notes(notes_dir: Path, *, home_set: homes.HomeSet | None = None) -> d
     home's key for a home. A page counts once, under the deepest folder that owns it.
     Excludes index.md files and any folder starting with "_".
     """
-    stored = _stored_index_listing(notes_dir)
-    if stored is not None:
+    if stored_folders is None and (stored := _stored_index_folders(notes_dir)) is not None:
+        stored_folders = stored[notes_dir]
+    if stored_folders is not None:
         owners = tuple(
             owner for owner in _notes_owners(home_set)
-            if "/".join(owner.parts) in stored.folders
+            if "/".join(owner.parts) in stored_folders
         )
         out = {owner.token: 0 for owner in owners}
-        for rel in stored.pages:
-            parts = tuple(rel.split("/"))
-            owner = _owner_of(owners, parts[:-1])
-            if owner is not None and parts[-1] != "index.md" and rel.endswith(".md"):
-                out[owner.token] += 1
+        for folder, count in stored_folders.items():
+            if count and (owner := _owner_of(owners, tuple(folder.split("/")))) is not None:
+                out[owner.token] += count
         return out
     out: dict[str, int] = {}
     if not notes_dir.is_dir():
@@ -613,24 +653,25 @@ def _count_entities(
     entities_dir: Path,
     *,
     registry: EntityTypeRegistry | None = None,
+    stored_folders: Mapping[str, int] | None = None,
 ) -> dict[str, int]:
     """Per-entity-type count, mirrors `_count_sources` shape.
 
     Returns a dict keyed by registered entity-type ID. Excludes index.md and
     `_*` folders.
     """
-    stored = _stored_index_listing(entities_dir)
-    if stored is not None:
+    if stored_folders is None and (stored := _stored_index_folders(entities_dir)) is not None:
+        stored_folders = stored[entities_dir]
+    if stored_folders is not None:
         registry = registry or load_entity_types(entities_dir.parents[1])
-        out = {
-            definition.id: 0 for folder in stored.folders
-            if "/" not in folder and not folder.startswith("_")
-            and (definition := registry.by_folder.get(folder.casefold())) is not None
-        }
-        for key, count in count_entity_pages(
-            (rel for rel in stored.pages if rel.endswith(".md")), registry
-        ).items():
-            out[key] = count
+        out = {}
+        for folder, count in stored_folders.items():
+            first, separator, _ = folder.partition("/")
+            definition = registry.by_folder.get(first.casefold())
+            if definition is not None and (count or not separator) and not any(
+                part.startswith("_") for part in folder.split("/")
+            ):
+                out[definition.id] = out.get(definition.id, 0) + count
         return out
     out: dict[str, int] = {}
     if not entities_dir.is_dir():
@@ -763,7 +804,9 @@ def _entities_bullet_re(
     )
 
 
-def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
+def _count_notes_by_subfolder(
+    notes_dir: Path, *, stored_folders: Mapping[str, int] | None = None,
+) -> dict[str, dict[str, int]]:
     """Return nested counts: `{type_folder: {subfolder: count}}`.
 
     For `Research`, `Experiments`, `Productions` (the nested types), the inner
@@ -771,29 +814,30 @@ def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
     flat types (`Insights`, `Failures`, `Patterns`), the inner dict has a
     single `''` key with the total.
     """
-    stored = _stored_index_listing(notes_dir)
-    if stored is not None:
+    if stored_folders is None and (stored := _stored_index_folders(notes_dir)) is not None:
+        stored_folders = stored[notes_dir]
+    if stored_folders is not None:
         out = {
-            folder: {} for folder in stored.folders
-            if "/" not in folder and not folder.startswith("_")
+            folder: {} for folder in stored_folders
+            if folder and "/" not in folder and not folder.startswith("_")
             and not is_scan_skipped_runtime_name(folder)
         }
-        for folder in stored.folders:
+        for folder in stored_folders:
             parts = folder.split("/")
             if len(parts) == 2 and parts[0] in out and not parts[1].startswith("_"):
                 out[parts[0]][parts[1]] = 0
         nested = {folder for folder, children in out.items() if children}
         for folder in out.keys() - nested:
             out[folder][""] = 0
-        for rel in stored.pages:
-            parts = rel.split("/")
-            if parts[0] not in out or not rel.endswith(".md") or parts[-1] == "index.md":
+        for folder, count in stored_folders.items():
+            first, *rest = folder.split("/")
+            if not count or first not in out:
                 continue
-            inner = out[parts[0]]
-            if parts[0] not in nested or len(parts) == 2:
-                inner[""] = inner.get("", 0) + 1
-            elif parts[1] in inner:
-                inner[parts[1]] += 1
+            inner = out[first]
+            if first not in nested or not rest:
+                inner[""] = inner.get("", 0) + count
+            elif rest[0] in inner:
+                inner[rest[0]] += count
         return out
     out: dict[str, dict[str, int]] = {}
     if not notes_dir.is_dir():
@@ -1033,17 +1077,27 @@ def compute_subindex_writes(
     notes_dir = kb / "Notes"
     entities_dir = kb / "Entities"
     entity_registry = load_entity_types(vault_root)
+    count_dirs: tuple[Path, ...] = (notes_dir, entities_dir)
+    if sources_counts is None:
+        count_dirs = (sources_dir, *count_dirs)
+    with call_spans.span("indexes.stored_folder_counts"):
+        stored_folders = _stored_index_folders(*count_dirs) or {}
 
     if sources_counts is None:
         with call_spans.span("indexes.source_census"):
-            sources_counts = _count_sources(sources_dir)
+            sources_counts = _count_sources(
+                sources_dir, stored_folders=stored_folders.get(sources_dir)
+            )
     else:
         sources_counts = dict(sources_counts)
     home_set = homes.load(vault_root)
     notes_owners = _notes_owners(home_set)
-    notes_counts = _count_notes(notes_dir, home_set=home_set)
-    entities_counts = _count_entities(entities_dir, registry=entity_registry)
-    notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
+    notes_folders = stored_folders.get(notes_dir)
+    notes_counts = _count_notes(notes_dir, home_set=home_set, stored_folders=notes_folders)
+    entities_counts = _count_entities(
+        entities_dir, registry=entity_registry, stored_folders=stored_folders.get(entities_dir)
+    )
+    notes_by_subfolder = _count_notes_by_subfolder(notes_dir, stored_folders=notes_folders)
 
     # Virtually count each pending path so the index shows post-write state.
     for raw_path in pending_paths or []:

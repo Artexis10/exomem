@@ -636,11 +636,13 @@ def _write_targets(vault: Path, target: Path) -> int:
 
     An exclude pattern per original costs restic one comparison per file and pattern, so it grows as files times
     originals. A list costs one entry per file: a directory with no original below it is one entry, and a
-    directory that holds one lists its other entries. The original pool and each bound original are left out.
+    directory that holds one lists its other entries. The original pool and each bound original are left out,
+    and so is the upload stage: a stage is an upload's transient copy that a committed upload renames into
+    place, and its bytes may still be growing while restic reads them.
     """
-    from . import original_pool
+    from . import original_pool, upload_stage
 
-    omitted = {str(original_pool.pool_root(vault))}
+    omitted = {str(original_pool.pool_root(vault)), str(upload_stage.stage_root(vault))}
     count = 0
     for snapshot in _bound_originals(vault):
         count += 1

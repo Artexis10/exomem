@@ -163,19 +163,20 @@ def permits(
 ) -> bool | None:
     """Meet with ordinary policy; never let a caller-declared purpose widen RAW.
 
-    No-byte admission returns None when authority or candidate release bytes
-    remain unproved. Only False proves hiding to a pending identity consumer.
+    No-byte admission can defer an original release until it establishes its authority
+    and binding. Derived pixels require current owner authority and need no bytes.
     """
     if not marked(path):
         return True
+    owner = is_owner(who)
+    # RAW release never approves extracted pixels for another audience.
+    if derived and not owner:
+        return False
     valid, trusted_purpose = _authority(root, who)
     if not valid:
-        return False if resolve_bytes else None
-    if is_owner(who):
+        return False if resolve_bytes or derived else None
+    if owner:
         return True
-    # An original's release never approves newly extracted pixels or aliases.
-    if derived:
-        return False
     from . import policy
 
     current = policy.load(root)

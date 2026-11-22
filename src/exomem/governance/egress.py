@@ -2098,6 +2098,15 @@ def unrestricted_content_access(vault_root: Path, who: RequestPrincipal) -> bool
             and connector_boundary.unrestricted(vault_root, who))
 
 
+def unrestricted_source_access(
+    vault_root: Path, *, purpose: str | None, principal: RequestPrincipal | None = None,
+) -> bool:
+    """Whether the caller may use the raw source fast path."""
+    policy = policy_module.load(Path(vault_root))
+    who = (principal if principal is not None else effective_principal()).with_purpose(purpose)
+    return policy_empty_without_writer(vault_root, policy) and unrestricted_content_access(vault_root, who)
+
+
 def _independent_content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                                  snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
     """Independent content floors cannot be widened by owner status or grants."""
@@ -2334,6 +2343,7 @@ def _stored_admission_many(
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
     classes = memo.setdefault(("scope-admission", named, content_only), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
+    check_tombstones = bool(tombstones) and not content_only
     answers = {}
     for path in paths:
         scopes = scope_sets.get(path)
@@ -2352,7 +2362,7 @@ def _stored_admission_many(
                 permitted = decision.level >= RELEASE_FLOOR
             classes[scopes] = (permitted, decision)
         permitted, decision = classes[scopes]
-        tombstoned = not content_only and lifecycle.is_tombstoned_in(tombstones, path)
+        tombstoned = check_tombstones and lifecycle.is_tombstoned_in(tombstones, path)
         allowed = permitted and not tombstoned
         if record_outcomes and not tombstoned and decision is not None and recording:
             content_hash, size = page_admission.evidence(root, path)
@@ -4128,6 +4138,8 @@ def guard_working_set(
         _record_blocked_outcome(who.audience_id)
         return None
 
+    from .. import working_set
+
     if "map" not in guarded:
         # A slice is restored only beside the map it was compiled with, so one without a map is never served.
         guarded.pop("turn_slice", None)
@@ -4184,6 +4196,17 @@ def guard_working_set(
             guarded["budget"]["used_chars"] = context_views.packet_chars(
                 map_block, slice_block, guarded.get("task_context"), guarded.get("next_action"),
             )
+
+    task_connections = any(
+        item.get("links") or item.get("links_omitted")
+        for item in (guarded.get("task_context") or {}).get("candidates", ())
+    )
+    if task_connections or working_set.packet_has_graph_quotes(guarded):
+        # Task links and graph quotes require unrestricted source access. If it narrowed
+        # during compilation, refuse the stale packet rather than releasing old material.
+        with state_paths.outside_resolution_scope(), policy_module.outside_request_policy_snapshot():
+            if not unrestricted_source_access(vault_root, purpose=purpose, principal=who):
+                return None
 
     ctx = _packet_release(
         vault_root,
@@ -6130,6 +6153,7 @@ def _artifact_text_key(key: Any) -> bool:
 
 
 def _withheld_cross_check(
+    command_name: str,
     vault_root: Path,
     result: Any,
     *,
@@ -6137,6 +6161,7 @@ def _withheld_cross_check(
     purpose: str | None = None,
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
     _current_parent_binding: tuple[str, str] | None = None,
+    _item_receipt: bool = False,
 ) -> Any:
     """Second, independent check that nothing sub-notice survived to the wire.
 
@@ -6153,9 +6178,16 @@ def _withheld_cross_check(
     `is_dir()`); `blocked` or an unresolved principal -> every path-bearing
     entry dropped; otherwise decide each named path.
     """
+    page_version_id = None
+    if command_name == "read_memory" and isinstance(result, Mapping) and "id" in result:
+        from .. import page_names
+
+        # The read producer's version token contains a dot but names no file.
+        page_version_id = page_names.id_of_read(result)
     return filter_withheld_entries(vault_root, result, principal=principal, purpose=purpose,
                                    _artifact_scan_demand=_artifact_scan_demand,
-                                   _current_parent_binding=_current_parent_binding)
+                                   _current_parent_binding=_current_parent_binding,
+                                   _item_receipt=_item_receipt, _page_version_id=page_version_id)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -6233,6 +6265,67 @@ def _at_release_boundary(function: Callable[..., Any]) -> Callable[..., Any]:
 
     return wrapped
 
+
+
+def _access_config_absent(root: Path) -> bool:
+    """Only an absent directory entry proves no access configuration."""
+    try:
+        access.access_config_path(root).lstat()
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _name_committed_file_item(
+    root: Path, result: dict[str, Any], path: str, version: str,
+) -> dict[str, Any]:
+    """Use the exact ordinary file image when the vault has no access configuration."""
+    from .. import document_containers, record_formats, runtime_resources
+
+    # Leave the delivery reserve alone. The held file open and guard recheck do not retry.
+    budget = request_budget.current()
+    delay = min(0.1, budget.remaining() - request_budget.DELIVERY_RESERVE_SECONDS) if budget else 0.1
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=delay))
+    try:
+        with request_budget.checking(check):
+            check()
+            if (not _access_config_absent(root)
+                    or reserved_paths.classify_logical(path).disposition != reserved_paths.PathDisposition.ORDINARY
+                    or raw_protection.marked(path) or document_containers.in_payload_tree(path)):
+                return result
+            raw, guard = vault._read_bounded_guarded_snapshot(root, path, record_formats._MAX_ITEM_BYTES)
+            if guard.expected_content_hash != version:
+                return result
+            with runtime_resources.parser_preparation(
+                len(raw), limit_bytes=record_formats._MAX_ITEM_BYTES, check=check,
+            ) as preparation:
+                # Charge the same logical Markdown header that the page parser will see.
+                preparation.hold(raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n"))
+                page = find_corpus._parse_page_after_checkpoint(
+                    root / path, 0, root, content=raw, resolved_relative=path,
+                )
+            if page is None or not page.frontmatter_valid or "container_member" in page.frontmatter:
+                return result
+            if any(bridges.parse_bridge_frontmatter(page.frontmatter)):
+                return result
+            named = _name_receipt_title(result, path, page.title)
+            guard.recheck(root)
+            check()
+            return named if _access_config_absent(root) else result
+    except (Exception, request_budget.ReadBudgetExhausted):  # noqa: BLE001 - optional prose cannot refuse a commit
+        return result
+
+
+def _name_receipt_title(result: dict[str, Any], path: str, title: str | None) -> dict[str, Any]:
+    """Replace the one subject of the summary and preserve the receipt fields."""
+    from ..mutation_terminal import _lead
+
+    summary = result.get("user_summary")
+    if isinstance(summary, str) and path and isinstance(title, str) and title.strip():
+        head, separator, tail = summary.partition(_lead("", [path]))
+        if separator:
+            return {**result, "user_summary": f"{head} -> {title}{tail}"}
+    return result
 
 
 @_at_release_boundary
@@ -6343,13 +6436,19 @@ def _postfilter(
         if isinstance(result.get("ref"), str) and context_views.parse_view_ref(result["ref"]) is not None:
             view_purpose = (request_kwargs or {}).get("purpose")
             result = guard_view_response(vault_root, result, purpose=view_purpose)
+    from ..capabilities import current_active_surface
+
+    surface = current_active_surface()
+    mcp = surface is not None and surface.surface == "mcp"
+    item_receipt = mcp and command_name in {"record_memory", "plan_memory"}
     artifact_scan_demand = _ArtifactScanDemand()
     # Fixed phase labels, timing only: the cross-check, the artifact gate (its
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         result = _withheld_cross_check(
-            vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
-            _current_parent_binding=parent_binding,
+            command_name, vault_root, result, purpose=view_purpose,
+            _artifact_scan_demand=artifact_scan_demand,
+            _current_parent_binding=parent_binding, _item_receipt=item_receipt,
         )
     from ..collection_store import governance as canonical_governance
 
@@ -6368,6 +6467,11 @@ def _postfilter(
         if blocked:
             _record_credential_block()
         return cleaned
+    if mcp and command_name == "episode_memory" and isinstance(result, dict):
+        # Episodes reuse the already released Source.
+        source = result.get("source")
+        if isinstance(source, Mapping) and isinstance(source.get("path"), str):
+            result = _name_receipt_title(result, source["path"], source.get("title"))
     with call_spans.span("egress.scrub"):
         cleaned, blocked = scrubber.scrub_value(result)
     if blocked:
@@ -6395,9 +6499,11 @@ def _postfilter(
                 purpose=(request_kwargs or {}).get("purpose"),
             )
         if "positions" in cleaned:
-            # Every other field is in place, so the block can end the response: real-model replays used the
-            # positions when they were read last and mostly passed over them mid-packet.
-            cleaned["positions"] = cleaned.pop("positions")
+            # The block leads the response. Real-model replays of two incident conversations, on a leading yes/no
+            # question that presupposes a default cause: mid-packet, the block was passed over, and last it opened
+            # the first answer in 1 of 8 replays. First, every first answer opened with the person's position
+            # (4 of 4), with no "Yes" before it. Do not move it back to the end or the middle.
+            cleaned = {"positions": cleaned.pop("positions"), **cleaned}
         if "map" in cleaned and isinstance(cleaned.get("budget"), dict):
             cleaned["budget"]["serialized_chars"] = context_views.serialized_chars(cleaned)
     if material_projection is not None and isinstance(cleaned, dict):
@@ -6868,6 +6974,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "append": "mutation",
         "bulk_upsert": "mutation",
         "update": "mutation",
+        "retract": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
@@ -8269,8 +8376,7 @@ def owner_only_aggregate(
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
                 if entry.kind != "file" or managed_split(path) is None:
                     continue
-                canonical = operation.projection_decision(path)
-                if canonical is None:
+                if not operation.projection_present(path):
                     continue
                 decision = _decide_path(
                     vault_root, path, policy=operation.policy,
@@ -8647,6 +8753,39 @@ def reader_view(
     return ReaderView(
         vault_root, pages, principal=who if who is not None else effective_principal(),
         purpose=purpose, unit_identity_only=unit_identity_only,
+    )
+
+
+def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) -> bool:
+    """Stop a known preview denial using only the selected path and current policy."""
+    if (not who.resolved or reserved_paths.classify_logical(path).blocked
+            or not _identity_path_accessible(vault_root, path)
+            or raw_protection.permits(vault_root, path, who, derived=True, resolve_bytes=False) is False):
+        return False
+    policy = policy_module.load(vault_root)
+    if policy.blocked:
+        return False
+    try:
+        boundary = connector_boundary.snapshot(vault_root, policy)
+    except connector_boundary.BoundaryUnavailable:
+        return False
+    if policy.empty or bound_writer(vault_root) is not None:
+        return True
+    try:
+        # Unresolved scopes can only narrow the result. Known scopes still supply their applicable ceilings.
+        scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).scope_ids
+    except membership_module.MembershipUnresolved:
+        return False
+    if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
+        return False
+    decision = decide(
+        scopes, audience=who.audience_id, purpose=_declared_purpose(vault_root, who, None), policy=policy,
+    )
+    if decision.level >= LEVEL_FULL:
+        return True
+    # A byte-bound grant can raise the standing floor. Organization caps still apply to it.
+    return who.verified_authorization_session is not None and all(
+        scope.organization_cap >= LEVEL_FULL for scope in decision.scope_contributions
     )
 
 
@@ -9129,6 +9268,8 @@ def filter_withheld_entries(
     _artifact_scan_demand: _ArtifactScanDemand | None = None,
     explicit_reference_markup: bool = False,
     _current_parent_binding: tuple[str, str] | None = None,
+    _item_receipt: bool = False,
+    _page_version_id: str | None = None,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -9514,6 +9655,8 @@ def filter_withheld_entries(
         # Only exact producer-bound metadata slots avoid physical-byte proof.
         # A sibling body or another occurrence of the same path remains ordinary.
         request_budget.checkpoint()
+        if location == ("id",) and _page_version_id is not None and entry == _page_version_id:
+            return []
         if metadata_references:
             if isinstance(entry, Mapping):
                 entry = {key: value for key, value in entry.items()
@@ -9684,6 +9827,19 @@ def filter_withheld_entries(
             for resolved in _resolve_vault_item(candidate)
         )
     filtered = _walk(payload)
+    if _item_receipt and policy.empty and who.resolved and writer is None and isinstance(filtered, dict):
+        paths, version = filtered.get("paths"), filtered.get("after_item_hash")
+        if (isinstance(paths, list) and len(paths) == 1 and isinstance(paths[0], str)
+                and isinstance(version, str) and _is_markdown_path(paths[0])
+                and isinstance(filtered.get("user_summary"), str)
+                and isinstance(filtered.get("item_key", filtered.get("plan_id")), str)):
+            path = paths[0]
+            decision = decisions_by_path.get(path)
+            if (resolved_items.get(path) == (path,) and decision is not None
+                    and decision.level == LEVEL_FULL and not decision.release_strip):
+                # The ordinary path decision is already complete. The receipt binds the exact title bytes,
+                # so a replay needs no current manifest recipe and a SQLite row token cannot pass.
+                filtered = _name_committed_file_item(vault_root, filtered, path, version)
     if (
         isinstance(payload, Mapping)
         and {"items", "summary", "shown", "total", "truncated", "note"}.issubset(payload)

@@ -254,11 +254,16 @@ def verify_staged(
 def preflight(vault_root: Path) -> dict:
     """Refuse a vault that cannot enter store mode; otherwise count what a migration would take. It takes no lease.
 
-    Each refusal costs the owner one command to fix: the release gate, the lease topology, the collection store,
-    the mode, the vault's marker and the sidecars are the facts that a migration on the wrong
-    footing would fail on late.
+    Check platform support, the release capability, the lease, the store, the current
+    mode, the vault marker and the sidecars before staging any changes.
     """
     admission.require_owner(vault_root, "store-mode migrate")
+    if platform_refusal := capability.vault_store_migration_platform_refusal():
+        raise OpError(
+            platform_refusal,
+            "store-mode migration is not yet supported on Windows",
+            "Keep using this vault in file mode. Windows migration support follows NTFS acceptance.",
+        )
     if not capability.vault_store_enabled():
         raise OpError(
             "VAULT_STORE_NOT_RELEASED",

@@ -178,6 +178,29 @@ class StoreSnapshot:
         for row in rows:
             yield PageMeta(*row)
 
+    def index_folder_counts(self, directories: tuple[str, ...]) -> Iterator[tuple[str, str, int]]:
+        """Each area's direct Markdown count per parent, including parents with only indexes."""
+        for directory in directories:
+            # "/" sorts immediately before "0". Bound the scan to the area's children.
+            prefix, upper = directory + "/", directory + "0"
+            lower = prefix
+            counts: dict[str, int] = {}
+            while True:
+                rows = self.connection.execute(
+                    "SELECT path FROM store_pages WHERE path >= ? AND path < ? ORDER BY path LIMIT ?",
+                    (lower, upper, KEYS_PER_QUERY),
+                ).fetchall()
+                for (path,) in rows:
+                    parent, slash, leaf = path.rpartition("/")
+                    folder = parent + slash
+                    counted = leaf.endswith(".md") and leaf != "index.md"
+                    counts[folder] = counts.get(folder, 0) + counted
+                if len(rows) < KEYS_PER_QUERY:
+                    break
+                # NUL sorts immediately after the last key, as in the child scan.
+                lower = rows[-1][0] + "\x00"
+            yield from ((prefix, parent, count) for parent, count in counts.items())
+
     def children(self, dir_rel: str) -> Iterator[Child]:
         """The direct children of a folder, in name order: the pages and the folders that hold pages.
 

@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: 66b38cc640f8e851bcb6ff73848bc1aba50116b057ef6d6fb2dcaa10a663850c
+  skill_contract: 8fe7d420e5443cd2d7fa79d55c2c102232843831b1dbc5d0b3a6189eb961ed7f
   version: "0.1.0"
 ---
 
@@ -74,7 +74,7 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 
 ## Workflow
 1. Search Exomem with `search_memory` for the project/topic so reflection builds on existing memory.
-2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views (attributed, with their uncertainty, not as fact), open questions (not a person's unsure report of an event), settled values (in full, not file pointers), and next actions.
+2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views and unsure reports (attributed, with their uncertainty, never as fact), open questions (including whether something happened), settled values (in full, not file pointers), and next actions.
 3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
 5. Link the pages you already read in step 1 inline, using `inspect_memory(operation="connections.suggest_links")` to catch the ones you missed; draft the edges that carry direction under `## Relations`. Then save with `create_note`, carrying the sources and accepted links in the first write.
@@ -91,7 +91,7 @@ exact calls). Corrections use a new canonical key and deprecate the old one.
 Return what was saved, what was intentionally not saved, and remaining open questions.
 
 ## Save rules
-Save conclusions, not a transcript. Keep enough context that the lesson is reusable later.
+Save conclusions, not a transcript. Keep enough context that the lesson is reusable later. Save each claim at its true strength: never more certain, more general or more settled than its source made it. No note mentions what stays unwritten.
 
 ## Mistakes to avoid
 Do not capture every turn. Do not flatten failures and patterns into generic summaries. Do not erase uncertainty or next actions.

@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from dataclasses import replace as dataclass_replace
@@ -44,6 +44,10 @@ REGISTRY_VERSION = 1
 ORIGINAL_POOL_DIRNAME = "_Originals"
 ORIGINAL_POOL_DESCRIPTOR_ID = "original-pool"
 ORIGINAL_POOL_OWNER = "original_pool"
+# An upload's bytes wait here, on the vault's own filesystem, between their one copy and the commit that renames them in.
+UPLOAD_STAGE_DIRNAME = "_UploadStage"
+UPLOAD_STAGE_DESCRIPTOR_ID = "upload-stage"
+MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -245,6 +249,7 @@ class GenericBinarySource:
     version: held_fs.FileVersion
     _check: Callable[[], None]
     _probe: Callable[[], held_fs.FileVersion]
+    _reopen: Callable[[], AbstractContextManager[GenericBinarySource]] | None = None
 
     def require_current(self) -> None:
         self._check()
@@ -480,6 +485,16 @@ _REGISTRY = (
         trees=("_sources/corrections",),
     ),
     InternalStateDescriptor(
+        "source-imports", "source_imports", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/imports",),
+    ),
+    InternalStateDescriptor(
+        "source-import-intents", "source_imports", StatePlacement.EXTERNAL_STATE,
+        rebuildable=False,
+        trees=("source-import-intents",),
+    ),
+    InternalStateDescriptor(
         "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_sources/custody",),
@@ -621,6 +636,13 @@ _REGISTRY = (
         ),
         migrates_from_vault=True,
         rebuildable=False,
+    ),
+    InternalStateDescriptor(
+        "media-previews",
+        "media_previews",
+        StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
+        trees=(MEDIA_PREVIEWS_DIRNAME,),
     ),
     InternalStateDescriptor(
         "maintenance-jobs-store",
@@ -822,6 +844,14 @@ _REGISTRY = (
         # install and follow that note (atomic same-volume rename), so the
         # placement suite exempts it from the constructor walk.
         component_tree_patterns=(_BATCH_WORKSPACE_RE,),
+    ),
+    InternalStateDescriptor(
+        UPLOAD_STAGE_DESCRIPTOR_ID,
+        "upload_stage",
+        StatePlacement.TARGET_ADJACENT,
+        # Machine-local scratch that must share the vault's volume: the commit renames a stage into its
+        # batch workspace and the destination, so it follows the content and never the external root.
+        trees=(UPLOAD_STAGE_DIRNAME.casefold(),),
     ),
     InternalStateDescriptor(
         "held-publication",
@@ -1775,7 +1805,10 @@ def open_generic_binary(vault_root: Path, value: object, *, physical: bool = Fal
 
             require_current()
             with os.fdopen(os.dup(file.descriptor), "rb") as stream:
-                yield GenericBinarySource(stream, version, require_current, file.version)
+                yield GenericBinarySource(
+                    stream, version, require_current, file.version,
+                    functools.partial(open_generic_binary, vault_root, value, physical=physical),
+                )
                 require_current()
     except held_fs.HeldFsError as error:
         raise ReservedPathLeafError(error.code) from error
@@ -1827,46 +1860,54 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
 
 def hold_generic_file(vault_root: Path, value: object, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Retain one ordinary file for checked delivery, reusing a proven digest when available."""
     return _hold_binary_file(vault_root, value, open_generic_binary(vault_root, value),
-                             recorded_sha256=recorded_sha256, deadline=deadline)
+                             recorded_sha256=recorded_sha256, deadline=deadline, strict_exit=strict_exit)
 
 
 @contextmanager
 def _hold_binary_file(vault_root: Path, value: object, open_source, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Hold the canonical source open and prove its bytes with no private copy.
 
     `recorded_sha256` gives the digest that a record proves for the file at the held
     version, or None. A recorded digest reads no byte. Otherwise one pass through the
     handle hashes the file. The caller then reads bytes with `read_held`.
+    Use `strict_exit` when the caller waits for teardown before returning any bytes.
     """
     _copy_deadline(deadline)
     finished = False
     try:
         with open_source as source:
-            try:
-                version = source.version
-                descriptor = source.stream.fileno()
-                digest = recorded_sha256(version)
-                if digest is None:
-                    digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
-                    if size != version.size or source.current_version() != version:
-                        raise ReservedPathLeafError("IO_REFUSED")
-                held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
-                                       digest, version.size, None, version, deadline, None, source)
-            except (OSError, held_fs.HeldFsError) as error:
-                raise ReservedPathLeafError("IO_REFUSED") from error
+            held = prove_held_binary(vault_root, value, source, recorded_sha256=recorded_sha256, deadline=deadline)
             yield held
             finished = True
     except ReservedPathLeafError:
         # Only the name check that `open_generic_binary` runs at exit can raise here once the caller finished
         # cleanly. `read_held` already proved each byte sent against the held version, so a rename after the
         # last byte changes nothing that was delivered and must not fail a complete response.
-        if not finished:
+        if strict_exit or not finished:
             raise
+
+
+def prove_held_binary(vault_root: Path, value: object, source: GenericBinarySource, *,
+                      recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                      deadline: float | None = None) -> GenericFileCopy:
+    """Prove bytes through an original handle the caller already holds."""
+    try:
+        version = source.version
+        descriptor = source.stream.fileno()
+        digest = recorded_sha256(version)
+        if digest is None:
+            digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
+            if size != version.size or source.current_version() != version:
+                raise ReservedPathLeafError("IO_REFUSED")
+        return GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
+                               digest, version.size, None, version, deadline, None, source)
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
 
 
 def read_held(held: GenericFileCopy, offset: int, length: int) -> bytes:
@@ -1940,6 +1981,21 @@ def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.File
             if current != copied.source_version:
                 raise ReservedPathLeafError("IO_REFUSED")
             return current
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+@contextmanager
+def revalidate_held_binary(copied: GenericFileCopy) -> Iterator[GenericFileCopy]:
+    """Reacquire the source after teardown and reuse its digest only at the same exact version."""
+    _copy_deadline(copied.deadline)
+    if copied.held is None or copied.held._reopen is None:
+        raise ReservedPathLeafError("IO_REFUSED")
+    try:
+        with copied.held._reopen() as source:
+            if source.version != copied.source_version:
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            yield dataclass_replace(copied, held=source)
     except (OSError, held_fs.HeldFsError) as error:
         raise ReservedPathLeafError("IO_REFUSED") from error
 

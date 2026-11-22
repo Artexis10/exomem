@@ -42,7 +42,7 @@ def test_planning_revision_reads_and_normalizes_graph_once(store, monkeypatch, s
             encoded = json.dumps(values)
             encoded_values.add(encoded)
             conn.execute(
-                "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,"
+                "INSERT INTO item_rows(collection_id,item_key,natural_key,row_version,schema_version,"
                 "values_json,body,payload_hash,view_path,created_txn,updated_txn,governance_json) "
                 "VALUES(?,?,NULL,1,1,?,'',?,?,1,1,?)",
                 (CID, key, encoded, tokens.payload_hash(1, key, values, ""),

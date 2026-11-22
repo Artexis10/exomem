@@ -341,12 +341,14 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         index_paths,
         lexstore,
         media_jobs,
+        media_previews,
         memory_refs,
         ownership_rotation,
         procedure_approval,
         review_state,
         served_context,
         source_custody,
+        source_imports,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -394,6 +396,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "media-previews",
         "ownership-review",
         "procedure-approval-key",
         "procedure-approvals",
@@ -403,7 +406,10 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "review-state",
         "source-corrections",
         "source-custody",
+        "source-import-intents",
+        "source-imports",
         "served-context",
+        "upload-stage",
         "voice-profile-store",
     }
 
@@ -421,6 +427,9 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     claims_from_owners = [
         (root / compiled_history.history_root(), "compiled-history"),
         (source_custody.manifest_root(root) / "6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b.json", "source-custody"),
+        (source_imports.receipt_root(root) / ("a" * 64 + ".json"), "source-imports"),
+        (state_paths.vault_state_dir(root) / source_imports._PREPARED_STORE / ("a" * 64 + ".json"),
+         "source-import-intents"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
@@ -435,6 +444,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (collection_conversion.archive_folder(root, "c" * 32, 1) / "manifest.json", "collection-archive"),
         (media_jobs.job_store_path(root), "media-jobs-store"),
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
+        (state_paths.vault_state_dir(root) / media_previews.STORE / "aa" / ("a" * 64 + ".json"), "media-previews"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (

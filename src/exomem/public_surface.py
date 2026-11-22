@@ -627,8 +627,8 @@ def door_schema(door: str, operations: Sequence[DoorOp]) -> dict[str, Any]:
 
 _DOOR_TEXT = {
     "read": ("Inspect memory",
-             "Read-only operations that no typed tool covers: files, schema, governance, imports, maintenance, "
-             "connections, review context, episodes, media, collection and plan details."),
+             "Read-only fallback for files, schema, governance, imports, maintenance, connections, reviews, "
+             "episodes, media, collections and plans."),
     "write": ("Manage memory",
               "Operations that change memory and that no typed tool covers: files, schema, governance, imports, "
               "repairs, connections, episodes, media, collection and plan structure. Preview with the "

@@ -652,7 +652,7 @@ def test_replica_verification_checks_containment_of_collections_omitted_by_the_h
         authority.marker_path(root).unlink()
     source = replica.replica_path(root)
     with sqlite3.connect(source) as writer:
-        writer.execute("UPDATE items SET view_path=? WHERE collection_id=?",
+        writer.execute("UPDATE item_rows SET view_path=? WHERE collection_id=?",
                        ("Knowledge Base/Notes/Outside.md", DAILY))
     before = source.read_bytes()
     with pytest.raises(connection.CollectionStoreError, match="outside canonical ownership"):

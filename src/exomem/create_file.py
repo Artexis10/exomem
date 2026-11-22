@@ -50,6 +50,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     resolve_under_vault,
     respell_new_path,
     serialize_frontmatter,
@@ -377,8 +378,11 @@ def create_file(
         auxiliary: list[PlannedWrite] = []
         derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
         top_index = kb_root(vault_root) / "index.md"
+        from .vault_store import read as store_read
+
+        # A store-mode top index is a stored page that may have no file yet, so the store answers first.
         if (
-            top_index.is_file()
+            store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
             and preflight.applicability in {"full", "structural"}
             and connector_boundary.effect_admission(vault_root)(top_index)
         ):

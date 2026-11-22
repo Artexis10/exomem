@@ -30,6 +30,7 @@ from test_vault_store_migration import (
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
+from test_vault_store_served import call
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
@@ -63,7 +64,7 @@ from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.kbdir import managed_join
-from exomem.vault_store import availability, importer, ownership, read, write
+from exomem.vault_store import importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
@@ -1196,6 +1197,25 @@ PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
 )
 
 
+def test_read_page_does_not_scan_its_parent_to_resolve_the_version_id(stored, monkeypatch):  # noqa: F811
+    parent = (stored / ALPHA).parent
+    scanned = []
+    scandir = os.scandir
+
+    def record(path):
+        if path == parent:
+            scanned.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", record)
+    with capabilities.active_surface(PUBLIC_SHAPE):
+        result = call(stored, "read_memory", path=ALPHA)
+
+    assert result["path"] == ALPHA
+    assert result["id"]
+    assert scanned == []
+
+
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("resolver", ["evicted", "resident"])
 def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
@@ -1503,8 +1523,6 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
-    # The session past the rollout fence, which refuses a store-mode vault on this build.
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))

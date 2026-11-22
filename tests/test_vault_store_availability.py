@@ -15,6 +15,7 @@ from exomem import commands, doctor, server_runtime, state_migration, state_path
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
+    capability,
     connection,
     export,
     migration,
@@ -100,9 +101,10 @@ def test_a_store_mode_vault_under_the_default_multi_host_topology_refuses_to_sta
     assert "EXOMEM_WRITER_LEASE_TOPOLOGY=single-host" in refused.value.reason
 
 
-def test_startup_on_a_single_host_store_mode_vault_names_the_rollback(store_mode_vault, monkeypatch):
+def test_startup_on_a_build_with_store_mode_disabled_names_the_rollback(store_mode_vault, monkeypatch):
     """Defect: a build that cannot serve the store's pages starts and answers from stale Markdown."""
-    _coordinator(monkeypatch, "http://127.0.0.1:8765", topology="single-host")
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.VAULT_STORE_V1})
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
     with pytest.raises(CollectionStoreError) as refused:
         server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     assert refused.value.code == availability.NOT_SERVED
@@ -114,7 +116,8 @@ def test_the_cli_and_the_terminal_ui_refuse_the_vault_that_the_service_refuses(
         store_mode_vault, monkeypatch, capsys, entry):
     """Defect: the service refuses a store-mode vault that this build cannot serve, while a CLI command
     or a terminal UI session starts on the same vault and serves it."""
-    _coordinator(monkeypatch, "http://127.0.0.1:8765", topology="single-host")
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.VAULT_STORE_V1})
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(store_mode_vault))
     if entry == "cli":
         assert cli.main(["bootstrap", "--json"]) == 1
@@ -349,10 +352,9 @@ CODE_ONLY_ROUTES = frozenset({"cell-import", "cell-export", "cell-init"})
 def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_even_where_the_service_serves_it(
         store_mode_vault, monkeypatch, tmp_path, capsys, name):
     """Defect: a CLI subcommand that the dispatcher routes before the registry path reads or rewrites the
-    Markdown, projections or file-mode indexes of a vault whose pages live in the store, once the build can
-    serve store mode (`require_servable` passes, as the rehearsal and the 7.4 switch leave it)."""
+    Markdown, projections or file-mode indexes of a vault whose pages the released build serves."""
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
+    availability.require_servable(store_mode_vault)
     if name == "warm":
         monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)  # `warm` skips the vault it has no model for
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "cell-check")  # a cell job's pod always sets it
@@ -392,7 +394,7 @@ def test_the_store_route_and_a_fresh_vault_still_run_beside_the_fence(
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
 
     assert cli._dispatch_main(["store-mode", "status", "--vault", str(store_mode_vault)]) == 0
-    assert availability.NOT_SERVED not in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)["mode"] == "store"
 
     created = tmp_path / "created"
     assert cli._dispatch_main(["init", "--vault", str(created)]) == 0

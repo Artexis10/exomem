@@ -187,7 +187,7 @@ def scan(admitted: AdmittedCollection, fields: tuple[str, ...]):
         columns, source, decode = scan_parts(session, admitted.collection_id, admitted.layout, fields)
     key = admitted.input_key
     head = ("item_key", "view_path", "created_txn", "row_id")
-    # Row id order walks items_by_collection_row and both tables in storage order; item key order
+    # Row id order walks the current-row index (item_rows_current) and both tables in storage order; item key order
     # reads them at random, about three times slower once a collection outgrows the page cache.
     select = (f"SELECT {','.join([*(f'i.{name}' for name in head), *columns])} FROM {source} "  # noqa: S608
               f"WHERE i.collection_id=? AND {admitted.membership_sql} AND i.row_id {{}} ? "

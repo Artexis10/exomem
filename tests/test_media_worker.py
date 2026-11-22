@@ -18,6 +18,7 @@ from exomem import (
     asr_runtime,
     cuda_containment,
     deferred_index,
+    embedding_index,
     embeddings,
     epistemic_graph,
     extract,
@@ -28,6 +29,7 @@ from exomem import (
     media_jobs,
     media_processing,
     media_worker,
+    mutation_lock,
     preserve,
     resource_status,
     runtime_resources,
@@ -2179,128 +2181,127 @@ def test_an_image_clip_commit_leaves_the_commit_generation_alone(
     assert writer_lease.read_commit_generation(vault) == before
 
 
-def test_scene_artifacts_and_reembed_publish_under_guard(
-    vault, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Rental",
-        category="video",
-        filename="guarded.mp4",
-        data=b"video",
-        text="scene",
-    )
-    manager = _RecordingMutationManager(vault)
-    worker = media_worker.MediaWorker(vault, execution_mode="inline")
-    frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
-    pairs = [(object(), object())]
-    published_samples = []
+def _stub_text_encoder(monkeypatch: pytest.MonkeyPatch, *, on_encode) -> None:
+    """Real embedding store and publication path, with a stub model whose every encode calls `on_encode`."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "numpy")
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
 
-    def embed_scenes_outside(_path):
-        assert manager.depth == 0
-        manager.events.append("scene-embed")
-        return frames, pairs
+    def encode(texts, *, is_query=False):
+        on_encode()
+        vectors = np.ones((len(texts), embedding_index.VECTOR_DIM), dtype=np.float32)
+        return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
-    def clip_commit_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("clip-commit")
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
 
-    def scene_commit_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("scene-commit")
-        published_samples.extend(_kwargs["parent_clip_samples"])
-        return []
 
-    def reembed_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("reembed-derived")
-
-    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
-    monkeypatch.setattr(media_worker.scene_frames, "scene_frames_enabled", lambda: True)
-    monkeypatch.setattr(embeddings, "embed_video_scenes", embed_scenes_outside)
-    monkeypatch.setattr(worker._clip_index, "upsert_frames", clip_commit_inside)
-    monkeypatch.setattr(media_worker.scene_frames, "write_scene_frames", scene_commit_inside)
-    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_inside)
-
-    clip_job = media_worker._Job(
+def _reembed_job(vault, result) -> media_worker._Job:
+    return media_worker._Job(
         binary_path=vault / result.path,
         sidecar_path=vault / result.sidecar_path,
         media_type="video",
         do_ocr=False,
-        do_clip=True,
-    )
-    worker._process(clip_job)
-    worker._process(
-        media_worker._Job(
-            binary_path=clip_job.binary_path,
-            sidecar_path=clip_job.sidecar_path,
-            media_type="video",
-            do_ocr=False,
-            do_clip=False,
-            do_reembed=True,
-        )
-    )
-
-    assert manager.events.index("scene-embed") < manager.events.index("guard-enter")
-    assert "clip-commit" in manager.events
-    assert "scene-commit" in manager.events
-    assert "reembed-derived" in manager.events
-    assert len(published_samples) == 1
-    assert published_samples[0].frame_timestamp_ms == 1_000
-    assert published_samples[0].vector == tuple(float(value) for value in frames[0][1])
-    assert {
-        "operation": "background_media_clip_commit",
-        "holder_kind": "background",
-    } in manager.guard_metadata
-    assert {
-        "operation": "background_media_scene_frame_commit",
-        "holder_kind": "background",
-    } in manager.guard_metadata
-    assert manager.depth == 0
-
-
-def test_reembed_publishes_under_canonical_mutation_guard(
-    vault, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    result = _preserve_media_stub(vault, filename="reembed-lease-race.mp3")
-
-    guard_metadata: list[dict[str, str]] = []
-
-    class _RecordingManager:
-        @contextmanager
-        def mutation_guard(self, _vault, **_metadata):
-            guard_metadata.append(_metadata)
-            yield
-
-        def yield_to_waiting_writes(self, _vault, **_kwargs) -> float:
-            return 0.0
-
-    monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingManager())
-    reembedded: list[Path] = []
-    monkeypatch.setattr(
-        media_worker.index_sync,
-        "upsert_after_write",
-        lambda _vault, paths: reembedded.extend(paths),
-    )
-    worker = media_worker.MediaWorker(vault, execution_mode="inline")
-    job = media_worker._Job(
-        binary_path=vault / result.path,
-        sidecar_path=vault / result.sidecar_path,
-        media_type="audio",
-        do_ocr=False,
+        do_clip=False,
         do_reembed=True,
     )
 
-    worker._process(job)
 
-    assert reembedded == [job.sidecar_path]
-    assert guard_metadata == [
-        {
-            "operation": "background_media_reembed_commit",
-            "holder_kind": "background",
-        }
-    ]
+def test_reembed_of_a_sidecar_edited_while_it_encodes_publishes_no_rows(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-embed holds no vault boundary, so the store's own check must refuse the stale bytes."""
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="edited.mp4", data=b"video",
+        text="a spoken passage about the harbour",
+    )
+    sidecar = vault / result.sidecar_path
+    edits: list[int] = []
+
+    def edit_sidecar() -> None:
+        if not edits:
+            edits.append(1)
+            sidecar.write_text(
+                sidecar.read_text(encoding="utf-8") + "\nA later paragraph changes the page.\n",
+                encoding="utf-8",
+            )
+
+    _stub_text_encoder(monkeypatch, on_encode=edit_sidecar)
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(_reembed_job(vault, result))
+
+    assert edits
+    assert embeddings.get_embedding_index(vault).file_mtimes({result.sidecar_path}) == {}
+
+
+def test_reembed_of_a_sidecar_withheld_while_it_encodes_publishes_no_rows(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recall exclusion that lands during encoding must withhold the text from the embedding store."""
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="withheld.mp4", data=b"video",
+        text="a spoken passage about the harbour",
+    )
+    excluded: list[int] = []
+
+    def exclude_rental_evidence() -> None:
+        if not excluded:
+            excluded.append(1)
+            (vault / "Knowledge Base" / "_access.yaml").write_text(
+                "excluded:\n  - Evidence/Rental\n", encoding="utf-8"
+            )
+
+    _stub_text_encoder(monkeypatch, on_encode=exclude_rental_evidence)
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(_reembed_job(vault, result))
+
+    assert excluded
+    assert embeddings.get_embedding_index(vault).file_mtimes({result.sidecar_path}) == {}
+
+
+def test_scene_frames_are_findable_after_commit_and_index_with_no_boundary_held(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_scene_frames import _FakeImg, _scene
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="scenes.mp4", data=b"video", text="scene"
+    )
+    held_while_encoding: list[object] = []
+
+    def note_boundary() -> None:
+        snapshot = mutation_lock.active_mutation_snapshot()
+        if snapshot["state"] == "held" and str(snapshot["operation"]).startswith("background_media"):
+            held_while_encoding.append(snapshot["operation"])
+
+    _stub_text_encoder(monkeypatch, on_encode=note_boundary)
+    scene = _scene(12.0)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_video_scenes",
+        lambda _path: (
+            [(scene.rep_ts, np.ones(embeddings.CLIP_DIM, dtype=np.float32))],
+            [(scene, _FakeImg())],
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="video",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    frames = sorted((vault / result.path).parent.glob("scenes.mp4.frames/*.md"))
+    assert len(frames) == 1
+    frame_rel = frames[0].relative_to(vault).as_posix()
+    assert embeddings.get_embedding_index(vault).file_mtimes({frame_rel})
+    assert held_while_encoding == []
 
 
 def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(

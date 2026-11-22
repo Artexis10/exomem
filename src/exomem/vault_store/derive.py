@@ -20,7 +20,7 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
 from typing import TYPE_CHECKING
@@ -37,7 +37,7 @@ from .. import (
 from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
-from . import read
+from . import read, resident_catalogue
 
 if TYPE_CHECKING:
     from .write import StoreChange
@@ -63,13 +63,27 @@ class ResolverDelta:
 
     entries: tuple[tuple[str, str | None], ...]
     deleted: tuple[str, ...]
+    #: The catalogue's ``(path, title)`` rows and the resolver over them as the commit leaves them, for
+    #: ``resident_catalogue.remember``. Set when the derivation was given the vault triple that it started from.
+    catalogue: tuple[dict[str, str | None], vault.WikilinkResolver] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
-def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[str]) -> ResolverDelta:
+def apply(
+    tx: Connection,
+    root: Path,
+    change: StoreChange,
+    existing: frozenset[str],
+    *,
+    before: tuple | None = None,
+) -> ResolverDelta:
     """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
 
     ``existing`` is the set of the change's page paths that the store held before the commit, which
-    tells a new page from an edited one.
+    tells a new page from an edited one. ``before`` is the vault triple that the commit starts at; a
+    caller that gives it lets the commit derive from the catalogue resolver that the last commit left
+    and carry the new one out (``resident_catalogue.remember``).
     """
     return _Derivation(
         tx,
@@ -81,6 +95,7 @@ def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[s
         ],
         refreshed=list(change.refresh),
         existing=existing,
+        before=before,
     ).run()
 
 
@@ -106,8 +121,10 @@ class _Derivation:
         removed: list[str],
         refreshed: list[str],
         existing: frozenset[str],
+        before: tuple | None = None,
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
+        self.before_triple = before
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
@@ -170,7 +187,9 @@ class _Derivation:
     # ------------------------------------------------------------------ run
 
     def run(self) -> ResolverDelta:
-        before = self._resolver_entries()
+        held = resident_catalogue.held(self.root, self.before_triple)
+        # The rows and resolver that the catalogue held before this commit: kept ones are read here, never edited.
+        before, before_resolver = held if held is not None else (self._resolver_entries(), None)
         derived = self._write_lexical_and_identity()
         if self.links:
             self._write_inbound()
@@ -181,9 +200,17 @@ class _Derivation:
             tuple(after_entries.items()),
             (*self.removed, *(rel for rel in derived if rel not in after_entries)),
         )
-        resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
-        before_resolver = resolver.fork()
+        if before_resolver is None:
+            before_resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
+        resolver = before_resolver.fork()
         resolver.on_entries_changed(delta.entries, delta.deleted)
+        if self.before_triple is not None:
+            after_rows = {**before, **dict(delta.entries)}
+            for rel in delta.deleted:
+                after_rows.pop(rel, None)
+            # A fork, so that the claims bound below stay with this transaction's graph and not the resident.
+            delta = replace(delta, catalogue=(after_rows, resolver))
+            resolver = resolver.fork()
         if self.priors:
             from .. import prior_claims
 
