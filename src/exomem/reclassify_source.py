@@ -771,7 +771,12 @@ def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | Non
     if who.surface not in ("mcp", "rest"):
         return None
     stop = file_watcher.observing_inbound_recovery_stop(vault_root)
-    return stop if stop is not None and egress.unrestricted_content_access(vault_root, who) else None
+    if stop is None:
+        return None
+    request_budget.checkpoint()
+    allowed = egress.unrestricted_content_access(vault_root, who)
+    request_budget.checkpoint()
+    return stop if allowed else None
 
 
 def _preview_generation(vault_root: Path) -> tuple:

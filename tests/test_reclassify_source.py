@@ -189,6 +189,85 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
+@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning"])
+def test_rest_preview_retries_while_verified_session_authority_is_busy(
+    vault, source_schema, monkeypatch, hold_at,
+):
+    import time
+    from contextlib import closing
+
+    from test_authorization_session_wire_reconnect import _configure_v4_authority
+    from test_rest_authorization_session import _client, _headers
+
+    from exomem import file_watcher, freshness, request_budget, writer_lease
+    from exomem import vault as vault_module
+    from exomem.governance import (
+        authorization_custody,
+        authorization_request,
+        authorization_session_lifecycle,
+        principal,
+        store,
+    )
+
+    source = _capture(vault, source_schema, title="Field measurements").path
+    _configure_v4_authority(vault, vault.parent / "custody", monkeypatch)
+    for scope, root in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    client = _client(vault, monkeypatch)
+    who = principal.resolve_rest_principal(None)
+    now = int(time.time())
+    with closing(store.open_authorization_session_connection(vault)) as connection:
+        credential = authorization_session_lifecycle.open_session(
+            connection, custody=authorization_custody.load_authorization_custody(vault, now=now),
+            principal_id=who.audience_id, issuer_family=who.issuer_family, now=now, ttl_seconds=600,
+        )
+    stop = threading.Event()
+    locked, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    def hold_authority():
+        with writer_lease.active_manager().reserved_identity_guard(
+            vault, domains=("governance-store",), exclusive=False, advance_generation=False,
+        ):
+            locked.set()
+            assert release.wait(10)
+
+    holder = threading.Thread(target=hold_authority, daemon=True)
+
+    if hold_at == "after-verification":
+        target, name = authorization_request, "verify_authorization_context"
+    else:
+        target, name = rc, "_propose"
+    operation = getattr(target, name)
+
+    def complete_then_hold(*args, **kwargs):
+        result = operation(*args, **kwargs)
+        if holder.ident is None:
+            holder.start()
+            assert locked.wait(3)
+        return result
+
+    # Hold the actual governance identity domain across the authority recheck and response.
+    monkeypatch.setattr(target, name, complete_then_hold)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
+    body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
+    headers = _headers(credential.bearer)
+    try:
+        terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
+        assert "references" not in terminal and "preview_digest" not in terminal
+        assert locked.is_set() and holder.is_alive()
+    finally:
+        release.set()
+        if holder.ident is not None:
+            holder.join(3)
+    preview = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+    assert preview["success"] and preview["data"]["preview_digest"], preview
+
+
 @pytest.mark.parametrize("fault", [
     "release", "render", "cold-resolver", "uncertified-resolver", "removed-link", "changed-source", "catalogue-link",
     "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "inbound-freshness-lock",

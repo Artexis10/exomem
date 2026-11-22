@@ -459,26 +459,12 @@ def register_rest_facade(
 
                     if not await auth_sessions.origin_session_active(bound_principal):
                         raise authorization_request.AuthorizationContextUnavailable
-                    boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
-                    unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
                     if _cmd.name == "edit_memory":
                         body = edit_operations.normalize_edit_surface_arguments(body)
                     kwargs = cli_ops.coerce(
                         _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                     )
                     check = None
-                    if _cmd.name == "manage_memory_file":
-                        from .reclassify_source import is_preview_call, managed_preview_stop
-
-                        if (
-                            is_preview_call(_cmd.name, kwargs)
-                            and await run_in_threadpool(
-                                managed_preview_stop, vault_root, bound_principal,
-                            ) is not None
-                        ):
-                            check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
-                                seconds=request_budget.budget_seconds(), entry=entered,
-                            ))
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
@@ -505,6 +491,21 @@ def register_rest_facade(
                             )
 
                     try:
+                        if _cmd.name == "manage_memory_file":
+                            from .reclassify_source import is_preview_call, managed_preview_stop
+
+                            if is_preview_call(_cmd.name, kwargs):
+                                check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
+                                    seconds=request_budget.budget_seconds(), entry=entered,
+                                ))
+                                with request_budget.checking(check):
+                                    stop = await run_in_threadpool(
+                                        managed_preview_stop, vault_root, bound_principal,
+                                    )
+                                if stop is None:
+                                    check = None
+                        boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
+                        unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
                         result = await run_in_threadpool(invoke_bound)
                         changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
                         limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)

@@ -13,7 +13,8 @@ from urllib.parse import unquote
 
 import yaml
 
-from .. import memory_refs, reserved_paths, vault
+from .. import memory_refs, request_budget, reserved_paths, vault
+from ..cli_ops import OpError
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -132,11 +133,23 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
     if who.authorization_session_id is not None and context is None:
         return False, None
     if context is not None:
+        checkpoint = request_budget.current_checkpoint()
         connection = None
         try:
             if context.issuer_family != who.issuer_family:
                 return False, None
-            connection = store.open_authorization_session_connection(root)
+            if checkpoint is None:
+                connection = store.open_authorization_session_connection(root)
+            else:
+                checkpoint()
+                connection = store.open_active_governance_read_connection(
+                    root, deadline=checkpoint.budget.deadline,
+                )
+                connection.set_progress_handler(lambda: int(checkpoint.remaining() <= 0), 1_000)
+                connection.execute("BEGIN")
+                # Acquire the read snapshot before lifecycle code can translate a busy read
+                # into an unavailable credential. All authority checks then share the same pin.
+                connection.execute("PRAGMA user_version").fetchone()
             now = int(time.time())
             custody = authorization_custody.load_authorization_custody(root, now=now)
             authorization_session_lifecycle.status_verified_session(
@@ -145,13 +158,25 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
             trusted_purpose = authorization_session_authority.active_session_purpose(
                 connection, context=context, audience=who.audience_id, now=now,
             )
+        except (OpError, reserved_paths.SqliteIdentityBusyError) as error:
+            if checkpoint is not None and (
+                isinstance(error, reserved_paths.SqliteIdentityBusyError) or error.code == "MUTATION_BUSY"
+            ):
+                raise request_budget.ReadBudgetExhausted() from None
+            raise
         except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
                 authorization_custody.AuthorizationCustodyUnavailable,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            if checkpoint is not None:
+                # An unproved live recheck of a verified credential cannot admit a preview
+                # or send it down the restricted path. Transport verifies it again on retry.
+                raise request_budget.ReadBudgetExhausted() from None
             return False, None
         finally:
             if connection is not None:
                 connection.close()
+        if checkpoint is not None:
+            checkpoint()
     return True, trusted_purpose
 
 

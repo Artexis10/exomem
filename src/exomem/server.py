@@ -625,18 +625,21 @@ class CallTraceMiddleware(Middleware):
             # ledger records the call that was actually made.
             ledger_args = _extract_tool_args(context.message)
             check = None
-            if self.vault_root is not None and tool_name == "manage_memory_file":
-                from .governance.principal import effective_principal
-                from .reclassify_source import is_preview_call, managed_preview_stop
-
-                budget = request_budget.current()
-                if (budget is not None and is_preview_call(tool_name, ledger_args)
-                        and await asyncio.to_thread(
-                            managed_preview_stop, self.vault_root, effective_principal(),
-                        ) is not None):
-                    check = request_budget.ReadCheckpoint(budget)
             try:
                 try:
+                    if self.vault_root is not None and tool_name == "manage_memory_file":
+                        from .governance.principal import effective_principal
+                        from .reclassify_source import is_preview_call, managed_preview_stop
+
+                        budget = request_budget.current()
+                        if budget is not None and is_preview_call(tool_name, ledger_args):
+                            check = request_budget.ReadCheckpoint(budget)
+                            with request_budget.checking(check):
+                                stop = await asyncio.to_thread(
+                                    managed_preview_stop, self.vault_root, effective_principal(),
+                                )
+                            if stop is None:
+                                check = None
                     with request_budget.checking(check) if check is not None else nullcontext():
                         result = await call_next(context)
                         if check is not None:

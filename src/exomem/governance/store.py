@@ -196,7 +196,9 @@ def open_authorization_session_connection(
                     raise
 
 
-def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connection:
+def open_active_governance_read_connection(
+    vault_root: Path, *, deadline: float | None = None,
+) -> sqlite3.Connection:
     """Open one existing exact-v4 activation store as a pinned read source.
 
     The caller starts an explicit SQLite read transaction before sampling the
@@ -205,7 +207,7 @@ def open_active_governance_read_connection(vault_root: Path) -> sqlite3.Connecti
     """
 
     try:
-        initial = _acquire_policy_read(vault_root, observe_legacy=False)
+        initial = _acquire_policy_read(vault_root, observe_legacy=False, deadline=deadline)
     except FileNotFoundError as exc:
         raise UnsupportedGovernanceSchema("active governance store is absent") from exc
     assert initial.connection is not None
@@ -226,7 +228,7 @@ def _initial_policy_read(vault_root: Path) -> _InitialPolicyRead:
 
 
 def _acquire_policy_read(
-    vault_root: Path, *, observe_legacy: bool
+    vault_root: Path, *, observe_legacy: bool, deadline: float | None = None,
 ) -> _InitialPolicyRead:
     connection: sqlite3.Connection | None = None
     observation = None
@@ -238,6 +240,7 @@ def _acquire_policy_read(
                 vault_root,
                 descriptor_ids=("governance-store",),
                 identity_may_change=False,
+                deadline=deadline,
             ):
                 path = sidecar_path(vault_root)
                 with reserved_paths._sqlite_owner_target_scope(
@@ -249,6 +252,7 @@ def _acquire_policy_read(
                     connection = sqlite3.connect(
                         f"{retained_path.as_uri()}?mode=ro",
                         uri=True,
+                        timeout=0 if deadline is not None else 5,
                     )
                     from . import schema_v4
 
@@ -260,7 +264,8 @@ def _acquire_policy_read(
                             "active governance requires an existing exact-v4 store"
                         )
                     connection.execute("PRAGMA query_only=ON")
-                    connection.execute("PRAGMA busy_timeout=50")
+                    if deadline is None:
+                        connection.execute("PRAGMA busy_timeout=50")
                     reserved_paths._publish_sqlite_owner_family(
                         vault_root,
                         path,
