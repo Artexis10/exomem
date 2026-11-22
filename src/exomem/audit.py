@@ -2546,8 +2546,10 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
     """Keep pages whose frontmatter records `custody_only: true`.
 
     Only a decided negative drops a page: on any uncertainty — an unreadable,
-    unterminated or oversized frontmatter block — the page stays in and the
-    ordinary admission and full parse decide it, exactly as without a selector.
+    unterminated or oversized frontmatter block, a fence spelling the bounded
+    reader does not recognise, or frontmatter that does not parse — the page
+    stays in and the ordinary admission and full parse decide it, exactly as
+    without a selector.
     """
 
     def select(rel: str, content: bytes | None) -> bool:
@@ -2558,6 +2560,8 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
                 with reserved_paths.open_generic_binary(
                     vault_root, rel, physical=True
                 ) as source:
+                    probe = source.stream.read(8)
+                    source.stream.seek(0)
                     content = vault_module.read_frontmatter_header(
                         source.stream, 64 * 1024
                     )
@@ -2566,6 +2570,10 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
                 reserved_paths.ReservedPathLeafError,
                 vault_module.FrontmatterError,
             ):
+                return True
+            if not content and probe.removeprefix(b"\xef\xbb\xbf").startswith(b"---"):
+                # The opener is there but the bounded reader could not fence
+                # the block (a CR-only page's `\r` opener): undecided.
                 return True
         return _custody_marked(content)
 
@@ -2576,9 +2584,9 @@ def _custody_marked(content: bytes) -> bool:
     """Whether page bytes, or the page's fenced block alone, record `custody_only: true`.
 
     Parsed the way `_parse_page_after_checkpoint` parses it (LF normalization,
-    frontmatter pattern, safe loader), so a page the full parse would give no
-    `custody_only` field — bad UTF-8, no block, invalid or non-mapping YAML —
-    selects nothing either.
+    frontmatter pattern, safe loader). A page whose bytes do not decode or
+    carry no frontmatter is a decided negative; one whose frontmatter does not
+    parse is undecided, and the caller keeps it.
     """
     try:
         text = vault_module.markdown_lf(content.decode("utf-8"))
@@ -2589,8 +2597,8 @@ def _custody_marked(content: bytes) -> bool:
         return False
     try:
         frontmatter = vault_module.yaml_safe_load(fm_match.group(1)) or {}
-    except yaml.YAMLError:
-        return False
+    except vault_module.MALFORMED_FRONTMATTER_ERRORS + (yaml.YAMLError,):
+        return True
     return isinstance(frontmatter, dict) and frontmatter.get("custody_only") is True
 
 

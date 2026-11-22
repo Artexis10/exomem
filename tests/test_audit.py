@@ -1428,6 +1428,54 @@ def test_a_custody_only_audit_lists_a_source_with_an_escaped_mark_key(
     assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
 
 
+def test_a_custody_only_audit_lists_a_cr_only_source(vault: Path) -> None:
+    # A CR-only fence is no recognised opener for the bounded header reader,
+    # but `markdown_lf` parses it: the selector keeps the page and the parse
+    # decides the mark.
+    rel = "Knowledge Base/Sources/Articles/2026-11-01-kept-file.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        b"---\rtype: source\rsource_type: article\rcaptured: 2026-11-01\r"
+        b"custody_only: true\ringested_into: []\r---\r\rKept bytes.\r"
+    )
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
+
+
+def test_a_refused_page_with_a_malformed_scalar_does_not_crash_a_custody_only_audit(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    refused = "Knowledge Base/Sources/Articles/bad-date.md"
+    target = vault / refused
+    target.write_text(
+        "---\ntype: insight\ntitle: Bad date\nwhen: 2026-99-99\n---\n\nRefused.\n",
+        encoding="utf-8",
+    )
+
+    # Governance refuses the malformed page; its frontmatter still passes through
+    # the selector first, and a refused page must never reach a decision or a crash.
+    from exomem.governance import egress as egress_module
+
+    permits = egress_module.content_permits
+
+    def refuse_bad(root, path, who, **kwargs):
+        if path == refused:
+            return False
+        return permits(root, path, who, **kwargs)
+
+    monkeypatch.setattr(egress_module, "content_permits", refuse_bad)
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert [(f.category, f.path) for f in report.findings] == [("custody_source", kept)]
+
+
 def test_a_budget_that_expires_inside_the_lookup_reports_unknown(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
