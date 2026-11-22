@@ -2604,6 +2604,27 @@ class PageGraphRows:
     source_hash: str
 
 
+@dataclass(frozen=True, slots=True)
+class PageGraphRecords:
+    """The exact SQLite bindings for one table of a page's graph rows."""
+
+    table: str
+    columns: tuple[str, ...]
+    values: tuple[tuple[Any, ...], ...]
+    replace: bool = False
+
+    def write(self, conn: sqlite3.Connection) -> None:
+        if self.values:
+            statement = _graph_insert(self.table, self.columns, replace=self.replace)
+            conn.executemany(statement, self.values)
+
+
+def _graph_insert(table: str, columns: tuple[str, ...], *, replace: bool = True) -> str:
+    command = "INSERT OR REPLACE" if replace else "INSERT"
+    placeholders = ", ".join("?" for _ in columns)
+    return f"{command} INTO {table}({', '.join(columns)}) VALUES ({placeholders})"
+
+
 def graph_registry_stamps(vault_root: Path) -> tuple[tuple[str, str], ...]:
     """The `graph_meta` pairs that name the registries a graph's rows derive under.
 
@@ -2632,6 +2653,7 @@ def page_graph_rows(
     type_basis: note_types.Basis,
     target_exists: Callable[[str], bool],
     landing: Callable[[str, str], tuple[str, str, dict[str, str]]],
+    prepared_structure: Mapping[str, Any] | None = None,
 ) -> PageGraphRows | None:
     """The graph rows of one page, derived from ``raw`` and the inputs below.
 
@@ -2652,7 +2674,8 @@ def page_graph_rows(
     if not _is_graph_page(rel) or not recall_policy.admits_markdown_content(vault_root, rel, raw):
         return None
     file_node = _file_node(
-        vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis
+        vault_root, page, raw.decode("utf-8"), state=state, type_basis=type_basis,
+        prepared_structure=prepared_structure,
     )
     unit_nodes = [
         _candidate_node(page, unit, state)
@@ -2681,12 +2704,39 @@ def write_page_graph_rows(
     conn: sqlite3.Connection,
     rows: PageGraphRows,
     registry_stamps: Iterable[tuple[str, str]],
+    *,
+    before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
-    ``registry_stamps`` is `graph_registry_stamps` of the pass. The caller owns the transaction.
+    ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
+    and the records that replace its rows, before any row changes. The caller owns the transaction.
     """
     rel = rows.rel
+    parent = PageGraphRecords(
+        "graph_parent_refs", ("path", "parent_ref"),
+        ((rel, rows.parent_ref),) if rows.parent_ref is not None else (), replace=True,
+    )
+    dependencies = PageGraphRecords(
+        "graph_dependencies", ("source_path", "lookup_key", "raw_target"),
+        tuple((rel, lookup_key, raw_target) for lookup_key, raw_target in rows.dependencies),
+    )
+    coverage = PageGraphRecords(
+        "graph_dependency_coverage",
+        ("source_path", "source_hash", "dependency_format", "expected_count"),
+        ((rel, rows.source_hash, _DEPENDENCY_FORMAT, len(rows.dependencies)),),
+    )
+    if before_write is not None:
+        nodes = PageGraphRecords(
+            "graph_nodes", _NODE_COLUMNS, tuple(_node_values(node) for node in rows.nodes),
+            replace=True,
+        )
+        edges = PageGraphRecords(
+            "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges),
+            replace=True,
+        )
+        before_write(rel, (nodes, parent, edges, dependencies, coverage))
+
     conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
     conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
     conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
@@ -2694,25 +2744,18 @@ def write_page_graph_rows(
     conn.execute("DELETE FROM graph_dependency_coverage WHERE source_path = ?", (rel,))
     for key, value in registry_stamps:
         conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", (key, value))
-    for node in rows.nodes:
-        _insert_node(conn, node)
-    if rows.parent_ref is not None:
-        conn.execute(
-            "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) VALUES (?, ?)",
-            (rel, rows.parent_ref),
-        )
-    for edge in rows.edges:
-        _insert_edge(conn, edge)
-    conn.executemany(
-        "INSERT INTO graph_dependencies(source_path, lookup_key, raw_target) VALUES (?, ?, ?)",
-        [(rel, lookup_key, raw_target) for lookup_key, raw_target in rows.dependencies],
-    )
-    conn.execute(
-        "INSERT INTO graph_dependency_coverage("
-        "source_path, source_hash, dependency_format, expected_count"
-        ") VALUES (?, ?, ?, ?)",
-        (rel, rows.source_hash, _DEPENDENCY_FORMAT, len(rows.dependencies)),
-    )
+    if before_write is None:
+        for node in rows.nodes:
+            _insert_node(conn, node)
+        parent.write(conn)
+        for edge in rows.edges:
+            _insert_edge(conn, edge)
+    else:
+        nodes.write(conn)
+        parent.write(conn)
+        edges.write(conn)
+    dependencies.write(conn)
+    coverage.write(conn)
     _bump_generation(conn)
 
 
@@ -14159,12 +14202,16 @@ def _file_node(
     *,
     state: semantic_index.SemanticParentIndexState,
     type_basis: note_types.Basis,
+    prepared_structure: Mapping[str, Any] | None = None,
 ) -> GraphNode:
     from . import activation
 
     frontmatter = page.frontmatter
     origin_date = frontmatter.get("created") or frontmatter.get("captured")
     updated = frontmatter.get("updated")
+    structure = prepared_structure
+    if structure is None:
+        structure = semantic_index.structural_metadata(state)
     metadata: dict[str, Any] = {
         "page_type": page.page_type,
         "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None,
@@ -14172,7 +14219,7 @@ def _file_node(
         "origin": "file",
         # One versioned structural summary; readers interpret it per operation.
         STRUCTURAL_METADATA: {
-            **semantic_index.structural_metadata(state),
+            **structure,
             "frontmatter_link_counts": activation.frontmatter_link_counts(frontmatter),
             "body_wikilinks": len(activation.find_body_wikilinks(state.body)),
         },
@@ -14990,86 +15037,94 @@ def _edge(
     )
 
 
-def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
+# SQLite column order shared by prepared graph records and the ordinary writer.
+_NODE_COLUMNS = (
+    "node_key", "kind", "path", "anchor", "title", "text", "source_hash", "line_start",
+    "line_end", "metadata", "unit_ref", "unit_category", "unit_kind", "page_type",
+    "lifecycle_status", "tags_json", "project", "origin_date", "updated_date", "access_tier",
+    "review_eligible", "activation_signal_version", "exomem_id", "activation_priority",
+    "activation_connected", "activation_typed_relations", "activation_assertion_blocks",
+    "activation_provenance_relations", "activation_unregistered",
+)
+_EDGE_COLUMNS = (
+    "edge_key", "src_key", "dst_key", "dst_page_key", "relation_type", "raw_relation",
+    "parent_relation", "registry_status", "registry_version", "registry_hash", "origin",
+    "source_path", "source_anchor", "metadata", "resolver_project", "resolver_page_type",
+    "resolver_source_kind", "resolver_target_kind", "resolver_origin", "review_evidence",
+)
+_INSERT_NODE = _graph_insert("graph_nodes", _NODE_COLUMNS)
+_INSERT_EDGE = _graph_insert("graph_edges", _EDGE_COLUMNS)
+
+
+def _node_values(node: GraphNode) -> tuple[Any, ...]:
     metadata = node.metadata or {}
     # Shared rows never hold a selected public unit ref or activation measure:
     # both depend on each page's selected instance. The legacy columns keep
     # their neutral values until the next schema change removes them.
-    conn.execute(
-        "INSERT OR REPLACE INTO graph_nodes "
-        "(node_key, kind, path, anchor, title, text, source_hash, line_start, "
-        "line_end, metadata, unit_ref, unit_category, unit_kind, page_type, "
-        "lifecycle_status, tags_json, project, origin_date, updated_date, access_tier, "
-        "review_eligible, activation_signal_version, exomem_id, activation_priority, "
-        "activation_connected, activation_typed_relations, activation_assertion_blocks, "
-        "activation_provenance_relations, activation_unregistered) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-        "?, ?, ?, ?, ?, ?)",
-        (
-            node.node_key,
-            node.kind,
-            node.path,
-            node.anchor,
-            node.title,
-            node.text,
-            node.source_hash,
-            node.line_start,
-            node.line_end,
-            json.dumps(metadata, sort_keys=True),
-            None,
-            node.unit_category,
-            node.unit_kind,
-            node.page_type,
-            node.lifecycle_status,
-            json.dumps(list(node.tags), ensure_ascii=False, sort_keys=True),
-            node.project,
-            node.origin_date,
-            node.updated_date,
-            node.access_tier,
-            int(node.review_eligible),
-            node.activation_signal_version,
-            node.exomem_id,
-            node.activation_priority,
-            int(node.activation_connected),
-            node.activation_typed_relations,
-            node.activation_assertion_blocks,
-            node.activation_provenance_relations,
-            node.activation_unregistered,
-        ),
+    return (
+        node.node_key,
+        node.kind,
+        node.path,
+        node.anchor,
+        node.title,
+        node.text,
+        node.source_hash,
+        node.line_start,
+        node.line_end,
+        json.dumps(metadata, sort_keys=True),
+        None,
+        node.unit_category,
+        node.unit_kind,
+        node.page_type,
+        node.lifecycle_status,
+        json.dumps(list(node.tags), ensure_ascii=False, sort_keys=True),
+        node.project,
+        node.origin_date,
+        node.updated_date,
+        node.access_tier,
+        int(node.review_eligible),
+        node.activation_signal_version,
+        node.exomem_id,
+        node.activation_priority,
+        int(node.activation_connected),
+        node.activation_typed_relations,
+        node.activation_assertion_blocks,
+        node.activation_provenance_relations,
+        node.activation_unregistered,
     )
+
+
+def _edge_values(edge: GraphEdge) -> tuple[Any, ...]:
+    return (
+        edge.edge_key,
+        edge.src_key,
+        edge.dst_key,
+        edge.dst_page_key or edge.dst_key,
+        edge.relation_type,
+        edge.raw_relation,
+        edge.parent_relation,
+        edge.registry_status,
+        edge.registry_version,
+        edge.registry_hash,
+        edge.origin,
+        edge.source_path,
+        edge.source_anchor,
+        json.dumps(edge.metadata or {}, sort_keys=True),
+        edge.resolver_project,
+        edge.resolver_page_type,
+        edge.resolver_source_kind,
+        edge.resolver_target_kind,
+        edge.resolver_origin,
+        json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True),
+    )
+
+
+def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
+    conn.execute(_INSERT_NODE, _node_values(node))
 
 
 def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO graph_edges "
-        "(edge_key, src_key, dst_key, dst_page_key, relation_type, raw_relation, "
-        "parent_relation, registry_status, registry_version, registry_hash, origin, "
-        "source_path, source_anchor, metadata, resolver_project, resolver_page_type, "
-        "resolver_source_kind, resolver_target_kind, resolver_origin, review_evidence) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            edge.edge_key,
-            edge.src_key,
-            edge.dst_key,
-            edge.dst_page_key or edge.dst_key,
-            edge.relation_type,
-            edge.raw_relation,
-            edge.parent_relation,
-            edge.registry_status,
-            edge.registry_version,
-            edge.registry_hash,
-            edge.origin,
-            edge.source_path,
-            edge.source_anchor,
-            json.dumps(edge.metadata or {}, sort_keys=True),
-            edge.resolver_project,
-            edge.resolver_page_type,
-            edge.resolver_source_kind,
-            edge.resolver_target_kind,
-            edge.resolver_origin,
-            json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True),
-        ),
-    )
+    conn.execute(_INSERT_EDGE, _edge_values(edge))
 
 
 def _node_row_to_dict(row) -> dict[str, Any]:

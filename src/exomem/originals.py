@@ -217,16 +217,38 @@ def companion_binding(fields: dict[str, object], *, sidecar_path: str) -> Binary
     return binary
 
 
+def local_configuration_path(vault: Path) -> Path:
+    from .state_paths import vault_state_dir
+
+    return vault_state_dir(vault) / "media-store.json"
+
+
+def uses_local_configuration() -> bool:
+    from .cloud_cell import store_identity
+
+    return CONFIG_ENV not in os.environ and store_identity()["kind"] == "personal"
+
+
 def configuration(vault: Path) -> dict[str, object] | None:
-    """Read explicit per-vault configuration, retaining identity while disabled.
+    """Read per-vault configuration, retaining identity while disabled.
 
     Configuration errors propagate: silently losing a selected store identity
     would turn every evicted original into an apparent deletion.
     """
     configured = os.environ.get(CONFIG_ENV)
-    if not configured:
+    if configured:
+        raw = Path(configured).read_text(encoding="utf-8")
+    elif uses_local_configuration():
+        try:
+            raw = local_configuration_path(vault).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+    else:
         return None
-    value = json.loads(Path(configured).read_text(encoding="utf-8"))
+    return configuration_entry(vault, json.loads(raw))
+
+
+def configuration_entry(vault: Path, value: object) -> dict[str, object] | None:
     if not isinstance(value, dict) or not isinstance(value.get("vaults"), dict):
         raise ValueError("media store configuration requires vaults")
     selected = value["vaults"].get(str(Path(vault).resolve()))

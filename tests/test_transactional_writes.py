@@ -2717,9 +2717,9 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
         created_workspaces.append(workspace.name)
         return workspace
 
-    def observe_artifact_create(self, name: str, content: bytes):
+    def observe_artifact_create(self, name: str, content: bytes, **options):  # noqa: ANN003
         artifact_workspaces.append((self.name, name))
-        return real_create_artifact(self, name, content)
+        return real_create_artifact(self, name, content, **options)
 
     monkeypatch.setattr(vault_module, "_batch_workspace_token", fixed_token_hex)
     monkeypatch.setattr(
@@ -2759,12 +2759,12 @@ def test_batch_staging_keyboard_interrupt_cleans_created_parents_and_workspaces(
     real_create_artifact = vault_module._BatchWorkspace.create_artifact
     calls = 0
 
-    def interrupt_after_parent(self, name: str, content: bytes):  # noqa: ANN001
+    def interrupt_after_parent(self, name: str, content: bytes, **options):  # noqa: ANN001, ANN003
         nonlocal calls
         calls += 1
         if calls == 1:
             raise KeyboardInterrupt("stop during staging")
-        return real_create_artifact(self, name, content)
+        return real_create_artifact(self, name, content, **options)
 
     monkeypatch.setattr(
         vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent

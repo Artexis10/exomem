@@ -338,7 +338,9 @@ class WriterConnection:
             )
 
     @contextmanager
-    def transaction(self, *, resolve_divergence: bool = False) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self, *, resolve_divergence: bool = False, before_commit: Callable[[], None] | None = None,
+    ) -> Iterator[sqlite3.Connection]:
         """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
         from sqlalchemy.exc import DBAPIError
 
@@ -354,6 +356,8 @@ class WriterConnection:
         try:
             yield self.connection
             cache.prepare()
+            if before_commit is not None:
+                before_commit()
             self.core.commit()
             cache.finish(True)
         except BaseException as error:
