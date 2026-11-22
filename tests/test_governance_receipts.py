@@ -3547,3 +3547,166 @@ def test_a_trashed_video_folder_with_scene_frames_recovers_in_a_governed_vault(
 
     assert recovered.restored_path == rel
     assert (frames / "scene-001.jpg.md").exists()
+
+
+def _lifecycle_vault_with_deletion(vault: Path) -> str:
+    rel = "Knowledge Base/Notes/Insights/settled-evidence.md"
+    (vault / rel).write_text("# Settled evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/settled-evidence.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    return rel
+
+
+def _active_receipt_part(vault: Path) -> Path:
+    return sorted(receipts._events_root(vault).rglob("????-??*.jsonl"))[-1]
+
+
+def test_lifecycle_read_survives_concurrent_ordinary_appends(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = _lifecycle_vault_with_deletion(vault)
+    assert rel in lifecycle.tombstoned_paths(vault)
+    expected = receipts.event_records(vault, lifecycle_only=True)
+    assert any(
+        record["event_type"] == "critical" and record["phase"] == "intent"
+        for record in expected
+    )
+
+    stop = threading.Event()
+    failures: list[Exception] = []
+
+    def writer() -> None:
+        # Capped well under _RECEIPT_PART_BYTES so no new part file appears.
+        for _ in range(500):
+            if stop.is_set():
+                return
+            try:
+                receipts.append_event(
+                    vault, event_type="disclosure", payload={"outcomes": []}
+                )
+            except Exception as exc:  # noqa: BLE001 - thread reports failures to the main thread
+                failures.append(exc)
+                return
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    results: list[list[dict[str, object]]] = []
+    errors: list[receipts.ReceiptError] = []
+    try:
+        for _ in range(20):
+            armed = True
+
+            def widen_one_window() -> None:
+                nonlocal armed
+                if armed:
+                    armed = False
+                    time.sleep(0.02)
+
+            try:
+                results.append(
+                    receipts.event_records(
+                        vault,
+                        lifecycle_only=True,
+                        checkpoint=widen_one_window,
+                    )
+                )
+            except receipts.ReceiptError as exc:
+                errors.append(exc)
+    finally:
+        stop.set()
+        thread.join(timeout=_STUCK_SECONDS)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert errors == []
+    assert results == [expected] * 20
+
+
+def test_active_part_in_place_tamper_fails_lifecycle_reads_closed(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = _lifecycle_vault_with_deletion(vault)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert rel in lifecycle.tombstoned_paths(vault)
+
+    active = _active_receipt_part(vault)
+    original = active.read_bytes()
+    old_stat = active.stat()
+    first_line = original.splitlines(keepends=True)[0]
+    pos = next(i for i, byte in enumerate(first_line) if chr(byte) in "0123456789abcdef")
+    replacement = b"0" if first_line[pos : pos + 1] != b"0" else b"1"
+    corrupted = original[:pos] + replacement + original[pos + 1 :]
+    assert corrupted != original and len(corrupted) == len(original)
+    active.write_bytes(corrupted)
+    os.utime(active, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True)
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstoned_paths(vault)
+
+
+def test_active_part_growth_past_the_cap_fails_closed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    active = _active_receipt_part(vault)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", active.stat().st_size)
+
+    calls = 0
+
+    def grow_during_read() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            with active.open("ab") as handle:
+                handle.write(b"x" * 64)
+
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True, checkpoint=grow_during_read)
+
+
+def test_lifecycle_read_lock_contention_respects_the_disclosure_budget(vault: Path) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with receipts._receipt_lock(vault):
+            held.set()
+            release.wait(timeout=_STUCK_SECONDS)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(timeout=10)
+    try:
+        check = request_budget.ReadCheckpoint(
+            request_budget.RequestBudget(seconds=0.5), bound_disclosure=True
+        )
+        started = time.monotonic()
+        with request_budget.checking(check), pytest.raises(
+            (receipts.ReceiptError, request_budget.ReadBudgetExhausted)
+        ):
+            receipts.event_records(vault, lifecycle_only=True)
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        thread.join(timeout=_STUCK_SECONDS)
+    assert not thread.is_alive()
+
+
+def test_oversized_legacy_active_part_verifies_without_the_writer_lock(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    expected = receipts.event_records(vault, lifecycle_only=True)
+
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 1)
+
+    def forbidden(vault_root: Path):
+        raise AssertionError("oversized active part took the writer lock")
+
+    monkeypatch.setattr(receipts, "_receipt_lock", forbidden)
+    assert receipts.event_records(vault, lifecycle_only=True) == expected

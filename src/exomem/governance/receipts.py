@@ -21,7 +21,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -647,6 +647,7 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
 
 def _read_evidence_file(
     instance_dir: Path, name: str, *, checkpoint: Callable[[], None] | None = None,
+    max_bytes: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
@@ -669,6 +670,8 @@ def _read_evidence_file(
                     line_no += 1
                     line_offset = offset
                     offset += len(raw_line)
+                    if max_bytes is not None and offset > max_bytes:
+                        raise ReceiptError("receipt part grew while reading")
                     oversized = len(raw_line) > MAX_RECORD_BYTES
                     while oversized and not raw_line.endswith(b"\n"):
                         if checkpoint is not None:
@@ -677,6 +680,8 @@ def _read_evidence_file(
                         if not chunk:
                             break
                         offset += len(chunk)
+                        if max_bytes is not None and offset > max_bytes:
+                            raise ReceiptError("receipt part grew while reading")
                         raw_line = chunk
                     if oversized:
                         issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
@@ -803,7 +808,7 @@ def _receipt_file_signature(path: Path) -> tuple[int, int, int, int, int, int]:
 
 
 def _lifecycle_instance_intents(
-    instance_dir: Path, *, checkpoint: Callable[[], None] | None,
+    vault_root: Path, instance_dir: Path, *, checkpoint: Callable[[], None] | None,
 ) -> list[dict[str, Any]]:
     names, issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
     if issues:
@@ -811,21 +816,24 @@ def _lifecycle_instance_intents(
     anchor = _LifecycleReceiptSegment(0, GENESIS_HASH, None, ())
     signatures: list[tuple[Path, tuple]] = []
     intents: list[dict[str, Any]] = []
-    for name in names:
+    def verify_segment(name: str, *, closed: bool, max_bytes: int | None = None) -> None:
+        nonlocal anchor
         if checkpoint is not None:
             checkpoint()
         path = instance_dir / name
         signature = _receipt_file_signature(path)
+        if max_bytes is not None and signature[3] > max_bytes:
+            raise ReceiptError("receipt part grew before verification")
         signatures.append((path, signature))
         key = path, signature, anchor.last_seq, anchor.last_hash, anchor.last_month
         # POSIX ctime changes on edits that restore mtime. The Windows stat ctime is creation time.
-        reusable = os.name != "nt" and name != names[-1]
+        reusable = os.name != "nt" and closed
         with _LIFECYCLE_SEGMENTS_LOCK:
             cached = _LIFECYCLE_SEGMENTS.get(key) if reusable else None
             if cached is not None:
                 _LIFECYCLE_SEGMENTS.move_to_end(key)
         if cached is None:
-            records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint)
+            records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint, max_bytes=max_bytes)
             valid, faults = _verify_records(
                 records, faults, expected_hash=anchor.last_hash, expected_seq=anchor.last_seq + 1,
                 previous_month=anchor.last_month, checkpoint=checkpoint,
@@ -846,14 +854,22 @@ def _lifecycle_instance_intents(
                         _LIFECYCLE_SEGMENTS.popitem(last=False)
         intents.extend(cached.intents)
         anchor = cached
-    for path, signature in signatures:
-        if checkpoint is not None:
-            checkpoint()
-        if _receipt_file_signature(path) != signature:
+
+    for name in names[:-1]:
+        verify_segment(name, closed=True)
+    bounded_tail = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
+    # Never hold the writer lock while replaying an oversized legacy file or a closed archive.
+    with _receipt_lock(vault_root) if bounded_tail else nullcontext():
+        if names:
+            verify_segment(names[-1], closed=False, max_bytes=_RECEIPT_PART_BYTES if bounded_tail else None)
+        for path, signature in signatures:
+            if checkpoint is not None:
+                checkpoint()
+            if _receipt_file_signature(path) != signature:
+                raise ReceiptError("receipt evidence changed while reading")
+        latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+        if faults or latest != names:
             raise ReceiptError("receipt evidence changed while reading")
-    latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
-    if faults or latest != names:
-        raise ReceiptError("receipt evidence changed while reading")
     return intents
 
 
@@ -2234,7 +2250,7 @@ def event_records(
             checkpoint()
         instance_dir = _instance_dir(vault_root, candidate.name)
         if lifecycle_only:
-            instance_records = _lifecycle_instance_intents(instance_dir, checkpoint=checkpoint)
+            instance_records = _lifecycle_instance_intents(vault_root, instance_dir, checkpoint=checkpoint)
         else:
             instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
             if issues:
