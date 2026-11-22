@@ -240,27 +240,41 @@ def test_a_cold_reranker_prepares_its_imports_outside_the_shared_model_turn(
     """A warm-up's cold reranker import must not hold every query encode behind it."""
     _cache(hub, embeddings.RERANKER_NAME)
     monkeypatch.setattr(embeddings, "RERANKER_BACKEND", "torch")
-    monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(_Spy()))
     monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
     monkeypatch.setattr(runtime_resources, "configure_torch", lambda: None)
     gate = runtime_resources.ModelAdmissionGate(2)
     monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
-    preparing, prepared = threading.Event(), threading.Event()
+    in_guard, guard_done = threading.Event(), threading.Event()
+    in_import, import_done = threading.Event(), threading.Event()
 
     def slow_tokenizer_guard(_name):
-        preparing.set()
-        assert prepared.wait(10)
+        in_guard.set()
+        assert guard_done.wait(10)
         return "tokenizer.json"
 
+    def slow_import(name):
+        # `from sentence_transformers import CrossEncoder` reaches here, as a cold import would.
+        if name != "CrossEncoder":
+            raise AttributeError(name)
+        in_import.set()
+        assert import_done.wait(10)
+        return _Spy()
+
+    module = types.ModuleType("sentence_transformers")
+    module.__getattr__ = slow_import
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
     monkeypatch.setattr(embedding_backend, "require_tokenizer", slow_tokenizer_guard)
     loader = threading.Thread(target=embeddings.get_reranker)
     loader.start()
     try:
-        assert preparing.wait(5)
-        with runtime_resources.model_execution(wait=False):
-            pass  # a query encode takes the turn while the loader is still preparing
+        for reached, done in ((in_guard, guard_done), (in_import, import_done)):
+            assert reached.wait(5)
+            with runtime_resources.model_execution(wait=False):
+                pass  # a query encode takes the turn while the loader is still preparing
+            done.set()
     finally:
-        prepared.set()
+        guard_done.set()
+        import_done.set()
         loader.join(10)
     assert embeddings._RERANKER == "MODEL"
 
