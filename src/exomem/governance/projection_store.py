@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, reserved_paths, state_paths
-from . import projections, schema_v4
+from . import projections, schema_v4, transcript_banks
 
 # 3 adds `projection_variant_parts` and `projection_variant_heads`; a store at 2 is read as one
 # whose variants hold no parts.
@@ -384,8 +384,8 @@ def _row_material(variant: projections.ProjectionVariant) -> _VariantRow:
         search_fields_jcs,
         str(variant.decision_level).encode("ascii"),
     ]
-    if variant.parts:
-        # A row without parts keeps the digest it had before parts existed. Each part and the
+    if variant.parts or variant.head is not None:
+        # A row without parts or a mapped head keeps the digest it had before parts existed. Each part and the
         # head carry their own digest, computed once, so a row frames those, not the part text.
         fields.append(b"".join(part.digest for part in variant.parts))
         fields.append(b"" if variant.head is None else variant.head.digest)
@@ -1502,6 +1502,16 @@ def _namespace_id(value: object) -> str:
     return value
 
 
+def _is_transcript_bank_leaf(parts: list[str]) -> bool:
+    if len(parts) != 2 or parts[0] != transcript_banks.DIRECTORY:
+        return False
+    # Only the owner's SHA-256 names and its atomic-write temporary suffix.
+    stem, _, suffix = parts[1].partition(".")
+    return len(stem) == 64 and all(character in _HEX for character in stem) and (
+        suffix == "json" or suffix.endswith(".part")
+    )
+
+
 def _collectable_namespace_path(record: held_fs.SagaRecord) -> bool:
     """Closed topology for one immutable namespace and its measurement stores."""
 
@@ -1512,6 +1522,8 @@ def _collectable_namespace_path(record: held_fs.SagaRecord) -> bool:
         f"{_STORE_FILENAME}-wal",
         f"{_STORE_FILENAME}-shm",
     }
+    if record.identity.kind == "file" and _is_transcript_bank_leaf(parts):
+        return True
     if record.identity.kind == "file":
         return record.identity.link_count == 1 and (
             (len(parts) == 1 and parts[0] in sqlite_names)
@@ -1527,7 +1539,7 @@ def _collectable_namespace_path(record: held_fs.SagaRecord) -> bool:
     if record.identity.kind != "directory":
         return False
     return (
-        parts == ["measurements"]
+        parts in (["measurements"], [transcript_banks.DIRECTORY])
         or (
             len(parts) == 2
             and parts[0] == "measurements"
@@ -1580,7 +1592,10 @@ def _remove_namespace_tree(
             file_result = filesystem.file(parent, leaf, access="mutate")
             _held_refusal(file_result, "projection collection file changed")
             with file_result.require() as file:
-                if file.identity != record.identity or file.identity.link_count != 1:
+                # Banks share one immutable inode across private namespaces.
+                # An exact held leaf still removes only this namespace's link.
+                linked_bank = _is_transcript_bank_leaf(record.relative_path.split("/"))
+                if file.identity != record.identity or (not linked_bank and file.identity.link_count != 1):
                     raise ProjectionStoreMismatch(
                         "projection collection identity changed"
                     )

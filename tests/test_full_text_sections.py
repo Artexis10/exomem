@@ -388,6 +388,162 @@ def test_a_source_page_with_crlf_line_endings_still_reads_in_windows(vault, monk
     assert "".join(pieces).replace("\r\n", "\n") == text
 
 
+def test_an_empty_first_extraction_reads_part_two_at_zero(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n"
+        "[0:03] The preamble starts.\n[0:19] The preamble ends.\n\n## Extracted text\n\n",
+        encoding="utf-8",
+    )
+    part.write_text(
+        "---\npart_of: workshop.md\n---\n\n## Extracted text\n\nThe extraction starts here.\n",
+        encoding="utf-8",
+    )
+
+    opened = commands.op_read_memory(vault, path=path, offset=0)
+
+    assert opened["window"]["part"] == 2
+    assert opened["body"] == "The extraction starts here."
+
+
+def test_an_already_parsed_source_keeps_markdown_between_horizontal_rules(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n"
+        "---\n\n## Extracted text\n\nThe first extraction starts here.\n\n---\n\nMore text.\n",
+        encoding="utf-8",
+    )
+    part.write_text(
+        "---\npart_of: workshop.md\n---\n\n## Extracted text\n\nThe second part starts here.\n",
+        encoding="utf-8",
+    )
+
+    opened = commands.op_read_memory(vault, path=path, offset=0)
+
+    assert opened["window"]["part"] == 1
+    assert opened["body"].startswith("The first extraction starts here.")
+
+
+def test_a_multipart_source_offset_opens_after_a_carriage_return_in_the_preamble(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    opening = "[0:03] We inspected the gate.\n"
+    quote = "[0:19] Leave it open until the truck arrives."
+    source.write_bytes((
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n"
+        f"Opening note.\rSecond line.\n\n## Extracted text\n\n{opening}{quote}\n"
+    ).encode())
+    part.write_text(
+        "---\npart_of: workshop.md\n---\n\n## Extracted text\n\nThe second part starts here.\n",
+        encoding="utf-8",
+    )
+
+    opened = commands.op_read_memory(vault, path=path, offset=len(opening))
+
+    assert opened["window"]["part"] == 1 and opened["body"] == quote
+
+
+def test_a_part_two_search_offset_ignores_preserved_notes_after_a_carriage_return(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    part = extraction_parts.part_path(source, 2)
+    part.parent.mkdir(parents=True, exist_ok=True)
+    first = "[0:03] We inspected the gate."
+    quote = "The cerulean forklift needs a wider turn."
+    source.write_bytes((
+        "---\ntitle: Workshop\ntype: source\nextraction_parts: 2\n---\n\n## Extracted text\n\n"
+        f"{first}\r{preserve.SIDECAR_PRESERVED_NOTES_SENTINEL}\r"
+        "## Preserved notes\r\rThe reader should skip this long caption when placing part two.\r"
+    ).encode())
+    part.write_text(
+        f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{quote}\n",
+        encoding="utf-8",
+    )
+
+    hit = next(hit for hit in find_module.find(vault, query=quote, mode="keyword") if hit.path == path)
+    opened = commands.op_read_memory(vault, path=path, offset=hit.passage["offset"])
+
+    assert hit.passage["offset"] == len(first)
+    assert hit.matched_part == opened["window"]["part"] == 2
+    assert hit.passage["text"] == opened["body"] == quote
+
+
+def test_a_multipart_read_opens_a_verified_prefix_without_releasing_an_unrelated_part(vault) -> None:
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    second = extraction_parts.part_path(source, 2)
+    unrelated = extraction_parts.part_path(source, 3)
+    second.parent.mkdir(parents=True, exist_ok=True)
+    first = "[0:03] We inspected the gate."
+    quote = "The cerulean forklift needs a wider turn."
+    source.write_text(
+        f"---\ntitle: Workshop\ntype: source\nextraction_parts: 3\n---\n\n## Extracted text\n\n{first}\n",
+        encoding="utf-8",
+    )
+    second.write_text(
+        f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{quote}\n",
+        encoding="utf-8",
+    )
+    unrelated.write_bytes(b"---\ntype: insight\n---\n\r## Extracted text\r\rAn unrelated note.\r")
+
+    hit = next(hit for hit in find_module.find(vault, query=quote, mode="keyword") if hit.path == path)
+    opened = commands.op_read_memory(vault, path=path, offset=hit.passage["offset"])
+
+    assert hit.matched_part == opened["window"]["part"] == 2
+    assert opened["body"] == hit.passage["text"] == quote
+    assert opened["window"]["incomplete"] is True and opened["window"]["total_chars"] is None
+    next_offset = opened["window"]["next_offset"]
+    assert next_offset == len(first) + len(quote)
+
+    with pytest.raises(ValueError, match="PART_MISSING"):
+        commands.op_read_memory(vault, path=path, offset=next_offset)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses content reads rather than generation guards")
+@pytest.mark.parametrize("link_kind", ["hardlink", "symlink"])
+def test_a_warm_multipart_window_stops_when_an_earlier_part_becomes_linked(vault, monkeypatch, link_kind) -> None:
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(vault_module, "GENERATION_RACY_WINDOW_NS", 0)
+    path = "Knowledge Base/Sources/workshop.md"
+    source = vault / path
+    first, second, third = "Part one.", "Part two.", "Part three."
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        f"---\ntype: source\nextraction_parts: 3\n---\n\n## Extracted text\n\n{first}\n",
+        encoding="utf-8",
+    )
+    for number, text in ((2, second), (3, third)):
+        part = extraction_parts.part_path(source, number)
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_text(f"---\npart_of: workshop.md\n---\n\n## Extracted text\n\n{text}\n", encoding="utf-8")
+    warm = commands.op_read_memory(vault, path=path, offset=0)
+    assert warm["window"]["total_chars"] == len(first + second + third)
+    linked = extraction_parts.part_path(source, 2)
+    other = vault / "other.md"
+    if link_kind == "hardlink":
+        os.link(linked, other)
+    else:
+        linked.rename(other)
+        linked.symlink_to(other)
+
+    before_gap = commands.op_read_memory(vault, path=path, offset=0)
+
+    assert before_gap["body"] == first
+    assert before_gap["window"]["incomplete"] is True and before_gap["window"]["total_chars"] is None
+    assert before_gap["window"]["next_offset"] == len(first)
+    with pytest.raises(ValueError, match="PART_MISSING"):
+        commands.op_read_memory(vault, path=path, offset=len(first + second))
+
+
 def test_export_classifies_part_pages_as_canonical_vault_content(vault, monkeypatch) -> None:
     stub, _text = _small_parted_source(vault, monkeypatch)
     page = vault / stub.sidecar_path

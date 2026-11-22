@@ -49,6 +49,7 @@ def _constructor_map():
         ownership_rotation,
         review_state,
         served_context,
+        source_imports,
         voice_profiles,
     )
     from exomem.governance import (
@@ -67,6 +68,9 @@ def _constructor_map():
         lane="vector",
         extractor_version="extractor-v1",
         model_version="model-v1",
+    )
+    source_import = source_imports.ImportCapture(
+        key="a" * 64, input_digest="b" * 64, original_sha256="c" * 64, protected=False,
     )
 
     return {
@@ -102,6 +106,7 @@ def _constructor_map():
         "review-state": (review_state.state_path,),
         "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
+        "source-import-intents": (source_import._pending_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
         "authorization-projections": (
             lambda root: projection_store.variant_store_path(root, namespace),
@@ -163,6 +168,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "refs-store",
     "review-state",
     "served-context",
+    "source-import-intents",
     "voice-profile-store",
     "brief-watermarks",
 }
@@ -189,6 +195,7 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "procedure-approvals",
     "source-corrections",
     "source-custody",
+    "source-imports",
 }
 
 #: Canonical data outside the vault: under the state root, but never rebuilt,
@@ -356,6 +363,7 @@ def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable()
         "collection-store",
         "collection-archive",
         "procedure-approval-key",
+        "source-import-intents",
     }
     assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
 

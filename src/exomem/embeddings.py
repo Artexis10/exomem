@@ -1192,8 +1192,8 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     timed get SEMANTIC SEGMENT chunks (each starting with its `[timestamp]`
     marker — what `find` surfaces as `transcript_match_at`), with the sections
     before/after `## Extracted text` still paragraph-chunked in document order.
-    Every other page — and the gate-off world — returns `chunk_text` output
-    unchanged (equality-tested).
+    Timestamped text Sources group lines into turns before applying the ordinary
+    chunk cap. Other pages use the paragraph chunker.
 
     Segmenting a timed transcript ENCODES: the segmenter scores every gap
     between timed lines with embeddings of the windows on either side, so one
@@ -1218,7 +1218,14 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
         ss.semantic_segments_enabled()
         and getattr(page, "media_type", None) in ("audio", "video")
     ):
-        return chunk_text(page.title, page.search_body)
+        from . import transcript_passages
+
+        body = page.search_body
+        if transcript_passages.is_source(getattr(page, "rel_path", "")):
+            groups = transcript_passages.chunks(body)
+            if groups:
+                return [chunk for group in groups for chunk in chunk_text(page.title, group)]
+        return chunk_text(page.title, body)
     body = page.body or ""
     idx = body.find("## Extracted text")
     if idx == -1:
@@ -3038,18 +3045,33 @@ def index_incremental(
     selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
     Returns a small stats dict (also the CLI's machine-readable output).
     """
-    from . import access, semantic_index
+    from . import access, semantic_index, transcript_passages
     from . import find as find_module
 
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
-    row_mtimes = index.file_mtimes()
+    row_states = index.incremental_file_states()
     unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
+    legacy_batch: list[tuple[str, list[str], float]] = []
+    transcript_paths: set[str] = set()
     pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
     unit_seen_on_disk: set[str] = set()
+
+    def queue_legacy_batch() -> None:
+        if not legacy_batch:
+            return
+        matching = index.verify_transcript_layout(
+            {path: chunks for path, chunks, _ in legacy_batch}, remember=not dry_run,
+        )
+        for row in legacy_batch:
+            if row[0] not in matching:
+                pending.append(row)
+                transcript_paths.add(row[0])
+        legacy_batch.clear()
+
     scanned = 0
     for md in index_paths.iter_index_markdown(vault_root):
         if not index_paths.is_embeddable_path(md):
@@ -3073,15 +3095,26 @@ def index_incremental(
             continue
         scanned += 1
         seen_on_disk.add(page.rel_path)
-        prior = row_mtimes.get(page.rel_path)
+        prior, verified_layout = row_states.get(page.rel_path, (None, False))
+        row = (page.rel_path, chunks, page.mtime)
+        timed = transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body)
         if prior is not None and page.mtime <= prior + 1.0:
-            continue  # sidecar already current for this file
-        pending.append((page.rel_path, chunks, page.mtime))
+            # Same-mtime Sources can still have legacy paragraph chunks.
+            if timed and not verified_layout:
+                legacy_batch.append(row)
+                if len(legacy_batch) == 16:
+                    queue_legacy_batch()
+            continue
+        if timed:
+            transcript_paths.add(page.rel_path)
+        pending.append(row)
+
+    queue_legacy_batch()
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
     stale = sorted(
-        {rp for rp in row_mtimes if rp not in seen_on_disk}
+        {rp for rp in row_states if rp not in seen_on_disk}
         | {rp for rp in unit_parent_states if rp not in unit_seen_on_disk}
     )
 
@@ -3124,7 +3157,7 @@ def index_incremental(
             n = len(chs)
             replacements.append((rp, chs, vectors[offset : offset + n], m))
             offset += n
-        index.upsert_batch(replacements, identity=producer)
+        index.upsert_batch(replacements, identity=producer, transcript_layout=transcript_paths)
         done_files += len(group)
         stats["chunks_embedded"] += len(flat)
         log_fn(

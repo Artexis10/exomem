@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import extraction_parts, find_results, preserve, provenance
 from .embeddings import MAX_WORDS_PER_CHUNK
-from .vault import parse_frontmatter, read_guarded_text
+from .vault import markdown_lf, parse_frontmatter, read_guarded_text
 
 #: Characters of surrounding text added on each side of the matched passage: about one
 #: paragraph of a hundred words, so the match reads in context without a second read.
@@ -117,8 +117,15 @@ def matched_passage(
         content, _guard = read_guarded_text(vault_root, path)
     except (OSError, UnicodeError):
         return None
-    title = parse_frontmatter(content)[0].get("title")
-    text = extraction_parts.text_of_part(content) if number > 1 else preserve.extracted_text(content)
+    if number > 1:
+        part = extraction_parts.part_document(content)
+        if part is None:
+            return None
+        frontmatter, text = part
+    else:
+        frontmatter, body, _ = parse_frontmatter(markdown_lf(content))
+        text = preserve.extracted_text(body)
+    title = frontmatter.get("title")
     return passage_in(
         text,
         number=number,
