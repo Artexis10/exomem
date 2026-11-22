@@ -2,7 +2,7 @@
 
 ### Requirement: A busy save is accepted durably instead of refused
 
-The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command declares `busy_intake` in the command registry, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, and the serialised arguments fit within 4 MiB. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (15 s by default) before it is accepted. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
+The serving HTTP process SHALL accept a save durably when the vault mutation boundary stays busy, instead of returning `MUTATION_BUSY`. A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command declares `busy_intake` in the command registry, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, and the serialised arguments fit within 4 MiB. Acceptance SHALL persist the save to a machine-local store that survives a process kill and a power loss before the receipt is returned. An eligible save SHALL wait for the boundary for at most the intake wait (15 s by default) before it is accepted. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract. A save that meets no contention SHALL NOT read the intake store, and a fault in the intake SHALL NOT refuse a save that would otherwise run. A drainer with nothing queued SHALL NOT poll the store or change the vault's private identities.
 
 #### Scenario: A save during a long hold comes back queued
 
@@ -22,6 +22,12 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 - **WHEN** a caller with a delegated authorization session sends an eligible save while the boundary is busy
 - **THEN** it returns `MUTATION_BUSY` with `committed: false` as before
 
+#### Scenario: An unreadable intake store does not block an ordinary save
+
+- **WHEN** the intake store cannot be read
+- **AND** the owner sends an eligible save while the boundary is free
+- **THEN** the save commits as it would without the intake
+
 #### Scenario: A process without a drainer keeps the busy refusal
 
 - **WHEN** a stdio server or the CLI meets a busy boundary on an eligible save
@@ -29,7 +35,7 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 
 ### Requirement: Queued saves land once, in arrival order
 
-One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. The drainer SHALL replay each save under its own durable replay identity, so a save whose commit happened before a process stop is not written again after the restart. A replay that stopped before it held the vault boundary SHALL be replayed under a fresh identity, so a dead attempt never leaves a save stuck. A replay that held the boundary and whose commit cannot be proven or ruled out SHALL end `failed` with `MUTATION_OUTCOME_UNKNOWN`, keep its arguments, and SHALL NOT block the saves behind it. While a save is queued or being applied, a resend with the save's original idempotency identity SHALL return the same receipt and SHALL NOT run. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
+One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. The drainer SHALL replay each save under its own durable replay identity, so a save whose commit happened before a process stop is not written again after the restart. Before a replay writes its first canonical byte, the service SHALL record durably that the replay reached its commit; when that record cannot be written, the replay SHALL be refused with nothing committed and retried. A replay that stopped before it reached its commit SHALL be replayed under a fresh identity, so a dead attempt never leaves a save stuck. A replay that reached its commit and whose commit cannot be proven or ruled out SHALL end `failed` with `MUTATION_OUTCOME_UNKNOWN`, keep its arguments, and SHALL NOT block the saves behind it. While a save is queued or being applied, a resend with the save's original idempotency identity and the same payload SHALL return the same receipt and SHALL NOT run; the same identity with a different payload SHALL be a different save. Before each replay of a save sent by a signed-in login, the drainer SHALL recheck that login: a login that has ended SHALL end the save `failed` with `INTAKE_LOGIN_REVOKED` and its arguments, and a session store that cannot be read SHALL leave the save queued. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
 
 #### Scenario: Two clients' saves land after the hold ends
 
@@ -49,6 +55,18 @@ One drainer in the serving process SHALL apply queued saves in acceptance order,
 - **AND** the service starts again without commit evidence for it
 - **THEN** that save is recorded `failed` with `MUTATION_OUTCOME_UNKNOWN` and its arguments
 - **AND** the saves behind it are applied
+
+#### Scenario: A commit record that cannot be written commits nothing
+
+- **WHEN** a replay reaches its commit and its commit record cannot be written
+- **THEN** nothing is committed by that attempt
+- **AND** the save is applied exactly once later
+
+#### Scenario: A save whose login has ended is not applied
+
+- **WHEN** a save is queued
+- **AND** the login that sent it ends before the save is applied
+- **THEN** the save is recorded `failed` with `INTAKE_LOGIN_REVOKED` and its arguments
 
 #### Scenario: A resend while queued runs nothing
 
@@ -76,7 +94,7 @@ A queued save whose application ends in a refusal other than contention SHALL be
 
 ### Requirement: Callers can read a queued save's outcome
 
-`review_memory(mode="queued-write")` SHALL list the queued, applying and failed saves, oldest first and bounded by `limit`. With `ref` it SHALL return that save's state (`queued`, `applying`, `applied` or `failed`), its attempts, its compact outcome when applied, its refusal when failed, and its arguments while queued or failed. `coordination_status` SHALL report the queued, applying and failed counts and the age of the oldest queued save, and SHALL report `unknown` when the store cannot be read.
+Only a caller whose saves may be queued SHALL read queued saves; any other caller, including a delegated session of the owner, SHALL receive `QUEUED_WRITE_OWNER_ONLY`. `review_memory(mode="queued-write")` SHALL list the queued, applying and failed saves, oldest first and bounded by `limit`. With `ref` it SHALL return that save's state (`queued`, `applying`, `applied` or `failed`), its attempts, its compact outcome when applied, its refusal when failed, and its arguments while queued or failed. `coordination_status` SHALL report the queued, applying and failed counts and the age of the oldest queued save, and SHALL report `unknown` when the store cannot be read.
 
 #### Scenario: A later session checks a queued save
 
