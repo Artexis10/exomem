@@ -435,6 +435,10 @@ def _valid_month_name(name: str) -> bool:
     return _evidence_name_key(name) is not None
 
 
+# A receipt month leaf name or its numbered continuation part, for other modules.
+is_receipt_evidence_name = _valid_month_name
+
+
 def _evidence_name_key(name: str) -> tuple[str, int] | None:
     match = _MONTH_FILE.fullmatch(name)
     if match is None:
