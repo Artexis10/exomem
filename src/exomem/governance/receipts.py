@@ -814,67 +814,87 @@ def _receipt_file_signature(path: Path) -> tuple[int, int, int, int, int, int]:
 def _lifecycle_instance_intents(
     vault_root: Path, instance_dir: Path, *, checkpoint: Callable[[], None] | None,
 ) -> list[dict[str, Any]]:
-    names, issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
-    if issues:
-        raise ReceiptError("receipt chain requires reconciliation")
-    anchor = _LifecycleReceiptSegment(0, GENESIS_HASH, None, ())
-    signatures: list[tuple[Path, tuple]] = []
-    intents: list[dict[str, Any]] = []
-    def verify_segment(name: str, *, closed: bool, max_bytes: int | None = None) -> None:
-        nonlocal anchor
-        if checkpoint is not None:
-            checkpoint()
-        path = instance_dir / name
-        signature = _receipt_file_signature(path)
-        if max_bytes is not None and signature[3] > max_bytes:
-            raise ReceiptError("receipt part grew before verification")
-        signatures.append((path, signature))
-        key = path, signature, anchor.last_seq, anchor.last_hash, anchor.last_month
-        # POSIX ctime changes on edits that restore mtime. The Windows stat ctime is creation time.
-        reusable = os.name != "nt" and closed
-        with _LIFECYCLE_SEGMENTS_LOCK:
-            cached = _LIFECYCLE_SEGMENTS.get(key) if reusable else None
-            if cached is not None:
-                _LIFECYCLE_SEGMENTS.move_to_end(key)
-        if cached is None:
-            records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint, max_bytes=max_bytes)
-            valid, faults = _verify_records(
-                records, faults, expected_hash=anchor.last_hash, expected_seq=anchor.last_seq + 1,
-                previous_month=anchor.last_month, checkpoint=checkpoint,
-            )
-            if faults or _receipt_file_signature(path) != signature:
-                raise ReceiptError("receipt chain requires reconciliation")
-            tail = valid[-1] if valid else None
-            cached = _LifecycleReceiptSegment(
-                int(tail["seq"]) if tail is not None else anchor.last_seq,
-                str(tail["hash"]) if tail is not None else anchor.last_hash,
-                name[:7] if tail is not None else anchor.last_month,
-                tuple(record for record in valid if record["event_type"] == "critical" and record["phase"] == "intent"),
-            )
-            if reusable:
-                with _LIFECYCLE_SEGMENTS_LOCK:
-                    _LIFECYCLE_SEGMENTS[key] = cached
-                    if len(_LIFECYCLE_SEGMENTS) > _LIFECYCLE_SEGMENTS_CAPACITY:
-                        _LIFECYCLE_SEGMENTS.popitem(last=False)
-        intents.extend(cached.intents)
-        anchor = cached
+    def scan(*, store_cache: bool, caller_holds_lock: bool) -> list[dict[str, Any]]:
+        names, issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+        if issues:
+            raise ReceiptError("receipt chain requires reconciliation")
+        anchor = _LifecycleReceiptSegment(0, GENESIS_HASH, None, ())
+        signatures: list[tuple[Path, tuple]] = []
+        intents: list[dict[str, Any]] = []
 
-    for name in names[:-1]:
-        verify_segment(name, closed=True)
-    bounded_tail = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
-    # Never hold the writer lock while replaying an oversized legacy file or a closed archive.
-    with _receipt_lock(vault_root) if bounded_tail else nullcontext():
-        if names:
-            verify_segment(names[-1], closed=False, max_bytes=_RECEIPT_PART_BYTES if bounded_tail else None)
-        for path, signature in signatures:
+        def verify_segment(name: str, *, closed: bool, max_bytes: int | None = None) -> None:
+            nonlocal anchor
             if checkpoint is not None:
                 checkpoint()
-            if _receipt_file_signature(path) != signature:
+            path = instance_dir / name
+            signature = _receipt_file_signature(path)
+            if max_bytes is not None and signature[3] > max_bytes:
+                raise ReceiptError("receipt part grew before verification")
+            signatures.append((path, signature))
+            key = path, signature, anchor.last_seq, anchor.last_hash, anchor.last_month
+            # POSIX ctime changes on edits that restore mtime. The Windows stat ctime is creation time.
+            reusable = os.name != "nt" and closed
+            with _LIFECYCLE_SEGMENTS_LOCK:
+                cached = _LIFECYCLE_SEGMENTS.get(key) if reusable else None
+                if cached is not None:
+                    _LIFECYCLE_SEGMENTS.move_to_end(key)
+            if cached is None:
+                records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint, max_bytes=max_bytes)
+                valid, faults = _verify_records(
+                    records, faults, expected_hash=anchor.last_hash, expected_seq=anchor.last_seq + 1,
+                    previous_month=anchor.last_month, checkpoint=checkpoint,
+                )
+                if faults or _receipt_file_signature(path) != signature:
+                    raise ReceiptError("receipt chain requires reconciliation")
+                tail = valid[-1] if valid else None
+                cached = _LifecycleReceiptSegment(
+                    int(tail["seq"]) if tail is not None else anchor.last_seq,
+                    str(tail["hash"]) if tail is not None else anchor.last_hash,
+                    name[:7] if tail is not None else anchor.last_month,
+                    tuple(record for record in valid if record["event_type"] == "critical" and record["phase"] == "intent"),
+                )
+                if reusable and store_cache:
+                    with _LIFECYCLE_SEGMENTS_LOCK:
+                        _LIFECYCLE_SEGMENTS[key] = cached
+                        if len(_LIFECYCLE_SEGMENTS) > _LIFECYCLE_SEGMENTS_CAPACITY:
+                            _LIFECYCLE_SEGMENTS.popitem(last=False)
+            intents.extend(cached.intents)
+            anchor = cached
+
+        for name in names[:-1]:
+            verify_segment(name, closed=True)
+        bounded_tail = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
+        # Never hold the writer lock while replaying an oversized legacy file or a closed archive.
+        # On the retry pass the caller already holds the lock, so the tail stays byte-bounded:
+        # a grown active part fails the max_bytes signature check before any long read.
+        tail_bound = _RECEIPT_PART_BYTES if bounded_tail or caller_holds_lock else None
+        with _receipt_lock(vault_root) if bounded_tail and not caller_holds_lock else nullcontext():
+            if names:
+                verify_segment(names[-1], closed=False, max_bytes=tail_bound)
+            for path, signature in signatures:
+                if checkpoint is not None:
+                    checkpoint()
+                if _receipt_file_signature(path) != signature:
+                    raise ReceiptError("receipt evidence changed while reading")
+            latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+            if faults or latest != names:
                 raise ReceiptError("receipt evidence changed while reading")
-        latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
-        if faults or latest != names:
-            raise ReceiptError("receipt evidence changed while reading")
-    return intents
+        return intents
+
+    try:
+        return scan(store_cache=True, caller_holds_lock=False)
+    except ReceiptError:
+        try:
+            names, _issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+            retry = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
+        except (ReceiptError, OSError):
+            retry = False
+        if not retry:
+            raise
+    # A transient race with an in-flight append fails the optimistic pass outside the lock.
+    # Retry once with every step under the writer lock; a second failure is genuine evidence.
+    with _receipt_lock(vault_root):
+        return scan(store_cache=False, caller_holds_lock=True)
 
 
 def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> None:

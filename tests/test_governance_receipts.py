@@ -3710,3 +3710,122 @@ def test_oversized_legacy_active_part_verifies_without_the_writer_lock(
 
     monkeypatch.setattr(receipts, "_receipt_lock", forbidden)
     assert receipts.event_records(vault, lifecycle_only=True) == expected
+
+
+def test_lifecycle_read_retries_once_under_the_lock_after_a_racing_append(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lifecycle_vault_with_deletion(vault)
+    instance_dir = next(receipts._events_root(vault).glob("*"))
+    # Force every append into a fresh numbered part: the fixture's single month part
+    # gains a closed sibling now, and the racing append below gains another mid-read.
+    monkeypatch.setattr(
+        receipts,
+        "_receipt_append_target",
+        lambda path, *, sequence, bytes_to_append: path.with_name(
+            f"{path.name[:7]}.{sequence:019}.jsonl"
+        ),
+    )
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    names = [path.name for path in instance_dir.glob("*.jsonl")]
+    assert len(names) >= 2
+
+    # The listing pass checkpoints once per directory entry; the first closed-part
+    # verification checkpoints right after, still outside the writer lock.
+    fire_at = len(list(instance_dir.iterdir())) + 1
+    appended: dict = {}
+    calls = 0
+
+    def racing_append() -> None:
+        nonlocal calls
+        calls += 1
+        if calls != fire_at:
+            return
+        done = threading.Event()
+
+        def writer() -> None:
+            appended.update(
+                receipts.begin_event(vault, operation="delete", prior=_PRIOR, target="c" * 64)
+            )
+            done.set()
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert done.wait(timeout=_STUCK_SECONDS)
+        thread.join()
+
+    records = receipts.event_records(vault, lifecycle_only=True, checkpoint=racing_append)
+    assert calls >= fire_at and appended
+    assert any(
+        record.get("event_id") == appended["event_id"] for record in records
+    ), records
+
+
+def test_a_transient_failure_on_an_oversized_active_part_gets_no_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 1)
+
+    real_names = receipts._monthly_evidence_names
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise receipts.ReceiptError("simulated transient")
+        return real_names(*args, **kwargs)
+
+    def forbidden(vault_root: Path):
+        raise AssertionError("an oversized active part entered the writer lock")
+
+    monkeypatch.setattr(receipts, "_monthly_evidence_names", fail_once)
+    monkeypatch.setattr(receipts, "_receipt_lock", forbidden)
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True)
+    assert calls == 2  # the pre-retry bound check, never a locked pass
+
+
+def test_the_locked_retry_respects_the_bound_disclosure_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import request_budget
+
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+
+    real_names = receipts._monthly_evidence_names
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise receipts.ReceiptError("simulated transient")
+        return real_names(*args, **kwargs)
+
+    monkeypatch.setattr(receipts, "_monthly_evidence_names", fail_once)
+
+    release = threading.Event()
+    ready = threading.Event()
+
+    def holder() -> None:
+        with receipts._receipt_lock(vault):
+            ready.set()
+            release.wait(timeout=_STUCK_SECONDS)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        ready.wait(timeout=_STUCK_SECONDS)
+        budget = request_budget.RequestBudget(seconds=0.5)
+        check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+        started = time.monotonic()
+        with pytest.raises(request_budget.ReadBudgetExhausted):
+            with request_budget.checking(check):
+                receipts.event_records(vault, lifecycle_only=True)
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        thread.join(timeout=_STUCK_SECONDS)
+    assert not thread.is_alive()

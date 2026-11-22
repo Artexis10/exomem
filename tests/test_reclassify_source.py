@@ -391,7 +391,14 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             scope.unlink()
             freshness.on_files_changed(vault, deleted=[vault / erased, bridge])
             vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[erased, bridge_rel])
-            after_erasure = await preview(preview_run_id=run_id)
+            async with asyncio.timeout(12):
+                while True:
+                    after_erasure = await preview(preview_run_id=run_id)
+                    if after_erasure.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                        break
+                    for leaked in ("result", "references", "entries", "next_cursor"):
+                        assert leaked not in after_erasure, after_erasure
+                    await asyncio.sleep(0.1)
             assert after_erasure["error"]["code"] == "NOT_FOUND", after_erasure
             assert "result" not in after_erasure and "next_cursor" not in after_erasure
 
