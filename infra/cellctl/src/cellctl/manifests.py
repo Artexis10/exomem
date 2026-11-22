@@ -1295,6 +1295,10 @@ BACKUP_JOB_NAME = "cell-backup"
 RESTORE_JOB_NAME = "cell-restore"
 # The closed Job attempt name and annotations shared by the renderer and observer.
 RESTIC_VERIFICATION_JOB_NAME_RE = re.compile(re.escape(JOB_KIND_RESTIC_VERIFY) + r"-[0-9a-f]{32}")
+# The verifier's fixed restic environment excludes executable and shell overrides.
+RESTIC_VERIFICATION_ENV_NAMES = frozenset({
+    "RESTIC_REPOSITORY", "RESTIC_PASSWORD", "RESTIC_CACHE_DIR", "TMPDIR", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+})
 RESTIC_VERIFICATION_ANNOTATION = "exomem.io/restic-verification"
 RESTIC_VERIFICATION_MAX_PARTS = 256  # restic 0.19.1 bounds n/N by the first pack-ID byte.
 RESTIC_VERIFICATION_GRACE_SECONDS = 30
@@ -1388,12 +1392,29 @@ def restic_verification_repository(cell_id: str, *, bucket_name: str, endpoint: 
     return hashlib.sha256(_restic_repo(cell_id, bucket_name, endpoint).encode()).hexdigest()
 
 
-def restic_verification_command(part: int, total: int, download_kib_per_second: int) -> list[str]:
-    """One pinned restic command that reads the repository without taking a lock."""
-    return _cell_command([
-        "restic", "check", "--no-lock",
+def restic_verification_command(part: int, total: int, download_kib_per_second: int, start_before: int) -> list[str]:
+    """A delayed Job cannot start restic after its issuing controller's launch window."""
+    return [
+        "sh", "-c", 'ulimit -c 0 && [ "$(date -u +%s)" -lt "$1" ] && shift && exec "$@"',
+        "cell-process", str(start_before), "restic", "check", "--no-lock",
         f"--read-data-subset={part}/{total}", f"--limit-download={download_kib_per_second}",
-    ], scratch=False)
+    ]
+
+
+def is_restic_verification_command(command: object) -> bool:
+    """Parse only the exact argv format emitted for a read-only verifier."""
+    if not isinstance(command, list) or len(command) != 10:
+        return False
+    if not all(isinstance(arg, str) for arg in command):
+        return False
+    part, slash, total = command[-2].removeprefix("--read-data-subset=").partition("/")
+    rate = command[-1].removeprefix("--limit-download=")
+    deadline = command[4]
+    if not (slash and all(0 < len(s) <= 19 and s.isascii() and s.isdecimal() for s in (part, total, rate, deadline))):
+        return False
+    n, count, kib, start_before = map(int, (part, total, rate, deadline))
+    return (1 <= n <= count <= RESTIC_VERIFICATION_MAX_PARTS and 0 < kib and 0 < start_before
+            and command == restic_verification_command(n, count, kib, start_before))
 
 
 def restic_verification_invocation(image: str, command: list[str], repository: str) -> str:
@@ -1705,7 +1726,7 @@ def render_backup_job(
 
 def render_restic_verify_job(
     spec: CellManifestSpec, *, bucket_name: str, endpoint: str, attempt_id: str, part: int, total: int,
-    download_kib_per_second: int, deadline_seconds: int, statefulset_uid: str,
+    download_kib_per_second: int, deadline_seconds: int, start_before: int, statefulset_uid: str,
 ) -> dict:
     """Check the repository in a bounded Job that needs no cell volume."""
     if not 1 <= part <= total <= RESTIC_VERIFICATION_MAX_PARTS:
@@ -1716,7 +1737,7 @@ def render_restic_verify_job(
     repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     pod = _job_pod_spec(spec, job_kind=JOB_KIND_RESTIC_VERIFY, command=[], data_read_only=True, repo=repo)
     container = pod["containers"][0]
-    container["command"] = restic_verification_command(part, total, download_kib_per_second)
+    container["command"] = restic_verification_command(part, total, download_kib_per_second, start_before)
     container["volumeMounts"] = [{"name": "cache", "mountPath": "/cache"}, {"name": "tmp", "mountPath": "/tmp"}]
     pod["volumes"] = [{"name": mount["name"], "emptyDir": {"sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB)}}
                       for mount in container["volumeMounts"]]

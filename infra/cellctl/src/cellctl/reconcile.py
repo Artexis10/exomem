@@ -2272,6 +2272,7 @@ async def reconcile_once(
     packing_cells = await db.read_packing_export_cells(connection)
     export_slots = ExportSlots(config.export_concurrency_per_node, [
         _export_node(row, observations[row.cell_id]) for row in rows if row.cell_id in packing_cells])
+    managed_work: set[str] = set()
     for row in rows:
         try:
             fast |= await _reconcile_row(
@@ -2301,16 +2302,19 @@ async def reconcile_once(
                 backup_listing=backup_listing,
                 export_slots=export_slots,
                 fleet_observations=observations,
+                managed_work=managed_work,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
                 raise
             logger.error("cellctl reconcile failed for cell %s: %s", row.cell_id, _describe_error(error))
+            managed_work.add(row.cell_id)
             fast = True
 
     fast |= await _sync_restic_work(
         cluster, cluster_config, rows, observations, now, runtime=memory.restic_verification,
         conflicts=(backup_candidates | upgrade_candidates | relocation_candidates | packing_cells | pending_starts
+                   | managed_work
                    | ({render_digest_candidate} if render_digest_candidate else set())),
         allow_start=not fleet_unobserved,
     )
@@ -3011,6 +3015,7 @@ async def _reconcile_row(
     refusal_parked: bool,
     memory: LoopMemory,
     fleet_observations: dict[str, ClusterObservation],
+    managed_work: set[str],
     start_relocation: bool = False,
     storage_room: StorageRoom | None = None,
     media_active: ActiveSet | None = None,
@@ -3260,6 +3265,8 @@ async def _reconcile_row(
         crossing=crossing,
         canary=canary,
     )
+    if import_decision or export_decision or transfer_run or decision.apply_manifests:
+        managed_work.add(row.cell_id)
     # Only an apply that stops or replaces the serving pod needs the builder's claim released.
     replaces_serving = decision.apply_manifests and (
         decision.replicas == 0 or decision.image != observation.statefulset_image
@@ -3887,8 +3894,8 @@ async def _sync_restic_work(
         )
         return cluster.create_restic_verification_job(render_restic_verify_job(
             spec, **location, attempt_id=receipt.attempt_id, part=receipt.part, total=receipt.total,
-            download_kib_per_second=settings.download_kib_per_second, deadline_seconds=settings.deadline_seconds,
-            statefulset_uid=receipt.statefulset_uid,
+            download_kib_per_second=settings.download_kib_per_second, deadline_seconds=receipt.deadline_seconds,
+            start_before=receipt.start_before, statefulset_uid=receipt.statefulset_uid,
         ))
 
     return await sync_verifications(

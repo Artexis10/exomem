@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -68,7 +71,8 @@ def test_restic_verification_uses_existing_repository_access_without_the_cell_vo
                  media_collector_credential="fixture-collector")
     job = manifests.render_restic_verify_job(
         spec, bucket_name="backups", endpoint="https://s3.example", attempt_id="an-attempt",
-        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300, statefulset_uid="statefulset-id",
+        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300, start_before=1_800_000_000,
+        statefulset_uid="statefulset-id",
     )
 
     assert job["metadata"]["name"] == manifests.restic_verification_job_name("an-attempt")
@@ -95,6 +99,22 @@ def test_restic_verification_uses_existing_repository_access_without_the_cell_vo
     job_kind = template["metadata"]["labels"][manifests.JOB_KIND_LABEL]
     policy = _find(render_network_policies(spec), "NetworkPolicy", manifests.JOB_EGRESS_POLICY)
     assert all(job_kind not in rule.get("values", ()) for rule in policy["spec"]["podSelector"]["matchExpressions"])
+
+
+@pytest.mark.parametrize("elapsed", [False, True])
+def test_a_delayed_verifier_cannot_start_restic_after_its_launch_window(tmp_path, elapsed) -> None:
+    restic = tmp_path / "restic"
+    restic.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    restic.chmod(0o700)
+    command = manifests.restic_verification_command(3, 24, 8192, int(time.time()) + (-60 if elapsed else 60))
+
+    result = subprocess.run(command, capture_output=True, text=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
+
+    if elapsed:
+        assert result.returncode != 0 and result.stdout == ""
+    else:
+        assert result.returncode == 0 and result.stdout.splitlines() == command[-4:]
 
 
 # A local cell's hourly backup runs beside its runtime too, with its own clone claim.

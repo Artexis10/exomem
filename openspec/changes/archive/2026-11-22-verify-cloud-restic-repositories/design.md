@@ -14,9 +14,11 @@ Start at most one verification Job across the fleet, in an idle cell with a prio
 
 ### Record evidence before cleanup
 
-Store a versioned verification receipt on the cell StatefulSet. Bind it to the configured repository address, attempt, and exact slice. Patch the observed StatefulSet UID. Read Jobs and Pods with paged fleet-wide observation. Accept successful exit only from the matching Job and Pod. Persist the outcome before deleting the completed Job.
+Store a versioned verification receipt on the cell StatefulSet. Bind it to the configured repository address, attempt, and exact slice. Patch the observed StatefulSet UID. Read Jobs and Pods with paged fleet-wide observation. Match the create-issued Job UID and native container digest and timing. Persist the outcome before deleting the completed Job.
 
 An unavailable observation, missing attempt, deadline, or failed check preserves the next slice and triggers backoff. Preserve the last verified slice and its time. Keep a successful receipt within its originating StatefulSet and configured repository address. A result covers the exact observed check and its time.
+
+The rendered command has an absolute start cutoff. An ambiguous create keeps the slot through the runtime and termination bounds. An observed active orphan keeps it until Kubernetes reports terminal or absent. In-place restore excludes the exact controlled verifier with its scratch mounts.
 
 ### Bound work and retain the existing backup contract
 

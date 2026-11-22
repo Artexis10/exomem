@@ -15,7 +15,7 @@ import logging
 import re
 import time
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import httpx
 from kubernetes import client as k8s
@@ -66,11 +66,12 @@ from .manifests import (
     RENDER_DIGEST_ANNOTATION,
     RENDER_DIGEST_APPLIED_AT_ANNOTATION,
     RESTIC_VERIFICATION_ANNOTATION,
-    RESTIC_VERIFICATION_GRACE_SECONDS,
+    RESTIC_VERIFICATION_ENV_NAMES,
     RESTIC_VERIFICATION_JOB_NAME_RE,
     RESTORE_JOB_NAME,
     RESTORED_SNAPSHOT_ANNOTATION,
     ROW_GENERATION_ANNOTATION,
+    SNAPSHOT_ID_RE,
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     UPGRADE_PHASE_ANNOTATION,
@@ -81,6 +82,7 @@ from .manifests import (
     cell_id_from_namespace,
     clone_claim_name,
     hold_job_name,
+    is_restic_verification_command,
     namespace_name,
     restic_verification_invocation,
     snapshot_backup_name,
@@ -117,6 +119,10 @@ VERIFICATION_REQUEST_SECONDS = 2
 VERIFICATION_CENSUS_SECONDS = 5
 VERIFICATION_LIST_LIMIT = 64
 VERIFICATION_MAX_PAGES = 2
+
+
+class VerificationCreateRejected(ValueError):
+    """Kubernetes refused the create without accepting this attempt."""
 
 # Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
 # pod (about 5 KB from node-exporter's mdadm collector, tens of KB from TopoLVM).
@@ -576,9 +582,15 @@ class ClusterClient:
 
     def create_restic_verification_job(self, manifest: dict) -> str:
         """A create conflict never adopts the other Job as this attempt."""
-        job = self._batch.create_namespaced_job(
-            manifest["metadata"]["namespace"], manifest, _request_timeout=VERIFICATION_REQUEST_SECONDS,
-        )
+        try:
+            job = self._batch.create_namespaced_job(
+                manifest["metadata"]["namespace"], manifest, _request_timeout=VERIFICATION_REQUEST_SECONDS,
+            )
+        except ApiException as error:
+            # API validation, admission, conflict and overload refusals did not create a new Job.
+            if error.status in (400, 401, 403, 404, 409, 422, 429):
+                raise VerificationCreateRejected(f"Kubernetes rejected verifier creation ({error.status})") from error
+            raise
         uid = job.metadata.uid
         if not uid:
             raise ValueError("Kubernetes did not acknowledge a verifier Job UID")
@@ -1624,29 +1636,39 @@ def _verification_pages(list_resources, selector: str, deadline: float):
 
 
 def _verification_invocation(pod_spec) -> str | None:
-    if pod_spec is None or len(pod_spec.containers) != 1 or pod_spec.init_containers:
+    if pod_spec is None or len(pod_spec.containers) != 1 or pod_spec.init_containers or pod_spec.ephemeral_containers:
         return None
     container, = pod_spec.containers
-    repositories = [entry for entry in (container.env or []) if entry.name == "RESTIC_REPOSITORY"]
-    if (container.name != JOB_KIND_RESTIC_VERIFY or not container.command or container.args
-            or container.env_from or len(repositories) != 1 or not repositories[0].value or repositories[0].value_from):
+    env = {entry.name: entry for entry in container.env or []}
+    if (container.name != JOB_KIND_RESTIC_VERIFY or not is_restic_verification_command(container.command)
+            or container.args or container.env_from or env.keys() != RESTIC_VERIFICATION_ENV_NAMES
+            or len(env) != len(container.env)):
         return None
-    fingerprint = hashlib.sha256(repositories[0].value.encode()).hexdigest()
+    repository = env["RESTIC_REPOSITORY"]
+    if not repository.value or repository.value_from:
+        return None
+    fingerprint = hashlib.sha256(repository.value.encode()).hexdigest()
     return restic_verification_invocation(container.image, container.command, fingerprint)
 
 
-def _live_verification_pod(pod, *, orphan: bool) -> bool:
-    if pod.metadata.deletion_timestamp is None and pod.status and pod.status.phase in ("Succeeded", "Failed"):
-        return False
-    if not orphan:
-        return True
-    deadline = pod.spec.active_deadline_seconds if pod.spec else None
-    start = (pod.status.start_time if pod.status else None) or pod.metadata.creation_timestamp
-    # A Pod without its Job has only the Pod's deadline and Kubernetes grace.
-    # Its API object can linger after this fate bound even with no verifier lock.
-    return bool(start and deadline and datetime.now(UTC) < start + timedelta(
-        seconds=deadline + RESTIC_VERIFICATION_GRACE_SECONDS,
+def _verified_container_finish(job, pod, status) -> datetime | None:
+    """Bind the clock and native runtime digest to the same terminated container."""
+    terminal = status.state.terminated
+    if not terminal or terminal.exit_code != 0 or not status.container_id or terminal.container_id != status.container_id:
+        return None
+    _, digest_separator, expected = pod.spec.containers[0].image.rpartition("@")
+    reported = (status.image_id or "").removeprefix("docker-pullable://").removeprefix("containerd://")
+    actual = reported.rpartition("@")[2]
+    if (not digest_separator or not expected.startswith("sha256:")
+            or not SNAPSHOT_ID_RE.fullmatch(expected[7:]) or actual != expected):
+        return None
+    times = tuple(_parse_timestamp(value) for value in (
+        job.metadata.creation_timestamp, pod.metadata.creation_timestamp, pod.status.start_time,
+        terminal.started_at, terminal.finished_at,
     ))
+    if all(times) and all(earlier <= later for earlier, later in zip(times[:-1], times[1:], strict=True)):
+        return times[-1]
+    return None
 
 
 def _restic_verification_observation(name: str, job, pods: list) -> ResticVerificationJob:
@@ -1663,8 +1685,8 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
     statefulset_uid = owners[0].uid if len(owners) == 1 else None
     invocation = _verification_invocation(job.spec.template.spec) if job is not None else None
     # A Job with no Pods can still create one.
-    active = bool(job is not None and not deleting and not conditions) or any(
-        _live_verification_pod(pod, orphan=job is None) for pod in pods
+    active = bool(job is not None and not conditions) or any(
+        not pod.status or pod.status.phase not in ("Succeeded", "Failed") for pod in pods
     )
     observation = ResticVerificationJob(name, uid, statefulset_uid, invocation, active, deleting)
     if active or deleting or not uid or len(conditions) != 1 or not invocation:
@@ -1675,7 +1697,8 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
     owned_pods = [
         pod
         for pod in pods
-        if any(owner.kind == "Job" and owner.controller is True and owner.name == name and owner.uid == uid
+        if any(owner.api_version == "batch/v1" and owner.kind == "Job" and owner.controller is True
+               and owner.name == name and owner.uid == uid
                for owner in (pod.metadata.owner_references or []))
     ]
     if len(owned_pods) == 1:
@@ -1684,11 +1707,9 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
         if (pod.metadata.uid and pod.status.phase == "Succeeded" and len(statuses) == 1
                 and statuses[0].name == JOB_KIND_RESTIC_VERIFY and statuses[0].state
                 and _verification_invocation(pod.spec) == invocation):
-            terminal = statuses[0].state.terminated
-            if terminal and terminal.exit_code == 0 and terminal.finished_at and job.metadata.creation_timestamp:
-                finished = _parse_timestamp(terminal.finished_at)
-                if finished >= _parse_timestamp(job.metadata.creation_timestamp):
-                    return replace(observation, outcome="success", pod_uid=pod.metadata.uid, finished_at=finished)
+            finished = _verified_container_finish(job, pod, statuses[0])
+            if finished:
+                return replace(observation, outcome="success", pod_uid=pod.metadata.uid, finished_at=finished)
     return replace(observation, outcome="unknown")
 
 

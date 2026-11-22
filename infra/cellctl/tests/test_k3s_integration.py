@@ -1220,13 +1220,12 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     # D9: the cell's backup key is the Secret the key custodian's identity creates below, holding
     # MinIO's one root credential.
     fake_hetzner = FakeHetznerVolumeProvider()
-    clock_offset = timedelta()
 
     async def _pass() -> None:
         connection = await asyncpg.connect(app_dsn)
         try:
             await reconcile_once(connection, cluster, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG,
-                                 now=datetime.now(UTC) + clock_offset)
+                                 now=datetime.now(UTC))
         finally:
             await connection.close()
 
@@ -1387,7 +1386,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         from cellctl.restic_verification import VerificationConfig, VerificationReceipt
 
         config = VerificationConfig(cell_ids=(cell_id,), parts=2, deadline_seconds=60,
-                                    interval=timedelta(minutes=10), retry=timedelta(minutes=1))
+                                    interval=timedelta(seconds=1), retry=timedelta(seconds=1))
         cluster_config = replace(cluster_config, restic_verification=config)
         observed_backup = (row["last_backup_at"], snapshot_id)
 
@@ -1421,7 +1420,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
 
         assert _run(["docker", "run", "--rm", good_tag, "restic", "version"]).stdout.startswith("restic 0.19.1 ")
         first = observe_slice(1, "success")
-        assert first.next_part == 2 and first.job_uid
+        assert first.next_part == 2 and first.job_uid and first.pod_uid and first.finished_at
 
         secret = json.loads(_kubectl(k3s.name, ["get", "secret", "cell-credentials", "--namespace", namespace,
                                                "--output=json"]).stdout)
@@ -1445,7 +1444,6 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         data_pack = next((pack for pack in packs if int(pack[:2], 16) % 2 == 1), packs[0])
         failed_part = 1 + int(data_pack[:2], 16) % 2
         if failed_part == 1:
-            clock_offset += config.interval + timedelta(seconds=1)
             assert observe_slice(2, "success").next_part == 1
 
         from botocore.config import Config
@@ -1461,7 +1459,6 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         corrupted = bytes([exact[0] ^ 1]) + exact[1:]
         storage.put_object(Bucket=BUCKET_NAME, Key=key, Body=corrupted)
         try:
-            clock_offset += config.interval + timedelta(seconds=1)
             failed = observe_slice(failed_part, "failed")
             assert failed.next_part == failed_part and failed.last_success_part != failed_part
         finally:
@@ -1469,7 +1466,6 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
 
         # Reconstruct the controller client and retry using only Kubernetes receipt state.
         cluster = ClusterClient(_sa_api_client(k3s, token=token))
-        clock_offset += config.retry + timedelta(seconds=1)
         repaired = observe_slice(failed_part, "success")
         assert repaired.last_success_part == failed_part and repaired.next_part == 3 - failed_part
         assert repaired.job_uid != failed.job_uid

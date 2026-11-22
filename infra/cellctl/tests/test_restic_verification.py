@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 
 from cellctl import db, reconcile
+from cellctl.k8s_client import VerificationCreateRejected
 from cellctl.main import build_restic_verification
 from cellctl.manifests import (
     JOB_KIND_LABEL,
@@ -22,6 +23,7 @@ from cellctl.restic_verification import (
 )
 from cellctl.state import ResticVerificationJob
 
+from .test_exports import FakeS3
 from .test_reconcile import (
     FakeClusterGateway,
     FakeHetznerVolumeProvider,
@@ -182,13 +184,15 @@ async def test_a_same_name_replacement_cannot_attest_to_a_fenced_receipt():
     cluster.jobs[NAMESPACE] = (observed(attempt, uid="wrong-uid", outcome="success"),)
 
     await cluster.sync(include=(NAMESPACE,))
+    assert cluster.receipt() == attempt
+    await cluster.sync(now=attempt.may_run_until, include=(NAMESPACE,))
 
     receipt = cluster.receipt()
     assert (receipt.outcome, receipt.job_uid, receipt.next_part, receipt.last_success_at) == ("unknown", "job-uid", 1, None)
     assert not any(operation[0] == "delete" for operation in cluster.operations)
 
 
-async def test_an_uncertain_create_never_adopts_its_job_on_restart():
+async def test_an_uncertain_create_holds_the_fleet_after_restart_even_before_the_job_appears():
     class LostResponse(FakeVerifier):
         def start(self, namespace, receipt):
             self.jobs[namespace] = (observed(receipt, outcome="success"),)
@@ -196,15 +200,45 @@ async def test_an_uncertain_create_never_adopts_its_job_on_restart():
 
     original = LostResponse()
     await original.sync(include=(NAMESPACE,))
+    attempt = original.receipt()
 
     restarted = FakeVerifier()
     restarted.annotations = original.annotations.copy()
+    await restarted.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    assert restarted.receipt() == attempt and restarted.receipt(OTHER_NAMESPACE) is None
+
     restarted.jobs = original.jobs.copy()
-    await restarted.sync(include=(NAMESPACE,))
+    await restarted.sync(now=attempt.may_run_until, include=(NAMESPACE, OTHER_NAMESPACE))
 
     receipt = restarted.receipt()
     assert (receipt.outcome, receipt.job_uid, receipt.next_part) == ("unknown", None, 1)
     assert not any(operation[0] == "delete" for operation in restarted.operations)
+    await restarted.sync(now=attempt.may_run_until, include=(NAMESPACE, OTHER_NAMESPACE))
+    assert restarted.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+async def test_a_definitive_create_rejection_leaves_the_slot_available_for_a_peer():
+    class Rejection(FakeVerifier):
+        def start(self, namespace, receipt):
+            if namespace == NAMESPACE:
+                raise VerificationCreateRejected("fixture API refused the create")
+            return super().start(namespace, receipt)
+
+    cluster = Rejection()
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    assert cluster.receipt().outcome == "unknown"
+
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    assert cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+async def test_a_malformed_receipt_does_not_stop_a_peer_cell_from_being_verified():
+    cluster = FakeVerifier()
+    cluster.annotations[NAMESPACE] = "[" * 5_000 + "0" + "]" * 5_000
+
+    await cluster.sync(include=(OTHER_NAMESPACE,))
+
+    assert cluster.receipt() is None and cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
 
 
 async def test_a_refused_cell_does_not_starve_the_next_due_cell():
@@ -278,36 +312,37 @@ async def test_statefulset_replaced_during_observation_never_receives_the_old_su
     assert cluster.receipt() is None and cluster.operations == before_replacement
 
 
+class ReconcileVerifierCluster(FakeClusterGateway):
+    verifiers = ()
+
+    def observe(self, cell_id, namespace):
+        observation = super().observe(cell_id, namespace)
+        annotations = self.applied.get((namespace, "StatefulSet", "cell"), {}).get("metadata", {}).get("annotations", {})
+        return replace(
+            observation, statefulset_restic_verification=annotations.get(RESTIC_VERIFICATION_ANNOTATION),
+            statefulset_uid="fixture-statefulset" if observation.statefulset_exists else None,
+        )
+
+    def patch_statefulset_annotations(self, namespace, annotations, *, uid=None):
+        if RESTIC_VERIFICATION_ANNOTATION in annotations:
+            assert uid == "fixture-statefulset"
+        super().patch_statefulset_annotations(namespace, annotations)
+
+    def observe_restic_verifications(self):
+        return {NAMESPACE: self.verifiers}
+
+    def create_restic_verification_job(self, manifest):
+        self.run_job(manifest)
+        return "job-uid"
+
+    def delete_restic_verification_job(self, namespace, name, *, uid):
+        self.events.append(("delete_verifier", namespace, name, uid))
+
+
 async def test_reconcile_does_not_wait_for_a_verifier_before_nightly_backup(cell_db):
-    class Cluster(FakeClusterGateway):
-        verifiers = ()
-
-        def observe(self, cell_id, namespace):
-            observation = super().observe(cell_id, namespace)
-            annotations = self.applied.get((namespace, "StatefulSet", "cell"), {}).get("metadata", {}).get("annotations", {})
-            return replace(
-                observation, statefulset_restic_verification=annotations.get(RESTIC_VERIFICATION_ANNOTATION),
-                statefulset_uid="fixture-statefulset" if observation.statefulset_exists else None,
-            )
-
-        def patch_statefulset_annotations(self, namespace, annotations, *, uid=None):
-            if RESTIC_VERIFICATION_ANNOTATION in annotations:
-                assert uid == "fixture-statefulset"
-            super().patch_statefulset_annotations(namespace, annotations)
-
-        def observe_restic_verifications(self):
-            return {NAMESPACE: self.verifiers}
-
-        def create_restic_verification_job(self, manifest):
-            self.run_job(manifest)
-            return "job-uid"
-
-        def delete_restic_verification_job(self, namespace, name, *, uid):
-            self.events.append(("delete_verifier", namespace, name, uid))
-
     await _seed_cell(cell_db, CELL, "backup-priority")
     connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
-    cluster = Cluster()
+    cluster = ReconcileVerifierCluster()
     noon = NOW + timedelta(hours=12)
     window = NOW + timedelta(days=1, hours=2)
     config = replace(_cluster_config(), restic_verification=VerificationConfig(cell_ids=(CELL,)))
@@ -333,4 +368,28 @@ async def test_reconcile_does_not_wait_for_a_verifier_before_nightly_backup(cell
         )
         assert any(job["metadata"]["labels"].get(JOB_KIND_LABEL) == "backup" for job in cluster.jobs)
     finally:
+        await connection.close()
+
+
+async def test_reconcile_defers_verification_when_this_pass_starts_an_export(cell_db, monkeypatch):
+    await _seed_cell(cell_db, CELL, "export-priority")
+    connection = await asyncpg.connect(cell_db.dsn(role="exomem_cellctl"))
+    app = await asyncpg.connect(cell_db.dsn(role="substrate_app"))
+    cluster = ReconcileVerifierCluster()
+    monkeypatch.setattr(reconcile, "_staging_s3_client", FakeS3().client)
+    noon = NOW + timedelta(hours=12)
+    config = replace(_cluster_config(), restic_verification=VerificationConfig(cell_ids=(CELL,)))
+    try:
+        await _converged_cell(connection, cluster, noon)
+        await db.write_observed(connection, CELL, {"last_backup_at": NOW, "last_backup_snapshot": "a" * 64})
+        await app.execute("INSERT INTO exomem_cloud_exports(cell_id) VALUES($1)", CELL)
+
+        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=noon)
+
+        row, = await db.select_all_rows(connection)
+        assert row.hold_kind == "export" and cluster.applied[(NAMESPACE, "StatefulSet", "cell")]["spec"]["replicas"] == 0
+        assert not any(job["metadata"]["labels"].get(JOB_KIND_LABEL) == JOB_KIND_RESTIC_VERIFY for job in cluster.jobs)
+        assert cluster.observe(CELL, NAMESPACE).statefulset_restic_verification is None
+    finally:
+        await app.close()
         await connection.close()

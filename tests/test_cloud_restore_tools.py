@@ -10,6 +10,7 @@ to a file and comparing two lists."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -326,3 +327,59 @@ def test_the_in_place_restore_and_its_helper_run_where_the_cell_runs() -> None:
     # The scratch verify pod follows the unplaced scratch Job, off the live cell's node.
     assert "nodeSelector" not in verify["spec"] and "tolerations" not in verify["spec"]
     assert verify["spec"]["volumes"][0]["persistentVolumeClaim"]["readOnly"] is True
+
+
+@pytest.mark.parametrize("writable_pod", [False, True])
+def test_in_place_restore_guards_distinguish_the_read_only_verifier(monkeypatch, capsys, writable_pod) -> None:
+    manifests = _manifests()
+    from cellctl.manifests import render_restic_verify_job
+
+    statefulset = {"metadata": {"uid": "statefulset-uid"}, "spec": {"replicas": 0, "template": {"spec": {
+        "containers": [{"name": "exomem", "image": IMAGE}],
+    }}}}
+    # A verifier admitted before an image rollback still uses its already pinned image.
+    verifier_image = IMAGE.rpartition(":")[0] + ":" + "b" * 64
+    spec = manifests.CellManifestSpec(cell_id=CELL_ID, image=verifier_image, replicas=1, read_only=False)
+    job = render_restic_verify_job(
+        spec, bucket_name="bucket", endpoint="https://s3.example.test", attempt_id="fixture-attempt",
+        part=1, total=24, download_kib_per_second=8192, deadline_seconds=300, start_before=1_800_000_000,
+        statefulset_uid="statefulset-uid",
+    )
+    job["metadata"]["uid"] = "job-uid"
+    job["status"] = {"active": 1}
+    template = job["spec"]["template"]
+    name = job["metadata"]["name"]
+    pod = {"metadata": {"name": name + "-test", "labels": {**template["metadata"]["labels"],
+            "batch.kubernetes.io/job-name": name, "batch.kubernetes.io/controller-uid": "job-uid"},
+            "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job", "name": name,
+                                 "uid": "job-uid", "controller": True} ]},
+           "spec": {**template["spec"], "volumes": list(template["spec"]["volumes"])}, "status": {"phase": "Running"}}
+    if writable_pod:
+        pod["spec"]["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": "cell-data"}})
+    workloads = {"jobs": [job], "pods": [pod]}
+    monkeypatch.setattr(manifests, "_kubectl", lambda _context, *args: json.dumps({"items": workloads[args[3]]}))
+    monkeypatch.setattr(manifests, "_check_cell_namespace", lambda _context, cell: manifests.namespace_name(cell))
+    monkeypatch.setattr(manifests, "_get", lambda *_args: statefulset)
+    monkeypatch.setattr(manifests, "_cellctl", lambda _context: {"spec": {"replicas": 0}})
+    monkeypatch.setattr(manifests, "platform_settings", lambda _deployment: manifests.PlatformSettings(
+        "bucket", "https://s3.example.test", (),
+    ))
+    applied = []
+    monkeypatch.setattr(manifests, "_apply", lambda _context, document, _manager: applied.append(document))
+
+    if writable_pod:
+        assert manifests.main(["idle", "--context", "fixture", "--cell-id", CELL_ID]) == 1
+        with pytest.raises(ValueError, match="a pod still runs"):
+            manifests.apply_in_place("fixture", CELL_ID, SNAPSHOT, "restore-manager")
+        assert not applied
+    else:
+        assert manifests.main(["idle", "--context", "fixture", "--cell-id", CELL_ID]) == 0
+        manifests.apply_in_place("fixture", CELL_ID, SNAPSHOT, "restore-manager")
+        assert applied[0]["metadata"]["labels"][manifests.JOB_KIND_LABEL] == manifests.JOB_KIND_RESTORE
+
+    # The shell treats an orphan the same way once the Job and owner reference are gone.
+    workloads["jobs"] = []
+    pod["metadata"].pop("ownerReferences")
+    capsys.readouterr()
+    assert manifests.main(["running-pods", "--context", "fixture", "--cell-id", CELL_ID]) == 0
+    assert capsys.readouterr().out.splitlines() == ([pod["metadata"]["name"]] if writable_pod else [])
