@@ -419,11 +419,12 @@ def _reconcile(
     cards: dict[str, Card],
     projected: frozenset[str],
     prefix: str,
-) -> tuple[frozenset[str], bool]:
+) -> tuple[frozenset[str], bool, bool]:
     """Bring the rows in step with `cards`.
 
     Returns the originals whose row was built from the card's current bytes, the only rows a
-    search may read, and whether datasets are still unindexed.
+    search may read, whether datasets are still unindexed, and whether an original read gave
+    no bytes this request.
     """
     stored = {
         original: (card_path, card_hash)
@@ -436,13 +437,15 @@ def _reconcile(
             conn.execute("COMMIT")
     current = {original for original, card in cards.items() if stored.get(original, ("", ""))[1] == card.card_hash}
     pending = [card for original, card in cards.items() if original not in current]
+    missed = False
     for card in pending[:MAX_BUILDS_PER_REQUEST]:
         data = _read_original(vault_root, card)
         if data is None:
+            missed = True
             continue  # the original is missing or not the recorded bytes: retried next request
         _store(conn, card, source_inspection.render_values(data, Path(card.original).suffix))
         current.add(card.original)
-    return frozenset(current), len(pending) > MAX_BUILDS_PER_REQUEST
+    return frozenset(current), len(pending) > MAX_BUILDS_PER_REQUEST, missed
 
 
 # ------------------------------------------------------------------ matching
@@ -824,17 +827,20 @@ def search(
         return Lane(failed=(LANE,))
     try:
         cards, projected, prefix, unread = _cards_in_scope(vault_root, scope, admit_path)
-        # Card reads wait on the private-identity inventory; until it exists, an unread card
-        # is still loading. Once it exists, an unread card is a page that does not parse.
-        loading = (LANE,) if unread and not reserved_paths.identity_catalogue_ready(vault_root) else ()
+        missed = False
+        if cards:
+            conn = _connect(vault_root)
+            try:
+                indexed, unindexed, missed = _reconcile(conn, vault_root, cards, projected, prefix)
+                matches = _match(conn, groups, needles, indexed)
+            finally:
+                conn.close()
+        # Card and original reads wait on the private-identity inventory; until it exists, a
+        # read that gave nothing is still loading. Once it exists, it is a page that does not
+        # parse or an original that is not the recorded bytes, which no wait changes.
+        loading = (unread or missed) and not reserved_paths.identity_catalogue_ready(vault_root)
         if not cards:
-            return Lane(warming=loading)
-        conn = _connect(vault_root)
-        try:
-            indexed, unindexed = _reconcile(conn, vault_root, cards, projected, prefix)
-            matches = _match(conn, groups, needles, indexed)
-        finally:
-            conn.close()
+            return Lane(warming=(LANE,) if loading else ())
     except (sqlite3.Error, OSError) as error:
         log.warning("dataset value search unavailable: %s", error)
         return Lane(failed=(LANE,))

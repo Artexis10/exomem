@@ -325,6 +325,32 @@ def test_a_card_unreadable_while_the_service_starts_is_found_once_it_reads(vault
     assert dataset_values.LANE in during_start["warming"]["components"]
 
 
+def test_a_reply_that_could_not_read_an_original_while_the_service_starts_says_so(vault, monkeypatch):
+    # The original's read also waits on the private-identity inventory. A search that misses
+    # the dataset for that reason says that its results may be incomplete.
+    from exomem import media_store, reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = media_store.read_original_bytes
+    starting = True
+
+    def read_while_starting(vault_root, path, **options):
+        if starting and path == result.path:
+            raise reserved_paths.ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        return original_read(vault_root, path, **options)
+
+    monkeypatch.setattr(media_store, "read_original_bytes", read_while_starting)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: not starting)
+
+    during_start = _find_response(vault, ACCOUNT)
+    assert isinstance(during_start, dict), "the reply during start-up carried no warming notice"
+    assert result.path not in _paths(during_start["hits"])
+    assert dataset_values.LANE in during_start["warming"]["components"]
+
+    starting = False
+    assert result.path in _paths(_find(vault, ACCOUNT))
+
+
 def test_an_original_that_no_longer_matches_its_card_is_not_served(vault):
     result = _preserve(vault, "supplier-profile.json", PROFILE)
     assert result.path in _paths(_find(vault, ACCOUNT))
