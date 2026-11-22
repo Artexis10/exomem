@@ -3723,6 +3723,23 @@ def _release_admission_identity(
             purpose, boundary, tombstones)
 
 
+def _freeze_identity_value(value: Any) -> Any:
+    if isinstance(value, (frozenset, set)):
+        return sorted(_freeze_identity_value(item) for item in value)
+    if isinstance(value, (tuple, list)):
+        return [_freeze_identity_value(item) for item in value]
+    return value
+
+
+def _frozen_release_identity(identity: tuple | None) -> str | None:
+    """Canonical serialization of a release-admission identity, for equality across time."""
+    if identity is None:
+        return None
+    return json.dumps(
+        _freeze_identity_value(identity), sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
+
+
 def page_release_filter(
     vault_root: Path,
     *,

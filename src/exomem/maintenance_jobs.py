@@ -86,6 +86,21 @@ _SOURCE_PREVIEW_PUBLIC_ERRORS = frozenset({
 _SOURCE_PREVIEW_FAILED = "RECLASSIFICATION_PREVIEW_FAILED"
 _SOURCE_PREVIEW_PAGE_ROWS = 128
 _ENTRY_INSERT = "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)"
+_HELD_INSERT = "INSERT OR REPLACE INTO held_evidence (run_id, path, record) VALUES (?, ?, ?)"
+
+
+@dataclass(frozen=True)
+class HeldEvidence:
+    """A simple governed row's release proof, held privately beside its preview job."""
+
+    path: str
+    sha256: str
+    size: int
+    #: (st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns) of the file when the job read it.
+    witness: tuple[int, int, int, int, int]
+    scopes: tuple[frozenset[str], ...]
+    #: Canonical serialization of the release-admission identity the row was decided under.
+    identity: str
 
 #: Terminal rows older than this are pruned, beyond the newest ``RETAIN_NEWEST``.
 RETAIN_SECONDS = 30 * 24 * 3600
@@ -246,6 +261,13 @@ def _open(
                 "kind TEXT NOT NULL, path TEXT NOT NULL, value TEXT)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS entries_run ON entries(run_id, seq)")
+            # One private record per simple preview row: hash, witness, scopes and the release
+            # identity they were computed under. Never a byte of the page, never a response field.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS held_evidence ("
+                "run_id TEXT NOT NULL, path TEXT NOT NULL, record TEXT NOT NULL, "
+                "PRIMARY KEY (run_id, path))"
+            )
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, _STORE_ID, conn)
     except BaseException:
@@ -644,9 +666,13 @@ def start_source_preview(
     binding: str,
     request_key: str,
     snapshot_key: str,
-    build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]]]],
+    build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]], ...]],
 ) -> dict[str, Any]:
-    """Start or join a private read job after the caller proves Source preview access."""
+    """Start or join a private read job after the caller proves Source preview access.
+
+    ``build`` returns ``(summary, entries)`` or ``(summary, entries, held)`` where ``held`` maps a
+    report row's path to its private release evidence record — one row each, never page bytes and
+    never response fields."""
     job, _ = _claim(
         vault_root,
         mode=_SOURCE_PREVIEW,
@@ -696,6 +722,40 @@ def source_preview_status(
             }
     except FileNotFoundError:
         raise OpError("NOT_FOUND", "No Source preview matches this request.") from None
+
+
+def source_preview_held_evidence(
+    vault_root: Path, run_id: str, paths: Iterable[str],
+) -> dict[str, HeldEvidence]:
+    """The private release evidence a completed preview job held for ``paths``, if it held any."""
+    wanted = list(dict.fromkeys(paths))
+    if not wanted:
+        return {}
+    try:
+        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT path, record FROM held_evidence WHERE run_id = ? "
+                f"AND path IN ({','.join('?' * len(wanted))})",
+                (run_id, *wanted),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    held: dict[str, HeldEvidence] = {}
+    for row in rows:
+        try:
+            record = json.loads(row["record"])
+            held[row["path"]] = HeldEvidence(
+                path=record["path"],
+                sha256=record["sha256"],
+                size=record["size"],
+                witness=tuple(record["witness"]),
+                scopes=tuple(frozenset(scope) for scope in record["scopes"]),
+                identity=record["identity"],
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return held
 
 
 def start_leaf(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Callable[..., Any]:
@@ -864,6 +924,7 @@ def _prune(conn: sqlite3.Connection) -> None:
     stale = "state != ? AND ended_at < ? AND run_id NOT IN (SELECT run_id FROM jobs ORDER BY started_at DESC, seq DESC LIMIT ?)"
     params = (RUNNING, cutoff, RETAIN_NEWEST)
     conn.execute(f"DELETE FROM entries WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
+    conn.execute(f"DELETE FROM held_evidence WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
     conn.execute(f"DELETE FROM jobs WHERE {stale}", params)
 
 
@@ -903,10 +964,14 @@ def _run_source_preview(
 
     state, error_code, outcome = FAILED, _SOURCE_PREVIEW_FAILED, {}
     published = None
+    held: list[tuple[str, str]] | None = None
     try:
         with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
             _JOB.set(live)
-            summary, entries = build(live.stop)
+            built = build(live.stop)
+            summary, entries = built[0], built[1]
+            if len(built) > 2 and built[2]:
+                held = sorted((path, _canonical(record)) for path, record in built[2].items())
             buffer = []
             limit = query_data.MAX_RESPONSE_BYTES // 2
             for kind, path, value in entries:
@@ -929,7 +994,7 @@ def _run_source_preview(
         state = FAILED
         error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
     finally:
-        _finish(live, state, error_code, outcome, preview_entries=published)
+        _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held)
 
 
 def _stopped(live: _Live) -> tuple[str, str]:
@@ -1029,6 +1094,7 @@ def _bounded(report: Any) -> Any:
 def _finish(
     live: _Live, state: str, error_code: str | None, outcome: dict[str, Any],
     *, preview_entries: list[tuple[str, str, str | None]] | None = None,
+    preview_held: list[tuple[str, str]] | None = None,
 ) -> None:
     """Record the terminal, then leave the live registry, so a sweep never sees a finished job as an orphan."""
     try:
@@ -1037,7 +1103,7 @@ def _finish(
                 _prune(conn)
             if preview_entries is not None and live.stop.is_set():
                 state, error_code = _stopped(live)
-                outcome, preview_entries = {}, None
+                outcome, preview_entries, preview_held = {}, None, None
             saved = conn.execute(
                 "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
                 (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),
@@ -1046,8 +1112,13 @@ def _finish(
                 conn.executemany(_ENTRY_INSERT, (
                     (live.run_id, 0, kind, path, value) for kind, path, value in preview_entries
                 ))
+                if preview_held:
+                    conn.executemany(_HELD_INSERT, (
+                        (live.run_id, path, record) for path, record in preview_held
+                    ))
                 if live.stop.is_set():
                     conn.execute("DELETE FROM entries WHERE run_id = ?", (live.run_id,))
+                    conn.execute("DELETE FROM held_evidence WHERE run_id = ?", (live.run_id,))
                     state, error_code = _stopped(live)
                     conn.execute(
                         "UPDATE jobs SET state = ?, error_code = ?, outcome = ? WHERE run_id = ?",

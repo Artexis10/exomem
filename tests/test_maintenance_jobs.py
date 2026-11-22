@@ -211,6 +211,52 @@ def test_a_source_preview_failure_releases_only_a_safe_reason(server, vault, err
     }
 
 
+def test_held_evidence_stays_private_and_dies_with_the_job(server, vault, monkeypatch):
+    sha = "ab" * 32
+    record = {
+        "path": "Notes/held.md", "sha256": sha, "size": 42,
+        "witness": [1, 2, 42, 3, 4], "scopes": [["scope-a"]], "identity": '["release"]',
+    }
+    held = {"Notes/held.md": record}
+    identity = {"binding": "owner-binding", "request_key": "req", "snapshot_key": "snap"}
+
+    def build(_stop):
+        return ({"preview_digest": "d"}, [("rewritten", "Notes/held.md", None)], held)
+
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    status = _source_preview_terminal(vault, **identity, run_id=handle["run_id"])
+    assert status["state"] == "completed"
+    evidence = maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/held.md"])
+    assert evidence == {
+        "Notes/held.md": maintenance_jobs.HeldEvidence(
+            path="Notes/held.md", sha256=sha, size=42, witness=(1, 2, 42, 3, 4),
+            scopes=(frozenset({"scope-a"}),), identity='["release"]',
+        ),
+    }
+    assert maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/other.md"]) == {}
+
+    pages = [status]
+    cursor = status.get("next_cursor")
+    while cursor is not None:
+        page = maintenance_jobs.source_preview_status(
+            vault, **identity, run_id=handle["run_id"], cursor=cursor,
+        )
+        pages.append(page)
+        cursor = page["next_cursor"]
+    wire = json.dumps(pages, ensure_ascii=False)
+    assert sha not in wire and "witness" not in wire and "scope-a" not in wire
+
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_SECONDS", 0)
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_NEWEST", 0)
+    newer = maintenance_jobs.start_source_preview(
+        vault, **{**identity, "snapshot_key": "snap-two"}, build=build,
+    )
+    assert _source_preview_terminal(
+        vault, **{**identity, "snapshot_key": "snap-two"}, run_id=newer["run_id"],
+    )["state"] == "completed"
+    assert maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/held.md"]) == {}
+
+
 def test_a_failed_source_preview_prunes_expired_terminal_jobs(server, vault, monkeypatch):
     def build(_stop):
         raise RuntimeError("preview failed")

@@ -1909,3 +1909,195 @@ def test_a_reclassification_says_so_when_it_could_not_check_path_mentions(
     assert any("path mentions were not checked" in warning for warning in preview.warnings)
     assert any("path mentions were not checked" in warning for warning in result.warnings)
     assert f"`{source}`" in note.read_text(encoding="utf-8")
+
+
+def _governed_held_page(vault: Path) -> str:
+    """A vault governed enough for a compiled policy: one scope over one note, denied to nobody here."""
+    rel = f"{KB}/Notes/held.md"
+    governance = vault / KB / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "held.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/held.md"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "held.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: principal:report-reader\nceiling: 0\n',
+        encoding="utf-8",
+    )
+    (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text("See [[somewhere]].\n", encoding="utf-8")
+    return rel
+
+
+def test_held_evidence_records_simple_witnessed_rows_only(vault, monkeypatch):
+    import hashlib
+    import json
+    import os
+
+    from exomem import document_containers
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+    from exomem.vault import read_guarded_text
+
+    rel = _governed_held_page(vault)
+    member = f"{KB}/Notes/member.md"
+    (vault / member).write_text("See [[somewhere]].\n", encoding="utf-8")
+    monkeypatch.setattr(
+        document_containers,
+        "parent_binding_for_path",
+        lambda root, path, **kwargs: object() if path == member else None,
+    )
+    sink = rc._HeldSink()
+    who = owner_principal()
+    with request_scope(who), invocation_scope():
+        rc._witnessed_read(read_guarded_text, sink, vault, (vault / rel).resolve())
+        rc._witnessed_read(read_guarded_text, sink, vault, (vault / member).resolve())
+    assert member not in sink
+    record = sink[rel]
+    raw = (vault / rel).read_bytes()
+    assert record["path"] == rel
+    assert record["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert record["size"] == len(raw)
+    assert tuple(record["witness"]) == rc._stat_witness(os.stat(vault / rel))
+    assert record["scopes"] == [["01ARZ3NDEKTSV4RRFFQ69G5FAV"]]
+    assert json.loads(record["identity"])[0] == "release"
+
+
+def test_held_evidence_keeps_no_page_text(vault):
+    import json
+
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+    from exomem.vault import read_guarded_text
+
+    _governed_held_page(vault)
+    sentinels = ("first-page-sentinel-text", "second-page-sentinel-text")
+    pages = []
+    for index, sentinel in enumerate(sentinels):
+        page = vault / f"{KB}/Notes/sentinel-{index}.md"
+        page.write_text(f"See [[somewhere]]. {sentinel}\n", encoding="utf-8")
+        pages.append(page)
+    sink = rc._HeldSink()
+    who = owner_principal()
+    with request_scope(who), invocation_scope():
+        for page in pages:
+            rc._witnessed_read(read_guarded_text, sink, vault, page.resolve())
+    # Records hold scalars only: every page's text dies with its read frame.
+    wire = json.dumps(sink)
+    for sentinel in sentinels:
+        assert sentinel not in wire
+
+
+def test_a_file_changed_between_its_two_witness_stats_leaves_no_held_evidence(vault):
+    from exomem.vault import read_guarded_text
+
+    rel = f"{KB}/Notes/shifting.md"
+    (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text("first\n", encoding="utf-8")
+
+    def reader(root, page):
+        text, guard = read_guarded_text(root, page)
+        page.write_text("rewritten between the two stats\n", encoding="utf-8")
+        return text, guard
+
+    sink = rc._HeldSink()
+    rc._witnessed_read(reader, sink, vault, (vault / rel).resolve())
+    assert sink == {}
+
+
+def test_completed_paged_report_stores_held_evidence_only_privately(vault, source_schema, monkeypatch):
+    import hashlib
+    import json
+    import os
+    import time
+
+    from record_fixtures import copy_dataset_fixture
+
+    from exomem import (
+        file_watcher,
+        find,
+        freshness,
+        maintenance_jobs,
+        reclassification_preview,
+        request_budget,
+    )
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 1)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 2)
+    source = _capture(vault, source_schema, title="Held rows").path
+    held_rel = _governed_held_page(vault)
+    other_rel = f"{KB}/Notes/other.md"
+    for rel in (held_rel, other_rel):
+        (vault / rel).write_text(f"See [[{source}]].\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    who = owner_principal(surface="mcp")
+    check = request_budget.ReadCheckpoint(
+        request_budget.RequestBudget(seconds=60), bound_disclosure=True,
+    )
+    path_arg = source.removeprefix(f"{KB}/")
+
+    def call_report(**extra):
+        admission = reclassification_preview.retained_report_identity(vault, who)
+        with (
+            request_scope(who), invocation_scope(), request_budget.checking(check),
+            reclassification_preview.retained_report_admission(admission),
+        ):
+            return reclassification_preview.report(
+                vault, path_arg, source_kind="dataset-export", domain=None, **extra,
+            )
+
+    job = call_report()
+    run_id = job["run_id"]
+    deadline = time.monotonic() + 45
+    while True:
+        try:
+            summary = call_report(preview_run_id=run_id)
+        except OpError as error:
+            assert error.code == "RECLASSIFICATION_PREVIEW_WARMING", error.code
+            summary = {"state": "running"}
+        if summary.get("state") != "running":
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    assert summary.get("state") == "completed", summary
+
+    released_pages = [dict(summary)]
+    held_paths: set[str] = set(summary.held_evidence)
+    seen_paths: set[str] = set()
+    cursor = summary.get("next_cursor")
+    while cursor is not None:
+        page = call_report(preview_run_id=run_id, cursor=cursor)
+        assert isinstance(page, reclassification_preview.RetainedReport)
+        released_pages.append(dict(page))
+        page_paths = {entry["path"] for entry in page["entries"]}
+        seen_paths |= page_paths
+        assert set(page.held_evidence) <= (page_paths | {source})
+        held_paths |= set(page.held_evidence)
+        cursor = page["next_cursor"]
+    assert {held_rel, other_rel} <= seen_paths
+    assert {held_rel, other_rel, source} <= held_paths
+
+    wire = json.dumps(released_pages, ensure_ascii=False)
+    evidence = maintenance_jobs.source_preview_held_evidence(
+        vault, run_id, {held_rel, other_rel, source},
+    )
+    for rel in (held_rel, other_rel, source):
+        record = evidence[rel]
+        raw = (vault / rel).read_bytes()
+        assert record.sha256 == hashlib.sha256(raw).hexdigest()
+        assert record.size == len(raw)
+        assert record.witness == rc._stat_witness(os.stat(vault / rel))
+        assert record.sha256 not in wire
+    assert evidence[held_rel].scopes == (frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"}),)

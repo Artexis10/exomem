@@ -60,10 +60,16 @@ def _stale_report() -> OpError:
 class RetainedReport(dict):
     """Refuse a whole receipt page if the terminal filter changes any reviewed value."""
 
-    def __init__(self, result: Mapping[str, Any], source: str) -> None:
+    def __init__(
+        self,
+        result: Mapping[str, Any],
+        source: str,
+        held_evidence: Mapping[str, maintenance_jobs.HeldEvidence] | None = None,
+    ) -> None:
         super().__init__(result)
         self._proof = _digest(result)
         self.exact_paths = frozenset({source, *(entry["path"] for entry in result.get("entries", ()))})
+        self.held_evidence: Mapping[str, maintenance_jobs.HeldEvidence] = held_evidence or {}
 
     def require_complete_projection(self, result: Any) -> None:
         if _digest(result) != self._proof:
@@ -155,7 +161,7 @@ def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]
 def _build(
     root: Path, args: Mapping[str, Any], who: RequestPrincipal,
     surface: capabilities.ActiveSurfaceDescriptor | None, authority: _Authority, snapshot_key: str, stop: Event,
-) -> tuple[dict[str, Any], Iterator[tuple[str, str, str | None]]]:
+) -> tuple[dict[str, Any], Iterator[tuple[str, str, str | None]], dict[str, dict[str, Any]]]:
     from .command_surface import resolve_command
     from .commands import PRODUCT_COMMANDS
     from .writer_lease import invoke_command
@@ -173,6 +179,7 @@ def _build(
         with (
             request_scope(who), invocation_scope(), request_budget.checking(check),
             capabilities.active_surface(surface) if surface is not None else nullcontext(),
+            reclassify_source.held_evidence_sink() as held,
         ):
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
@@ -196,7 +203,7 @@ def _build(
     finally:
         _JOB_REPORT.reset(token)
     summary = {key: value for key, value in result.items() if key not in {"referrers", "refusals"}}
-    return summary, _entries(result)
+    return summary, _entries(result), held
 
 
 def report(
@@ -270,4 +277,10 @@ def report(
         if result.get("next_cursor") is not None:
             follow["cursor"] = result["next_cursor"]
         result["next"] = capabilities.active_call_route("manage_memory_file", follow)
-    return RetainedReport(result, path) if result.get("state") == maintenance_jobs.COMPLETED else result
+    if result.get("state") != maintenance_jobs.COMPLETED:
+        return result
+    held_evidence = maintenance_jobs.source_preview_held_evidence(
+        root, result["run_id"],
+        {path, *(entry["path"] for entry in result.get("entries", ()))},
+    )
+    return RetainedReport(result, path, held_evidence=held_evidence)

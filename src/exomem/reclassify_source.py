@@ -32,10 +32,12 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import os
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import closing, nullcontext
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -659,8 +661,13 @@ def _propose(
     rel, absolute = _require_source(vault_root, path)
     if visible is not None and not visible(rel):
         raise ReclassifyError("SOURCE_NOT_FOUND", "source does not exist")
+    held_sink: _HeldSink | None = _HELD_EVIDENCE.get() if paged else None
     read_text = _read_inline_text if candidate_limit is not None else read_guarded_text
-    text, source_guard = read_text(vault_root, absolute)
+    text, source_guard = (
+        _witnessed_read(read_text, held_sink, vault_root, absolute)
+        if held_sink is not None
+        else read_text(vault_root, absolute)
+    )
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
 
@@ -741,7 +748,7 @@ def _propose(
     outcome = (
         _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes,
                           candidate_limit=candidate_limit, paged_classification=classification if paged else None,
-                          visible=visible)
+                          visible=visible, held_sink=held_sink)
         if destination is not None
         else _ReferrerOutcome()
     )
@@ -1002,6 +1009,133 @@ def _read_inline_text(root: Path, path: Path) -> tuple[str, PathGuard]:
     return raw.decode("utf-8"), guard
 
 
+class _HeldSink(dict):
+    """path -> release record, plus the build's identity context, computed once on first use."""
+
+    context_ready = False
+    context_usable = False
+    compiled = None
+    identity = None
+
+
+#: A private preview job's held-evidence sink, set only inside its own thread. Every other
+#: preview sees ``None`` and pays no capture cost.
+_HELD_EVIDENCE: ContextVar[_HeldSink | None] = ContextVar(
+    "reclassify_source_held_evidence", default=None,
+)
+
+
+@contextmanager
+def held_evidence_sink() -> Iterator[dict[str, dict[str, Any]]]:
+    """Collect per-row release evidence for the duration of one preview build."""
+    sink: _HeldSink = _HeldSink()
+    token = _HELD_EVIDENCE.set(sink)
+    try:
+        yield sink
+    finally:
+        sink.compiled = None
+        _HELD_EVIDENCE.reset(token)
+
+
+def _load_held_context(sink: _HeldSink, vault_root: Path, who: RequestPrincipal) -> None:
+    """Load the row-independent release identity once; a failed load records nothing all build."""
+    if sink.context_ready:
+        return
+    sink.context_ready = True
+    try:
+        compiled = policy.load(vault_root)
+        tombstones = lifecycle.tombstoned_paths(vault_root)
+        declared_purpose = egress._declared_purpose(vault_root, who, None)
+        identity = egress._frozen_release_identity(egress._release_admission_identity(
+            vault_root, compiled, who, declared_purpose, egress._grants_hash(compiled), tombstones,
+        ))
+    except Exception:  # noqa: BLE001 - no provable identity means every row takes the full path
+        return
+    if identity is not None:
+        sink.compiled = compiled
+        sink.identity = identity
+        sink.context_usable = True
+
+
+def _stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _record_held_row(
+    vault_root: Path,
+    sink: _HeldSink,
+    who: RequestPrincipal,
+    rel: str,
+    text: str,
+    guard: PathGuard,
+    witness: tuple[int, int, int, int, int],
+) -> None:
+    """Record one simple governed row's release evidence while its bytes are still in hand.
+
+    A row is simple when its permit depends on no other file: no container-parent binding and no
+    bridge contribution. Anything unclear leaves no record and takes the full release path. Only
+    scalars are stored — the page text dies with this frame.
+    """
+    from . import document_containers
+    from .governance import connector_boundary
+
+    if not rel.lower().endswith(".md"):
+        return
+    # Only a file's content guard carries a stat witness; a store-guarded page cannot.
+    if guard.leaf_policy != "content" or guard.expected_content_hash is None:
+        return
+    raw = text.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != guard.expected_content_hash:
+        return
+    if document_containers.parent_binding_for_path(vault_root, rel, content=raw) is not None:
+        return
+    if bridges.maybe_bridge(raw) or any(
+            rel == grant.path or any(rel == dependency.path for dependency in grant.bridge_of)
+            for grant in sink.compiled.release_grants):
+        return
+    scopes = connector_boundary._membership_sets(
+        vault_root, rel, sink.compiled, content=raw, who=who,
+    )
+    sink[rel] = {
+        "path": rel,
+        "sha256": digest,
+        "size": len(raw),
+        "witness": list(witness),
+        "scopes": [sorted(scope) for scope in scopes],
+        "identity": sink.identity,
+    }
+
+
+def _witnessed_read(
+    reader: Callable[[Path, Path], tuple[str, PathGuard]],
+    sink: _HeldSink,
+    root: Path,
+    page: Path,
+) -> tuple[str, PathGuard]:
+    """Read a page and record its release evidence only when both stat witnesses agree."""
+    try:
+        resolved = page.resolve()
+        before = os.stat(resolved)
+    except OSError:
+        return reader(root, page)
+    text, guard = reader(root, page)
+    try:
+        rel = resolved.relative_to(root.resolve()).as_posix()
+        after = os.stat(resolved)
+    except (OSError, ValueError):
+        return text, guard
+    if _stat_witness(before) == _stat_witness(after):
+        try:
+            who = effective_principal()
+            _load_held_context(sink, root, who)
+            if sink.context_usable:
+                _record_held_row(root, sink, who, rel, text, guard, _stat_witness(before))
+        except Exception:  # noqa: BLE001 - one unprovable row must not lose the others
+            pass
+    return text, guard
+
+
 class _PagedPlanProof:
     """Bind the Source and the ordered effects that produce every row of a paged report."""
 
@@ -1052,6 +1186,7 @@ def _referrer_outcome(
     candidate_limit: int | None = None,
     paged_classification: tuple[str | None, str | None] | None = None,
     visible: Callable[[str], bool] | None = None,
+    held_sink: _HeldSink | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -1107,11 +1242,18 @@ def _referrer_outcome(
         _PagedPlanProof(rel, destination, text, inbound, paged_classification)
         if paged_classification is not None else None
     )
+    iter_reader = _read_inline_text if candidate_limit is not None else None
+    if held_sink is not None:
+        base_reader = iter_reader or read_guarded_text
+
+        def iter_reader(root: Path, page: Path) -> tuple[str, PathGuard]:
+            return _witnessed_read(base_reader, held_sink, root, page)
+
     plans = move_file_module.iter_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
         check=foreground_priority.check_cancelled if read_hashes is not None else None,
         resolver_factory=borrow_resolver if read_hashes is not None else None,
-        read_text=_read_inline_text if candidate_limit is not None else None,
+        read_text=iter_reader,
     )
     for item in plans:
         if read_hashes is not None:
@@ -1156,6 +1298,14 @@ def _referrer_outcome(
                 "path": destination,
                 "reason": f"another page already occupies {destination}",
             })
+    if held_sink is not None:
+        row_paths = {
+            rel, *rewritten, *repointed,
+            *(path for paths in unchanged.values() for path in paths),
+            *(refusal["path"] for refusal in refusals),
+        }
+        for recorded in set(held_sink) - row_paths:
+            del held_sink[recorded]
     return _ReferrerOutcome(
         rewritten=tuple(rewritten),
         repointed=tuple(repointed),
