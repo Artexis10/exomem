@@ -66,11 +66,13 @@ def _load(path: Path) -> dict | None:
     return None
 
 
-def _read_record(path: Path, relative: str, digest: str) -> bytes | None:
+def _read_record(path: Path, relative: str, digest: str, *, receipt_id: str | None = None) -> bytes | None:
     record = _load(path)
     if record is None or record.get("version") != _FORMAT:
         return None
     if record.get("path") != relative or record.get("sha256") != digest:
+        return None
+    if receipt_id is not None and record.get("receipt_id") != receipt_id:
         return None
     try:
         jpeg = base64.b64decode(record.get("jpeg"), validate=True)
@@ -286,18 +288,19 @@ def _sync_record(path: Path, *, existing: bool) -> None:
 
 
 def confirm_install(vault: Path, job: MediaJob) -> bool:
-    """A restart can acknowledge a matching record without opening or decoding the original."""
+    """A restart can acknowledge its attempt's ready record without opening the original."""
     from .writer_lease import get_manager
 
     relative = job.binary_path.relative_to(vault).as_posix()
     digest = job.preview_sha256
+    receipt_id = job.preview_receipt_id
     path = _record_path(store_path(vault), relative)
-    if digest is None or _read_record(path, relative, digest) is None:
+    if digest is None or receipt_id is None or _read_record(path, relative, digest, receipt_id=receipt_id) is None:
         return False
     manager = get_manager()
     manager.yield_to_waiting_writes(vault)
     with manager.consistency_guard(vault, operation="media_preview_acknowledge", holder_kind="background"):
-        if _read_record(path, relative, digest) is None:
+        if _read_record(path, relative, digest, receipt_id=receipt_id) is None:
             return False
         _sync_record(path, existing=True)
     return True
@@ -315,6 +318,9 @@ def generate(
     from .writer_lease import get_manager
 
     relative = job.binary_path.relative_to(vault).as_posix()
+    receipt_id = job.preview_receipt_id
+    if receipt_id is None:
+        return False
     kind = media_types.media_type_for(relative)
     assert kind is not None
     if deadline is None:
@@ -349,30 +355,31 @@ def generate(
         )
         if (held.sha256, held.size) != (expected.sha256, expected.size):
             return False
-        record = {"version": _FORMAT, "path": relative, "sha256": held.sha256, "jpeg": ""}
-        if jpeg is None:
-            inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
+        record = {"version": _FORMAT, "path": relative, "sha256": held.sha256, "receipt_id": receipt_id, "jpeg": ""}
+        inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
+        max_jpeg_bytes = (inline_bytes // 4) * 3
+        if jpeg is None or len(jpeg) > max_jpeg_bytes:
             opened.stream.seek(0)
             jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
-        record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
 
         manager.yield_to_waiting_writes(vault)
         with (
             manager.consistency_guard(vault, operation="media_preview_publish", holder_kind="background"),
             ExitStack() as staged,
         ):
-            temporary = None
             try:
                 root = private_state.store(vault, STORE)
                 path = _record_path(root, relative)
                 path.parent.mkdir(mode=0o700, exist_ok=True)
                 if not stat.S_ISDIR(path.parent.lstat().st_mode):
                     return False
-                existing = _read_for_publication(path, relative, held.sha256) is not None
-                if not existing:
-                    temporary = staged.enter_context(private_state.stage_record(
-                        path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True,
-                    ))
+                existing = _read_for_publication(path, relative, held.sha256)
+                if existing is not None and len(existing) <= max_jpeg_bytes:
+                    jpeg = existing
+                record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
+                temporary = staged.enter_context(private_state.stage_record(
+                    path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True,
+                ))
             finally:
                 # Teardown rechecks custody and writes the pin ledger before the install transaction.
                 original.close()
@@ -382,9 +389,8 @@ def generate(
                     return False
                 with reserved_paths.revalidate_held_binary(held):
                     pass
-                if temporary is not None:
-                    os.replace(temporary, path)
-                _sync_record(path, existing=existing)
+                os.replace(temporary, path)
+                _sync_record(path, existing=False)
                 return True
 
             return store.publish_preview(job, install)

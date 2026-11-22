@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -516,6 +517,7 @@ class MediaJob:
     language: str | None = None
     language_mode: str | None = None
     preview_sha256: str | None = None
+    preview_receipt_id: str | None = None
     # The failure to retain if a receipt-only claim proves there is no matching record.
     preview_finish_error: str | None = None
 
@@ -1062,6 +1064,8 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN preview_sha256 TEXT")
         if "preview_finish_error" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN preview_finish_error TEXT")
+        if "preview_receipt_id" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN preview_receipt_id TEXT")
         conn.execute(f"CREATE INDEX IF NOT EXISTS jobs_ordinary_state_id ON jobs(state, id) WHERE {_ORDINARY_JOB}")
         conn.execute(f"CREATE INDEX IF NOT EXISTS {_PREVIEW_DUE_INDEX} ON jobs({_PREVIEW_DUE}, id) "
                      f"WHERE {_PENDING_PREVIEW}")
@@ -1321,7 +1325,7 @@ class MediaJobStore:
                     sidecar_rel = excluded.sidecar_rel, preview_sha256 = excluded.preview_sha256,
                     state = 'pending', attempts = 0, claim_revision = jobs.claim_revision + 1,
                     pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, last_error = NULL,
-                    preview_finish_error = NULL, returns = 0, updated_at = excluded.updated_at
+                    preview_finish_error = NULL, preview_receipt_id = NULL, returns = 0, updated_at = excluded.updated_at
                 WHERE jobs.preview_sha256 IS NOT excluded.preview_sha256 OR jobs.sidecar_rel != excluded.sidecar_rel
                     OR (jobs.id = ? AND jobs.claim_revision = ?
                         AND jobs.state = 'completed' AND jobs.last_error IS NULL)
@@ -1576,6 +1580,8 @@ class MediaJobStore:
                 return None
             now = time.time()
             spend_attempt = int(row["preview_finish_error"] is None)
+            receipt_id = (uuid.uuid4().hex if row["media_type"] == PREVIEW_MEDIA_TYPE and spend_attempt
+                          else row["preview_receipt_id"])
             # A job that stays pinned across a slice keeps the flag from its first claim.
             # Receipt-only preview claims need no original and spend no attempt.
             changed = conn.execute(
@@ -1583,12 +1589,13 @@ class MediaJobStore:
                 UPDATE jobs
                 SET state = 'running', attempts = attempts + ?,
                     claim_revision = claim_revision + 1,
+                    preview_receipt_id = ?,
                     hydrated = CASE WHEN pinned = 1 THEN hydrated ELSE ? END, pinned = ?,
                     object_key = CASE WHEN pinned = 1 THEN object_key ELSE NULL END,
                     updated_at = ?, last_error = NULL
                 WHERE id = ? AND state = 'pending'
                 """,
-                (spend_attempt, int(row["needs_hydration"]), spend_attempt, now, row["id"]),
+                (spend_attempt, receipt_id, int(row["needs_hydration"]), spend_attempt, now, row["id"]),
             ).rowcount
             conn.commit()
             if changed != 1:
@@ -1599,6 +1606,7 @@ class MediaJobStore:
                     "state": RUNNING,
                     "attempts": row["attempts"] + spend_attempt,
                     "claim_revision": row["claim_revision"] + 1,
+                    "preview_receipt_id": receipt_id,
                 }
             )
         except Exception:
@@ -3042,6 +3050,7 @@ class MediaJobStore:
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
             preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
+            preview_receipt_id=row["preview_receipt_id"] if "preview_receipt_id" in row.keys() else None,
             preview_finish_error=row["preview_finish_error"] if "preview_finish_error" in row.keys() else None,
         )
 

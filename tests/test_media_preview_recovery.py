@@ -6,6 +6,7 @@ import base64
 import errno
 import hashlib
 import io
+import json
 import os
 import sqlite3
 import subprocess
@@ -314,8 +315,8 @@ def test_discovery_queues_a_first_companion_after_the_watcher_event_was_missed(v
         assert "A caption from the original filing." in body
 
 
-@pytest.mark.parametrize("ready", [False, True])
-def test_restart_acknowledges_only_a_ready_record_on_the_final_attempt(vault, monkeypatch, ready):
+@pytest.mark.parametrize("published", ["none", "earlier", "current"])
+def test_restart_acknowledges_only_its_own_ready_record(vault, monkeypatch, published):
     original = _photo(910, 630)
     with library_scope():
         saved = preserve.preserve_stream(
@@ -323,14 +324,16 @@ def test_restart_acknowledges_only_a_ready_record_on_the_final_attempt(vault, mo
             stream=io.BytesIO(original),
         )
     ledger = media_jobs.MediaJobStore(vault, create=False)
-    for _ in range(media_jobs.MAX_PREVIEW_ATTEMPTS - 1):
+    for attempt in range(media_jobs.MAX_PREVIEW_ATTEMPTS - 1):
         previous = ledger.claim_next()
         assert previous is not None
+        if published == "earlier" and attempt == 0:
+            assert media_previews.generate(vault, previous, ledger, deadline=None)
         assert ledger.recover_interrupted() == 1
 
     claim = ledger.claim_next()
     assert claim is not None and claim.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
-    if ready:
+    if published == "current":
         assert media_previews.generate(vault, claim, ledger, deadline=None)
     else:
         class WorkerStopped(BaseException):
@@ -352,11 +355,15 @@ def test_restart_acknowledges_only_a_ready_record_on_the_final_attempt(vault, mo
     acknowledgement = ledger.claim_next()
     assert acknowledgement is not None and acknowledgement.id == claim.id
     assert acknowledgement.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    assert acknowledgement.preview_receipt_id == claim.preview_receipt_id
+    assert acknowledgement.claim_revision > claim.claim_revision
     media_worker.MediaWorker(vault, execution_mode="process")._process(acknowledgement)
     settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED
-    assert (settled.last_error is None) == ready
-    assert (media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None) == ready
+    assert (settled.last_error is None) == (published == "current")
+    assert (media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None) == (
+        published != "none"
+    )
 
 
 def test_preview_publication_requires_the_resident_binding_after_source_close(vault, monkeypatch):
@@ -560,7 +567,7 @@ def test_resident_preview_refuses_malformed_companion_at_acquisition(vault, sele
     assert originals.original_state(vault, saved.path).present
 
 
-@pytest.mark.parametrize("settlement_error", ["busy", "readonly"])
+@pytest.mark.parametrize("settlement_error", ["busy", "readonly", "persistent"])
 def test_process_worker_settles_a_definitive_preview_without_accepting_old_record(
     vault, tmp_path, monkeypatch, caplog, settlement_error,
 ):
@@ -575,6 +582,7 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
     ledger = media_jobs.MediaJobStore(vault)
     claim = ledger.claim_next()
     assert claim is not None and claim.preview_sha256 is not None
+    first_receipt = claim.preview_receipt_id
     assert media_previews.generate(vault, claim, ledger, deadline=None)
     previous_jpeg = media_previews.read(vault, relative, claim.preview_sha256)
     assert previous_jpeg is not None
@@ -588,7 +596,7 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
     finish_preview = media_jobs.MediaJobStore.finish_preview
     refused_writes = []
 
-    with closing(sqlite3.connect(ledger.path, timeout=0)) as holder:
+    with closing(sqlite3.connect(ledger.path, timeout=0)) as holder, monkeypatch.context() as fault:
         @contextmanager
         def replace_then_hold_ledger(*args, **kwargs):
             with local_original(*args, **kwargs) as source:
@@ -611,16 +619,28 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
             return connect(*args, **kwargs)
 
         def readonly_first_settlement(self, job, **kwargs):
-            if refused_writes:
+            if refused_writes and settlement_error == "readonly":
                 return finish_preview(self, job, **kwargs)
 
-            def readonly_connection(*args, **options):
-                connection = connect(self, *args, **options)
+            def readonly_connection(store, *args, **options):
+                connection = connect(store, *args, **options)
                 connection.execute("PRAGMA query_only=ON")
                 return connection
 
+            if settlement_error == "persistent":
+                if len(refused_writes) == 3:
+                    pytest.fail("the child must leave the ledger after three failed settlement writes")
+                if not refused_writes:
+                    # This also prevents the child from clearing its worker marker on exit.
+                    fault.setattr(media_jobs.MediaJobStore, "_connect", readonly_connection)
+                try:
+                    return finish_preview(self, job, **kwargs)
+                except sqlite3.OperationalError as error:
+                    refused_writes.append(error.sqlite_errorcode)
+                    raise
+
             with monkeypatch.context() as failed_write:
-                failed_write.setattr(self, "_connect", readonly_connection)
+                failed_write.setattr(self, "_connect", lambda: readonly_connection(self))
                 try:
                     return finish_preview(self, job, **kwargs)
                 except sqlite3.OperationalError as error:
@@ -630,23 +650,40 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
         def unexpected_decode(*args, **kwargs):
             pytest.fail("settling a definitive refusal must not run the codec again")
 
-        monkeypatch.setattr(media_store, "_open_local_original", replace_then_hold_ledger)
-        monkeypatch.setattr(media_previews, "_decode", unexpected_decode)
+        fault.setattr(media_store, "_open_local_original", replace_then_hold_ledger)
+        fault.setattr(media_previews, "_decode", unexpected_decode)
         if settlement_error == "busy":
-            monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", connect_until_holder_clears)
+            fault.setattr(media_jobs.MediaJobStore, "_connect", connect_until_holder_clears)
             assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
             assert refused_writes == [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY]
         else:
-            monkeypatch.setattr(media_jobs.MediaJobStore, "finish_preview", readonly_first_settlement)
-            assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
-            assert refused_writes == [sqlite3.SQLITE_READONLY]
-        settled = ledger.get(claim.id)
+            fault.setattr(media_jobs.MediaJobStore, "finish_preview", readonly_first_settlement)
+            code = media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01)
+            if settlement_error == "persistent":
+                assert code == media_worker._TRANSIENT_EXIT_CODE
+                assert refused_writes == [sqlite3.SQLITE_READONLY] * 3
+            else:
+                assert code == 0 and refused_writes == [sqlite3.SQLITE_READONLY]
 
+    if settlement_error == "persistent":
+        assert ledger.worker_pid() == os.getpid()
+        assert ledger.recover_interrupted() == 1
+        ledger.clear_worker(os.getpid())
+        acknowledgement = ledger.claim_next()
+        assert acknowledgement is not None and acknowledgement.id == claim.id
+        assert acknowledgement.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+        assert acknowledgement.preview_receipt_id and acknowledgement.preview_receipt_id != first_receipt
+        monkeypatch.setattr(media_previews, "_decode", unexpected_decode)
+        monkeypatch.setattr(media_store, "open_original", unexpected_decode)
+        media_worker.MediaWorker(vault, execution_mode="process")._process(acknowledgement)
+
+    settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED
     assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
-    assert settled.last_error == "preview original unavailable"
+    expected = "preview retry limit reached" if settlement_error == "persistent" else "preview original unavailable"
+    assert settled.last_error == expected
     assert media_previews.read(vault, relative, claim.preview_sha256) == previous_jpeg
-    if settlement_error == "readonly":
+    if settlement_error != "busy":
         assert sum("SQLITE_READONLY" in record.getMessage() for record in caplog.records) == 1
 
 
@@ -795,6 +832,7 @@ def test_uncertain_final_acknowledgement_retries_without_new_codec_work(vault, m
 
         acknowledgement = ledger.claim_next()
         assert acknowledgement is not None and acknowledgement.id == claim.id
+        assert acknowledgement.preview_receipt_id == claim.preview_receipt_id
         worker._process(acknowledgement)
         assert failures == [fault]
         waiting = ledger.get(claim.id)
@@ -805,6 +843,8 @@ def test_uncertain_final_acknowledgement_retries_without_new_codec_work(vault, m
     now += media_jobs.RETRY_FIRST_SECONDS
     retry = ledger.claim_next()
     assert retry is not None and retry.id == claim.id
+    assert retry.preview_receipt_id == claim.preview_receipt_id
+    assert retry.claim_revision > acknowledgement.claim_revision
     worker._process(retry)
     settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
@@ -817,6 +857,72 @@ def test_uncertain_final_acknowledgement_retries_without_new_codec_work(vault, m
     media_processing.reconcile_all_media(vault)
     rebuild = ledger.get(claim.id)
     assert rebuild is not None and rebuild.state == media_jobs.PENDING and rebuild.preview_sha256 == digest
+
+
+def test_storage_failure_after_install_retries_the_same_receipt_without_reopening_original(vault, monkeypatch):
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-post-install-sync.jpg",
+            stream=io.BytesIO(_photo(910, 630)),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.preview_sha256 and claim.preview_receipt_id
+    now = time.time()
+    monkeypatch.setattr(media_jobs, "time", SimpleNamespace(time=lambda: now))
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+
+    def unavailable(*args, **kwargs):
+        raise OSError("preview directory flush is unavailable")
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(private_state, "sync_directory", unavailable)
+        worker._process(claim)
+
+    assert media_previews.read(vault, saved.path, claim.preview_sha256) is not None
+    waiting = ledger.get(claim.id)
+    assert waiting is not None and waiting.state == media_jobs.PENDING and waiting.preview_finish_error
+    assert waiting.preview_receipt_id == claim.preview_receipt_id
+
+    def unexpected_open(*args, **kwargs):
+        pytest.fail("post-install acknowledgement must not open the original or run the codec")
+
+    monkeypatch.setattr(media_store, "open_original", unexpected_open)
+    monkeypatch.setattr(media_previews, "_decode", unexpected_open)
+    now += media_jobs.RETRY_FIRST_SECONDS
+    acknowledgement = ledger.claim_next()
+    assert acknowledgement is not None and acknowledgement.preview_receipt_id == claim.preview_receipt_id
+    assert acknowledgement.attempts == claim.attempts
+    worker._process(acknowledgement)
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+
+
+def test_reused_preview_reserves_space_for_the_receipt(vault):
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-legacy-at-envelope-limit.jpg",
+            stream=io.BytesIO(_photo(920, 640)),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.preview_sha256
+    record = {"version": 1, "path": saved.path, "sha256": claim.preview_sha256, "jpeg": ""}
+    max_legacy_bytes = ((media_previews.MAX_RECORD_BYTES - len(json.dumps(record))) // 4) * 3
+    # The size gate reads the JPEG markers and envelope before any codec runs.
+    legacy_jpeg = b"\xff\xd8" + bytes(max_legacy_bytes - 4) + b"\xff\xd9"
+    record["jpeg"] = base64.b64encode(legacy_jpeg).decode("ascii")
+    path = media_previews._record_path(private_state.store(vault, media_previews.STORE), saved.path)
+    path.parent.mkdir()
+    private_state.write_record(path.parent, path.stem, record, temp_suffix=".tmp")
+    assert media_previews.read(vault, saved.path, claim.preview_sha256) == legacy_jpeg
+
+    assert media_previews.generate(vault, claim, ledger, deadline=None)
+
+    jpeg = media_previews.read(vault, saved.path, claim.preview_sha256)
+    assert jpeg is not None and jpeg != legacy_jpeg
+    assert path.stat().st_size <= media_previews.MAX_RECORD_BYTES
+    assert media_previews.confirm_install(vault, claim)
 
 
 @pytest.mark.parametrize("fault", ["reuse", "install"])
@@ -832,6 +938,8 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
     assert media_previews.generate(vault, first, ledger, deadline=None)
     record, = media_previews.store_path(vault).glob("*/*.json")
     installed = record.read_bytes(), record.stat().st_ino
+    jpeg = media_previews.read(vault, saved.path, first.preview_sha256)
+    assert jpeg is not None
     assert ledger.recover_interrupted() == 1
 
     now = time.time()
@@ -880,8 +988,8 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         return inspect_original(root, path, *args, **kwargs)
 
     monkeypatch.setattr(media_previews, "_decode", unnecessary_codec)
-    monkeypatch.setattr(private_state, "stage_record", unnecessary_replacement)
     with monkeypatch.context() as blocked:
+        blocked.setattr(private_state, "stage_record", unnecessary_replacement)
         blocked.setattr(manager, "consistency_guard", guard)
         blocked.setattr(media_previews, "_load", load)
         if fault == "reuse":
@@ -916,15 +1024,21 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
             assert waiting.attempts == last.attempts and ledger.claim_next() is None
             now += 2 * media_jobs.RETRY_FIRST_SECONDS
 
+    assert (record.read_bytes(), record.stat().st_ino) == installed
     retry = ledger.claim_next()
     assert retry is not None and retry.id == claim.id
     worker._process(retry)
     settled = ledger.get(claim.id)
-    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+    expected_error = None if fault == "reuse" else "preview retry limit reached"
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error == expected_error
     expected_attempts = claim.attempts if fault == "reuse" else media_jobs.MAX_PREVIEW_ATTEMPTS
     assert settled.attempts == expected_attempts
-    assert media_previews.read(vault, saved.path, first.preview_sha256) is not None
-    assert (record.read_bytes(), record.stat().st_ino) == installed
+    assert media_previews.read(vault, saved.path, first.preview_sha256) == jpeg
+    if fault == "reuse":
+        assert retry.preview_receipt_id != first.preview_receipt_id
+        assert media_previews.confirm_install(vault, retry)
+    else:
+        assert (record.read_bytes(), record.stat().st_ino) == installed
 
 
 @pytest.mark.parametrize("fault", ["probe", "recheck"])

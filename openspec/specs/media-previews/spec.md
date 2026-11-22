@@ -52,14 +52,21 @@ When the install enables previews, the existing media worker SHALL queue a previ
 #### Scenario: The worker stops after installing the record
 
 - **WHEN** a worker stops before acknowledging its final publication attempt
-- **AND** the matching record is installed and ready
+- **AND** the installed ready record carries the receipt for that exact attempt
 - **THEN** recovery acknowledges publication and preserves the successful outcome
+- **AND** acknowledgement keeps that attempt's receipt across claims
 
 #### Scenario: Storage cannot confirm the installed record
 
-- **WHEN** publication acknowledgement cannot read or flush the matching record
+- **WHEN** publication acknowledgement cannot read or flush its attempt's record
 - **THEN** the worker delays acknowledgement and gives ordinary media jobs priority
 - **AND** acknowledgement retries without opening or decoding the original
+
+#### Scenario: The job ledger refuses preview settlement
+
+- **WHEN** SQLite refuses a preview settlement or writer coordination returns a retryable refusal
+- **THEN** the worker retries settlement with a bounded backoff
+- **AND** it returns control to the supervisor when that retry budget expires
 
 #### Scenario: The installed record cannot be inspected during generation
 

@@ -125,6 +125,7 @@ _COMPLETE = "complete"
 _HANDOFF = "handoff"
 _STALE = "stale"
 _PREVIEW_SETTLEMENT = "preview_settlement"
+_PREVIEW_SETTLEMENT_ATTEMPTS = 3
 # A hydration failure that returns the job to the queue with no attempt spent (D3, M4).
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
@@ -3312,6 +3313,7 @@ def run_child(
     gpu_busy = False
     #: The jobs this child returned to pending for that reason; it asks the GPU about each only once.
     deferred_for_gpu: set[int] = set()
+    supervisor_recovers = False
 
     def budget_of(job: _Job) -> media_brakes.Budget:
         assert config is not None
@@ -3483,7 +3485,11 @@ def run_child(
                 if outcome.state == _PREVIEW_SETTLEMENT:
                     # Known outcomes settle outside the failure handler. Only an unknown result needs receipt recovery.
                     storage_error_logged = False
-                    while outcome.state == _PREVIEW_SETTLEMENT:
+                    for attempt in range(_PREVIEW_SETTLEMENT_ATTEMPTS):
+                        if attempt:
+                            if not _parent_alive(parent_pid):
+                                return 0
+                            time.sleep(0.25 * 2 ** (attempt - 1))
                         try:
                             outcome = _settle_known_preview(store, job, outcome.error)
                         except sqlite3.Error as write_error:
@@ -3496,9 +3502,9 @@ def run_child(
                                 storage_error_logged = True
                         if outcome.state != _PREVIEW_SETTLEMENT:
                             break
-                        if not _parent_alive(parent_pid):
-                            return 0
-                        time.sleep(0.25)
+                    else:
+                        supervisor_recovers = True
+                        return _TRANSIENT_EXIT_CODE
                 elif outcome.state == BLOCKED:
                     store.mark(job, BLOCKED, outcome.error, blocked_reason=outcome.blocked_reason)
                 elif outcome.state == FAILED:
@@ -3542,7 +3548,8 @@ def run_child(
         log.info("media worker: parent exited; child stopping")
         return 0
     finally:
-        store.clear_worker(os.getpid())
+        if not supervisor_recovers:
+            store.clear_worker(os.getpid())
 
 
 def _parent_alive(parent_pid: int) -> bool:

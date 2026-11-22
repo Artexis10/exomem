@@ -57,6 +57,7 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
         connection.execute("DROP INDEX jobs_preview_receipt_due")
         connection.execute("DROP INDEX jobs_ordinary_state_id")
         connection.execute("ALTER TABLE jobs DROP COLUMN preview_finish_error")
+        connection.execute("ALTER TABLE jobs DROP COLUMN preview_receipt_id")
         connection.execute("ALTER TABLE jobs DROP COLUMN preview_sha256")
         connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
         connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
@@ -67,11 +68,13 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
     assert pending.id == job_id and not pending.do_offload and pending.offload_generation == 0
     with sqlite3.connect(store.path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
-        assert not {"do_offload", "offload_generation", "retry_at", "preview_finish_error"} & columns
+        assert not {"do_offload", "offload_generation", "retry_at", "preview_finish_error", "preview_receipt_id"} & columns
     claimed = retained.claim_next()
     assert claimed.id == job_id and claimed.do_ocr and not claimed.do_offload
     with sqlite3.connect(store.path) as connection:
-        assert "preview_finish_error" in {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+        assert {"preview_finish_error", "preview_receipt_id"} <= {
+            row[1] for row in connection.execute("PRAGMA table_info(jobs)")
+        }
 
 
 def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(vault, monkeypatch):
@@ -81,10 +84,11 @@ def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(
     original = _job(vault)
     store.enqueue_preview(original.binary_path, original.sidecar_path, "a" * 64)
     first = store.claim_next()
-    assert first is not None
+    assert first is not None and first.preview_receipt_id
     store.enqueue_preview(original.binary_path, original.sidecar_path, "b" * 64)
     second = store.claim_next()
     assert second is not None and second.id == first.id and second.preview_sha256 == "b" * 64
+    assert second.preview_receipt_id and second.preview_receipt_id != first.preview_receipt_id
 
     def unexpected_install():
         pytest.fail("the old preview claim published after the filing changed")
@@ -103,6 +107,41 @@ def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(
     store.finish_preview(second)
     settled = store.get(second.id)
     assert settled.state == media_jobs.COMPLETED and settled.preview_sha256 == "b" * 64
+
+
+def test_an_old_preview_receipt_does_not_match_a_recreated_ledger(vault, monkeypatch):
+    import base64
+
+    from exomem import media_previews, private_state
+
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    monkeypatch.setattr(media_engines, "preview_worker_available", lambda: True)
+    store = media_jobs.MediaJobStore(vault)
+    original = _job(vault)
+    digest = "a" * 64
+    store.enqueue_preview(original.binary_path, original.sidecar_path, digest)
+    first = store.claim_next()
+    assert first is not None and first.preview_receipt_id
+    relative = first.binary_path.relative_to(vault).as_posix()
+    path = media_previews._record_path(private_state.store(vault, media_previews.STORE), relative)
+    path.parent.mkdir()
+    private_state.write_record(
+        path.parent, path.stem,
+        {"version": 1, "path": relative, "sha256": digest, "receipt_id": first.preview_receipt_id,
+         "jpeg": base64.b64encode(b"\xff\xd8preview\xff\xd9").decode("ascii")},
+        temp_suffix=".tmp",
+    )
+    assert media_previews.confirm_install(vault, first)
+
+    store.path.unlink()
+    rebuilt = media_jobs.MediaJobStore(vault)
+    rebuilt.enqueue_preview(original.binary_path, original.sidecar_path, digest)
+    current = rebuilt.claim_next()
+    assert current is not None and current.preview_receipt_id
+    assert (current.id, current.claim_revision) == (first.id, first.claim_revision)
+    assert current.preview_receipt_id != first.preview_receipt_id
+    assert not media_previews.confirm_install(vault, current)
+    assert media_previews.read(vault, relative, digest) == b"\xff\xd8preview\xff\xd9"
 
 
 def test_interrupted_offload_column_upgrade_recovers_the_pending_job(vault: Path) -> None:
