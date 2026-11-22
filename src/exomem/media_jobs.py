@@ -16,7 +16,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,9 @@ FAILED = "failed"
 COMPLETED = "completed"
 # This queue token names offload-only work, not a vocabulary classification.
 OFFLOAD_MEDIA_TYPE = "binary"
+# The ledger uses one private row kind for a filing's preview demands.
+PREVIEW_MEDIA_TYPE = "preview"
+MAX_PREVIEW_ATTEMPTS = 3
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 # Bump when _key's composition changes so existing stores re-key on next open.
@@ -512,6 +515,7 @@ class MediaJob:
     reprocess: bool = False
     language: str | None = None
     language_mode: str | None = None
+    preview_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -622,6 +626,9 @@ def _drop_ocr_stage(conn: sqlite3.Connection, match: str, params: tuple) -> int:
 # A returned job waits 1 minute, doubling with each return, up to 15 minutes (D3, M4).
 RETRY_FIRST_SECONDS = 60
 RETRY_LIMIT_SECONDS = 15 * 60
+_ORDINARY_JOB = f"media_type != '{PREVIEW_MEDIA_TYPE}'"
+_PENDING_PREVIEW = f"state = 'pending' AND media_type = '{PREVIEW_MEDIA_TYPE}'"
+_PREVIEW_DUE = "COALESCE(retry_at, 0)"
 _CLAIMABLE = "state = 'pending' AND (retry_at IS NULL OR retry_at <= ?)"
 _FRESH = "NOT EXISTS (SELECT 1 FROM speech_progress WHERE speech_progress.job_id = jobs.id)"
 # The cache flag only orders the claim; the hydration itself reads the original's real state.
@@ -658,6 +665,7 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
         clause, skipped = _extraction_stage(skip_media_types)
         skip = f" AND NOT {clause}"
     # A ledger from before this order's columns keeps the earlier order until the next write adds them.
+    hydration_room = True
     if not migrated:
         claimable, needs_hydration, groups, parameters = "state = 'pending'", "0", [_FRESH, "1"], skipped
     else:
@@ -668,17 +676,29 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
         # Placeholders bind in text order: the retry time in `_CLAIMABLE`, then the skipped media types.
         claimable, needs_hydration, parameters = _CLAIMABLE, hydration, (time.time(), *skipped)
         groups = ["do_offload = 1", f"NOT {hydration} AND {_FRESH}", f"NOT {hydration}"]
-        if max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations:
+        hydration_room = max_hydrations is None or conn.execute(_HYDRATED_CLAIMS).fetchone()[0] < max_hydrations
+        if hydration_room:
             groups += [_FRESH, "1"]
     for group in groups:
         row = conn.execute(
             f"SELECT *, {needs_hydration} AS needs_hydration FROM jobs "
-            f"WHERE {claimable} AND {group}{skip} ORDER BY id LIMIT 1",
+            f"WHERE {_ORDINARY_JOB} AND {claimable} AND {group}{skip} ORDER BY id LIMIT 1",
             parameters,
         ).fetchone()
         if row is not None:
             return row
-    return None
+    if not migrated or not hydration_room:
+        return None
+    from . import media_engines
+
+    if (media_engines.PREVIEWS not in media_engines.enabled_engines()
+            or not media_engines.preview_worker_available()):
+        return None
+    return conn.execute(
+        f"SELECT *, {needs_hydration} AS needs_hydration FROM jobs "
+        f"WHERE {_PENDING_PREVIEW} AND {_PREVIEW_DUE} <= ? ORDER BY {_PREVIEW_DUE}, id LIMIT 1",
+        (time.time(),),
+    ).fetchone()
 
 
 def _max_hydrations(vault_root: Path) -> int | None:
@@ -1029,6 +1049,10 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN retry_at REAL")
         if "returns" not in jobs:
             conn.execute("ALTER TABLE jobs ADD COLUMN returns INTEGER NOT NULL DEFAULT 0")
+        if "preview_sha256" not in jobs:
+            conn.execute("ALTER TABLE jobs ADD COLUMN preview_sha256 TEXT")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS jobs_ordinary_state_id ON jobs(state, id) WHERE {_ORDINARY_JOB}")
+        conn.execute(f"CREATE INDEX IF NOT EXISTS jobs_preview_due ON jobs({_PREVIEW_DUE}, id) WHERE {_PENDING_PREVIEW}")
         conn.execute("CREATE INDEX IF NOT EXISTS jobs_hydrated_claims ON jobs(pinned) WHERE hydrated = 1")
         # A pin check reads only the claimed jobs, so a backlog of pending jobs never enters an eviction decision.
         conn.execute("CREATE INDEX IF NOT EXISTS jobs_pins ON jobs(pinned) WHERE pinned = 1")
@@ -1258,6 +1282,48 @@ class MediaJobStore:
                 return int(row[0])
         finally:
             conn.close()
+
+    def enqueue_preview(self, binary: Path, sidecar: Path, sha256: str) -> None:
+        """Admit one preview per original. A replacement fences the old claim."""
+        relative = self._relative(binary)
+        now = time.time()
+        with contextlib.closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO jobs (
+                    job_key, binary_rel, sidecar_rel, media_type, preview_sha256, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_key) DO UPDATE SET
+                    sidecar_rel = excluded.sidecar_rel, preview_sha256 = excluded.preview_sha256,
+                    state = 'pending', attempts = 0, claim_revision = jobs.claim_revision + 1,
+                    pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, updated_at = excluded.updated_at
+                WHERE jobs.preview_sha256 IS NOT excluded.preview_sha256 OR jobs.sidecar_rel != excluded.sidecar_rel
+                """,
+                (self._key(relative, PREVIEW_MEDIA_TYPE), relative, self._relative(sidecar),
+                 PREVIEW_MEDIA_TYPE, sha256, now, now),
+            )
+
+    def publish_preview(self, job: MediaJob, install: Callable[[], None]) -> None:
+        """Keep the generation current through its guarded atomic record replacement."""
+        with contextlib.closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM jobs WHERE id = ? AND claim_revision = ? AND state = 'running' AND preview_sha256 = ?",
+                (job.id, job.claim_revision, job.preview_sha256),
+            ).fetchone() is not None:
+                install()
+
+    def retry_preview(self, job: MediaJob) -> None:
+        """Spend a busy publication attempt and release its pin before the next claim."""
+        if job.attempts >= MAX_PREVIEW_ATTEMPTS:
+            return
+        now = time.time()
+        with contextlib.closing(self._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE jobs SET state = 'pending', pinned = 0, hydrated = 0, object_key = NULL, "
+                "retry_at = ?, updated_at = ? WHERE id = ? AND claim_revision = ? AND state = 'running' AND media_type = ?",
+                (now + RETRY_FIRST_SECONDS * (2 ** (job.attempts - 1)), now, job.id, job.claim_revision, PREVIEW_MEDIA_TYPE),
+            )
 
     def complete_offload(self, job: MediaJob) -> bool:
         """Acknowledge exactly this claim's offload demand, never a newer one."""
@@ -2260,7 +2326,7 @@ class MediaJobStore:
         try:
             if media_type is None:
                 row = conn.execute(
-                    "SELECT * FROM jobs WHERE binary_rel = ? AND media_type != ? ORDER BY id LIMIT 1",
+                    f"SELECT * FROM jobs WHERE binary_rel = ? AND {_ORDINARY_JOB} AND media_type != ? ORDER BY id LIMIT 1",
                     (binary_rel, OFFLOAD_MEDIA_TYPE),
                 ).fetchone()
             else:
@@ -2429,14 +2495,20 @@ class MediaJobStore:
         conn = self._connect()
         try:
             with conn:
+                dropped = conn.execute(
+                    "DELETE FROM jobs WHERE state = 'running' AND media_type = ? AND attempts >= ?",
+                    (PREVIEW_MEDIA_TYPE, MAX_PREVIEW_ATTEMPTS),
+                ).rowcount
                 changed = conn.execute(
-                    f"UPDATE jobs SET state = 'pending', updated_at = ? "
+                    f"UPDATE jobs SET state = 'pending', updated_at = ?, "
+                    f"pinned = CASE WHEN {_ORDINARY_JOB} THEN pinned ELSE 0 END, "
+                    f"hydrated = CASE WHEN {_ORDINARY_JOB} THEN hydrated ELSE 0 END "
                     f"WHERE state IN ({placeholders}) "
                     "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                     "WHERE media_job_results.job_id = jobs.id)",
                     (time.time(), *states),
                 ).rowcount
-                return int(changed)
+                return int(changed + dropped)
         finally:
             conn.close()
 
@@ -2738,7 +2810,7 @@ class MediaJobStore:
         """Return a bounded snapshot for runtime-unavailable state convergence."""
         conn = self._connect()
         try:
-            sql = "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id"
+            sql = f"SELECT * FROM jobs WHERE state = 'pending' AND {_ORDINARY_JOB} ORDER BY id"
             params: tuple[object, ...] = ()
             if limit is not None:
                 sql += " LIMIT ?"
@@ -2777,17 +2849,27 @@ class MediaJobStore:
         state -- the most expensive one to reach: two store opens, and each open
         takes the reserved-identity boundary twice.
         """
+        from . import media_engines
+
         conn = self._connect()
         try:
             clauses = " OR ".join("lower(last_error) LIKE ?" for _ in COMPUTE_RUNTIME_MARKERS)
             # A returned job is no work before its retry time; the supervisor's forced
             # recheck finds it within a minute after.
             work = conn.execute(
-                "SELECT 1 FROM jobs WHERE (state = 'running' OR " + _CLAIMABLE + ") "
+                f"SELECT 1 FROM jobs WHERE {_ORDINARY_JOB} AND (state = 'running' OR " + _CLAIMABLE + ") "
                 "AND NOT EXISTS (SELECT 1 FROM media_job_results "
-                "WHERE media_job_results.job_id = jobs.id) LIMIT 1",
-                (time.time(),),
+                "WHERE media_job_results.job_id = jobs.id) "
+                "UNION ALL SELECT 1 FROM jobs WHERE state = 'running' AND media_type = ? LIMIT 1",
+                (time.time(), PREVIEW_MEDIA_TYPE),
             ).fetchone()
+            if (work is None and media_engines.PREVIEWS in media_engines.enabled_engines()
+                    and media_engines.preview_worker_available()):
+                work = conn.execute(
+                    f"SELECT 1 FROM jobs WHERE {_PENDING_PREVIEW} AND {_PREVIEW_DUE} <= ? "
+                    "LIMIT 1",
+                    (time.time(),),
+                ).fetchone()
             if work is None:
                 candidates = conn.execute(
                     f"SELECT last_error FROM jobs WHERE state = 'failed' AND ({clauses}) ORDER BY id",
@@ -2859,6 +2941,7 @@ class MediaJobStore:
             reprocess=bool(row["reprocess"]) if "reprocess" in row.keys() else False,
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
+            preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
         )
 
     def _row_to_result(self, row: Any) -> MediaJobResult | None:
@@ -2969,7 +3052,7 @@ class MediaJobStore:
 def _read_status_rows(
     conn: sqlite3.Connection, *, binary_rel: str | None = None,
 ) -> tuple[list[Any], Any, list[Any], list[Any], int, int, dict[str, Any]]:
-    selector = " WHERE binary_rel = ?" if binary_rel is not None else ""
+    selector = f" WHERE {_ORDINARY_JOB}" + (" AND binary_rel = ?" if binary_rel is not None else "")
     parameters = (binary_rel,) if binary_rel is not None else ()
     # PRAGMA table_info rows are (cid, name, ...); read by position on any row factory.
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}

@@ -91,6 +91,7 @@ def _reconcile_background_media(vault_root: Path, binary: Path) -> object:
         binary,
         explicit=False,
         commit_guard=lambda: _media_mutation_guard(vault_root),
+        enqueue_preview=False,
     )
 
 

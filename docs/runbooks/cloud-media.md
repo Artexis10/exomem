@@ -52,15 +52,20 @@ Media status and stored originals remain available.
 
 ## Stored media previews
 
-Add `previews` to the cell's media engine selection to generate previews during existing image and video processing.
+Add `previews` to the cell's media engine selection to generate previews for new image and video filings.
 On personal installs, include `previews` in `EXOMEM_MEDIA_ENGINES` with the other engines you use.
-Preview generation is off by default. It uses the processing job's existing admission and limits, and adds no backfill.
+Preview generation is off by default. The existing worker claims due preview jobs after ordinary media work.
+Previews can run with text extraction and CLIP disabled. Enabling previews adds no backfill.
+The codec child needs POSIX resource limits. Its wall time is at most 15 seconds within the remaining job budget.
+Preview generation is unavailable in the inline debug worker. Stored previews remain readable through the same proof.
+The preview engine uses the existing memory brakes. The video decoder caps input frames at 16 million pixels.
+The worker retries a busy publication at most twice after the first attempt. A retry leaves extraction results intact.
 The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.
 
-Use `inspect_memory` with operation `media.preview` and the original's path.
+Use `inspect_memory` with operation `media.preview` and the canonical original path.
 On Cloud, select `frames` to offer this operation.
 Each read adds one keyed record lookup and reads at most 64 KiB of preview state, with a 25 ms p95 lookup budget at 500,000 records.
-The read can hydrate the original for custody proof. It returns the JPEG only while the caller can receive the original and its derived pixels.
+The read refuses known denials before hydration. It can still hydrate an original to prove custody before release.
 
 ## Speech and image query artifacts
 

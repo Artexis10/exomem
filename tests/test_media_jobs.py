@@ -53,6 +53,9 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
     store = media_jobs.MediaJobStore(vault)
     job_id = store.enqueue(_job(vault))
     with sqlite3.connect(store.path) as connection:
+        connection.execute("DROP INDEX jobs_preview_due")
+        connection.execute("DROP INDEX jobs_ordinary_state_id")
+        connection.execute("ALTER TABLE jobs DROP COLUMN preview_sha256")
         connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
         connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
         connection.execute("ALTER TABLE jobs DROP COLUMN retry_at")
@@ -65,6 +68,30 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
         assert not {"do_offload", "offload_generation", "retry_at"} & columns
     claimed = retained.claim_next()
     assert claimed.id == job_id and claimed.do_ocr and not claimed.do_offload
+
+
+def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(vault, monkeypatch):
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    store = media_jobs.MediaJobStore(vault)
+    original = _job(vault)
+    store.enqueue_preview(original.binary_path, original.sidecar_path, "a" * 64)
+    first = store.claim_next()
+    assert first is not None
+    store.enqueue_preview(original.binary_path, original.sidecar_path, "b" * 64)
+    second = store.claim_next()
+    assert second is not None and second.id == first.id and second.preview_sha256 == "b" * 64
+
+    def unexpected_install():
+        pytest.fail("the old preview claim published after the filing changed")
+
+    store.publish_preview(first, unexpected_install)
+    store.retry_preview(first)
+    store.complete(first)
+    installed = []
+    store.publish_preview(second, lambda: installed.append(second.preview_sha256))
+    assert installed == ["b" * 64]
+    store.complete(second)
+    assert store.get(second.id) is None
 
 
 def test_interrupted_offload_column_upgrade_recovers_the_pending_job(vault: Path) -> None:

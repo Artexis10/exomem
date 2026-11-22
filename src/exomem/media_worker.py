@@ -498,7 +498,7 @@ class MediaWorker:
         self._vault_root = vault_root
         #: The owner census that consecutive offloads share; it ends when this worker has no job left (D10).
         self._offload_batch = media_store.OffloadBatch(vault_root)
-        selected = execution_mode or os.environ.get("EXOMEM_MEDIA_WORKER_MODE", "process")
+        selected = execution_mode or media_engines.worker_mode()
         if selected not in {"process", "inline"}:
             raise ValueError("media worker mode must be process or inline")
         self._execution_mode = selected
@@ -679,8 +679,31 @@ class MediaWorker:
             finally:
                 self._q.task_done()
 
-    def _process(self, job: _Job) -> _ProcessOutcome:
+    def _process(self, job: _Job, *, deadline: float | None = None) -> _ProcessOutcome:
         from . import held_fs, media_store, originals, reserved_paths
+
+        if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+            from . import media_previews
+
+            store = self._store or MediaJobStore(self._vault_root, create=False)
+            if media_engines.PREVIEWS in media_engines.enabled_engines():
+                def publish(install):
+                    return self._holding_boundary(
+                        "background_media_preview", lambda: store.publish_preview(job, install)
+                    )
+
+                try:
+                    outcome = media_previews.generate(self._vault_root, job, publish, deadline=deadline)
+                except Exception as error:  # noqa: BLE001 - a preview failure ends only this claim
+                    outcome = None
+                    if ((isinstance(error, OpError) and error.code in _TRANSIENT_OPERATION_CODES)
+                            or _ledger_busy(error)):
+                        outcome = _BUSY
+                    else:
+                        log.warning("media preview unavailable (%s)", type(error).__name__)
+                if outcome is _BUSY:
+                    store.retry_preview(job)
+            return _ProcessOutcome(_COMPLETE)
 
         offload_error = None
         # Offload runs before extraction can hand a blocked result to the parent.
@@ -712,20 +735,10 @@ class MediaWorker:
                             if pinned else contextlib.nullcontext())
                 with contextlib.ExitStack() as held:
                     try:
-                        source = held.enter_context(original)
+                        held.enter_context(original)
                     except media_store.MediaStoreError as error:
                         outcome = _hydration_outcome(error)
                     else:
-                        if _previews_enabled(job):
-                            from . import media_previews
-
-                            try:
-                                media_previews.generate(
-                                    self._vault_root, job, source,
-                                    lambda install: self._holding_boundary("background_media_preview", install),
-                                )
-                            except Exception as error:  # noqa: BLE001 - previews cannot block extraction
-                                log.warning("media preview unavailable (%s)", type(error).__name__)
                         outcome = self._process_original(job)
             elif job.do_reembed:
                 self._run_reembed(job)
@@ -1413,6 +1426,9 @@ class MediaWorker:
         if kind == media_brakes.TIMEOUT:
             exceeded = media_brakes.timeout_context(config)
             for job in self._store.running_jobs():
+                if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                    self._store.complete(job)
+                    continue
                 verdict = self._store.record_timeout_stop(
                     job,
                     stop_limit=config.stop_limit,
@@ -1429,6 +1445,9 @@ class MediaWorker:
         else:
             context = self._context_for(cell, config)
             for job in self._store.running_jobs():
+                if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                    self._store.complete(job)
+                    continue
                 self._store.record_memory_stop(
                     job,
                     kind=kind,
@@ -3164,18 +3183,13 @@ def _speech_job(job: _Job) -> bool:
     return job.do_ocr and media_engines.engine_for(job.media_type) == media_engines.SPEECH
 
 
-def _previews_enabled(job: _Job) -> bool:
-    from . import media_previews
-
-    return (media_engines.PREVIEWS in media_engines.enabled_engines()
-            and media_previews.supports(job.binary_path))
-
-
 def _engines_loaded(job: _Job) -> list[str | None]:
     """The budget entries of what the job's child loads: the stage's engine and the CLIP tower.
 
     The tower loads when the CLIP stage runs and image search is on, as `_run_clip` decides.
     """
+    if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+        return [media_engines.PREVIEWS]
     engines: list[str | None] = [media_engines.engine_for(job.media_type)] if job.do_ocr else []
     if job.do_clip and embeddings.clip_enabled():
         engines.append(media_brakes.CLIP_BUDGET_KEY)
@@ -3343,7 +3357,10 @@ def run_child(
                 if config is not None:
                     media_brakes.apply_hard_limit(budget_of(job), config)
                 try:
-                    outcome = worker._process(job)
+                    if config is not None and job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                        outcome = worker._process(job, deadline=last_work + config.job_timeout_seconds)
+                    else:
+                        outcome = worker._process(job)
                 finally:
                     if config is not None:
                         media_brakes.lift_hard_limit()

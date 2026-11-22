@@ -8,11 +8,15 @@ Produce one small visual output per eligible filing through normal media process
 
 ## Decisions
 
-### Generate inside the media worker
+### Generate through the existing media queue
 
-Use the existing admission, original pin and host resource limits before extraction can hand off the job. Apply this to original image and video filings. Scene frames retain their own processing path. Reuse the image renderer for orientation and color conversion. Reuse the frame sampler and JPEG encoder for video. Exomem adds the storage and access rules that the decoders lack.
+Admit a private preview item in the media ledger for each new eligible original version. Use the normal capture and processing paths and prefer existing work when both are due. Preview admission depends on its own engine toggle. The worker can process a preview when the install has disabled text extraction. The ordinary reconciliation sweep keeps its existing input census.
 
-Verify a digest of the held stream used by the decoder. Reuse a recorded digest only when it proves that held version. Decode outside the mutation boundary. Under the existing publication guard, recheck the filing and held source version before installing the record. A refresh for the same digest and preview format version reuses the file. A decode failure leaves other media stages free to finish.
+Only the durable process-mode worker consumes preview jobs. The inline debug mode and platforms without the required child limits report generation unavailable and admit no preview work. Stored previews still use the same read boundary.
+
+Verify a digest of the held stream used by the decoder. Reuse a recorded digest only when it proves that held version. Give that stream to a one-shot codec child with an enforced deadline and memory limits. Apply the preview engine budget to Cloud admission. Limit codec dimensions and secondary inputs before full decode. Reuse the image renderer and frame JPEG encoder. The child returns one bounded payload to the existing worker.
+
+Run the codec outside the mutation boundary. Under the existing publication guard, recheck the filing and held source version before installing the record. A refresh for the same digest and preview format version reuses the file. Retry a busy publication with the media ledger's bounded attempts and delay. A failed preview leaves extraction results and their status intact.
 
 ### Keep the preview in derived state
 
@@ -22,7 +26,7 @@ One file per filing keeps large binary values out of the media job ledger. One J
 
 ### Reuse the original's read boundary
 
-`read_media` takes the original selection. Check the canonical original's access tier and use the existing recovery path to prove its input and grant full release. Apply the derived-pixel floor to images and posters. Video posters also require the video frame boundary. Recheck the current binding and release immediately before returning the matching JPEG.
+`read_media` takes the canonical original path. Check the access tier, the RAW derived-pixel floor, and denials the current policy can prove without reading bytes before hydration. Keep the existing full recovery and release proof for cases the precheck cannot decide. Check derived-pixel release for images and posters. Video posters also require the video frame boundary. Recheck the current binding and release immediately before returning the matching JPEG.
 
 The action is available wherever `read_media` is offered. On Cloud that currently requires the frame engine. Preview reads use the stored output and do their decoding only in the media worker.
 

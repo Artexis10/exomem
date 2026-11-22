@@ -7,7 +7,13 @@ Keep a compact visual output from governed media processing so a caller can read
 
 ### Requirement: Media processing persists a bounded preview
 
-When the install enables previews, the existing media worker SHALL keep one JPEG for each image or video filing it processes. A video SHALL use one poster frame. The longest edge SHALL be at most 512 pixels. The JPEG SHALL carry no original metadata. Its record SHALL identify the exact original digest that produced it.
+When the install enables previews, the existing media worker SHALL queue a preview for each eligible new image or video and keep one JPEG. Preview work SHALL stay within its decoder time and memory limits and leave other media outputs independent. A video SHALL use one poster frame. The longest edge SHALL be at most 512 pixels. The JPEG SHALL carry no original metadata. Its record SHALL identify the exact original digest that produced it.
+
+#### Scenario: The inline debug worker is selected
+
+- **WHEN** the install selects the inline debug worker with previews enabled
+- **THEN** generation reports unavailable and admits no preview work
+- **AND** an authorized read can still return a current stored preview
 
 #### Scenario: Normal processing of a photo and a video
 
@@ -18,7 +24,13 @@ When the install enables previews, the existing media worker SHALL keep one JPEG
 #### Scenario: The decoder is unavailable
 
 - **WHEN** the decoder cannot produce a preview for an eligible filing
-- **THEN** the preview is unavailable and other media stages still run
+- **THEN** the preview is unavailable and the original’s other media stages still run
+
+#### Scenario: Publication is busy
+
+- **WHEN** a preview decodes but its guarded publication is busy
+- **THEN** the worker retries preview publication within a bounded attempt limit
+- **AND** a completed extraction stays completed
 
 #### Scenario: Processing is replayed
 
@@ -27,7 +39,7 @@ When the install enables previews, the existing media worker SHALL keep one JPEG
 
 ### Requirement: Preview reads use the original's live access rules
 
-Where `read_media` is offered, its preview action SHALL prove the current input and grant full release and derived-pixel access. A video poster SHALL also satisfy the video frame boundary. An allowed caller whose current preview is missing SHALL receive a distinct unavailable result. The read SHALL use the existing read budget.
+Where `read_media` is offered, its preview action SHALL accept the canonical original path. It SHALL check provable denials before hydration and require current full release and derived-pixel access before returning the held preview. A video poster SHALL also satisfy the video frame boundary. An allowed caller whose current preview is missing SHALL receive a distinct unavailable result. The read SHALL use the existing read budget.
 
 #### Scenario: A caller requests a stored preview
 
@@ -38,6 +50,7 @@ Where `read_media` is offered, its preview action SHALL prove the current input 
 
 - **WHEN** the current policy denies derived pixels, even if the caller can download the original
 - **THEN** the preview request refuses without revealing whether the preview exists
+- **AND** a denial that the precheck can prove leaves the original evicted
 
 #### Scenario: The filing now names another original
 

@@ -22,6 +22,7 @@ from . import cloud_cell, media_types
 log = logging.getLogger(__name__)
 
 ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
+WORKER_MODE_ENV = "EXOMEM_MEDIA_WORKER_MODE"
 
 # A closed set: each name is media code this package implements, so a new
 # engine is a code change. Which of them run is deployment configuration.
@@ -91,6 +92,21 @@ def stage_enabled(media_type: str | None, env: Mapping[str, str] | None = None) 
     return engine is None or engine in enabled_engines(env)
 
 
+def worker_mode(env: Mapping[str, str] | None = None) -> str:
+    return (os.environ if env is None else env).get(WORKER_MODE_ENV, "process")
+
+
+def preview_worker_available(env: Mapping[str, str] | None = None) -> bool:
+    """Preview creation needs a consumer for the durable row and enforceable child limits."""
+    if worker_mode(env) != "process" or os.name != "posix":
+        return False
+    try:
+        import resource
+    except ImportError:
+        return False
+    return all(hasattr(resource, name) for name in ("RLIMIT_DATA", "RLIMIT_AS", "RLIMIT_FSIZE"))
+
+
 def stage_available(media_type: str | None) -> bool:
     """Enabled, and the extractor's dependencies are installed. Loads no model."""
     from . import extract
@@ -115,7 +131,9 @@ def status(env: Mapping[str, str] | None = None) -> dict[str, str]:
             from importlib.util import find_spec
 
             # These are the codec modules of the shipped frame reader, not model engines.
-            available = find_spec("PIL") and (engine == PREVIEWS or find_spec("av"))
+            available = find_spec("PIL") and (
+                preview_worker_available(env) if engine == PREVIEWS else find_spec("av")
+            )
             out[engine] = ENABLED if available else UNAVAILABLE
         elif kinds and all(extract.dependencies_present(kind) for kind in kinds):
             out[engine] = ENABLED

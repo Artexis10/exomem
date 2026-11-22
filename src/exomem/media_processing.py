@@ -361,6 +361,7 @@ def reconcile_media(
     defer_fanout_to_terminal: bool = False,
     request: ExtractionRequest | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
+    enqueue_preview: bool = True,
 ) -> ReconcileResult | None:
     """Converge one governed media artifact to a sidecar and durable job.
 
@@ -412,7 +413,7 @@ def reconcile_media(
                 return None
         for child in children:
             reconcile_media(vault, child, explicit=False, commit_guard=commit_guard,
-                            defer_fanout_to_terminal=defer_fanout_to_terminal)
+                            defer_fanout_to_terminal=defer_fanout_to_terminal, enqueue_preview=enqueue_preview)
         return ReconcileResult("asic-e", "pending", sidecar, None, document_container=metadata)
 
     media_type = classify_media(binary)
@@ -456,13 +457,17 @@ def reconcile_media(
             with media_store.open_original(vault, binary):
                 return reconcile_media(vault, binary, explicit=explicit,
                                        commit_guard=commit_guard, defer_fanout_to_terminal=defer_fanout_to_terminal,
-                                       request=request, queue_guard=queue_guard)
+                                       request=request, queue_guard=queue_guard, enqueue_preview=enqueue_preview)
         if (stored.state == "evicted"
                 or media_store.cache_matches(vault, binary, snapshot=stored)
                 or media_store.recover_cache(vault, binary, stored)):
+            from . import media_previews
+
             text = _read_sidecar_text(vault, stored.sidecar_path)
             if text is not None and has_completed_transcript(text, media_type=media_type):
                 _retire_completed_ocr(vault, binary, stored.sidecar_path, media_type)
+                if enqueue_preview:
+                    media_previews.enqueue(vault, binary, expected_sha256=stored.binary_sha256)
                 return ReconcileResult(media_type, "completed", stored.sidecar_path, None)
             store = media_jobs.MediaJobStore(vault)
             job = store.get_by_binary(binary)
@@ -472,6 +477,8 @@ def reconcile_media(
                     store, media_jobs.MediaJob(binary, stored.sidecar_path, media_type), request
                 )
                 job = store.get(job_id)
+            if enqueue_preview:
+                media_previews.enqueue(vault, binary, expected_sha256=stored.binary_sha256)
             return ReconcileResult(
                 media_type,
                 job.state if job else "pending",
@@ -760,8 +767,12 @@ def reconcile_media(
     if rerun_with_commit_hold:
         return reconcile_media(
             vault, binary, explicit=explicit, commit_guard=commit_guard,
-            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request,
+            defer_fanout_to_terminal=defer_fanout_to_terminal, request=request, enqueue_preview=enqueue_preview,
         )
+    if enqueue_preview and result is not None:
+        from . import media_previews
+
+        media_previews.enqueue(vault, binary, expected_sha256=provenance.sha256)
     if early:
         return result
 
@@ -800,7 +811,7 @@ def reconcile_all_media(
 
         media_store.enqueue_offloads(vault)
     reconcile_one = reconcile_one or (
-        lambda binary: reconcile_media(vault, binary, explicit=False)
+        lambda binary: reconcile_media(vault, binary, explicit=False, enqueue_preview=False)
     )
     kb = managed_root(vault)
     if not kb.is_dir():

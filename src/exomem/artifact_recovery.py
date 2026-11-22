@@ -283,6 +283,7 @@ def stage(
     expected: dict | None = None,
     byte_proofs: dict | None = None,
     materialize: bool = True,
+    canonical: bool = False,
     additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
@@ -300,7 +301,10 @@ def stage(
                     if budget is not None
                     else time.monotonic() + seconds
                 )
-                path, metadata = _resolve(root, selected)
+                def binding():
+                    return (selected, _companion(root, selected)[1]) if canonical else _resolve(root, selected)
+
+                path, metadata = binding()
                 if materialize:
                     stack.enter_context(media_store.local_originals(root, (path,), read=True))
 
@@ -338,7 +342,7 @@ def stage(
                 ):
                     raise RecoveryUnavailable
                 require_current(root, held, who, byte_proofs=byte_proofs, additional_release=additional_release)
-                if _resolve(root, selected) != (path, metadata):
+                if binding() != (path, metadata):
                     raise RecoveryUnavailable
                 yield held, descriptor
             except (

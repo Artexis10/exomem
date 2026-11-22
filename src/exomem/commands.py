@@ -10354,6 +10354,7 @@ def _process_media(
                     binary,
                     explicit=False,
                     commit_guard=_commit_guard,
+                    enqueue_preview=False,
                 ),
                 propagate_transient_errors=True,
             )

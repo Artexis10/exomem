@@ -1044,8 +1044,11 @@ def preserve(
         container_stack.close()
         artifact_stage.close()
 
+    from . import media_previews
     from .media_store import enqueue_offload
 
+    if not media_pending:
+        media_previews.enqueue(vault_root, artifact_path, expected_sha256=artifact_hash)
     enqueue_offload(vault_root, artifact_path)
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),

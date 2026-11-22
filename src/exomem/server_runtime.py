@@ -1149,6 +1149,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 binary,
                 explicit=False,
                 commit_guard=reconcile_commit_guard,
+                enqueue_preview=False,
             ),
         )
         if unavailable_reason is not None and unavailable_action is not None:

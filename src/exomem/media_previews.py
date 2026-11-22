@@ -8,13 +8,17 @@ import json
 import logging
 import os
 import stat
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Generator
 from contextlib import nullcontext
+from contextvars import Context
 from itertools import islice
-from pathlib import Path
-from typing import TYPE_CHECKING
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, BinaryIO
 
 from . import media_types, originals, private_state, reserved_paths, state_paths
 
@@ -25,7 +29,7 @@ log = logging.getLogger(__name__)
 
 STORE = reserved_paths.MEDIA_PREVIEWS_DIRNAME
 MAX_RECORD_BYTES = 64 * 1024
-_MAX_SIDE = 512
+DECODE_SECONDS = 15
 _FORMAT = 1
 _TEMP_SUFFIX = ".tmp"
 _SWEEP_LIMIT = 64
@@ -75,20 +79,79 @@ def read(vault: Path, relative: str, digest: str) -> bytes | None:
     return None
 
 
+def enqueue(vault: Path, binary: Path, *, expected_sha256: str | None) -> None:
+    """Queue a preview for an admitted, currently bound original version."""
+    from . import media_engines, media_jobs, recall_policy
+    from .writer_lease import get_manager
+
+    if (expected_sha256 is None or not supports(binary)
+            or media_engines.PREVIEWS not in media_engines.enabled_engines()
+            or not media_engines.preview_worker_available()):
+        return
+    try:
+        relative = binary.relative_to(vault).as_posix()
+        manager = get_manager()
+        boundary = (nullcontext() if manager.holds_mutation_boundary(vault) else
+                    manager.consistency_guard(vault, operation="media_preview_admit", holder_kind="background"))
+        with boundary:
+            companion = originals.bound_companion(vault, relative)
+            if companion is None or companion[1].get("parent_media"):
+                return
+            sidecar = vault / companion[0]
+            binding = originals.binary_binding(companion[1])
+            if (binding is not None and binding.sha256 == expected_sha256
+                    and recall_policy.is_recall_candidate(vault, sidecar)
+                    and read(vault, relative, binding.sha256) is None):
+                media_jobs.MediaJobStore(vault).enqueue_preview(binary, sidecar, binding.sha256)
+    except Exception as error:  # noqa: BLE001 - optional admission cannot fail the filing or extraction
+        log.warning("media preview admission deferred (%s)", type(error).__name__)
+
+
+def _decode(source: BinaryIO, kind: str, suffix: str, inline_bytes: int, deadline: float) -> bytes:
+    """Run one codec with a bounded private stdout and the original as seekable stdin."""
+    from . import media_brakes, media_engines
+
+    if os.name != "posix":
+        raise OSError("preview codec limits are unavailable on this platform")
+    config = media_brakes.settings()
+    memory_limit = config.budget_for(media_engines.PREVIEWS).vmdata_bytes + config.margin_bytes
+    latest = min(deadline, time.monotonic() + DECODE_SECONDS)
+    if latest <= time.monotonic() or inline_bytes < 4:
+        raise ValueError("preview codec budget exhausted")
+    command = [sys.executable, "-m", "exomem.media_preview_child", kind, suffix,
+               str(inline_bytes), str(memory_limit), str(latest)]
+    with tempfile.TemporaryFile() as output:
+        subprocess.run(
+            command, stdin=source, stdout=output, stderr=subprocess.DEVNULL, check=True,
+            env={**os.environ, "OPENBLAS_NUM_THREADS": "1"},
+            timeout=max(0, latest - time.monotonic()),
+        )
+        output.seek(0)
+        max_bytes = (inline_bytes // 4) * 3
+        jpeg = output.read(max_bytes + 1)
+        if len(jpeg) > max_bytes or not (jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9")):
+            raise ValueError("invalid preview codec output")
+        return jpeg
+
+
 def generate(
     vault: Path,
     job: MediaJob,
-    source: reserved_paths.GenericBinarySource | None,
     publish: Callable[[Callable[[], None]], object],
-) -> None:
+    *,
+    deadline: float | None,
+) -> object:
     """Render outside the publication hold, then recheck the held bytes and their filing."""
     from . import image_view, media_brakes, media_store, recall_policy
 
     relative = job.binary_path.relative_to(vault).as_posix()
-    with (nullcontext(source) if source is not None else media_store.open_original(vault, relative, job=job)) as opened:
-        if job.media_type == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
-            return
+    kind = media_types.media_type_for(relative)
+    assert kind is not None
+    if deadline is None:
         deadline = time.monotonic() + media_brakes.settings().job_timeout_seconds
+    with media_store.open_original(vault, relative, job=job, deadline=deadline) as opened:
+        if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
+            return None
         held = reserved_paths.prove_held_binary(
             vault, relative, opened, deadline=deadline,
             recorded_sha256=lambda version: media_store.cached_sha256(vault, job.binary_path, version),
@@ -102,23 +165,12 @@ def generate(
                     and originals.binary_binding(companion[1]) == expected
                     and recall_policy.is_recall_candidate(vault, job.sidecar_path))
 
-        if not current_filing() or read(vault, relative, held.sha256) is not None:
-            return
+        if held.sha256 != job.preview_sha256 or not current_filing() or read(vault, relative, held.sha256) is not None:
+            return None
         record = {"version": _FORMAT, "path": relative, "sha256": held.sha256, "jpeg": ""}
         inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
         opened.stream.seek(0)
-        if job.media_type == "image":
-            jpeg = image_view.render_preview(
-                opened.stream, job.binary_path.suffix, max_side=_MAX_SIDE, inline_bytes=inline_bytes,
-            )
-        else:
-            from . import video_frames
-
-            result = video_frames.sample_stream(
-                opened.stream, relative, max_frames=1, max_side=_MAX_SIDE,
-                resize_candidates=True, inline_bytes=inline_bytes,
-            )
-            jpeg = result.frames[0].jpeg
+        jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
         record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
 
         def install() -> None:
@@ -133,16 +185,33 @@ def generate(
             private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
             private_state.sync_directory(path.parent)
 
-        publish(install)
+        return publish(install)
 
 
 def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
     """Return a stored JPEG only after a live authorization for its original and pixels."""
     from . import access, artifact_recovery
-    from .governance import egress
+    from .governance import egress, raw_protection
+    from .governance.principal import request_scope
 
     who = artifact_recovery.delegated_principal()
     proofs: dict = {}
+
+    path = PurePosixPath(selected)
+    if (path.is_absolute() or path.as_posix() != selected or ".." in path.parts
+            or "\\" in selected or not supports(selected) or not who.resolved):
+        raise artifact_recovery.RecoveryUnavailable
+
+    def possible() -> bool:
+        with request_scope(who):
+            return (raw_protection.permits(vault, selected, who, derived=True, resolve_bytes=False) is not False
+                    and bool(egress.pending_identity_candidates(
+                        vault, (selected,), principal=who, minimum_level=egress.LEVEL_FULL,
+                    )))
+
+    # This only short-circuits known denials. The held proof still decides release.
+    if not Context().run(possible):
+        raise artifact_recovery.RecoveryUnavailable
 
     def allows_pixels(held: reserved_paths.GenericFileCopy) -> bool:
         relative = held.relative_path
@@ -153,10 +222,9 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
         return egress.content_permits(vault, relative, who, derived=True, artifact_copy=held)
 
     with artifact_recovery.stage(
-        vault, selected, who, byte_proofs=proofs, additional_release=allows_pixels,
+        vault, selected, who, byte_proofs=proofs, canonical=True, additional_release=allows_pixels,
     ) as (held, descriptor):
-        relative = descriptor["path"]
-        jpeg = read(vault, relative, held.sha256) if supports(relative) else None
+        jpeg = read(vault, selected, held.sha256)
         artifact_recovery.require_current(
             vault, held, who, byte_proofs=proofs, selected=selected, additional_release=allows_pixels,
         )
