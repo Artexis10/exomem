@@ -9,6 +9,8 @@ k=60 is the conventional default (Cormack, Clarke, Buettcher 2009).
 
 from __future__ import annotations
 
+from typing import Any
+
 
 def reciprocal_rank_fusion(
     result_lists: list[list[str]], k: int = 60
@@ -55,4 +57,27 @@ def reciprocal_rank_fusion_weighted(
                 continue
             seen.add(path)
             fused[path] = fused.get(path, 0.0) + weight * (1.0 / (k + rank))
+    return sorted(fused.items(), key=lambda t: (-t[1], t[0]))
+
+
+def reciprocal_rank_fusion_scored(
+    result_lists: list[list[tuple[Any, float]]], k: int = 60
+) -> list[tuple[Any, float]]:
+    """RRF over best-first `(key, score)` lists, where equal scores share the better rank.
+
+    Competition ranking gives equal evidence an equal vote, so two keys that every
+    list scores alike always fuse to the same value. Keys must be mutually orderable:
+    they break ties in the result.
+    """
+    fused: dict[Any, float] = {}
+    for ranking in result_lists:
+        seen: set[Any] = set()
+        rank, previous = 0, None
+        for position, (key, score) in enumerate(ranking, start=1):
+            if key in seen:
+                continue
+            seen.add(key)
+            if position == 1 or score != previous:
+                rank, previous = position, score
+            fused[key] = fused.get(key, 0.0) + 1.0 / (k + rank)
     return sorted(fused.items(), key=lambda t: (-t[1], t[0]))

@@ -35,6 +35,7 @@ from . import (
     foreground_priority,
     index_paths,
     passage_matrix,
+    passage_terms,
     recall_space,
     reserved_paths,
     semantic_index,
@@ -1079,6 +1080,10 @@ class EmbeddingIndex:
         self._catch_up_lock = threading.Lock()
         self._matrix_load_failed_at: float | None = None
         self._matrix_load_failures = 0
+        # Guards `_terms_backfill`, the one background lexical backfill (a leaf lock).
+        self._terms_lock = threading.Lock()
+        self._terms_backfill: threading.Thread | None = None
+        self._terms_failed_at: float | None = None
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1144,6 +1149,7 @@ class EmbeddingIndex:
         # that a writer which bumps the generation without logging its paths is
         # DETECTED rather than silently caught up (see sidecar_store).
         sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
+        passage_terms.attach(conn)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
@@ -2937,6 +2943,82 @@ class EmbeddingIndex:
                 )[0]
         return ChunkSelection(hits, mode)
 
+    def select_passage_terms(
+        self, query: str, k: int, *, allowed_paths: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical passage hits under a chunk proof, or None while the terms table is not whole.
+
+        A sidecar of at most one backfill batch is made whole inline; a larger one starts
+        the background backfill, and the caller ranks without lexical matching meanwhile.
+        After a failed backfill, neither runs again until the retry delay has passed.
+        """
+        if not self.path.exists():
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
+            return []
+        eligible = set(allowed_paths) - withheld.paths
+        for attempt in range(2):
+            conn = self._connect()
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                if token[1] > 0 and passage_terms.covered(conn, token[1]):
+                    proof = ChunkProof(
+                        self, token[:3], recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                    )
+                    with foreground_priority.foreground():
+                        rows = passage_terms.select(conn, query, k, eligible)
+                    return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
+                rows_held = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            finally:
+                conn.rollback()
+                conn.close()
+            if attempt or rows_held > passage_terms.BACKFILL_ROWS or self._terms_backing_off():
+                break
+            self._backfill_passage_terms()
+        self.prepare_passage_terms()
+        return None
+
+    def prepare_passage_terms(self) -> threading.Thread | None:
+        """Start the one background lexical backfill, or return the one running."""
+        if not self.path.exists():
+            return None
+        with self._terms_lock:
+            running = self._terms_backfill
+            if running is not None and running.is_alive():
+                return running
+            if self._terms_backing_off():
+                return None
+            running = threading.Thread(
+                target=self._backfill_passage_terms, name="exomem-passage-terms", daemon=True
+            )
+            running.start()
+            self._terms_backfill = running
+            return running
+
+    def passage_terms_failed(self) -> bool:
+        """Whether the last lexical backfill failed; the next waits out the retry delay."""
+        return self._terms_failed_at is not None
+
+    def _terms_backing_off(self) -> bool:
+        # A failing backfill rescans every row, so a request does not restart it at once.
+        failed_at = self._terms_failed_at
+        return failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS
+
+    def _backfill_passage_terms(self) -> None:
+        try:
+            conn = self._connect()
+            try:
+                passage_terms.backfill(conn, CHUNK_PATH_LOG)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, OpError) as error:
+            self._terms_failed_at = time.monotonic()
+            log.warning("passage terms backfill failed: %s", error)
+            return
+        self._terms_failed_at = None
+
     def _search(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
@@ -4175,6 +4257,7 @@ class EmbeddingIndex:
                         "rebuild_embeddings: serving or source snapshot changed; publication refused"
                     )
                     return 0
+                passage_terms.suspend(conn)
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
                 recall_space.write_identity(conn, producer)

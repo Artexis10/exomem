@@ -876,14 +876,15 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
     try:
         from . import cloud_cell
 
-        # Optional passage residency applies only after published metadata identifies passages.
+        # Passage preparation applies only after published metadata identifies passages:
+        # the lexical terms always, and the resident matrix when its budget allows one.
         if cloud_cell.resource_policy() == "service-v1":
-            from . import embeddings, passage_evidence, passage_matrix, semantic_contract
+            from . import embeddings, passage_evidence, semantic_contract
 
-            if passage_matrix.ceiling():
-                publication = semantic_contract.borrow_published_corpus(vault_root)
-                if publication is not None and passage_evidence.declared_sources(vault_root, publication):
-                    loading = embeddings.get_embedding_index(vault_root).prepare_passage_matrix()
+            publication = semantic_contract.borrow_published_corpus(vault_root)
+            if publication is not None and passage_evidence.declared_sources(vault_root, publication):
+                index = embeddings.get_embedding_index(vault_root)
+                for loading in (index.prepare_passage_terms(), index.prepare_passage_matrix()):
                     if loading is not None:
                         loading.join()
             return
