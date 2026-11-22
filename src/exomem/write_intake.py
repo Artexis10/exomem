@@ -9,10 +9,15 @@ order, through ``writer_lease.invoke_command``, as the principal that sent each
 one, so every ordinary check still runs.
 
 Exactly once: the drainer replays a save under its own explicit identity,
-``intake:<id>``, which the idempotency store keeps for 24 hours. A save whose
-commit happened before a process stop replays its stored terminal after the
-restart instead of writing again. While a save is open, a resend with the
-original identity returns the same receipt and runs nothing.
+``intake:<id>``, which the idempotency store keeps for 24 hours. Before the
+replay writes its first canonical byte, the commit gate
+(``writer_lease.validate_active_write_fence`` and the collection store's
+transaction) records durably that this identity reached its commit, or refuses
+the attempt uncommitted. After a stop, a row whose identity reached its commit
+replays under the same identity, so the idempotency store resumes it or answers
+``MUTATION_OUTCOME_UNKNOWN``; a row whose identity never reached it replays
+under a fresh one. While a save is open, a resend with the original identity
+returns the same receipt and runs nothing.
 
 A save that fails for any reason other than contention stays ``failed`` with
 its refusal and its arguments until the owner dismisses it
@@ -23,9 +28,9 @@ drops its arguments; applied rows are pruned after seven days.
 from __future__ import annotations
 
 import contextvars
-import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import threading
@@ -33,10 +38,12 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from pydantic_core import to_jsonable_python
 
 from . import reserved_paths, state_paths
 from .cli_ops import OpError
@@ -66,6 +73,10 @@ RETRY_REFUSALS = ACCEPTED_REFUSALS | {  # nosemgrep: ep-word-set -- closed publi
     # Committed, terminal not persisted: its own remediation is a same-identity retry.
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
 }
+#: The login behind a save no longer vouches for it: the save fails, with its arguments.
+LOGIN_REVOKED = "INTAKE_LOGIN_REVOKED"
+#: The session store could not say whether the login still holds: the save waits and is retried.
+LOGIN_UNREADABLE = "INTAKE_LOGIN_UNREADABLE"
 _REQUEST_NAMESPACE = uuid.UUID("5d1f3c62-8a7e-4f0b-9c2d-6e4b1a7f3c90")
 
 MAX_ARGUMENT_BYTES = 4 * 1024 * 1024
@@ -74,15 +85,15 @@ FIRST_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 30.0
 _DEFAULT_INTAKE_WAIT_SECONDS = 15.0
 _MAX_INTAKE_WAIT_SECONDS = 600.0
-_IDLE_POLL_SECONDS = 5.0
+#: How often a drainer looks again at a row that another live process is applying.
+_OTHER_OWNER_POLL_SECONDS = 5.0
+#: An idle drainer waits for an acceptance; this read-only re-check only covers a missed one.
+_IDLE_RECHECK_SECONDS = 300.0
 _OUTCOME_LIMIT_BYTES = 16 * 1024
 _LIST_LIMIT = 50
+_STABLE_READ_ATTEMPTS = 3
 
-#: The arguments `invoke_command` takes for itself, not for the command leaf.
-_CONTROL_ARGUMENTS = frozenset({  # nosemgrep: ep-word-set -- invoke_command's own keyword parameters.
-    "idempotency_key", "public_idempotency_key", "idempotency_principal_scope",
-    "implicit_idempotency_scope", "mutation_request_id", "absorb_unkeyed",
-})
+StoreMode = Literal["read", "write", "create"]
 
 
 def enabled() -> bool:
@@ -96,7 +107,7 @@ def intake_wait_seconds() -> float:
         wait = float(os.environ.get("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", _DEFAULT_INTAKE_WAIT_SECONDS))
     except ValueError:
         return _DEFAULT_INTAKE_WAIT_SECONDS
-    if wait != wait or wait in (float("inf"), float("-inf")):
+    if not math.isfinite(wait):
         return _DEFAULT_INTAKE_WAIT_SECONDS
     return min(max(0.0, wait), _MAX_INTAKE_WAIT_SECONDS)
 
@@ -113,18 +124,31 @@ def _iso(epoch: float | None) -> str | None:
     return None if epoch is None else datetime.fromtimestamp(epoch, UTC).isoformat(timespec="seconds")
 
 
-def _canonical(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+def _json(value: Any) -> str:
+    """Canonical JSON of a JSON-mode value; raises on anything JSON cannot hold."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+
+def _report_json(value: Any) -> str:
+    """JSON of a reply or refusal kept for the owner to read; a value JSON cannot hold reads as text."""
+    return _json(to_jsonable_python(value, fallback=str))
 
 
 # --------------------------------------------------------------------------- store
 
 
 @contextmanager
-def _store(vault_root: Path, *, create: bool) -> Iterator[sqlite3.Connection]:
-    """Open the intake store under the private-state ceremony; ``FileNotFoundError`` for a read of none."""
+def _store(vault_root: Path, *, mode: StoreMode) -> Iterator[sqlite3.Connection]:
+    """Open the intake store under the private-state ceremony.
+
+    ``create`` makes the store and may change the vault's private identities, so it advances
+    the identity generation; only the first acceptance on a vault needs it. ``write`` opens
+    the existing store read-write and ``read`` opens it read-only; neither changes an identity,
+    and both raise ``FileNotFoundError`` when no store exists yet.
+    """
     root = Path(vault_root).resolve()
     path = store_path(root)
+    create = mode == "create"
     with reserved_paths._subsystem_authority_scope(OWNER):  # noqa: SLF001
         with reserved_paths._identity_coordination_scope(  # noqa: SLF001
             root, descriptor_ids=(STORE_ID,), identity_may_change=create
@@ -132,7 +156,7 @@ def _store(vault_root: Path, *, create: bool) -> Iterator[sqlite3.Connection]:
             with reserved_paths._sqlite_owner_target_scope(  # noqa: SLF001
                 root, path, STORE_ID, create=create
             ) as retained:
-                conn = _open(root, path, retained, create)
+                conn = _open(root, path, retained, mode)
     try:
         yield conn
     finally:
@@ -140,8 +164,8 @@ def _store(vault_root: Path, *, create: bool) -> Iterator[sqlite3.Connection]:
 
 
 @contextmanager
-def _write(vault_root: Path) -> Iterator[sqlite3.Connection]:
-    with _store(vault_root, create=True) as conn:
+def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connection]:
+    with _store(vault_root, mode="create" if create else "write") as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             yield conn
@@ -151,30 +175,32 @@ def _write(vault_root: Path) -> Iterator[sqlite3.Connection]:
             raise
 
 
-def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Connection:
-    if create:
+def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Connection:
+    if mode == "create":
         retained.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(retained, timeout=5.0)
     else:
         if not retained.exists():
             raise FileNotFoundError(retained)
-        conn = sqlite3.connect(f"{retained.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        # `mode=rw` opens the existing file and never creates one.
+        conn = sqlite3.connect(f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=5.0)
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
-        if create:
-            conn.execute("PRAGMA journal_mode=WAL")
+        if mode != "read":
             # A queued receipt promises custody: it must survive a power loss, not only a kill.
             conn.execute("PRAGMA synchronous=FULL")
+        if mode == "create":
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS intake ("
-                "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, origin TEXT, "
+                "seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, origin TEXT, origin_ttl REAL, "
                 "command TEXT NOT NULL, arguments TEXT, principal TEXT NOT NULL, surface TEXT, "
                 "state TEXT NOT NULL, owner TEXT, attempts INTEGER NOT NULL DEFAULT 0, "
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
                 "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
-                "generation INTEGER NOT NULL DEFAULT 0, boundary_held INTEGER NOT NULL DEFAULT 0)"
+                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -193,26 +219,14 @@ def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Conne
 # --------------------------------------------------------------------------- identity and eligibility
 
 
-def origin_identity(command_name: str, arguments: Mapping[str, Any], control: Mapping[str, Any]) -> str | None:
-    """The original call's replay identity, hashed; ``None`` for an unkeyed call."""
-    explicit = control.get("idempotency_key")
-    if explicit:
-        material = ["explicit", control.get("idempotency_principal_scope") or "", explicit]
-    elif control.get("implicit_idempotency_scope"):
-        material = ["implicit", control["implicit_idempotency_scope"], command_name, _canonical(arguments)]
-    else:
-        return None
-    return hashlib.sha256("\0".join(str(part) for part in material).encode("utf-8")).hexdigest()
-
-
 def principal_record(principal: Any) -> dict[str, Any] | None:
     """The stored form of an owner principal, or ``None`` for a caller whose authority may not be replayed.
 
     Only the owner (`raw_protection.is_owner`) is stored. A delegated authorization session can
     be narrowed or revoked after the save is accepted, so replaying it later could exceed what
     the owner still grants; such a caller keeps the busy refusal. The origin-session binding
-    of a local or remote client is kept, so any live-session check runs against the login
-    that sent the save.
+    of a local or remote client is kept, so the replay rechecks the login that sent the save.
+    The same test gates who reads queued saves: they hold exactly these callers' arguments.
     """
     from .governance.raw_protection import is_owner
 
@@ -271,6 +285,20 @@ def _restore_principal(record: Mapping[str, Any]) -> Any:
     )
 
 
+def _login_state(principal: Any) -> Any:
+    """The background recheck of the login behind a save, as the collection importer runs it."""
+    from . import auth_sessions, cloud_cell
+    from .governance import principal as principal_module
+
+    login = auth_sessions.origin_login_state_sync(principal)
+    issuer = principal.issuer_family
+    if login is not auth_sessions.OriginLogin.NOT_VALID and cloud_cell.is_cloud_issuer_family(issuer):
+        cell_id = issuer[len(cloud_cell.issuer_family("")):]
+        if not principal_module.cloud_owner_binding_matches(cell_id):
+            return auth_sessions.OriginLogin.NOT_VALID
+    return login
+
+
 def _surface_record() -> dict[str, Any] | None:
     from . import capabilities
 
@@ -299,13 +327,80 @@ def _restore_surface(record: Mapping[str, Any] | None, command_name: str) -> Any
     )
 
 
-_REPLAYING: contextvars.ContextVar[bool] = contextvars.ContextVar("exomem_intake_replaying", default=False)
+@dataclass(frozen=True)
+class _Claim:
+    id: str
+    command: str
+    arguments: dict[str, Any]
+    principal: dict[str, Any]
+    surface: dict[str, Any] | None
+    attempts: int
+    generation: int
+    origin: str | None
+    origin_ttl: float | None
+
+
+@dataclass
+class _Replay:
+    """One replay attempt of a claimed save, visible to the commit gate through `_REPLAY`."""
+
+    vault_root: Path
+    claim: _Claim
+    commit_reached: bool = False
+    closed: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+_REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem_intake_replay", default=None)
 _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem_intake_wait_cap", default=None)
 
 
 def busy_wait_cap() -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
     return _WAIT_CAP.get()
+
+
+def mark_replay_reached_commit() -> None:
+    """Record, before a queued save's replay writes its first canonical byte, that it reached its commit.
+
+    The commit gates call this; outside a replay it does nothing. The first call of an attempt
+    writes `commit_reached` for the row's current replay identity. A marker that cannot be
+    written refuses the attempt as `MUTATION_BUSY` with `committed: false`, so nothing commits
+    and the drainer tries again: an unmarked commit could be replayed under a fresh identity
+    after a stop, and so land twice.
+    """
+    replay = _REPLAY.get()
+    if replay is None:
+        return
+    with replay.lock:
+        # A thread that inherited the replay's context and outlived it writes under its own name.
+        if replay.commit_reached or replay.closed:
+            return
+        try:
+            # A fresh context: the commit gate may already hold another private-state domain,
+            # and this write takes only the intake's own.
+            contextvars.Context().run(
+                _with_store_retry, lambda: _mark_commit_reached(replay.vault_root, replay.claim)
+            )
+        except Exception as error:
+            log.warning("write intake could not mark %s as reaching its commit", replay.claim.id, exc_info=True)
+            raise OpError(
+                "MUTATION_BUSY",
+                "the queued save could not record that it reached its commit, so nothing was written",
+                "Nothing to do: the service applies the queued save again.",
+                details={"status": "retryable", "committed": False},
+            ) from error
+        replay.commit_reached = True
+
+
+def _mark_commit_reached(vault_root: Path, claim: _Claim) -> None:
+    with _write(vault_root) as conn:
+        cursor = conn.execute(
+            "UPDATE intake SET commit_reached = 1 WHERE id = ? AND generation = ? AND state = ?",
+            (claim.id, claim.generation, APPLYING),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("the queued save is no longer claimed by this replay")
 
 
 # --------------------------------------------------------------------------- drainers
@@ -346,6 +441,13 @@ def stop(vault_root: Path, *, timeout: float = 10.0) -> None:
         drainer.stop(timeout=timeout)
 
 
+def _note_finished(vault_root: Path, origin: str | None, intake_id: str, expires_at: float | None) -> None:
+    with _DRAINERS_LOCK:
+        drainer = _DRAINERS.get(Path(vault_root).resolve())
+    if drainer is not None:
+        drainer.note_finished(origin, intake_id, expires_at)
+
+
 def _owner_identity() -> tuple[str | None, Path]:
     from . import writer_lease
 
@@ -364,21 +466,36 @@ def _owner_alive(owner: str | None, mine: str | None, state_dir: Path) -> bool:
 
 
 class Drainer:
-    """The one thread that applies one vault's queued saves, oldest first."""
+    """The one thread that applies one vault's queued saves, oldest first.
+
+    It also keeps the in-memory index that lets a save that never met contention skip the
+    store: the origins of open saves, and of applied saves while their original identity's
+    retry window lasts. The index is loaded once at start and kept current on acceptance
+    and finish.
+    """
 
     def __init__(self, vault_root: Path) -> None:
         self.vault_root = vault_root
         self._condition = threading.Condition()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._open = 0
+        #: Open saves, or None while unknown: a store that could not be read counts as non-empty.
+        self._open: int | None = None
+        self._indexed = False
+        self._open_origins: dict[str, str] = {}
+        self._applied_origins: dict[str, tuple[str, float]] = {}
+        #: Acceptances so far; a store read that an acceptance overlapped is read again.
+        self._accepts = 0
 
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
 
     def start(self) -> None:
-        self._refresh_open()
+        try:
+            self._load()
+        except Exception:  # noqa: BLE001 - the drainer must run even when its store cannot be read
+            log.warning("write intake could not read its store at start; the backlog is unknown", exc_info=True)
         thread = threading.Thread(
             target=contextvars.Context().run, args=(self._loop,), name="exomem-write-intake", daemon=True
         )
@@ -396,36 +513,114 @@ class Drainer:
         with self._condition:
             self._condition.notify_all()
 
-    def backlog(self) -> int:
+    def backlog(self) -> int | None:
+        """Open saves, or None while the store has not been read."""
         with self._condition:
             return self._open
+
+    def has_backlog(self) -> bool:
+        with self._condition:
+            return self._open is None or self._open > 0
 
     def wait_for_empty_queue(self, deadline: float) -> bool:
         """Wait until no save is open or `deadline` (monotonic) passes; return whether it emptied."""
         with self._condition:
-            while self._open > 0:
+            while self._open is None or self._open > 0:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._stop.is_set():
                     return False
                 self._condition.wait(min(remaining, 1.0))
             return True
 
-    def _refresh_open(self) -> None:
-        try:
-            with _store(self.vault_root, create=False) as conn:
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM intake WHERE state IN (?, ?)", _OPEN_STATES
-                ).fetchone()[0]
-        except FileNotFoundError:
-            count = 0
+    def lookup(self, origin: str) -> str | None:
+        """The intake id of the open save, or of the applied save still in its retry window, with this origin."""
         with self._condition:
-            self._open = int(count)
+            intake_id = self._open_origins.get(origin)
+            if intake_id is not None:
+                return intake_id
+            applied = self._applied_origins.get(origin)
+            if applied is None:
+                return None
+            if applied[1] <= time.time():
+                del self._applied_origins[origin]
+                return None
+            return applied[0]
+
+    def note_accepted(self, origin: str | None, intake_id: str) -> None:
+        with self._condition:
+            self._accepts += 1
+            if self._open is not None:
+                self._open += 1
+            if origin is not None:
+                self._open_origins[origin] = intake_id
             self._condition.notify_all()
 
-    def note_accepted(self) -> None:
+    def note_finished(self, origin: str | None, intake_id: str, expires_at: float | None) -> None:
+        now = time.time()
         with self._condition:
-            self._open += 1
-            self._condition.notify_all()
+            if origin is not None and self._open_origins.get(origin) == intake_id:
+                del self._open_origins[origin]
+            self._applied_origins = {
+                key: value for key, value in self._applied_origins.items() if value[1] > now
+            }
+            if origin is not None and expires_at is not None and expires_at > now:
+                self._applied_origins[origin] = (intake_id, expires_at)
+
+    def _load(self) -> None:
+        """Read the open count and the origin index in one query."""
+        for _attempt in range(_STABLE_READ_ATTEMPTS):
+            with self._condition:
+                seen = self._accepts
+            now = time.time()
+            try:
+                with _store(self.vault_root, mode="read") as conn:
+                    rows = conn.execute(
+                        "SELECT id, origin, state, finished_at, origin_ttl FROM intake WHERE state IN (?, ?) "
+                        "OR (state = ? AND origin IS NOT NULL AND finished_at + origin_ttl > ?)",
+                        (*_OPEN_STATES, APPLIED, now),
+                    ).fetchall()
+            except FileNotFoundError:
+                rows = []
+            open_count = 0
+            open_origins: dict[str, str] = {}
+            applied_origins: dict[str, tuple[str, float]] = {}
+            for row in rows:
+                if row["state"] == APPLIED:
+                    applied_origins[row["origin"]] = (row["id"], row["finished_at"] + row["origin_ttl"])
+                    continue
+                open_count += 1
+                if row["origin"] is not None:
+                    open_origins[row["origin"]] = row["id"]
+            with self._condition:
+                if self._accepts != seen:
+                    continue
+                self._open, self._indexed = open_count, True
+                self._open_origins, self._applied_origins = open_origins, applied_origins
+                self._condition.notify_all()
+                return
+        raise RuntimeError("acceptances kept overlapping the intake index read")
+
+    def _refresh_open(self) -> None:
+        """Recount open saves read-only; a failed read keeps the last known count."""
+        if not self._indexed:
+            self._load()
+            return
+        for attempt in range(_STABLE_READ_ATTEMPTS):
+            with self._condition:
+                seen = self._accepts
+            try:
+                with _store(self.vault_root, mode="read") as conn:
+                    count = conn.execute(
+                        "SELECT COUNT(*) FROM intake WHERE state IN (?, ?)", _OPEN_STATES
+                    ).fetchone()[0]
+            except FileNotFoundError:
+                count = 0
+            with self._condition:
+                # An acceptance during the read may be missing from it; its own count stands.
+                if self._accepts == seen or attempt == _STABLE_READ_ATTEMPTS - 1:
+                    self._open = int(count) if self._accepts == seen else max(int(count), self._open or 0)
+                    self._condition.notify_all()
+                    return
 
     def _loop(self) -> None:
         backoff_failures = 0
@@ -442,14 +637,28 @@ class Drainer:
             with self._condition:
                 if self._stop.is_set():
                     return
-                self._condition.wait(due_in)
+                if due_in != math.inf:
+                    self._condition.wait(due_in)
+                elif self._open == 0:
+                    # Nothing open: an acceptance notifies this wait. Checked under the condition,
+                    # so an acceptance that came first is not missed.
+                    self._condition.wait(_IDLE_RECHECK_SECONDS)
 
     def _drain_one(self) -> float | None:
-        """Apply the oldest open save if it is due. Return seconds to wait, or None to go again at once."""
+        """Apply the oldest open save if it is due.
+
+        Return seconds to wait, ``inf`` when nothing is open, or None to go again at once.
+        While nothing is open the drainer only reads the store, so an idle drainer never
+        takes the store's write path.
+        """
+        if self.backlog() == 0:
+            self._refresh_open()
+            if self.backlog() == 0:
+                return math.inf
         claimed = _with_store_retry(lambda: _claim_head(self.vault_root))
         if claimed is None:
             self._refresh_open()
-            return _IDLE_POLL_SECONDS
+            return math.inf
         if isinstance(claimed, float):
             return claimed
         _apply(self.vault_root, claimed)
@@ -457,19 +666,19 @@ class Drainer:
         return None
 
 
-@dataclass(frozen=True)
-class _Claim:
-    id: str
-    command: str
-    arguments: dict[str, Any]
-    principal: dict[str, Any]
-    surface: dict[str, Any] | None
-    attempts: int
-    generation: int
-
-
 def _replay_identity(claim: _Claim) -> str:
     return f"intake:{claim.id}" if claim.generation == 0 else f"intake:{claim.id}:{claim.generation}"
+
+
+def _decoded(row: sqlite3.Row) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    arguments = json.loads(row["arguments"])
+    principal = json.loads(row["principal"])
+    surface = json.loads(row["surface"]) if row["surface"] else None
+    if not isinstance(arguments, dict) or not isinstance(principal, dict) or not (
+        surface is None or isinstance(surface, dict)
+    ):
+        raise ValueError("a stored queued save is not a JSON object")
+    return arguments, principal, surface
 
 
 def _claim_head(vault_root: Path) -> _Claim | float | None:
@@ -477,47 +686,71 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
 
     Order is strict: a save in back-off holds the saves behind it, so a later edit never
     overtakes the create it depends on. A save left applying by a live other process is
-    that process's; this drainer waits for it.
+    that process's; this drainer waits for it. A row that does not decode fails with
+    ``INTERNAL`` in the same transaction, keeps its arguments, and the claim moves on.
     """
     mine, state_dir = _owner_identity()
     now = time.time()
+    undecodable: list[tuple[str | None, str]] = []
+    claimed: _Claim | float | None = None
     try:
         with _write(vault_root) as conn:
-            row = conn.execute(
-                "SELECT * FROM intake WHERE state IN (?, ?) ORDER BY seq LIMIT 1", _OPEN_STATES
-            ).fetchone()
-            if row is None:
-                return None
-            if row["state"] == APPLYING and row["owner"] != mine and _owner_alive(row["owner"], mine, state_dir):
-                return _IDLE_POLL_SECONDS
-            if row["state"] == QUEUED and row["next_attempt_at"] > now:
-                return max(0.05, row["next_attempt_at"] - now)
-            generation = int(row["generation"])
-            if row["state"] == APPLYING and not row["boundary_held"]:
-                # No attempt under this replay identity ever held the vault boundary, so no leaf
-                # ran under it. The attempt that left the row applying may still have the identity
-                # pending under a dead owner, which the idempotency store keeps as outcome-unknown
-                # for good; a fresh identity replays the save instead of leaving it stuck.
-                # `boundary_held` is sticky per identity, so an identity that ever reached the
-                # boundary (and so may have committed) is never abandoned this way.
-                generation += 1
-            conn.execute(
-                "UPDATE intake SET state = ?, owner = ?, attempts = attempts + 1, updated_at = ?, "
-                "boundary_held = CASE WHEN generation = ? THEN boundary_held ELSE 0 END, "
-                "generation = ? WHERE id = ?",
-                (APPLYING, mine, now, generation, generation, row["id"]),
-            )
-            return _Claim(
-                id=row["id"],
-                command=row["command"],
-                arguments=json.loads(row["arguments"]),
-                principal=json.loads(row["principal"]),
-                surface=json.loads(row["surface"]) if row["surface"] else None,
-                attempts=int(row["attempts"]) + 1,
-                generation=generation,
-            )
+            while True:
+                row = conn.execute(
+                    "SELECT * FROM intake WHERE state IN (?, ?) ORDER BY seq LIMIT 1", _OPEN_STATES
+                ).fetchone()
+                if row is None:
+                    break
+                if row["state"] == APPLYING and row["owner"] != mine and _owner_alive(row["owner"], mine, state_dir):
+                    claimed = _OTHER_OWNER_POLL_SECONDS
+                    break
+                if row["state"] == QUEUED and row["next_attempt_at"] > now:
+                    claimed = max(0.05, row["next_attempt_at"] - now)
+                    break
+                try:
+                    arguments, principal, surface = _decoded(row)
+                except (TypeError, ValueError) as error:
+                    log.warning("write intake save %s does not decode", row["id"], exc_info=True)
+                    conn.execute(
+                        "UPDATE intake SET state = ?, owner = NULL, error_code = ?, error = ?, updated_at = ?, "
+                        "finished_at = ? WHERE id = ?",
+                        (FAILED, "INTERNAL", _json({"code": "INTERNAL", "message": type(error).__name__}),
+                         now, now, row["id"]),
+                    )
+                    undecodable.append((row["origin"], row["id"]))
+                    continue
+                generation = int(row["generation"])
+                if row["state"] == APPLYING and not row["commit_reached"]:
+                    # No attempt under this replay identity reached the commit gate, so none wrote a
+                    # canonical byte. The attempt that left the row applying may still hold the
+                    # identity pending under a dead owner, which the idempotency store keeps as
+                    # outcome-unknown for good; a fresh identity replays the save instead of leaving
+                    # it stuck. `commit_reached` is sticky per identity, so an identity that ever
+                    # reached its commit (and so may have committed) is never abandoned this way.
+                    generation += 1
+                conn.execute(
+                    "UPDATE intake SET state = ?, owner = ?, attempts = attempts + 1, updated_at = ?, "
+                    "commit_reached = CASE WHEN generation = ? THEN commit_reached ELSE 0 END, "
+                    "generation = ? WHERE id = ?",
+                    (APPLYING, mine, now, generation, generation, row["id"]),
+                )
+                claimed = _Claim(
+                    id=row["id"],
+                    command=row["command"],
+                    arguments=arguments,
+                    principal=principal,
+                    surface=surface,
+                    attempts=int(row["attempts"]) + 1,
+                    generation=generation,
+                    origin=row["origin"],
+                    origin_ttl=row["origin_ttl"],
+                )
+                break
     except FileNotFoundError:
         return None
+    for origin, intake_id in undecodable:
+        _note_finished(vault_root, origin, intake_id, None)
+    return claimed
 
 
 def _command_named(name: str) -> Any:
@@ -535,41 +768,53 @@ def _apply(vault_root: Path, claim: _Claim) -> None:
 
 
 def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
-    from . import capabilities, cli_ops, writer_lease
+    outcome = _replay(vault_root, claim)
+    if outcome[0] == APPLIED:
+        _with_store_retry(lambda: _finish_applied(vault_root, claim, outcome[1]))
+    elif outcome[0] == QUEUED:
+        _with_store_retry(lambda: _requeue(vault_root, claim, outcome[1]))
+    else:
+        _with_store_retry(lambda: _finish_failed(vault_root, claim, outcome[1], outcome[2]))
+
+
+def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
+    """Run one replay; return ``(applied, result)``, ``(queued, code)`` or ``(failed, code, refusal)``.
+
+    Every step from the command lookup to the dispatcher sits in one try, so any error ends
+    in a recorded outcome and the row never stays applying behind the queue.
+    """
+    from . import auth_sessions, capabilities, cli_ops, writer_lease
     from .governance import principal as principal_module
 
-    command = _command_named(claim.command)
-    if command is None:
-        _finish_failed(vault_root, claim.id, "INTAKE_COMMAND_UNKNOWN",
-                       {"code": "INTAKE_COMMAND_UNKNOWN", "message": f"no command named {claim.command}"})
-        return
-    principal = _restore_principal(claim.principal)
-    descriptor = _restore_surface(claim.surface, command.name)
-    if command.needs_schema:
-        from . import schema as schema_module
-
-        injected: tuple[Any, ...] = (vault_root, schema_module.load_source_schema(vault_root))
-    else:
-        injected = (vault_root,)
-    from . import mutation_lock
-
-    marked = threading.Event()
-
-    def mark_boundary_held() -> None:
-        # Durable before the leaf runs: after a crash, a row whose attempt held the boundary
-        # is uncertain and replays only under the same identity.
-        if not marked.is_set():
-            _with_store_retry(lambda: _mark_boundary_held(vault_root, claim))
-            marked.set()
-
-    token = _REPLAYING.set(True)
+    replay = _Replay(vault_root, claim)
+    token = _REPLAY.set(replay)
     try:
+        command = _command_named(claim.command)
+        if command is None:
+            raise OpError("INTAKE_COMMAND_UNKNOWN", f"no command named {claim.command}",
+                          "Send the save again through a current tool.")
+        principal = _restore_principal(claim.principal)
+        login = _login_state(principal)
+        if login is auth_sessions.OriginLogin.UNREADABLE:
+            return (QUEUED, LOGIN_UNREADABLE)
+        if login is auth_sessions.OriginLogin.NOT_VALID:
+            return (FAILED, LOGIN_REVOKED, {
+                "code": LOGIN_REVOKED,
+                "message": "the login that sent this save has ended, so the service did not apply it",
+                "remediation": "Sign in again and send the save again with its arguments below.",
+            })
+        descriptor = _restore_surface(claim.surface, command.name)
+        if command.needs_schema:
+            from . import schema as schema_module
+
+            injected: tuple[Any, ...] = (vault_root, schema_module.load_source_schema(vault_root))
+        else:
+            injected = (vault_root,)
         with (
             principal_module.request_scope(principal),
             capabilities.active_surface(descriptor) if descriptor is not None else _nothing(),
             principal_module.invocation_scope(),
             writer_lease.caller_holds_no_request_worker(),
-            mutation_lock.on_boundary_acquired(mark_boundary_held),
         ):
             result = writer_lease.invoke_command(
                 command,
@@ -584,29 +829,21 @@ def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
         refusal = cli_ops.public_refusal(error)
         code = str(refusal.get("code")) if refusal else "INTERNAL"
         if code in RETRY_REFUSALS:
-            _with_store_retry(lambda: _requeue(vault_root, claim, code))
-            return
+            return (QUEUED, code)
         if refusal is None:
             log.warning("write intake replay of %s failed", claim.command, exc_info=True)
             refusal = {"code": "INTERNAL", "message": type(error).__name__}
-        _with_store_retry(lambda: _finish_failed(vault_root, claim.id, code, refusal))
-        return
+        return (FAILED, code, refusal)
     finally:
-        _REPLAYING.reset(token)
-    _with_store_retry(lambda: _finish_applied(vault_root, claim.id, result))
+        with replay.lock:
+            replay.closed = True
+        _REPLAY.reset(token)
+    return (APPLIED, result)
 
 
 @contextmanager
 def _nothing() -> Iterator[None]:
     yield
-
-
-def _mark_boundary_held(vault_root: Path, claim: _Claim) -> None:
-    with _write(vault_root) as conn:
-        conn.execute(
-            "UPDATE intake SET boundary_held = 1 WHERE id = ? AND generation = ?",
-            (claim.id, claim.generation),
-        )
 
 
 def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
@@ -615,15 +852,15 @@ def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
     with _write(vault_root) as conn:
         conn.execute(
             "UPDATE intake SET state = ?, owner = NULL, updated_at = ?, next_attempt_at = ?, error_code = ? "
-            "WHERE id = ? AND state = ?",
-            (QUEUED, now, now + delay, code, claim.id, APPLYING),
+            "WHERE id = ? AND state = ? AND generation = ?",
+            (QUEUED, now, now + delay, code, claim.id, APPLYING, claim.generation),
         )
 
 
 def _bounded_outcome(result: Any) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         return {"result": str(result)[:1024]}
-    text = _canonical(dict(result))
+    text = _report_json(dict(result))
     if len(text.encode("utf-8")) <= _OUTCOME_LIMIT_BYTES:
         return json.loads(text)
     # A large reply keeps its top-level scalars: the summary, state, title and ids.
@@ -634,30 +871,33 @@ def _bounded_outcome(result: Any) -> dict[str, Any]:
     }
 
 
-def _finish_applied(vault_root: Path, intake_id: str, result: Any) -> None:
+def _finish_applied(vault_root: Path, claim: _Claim, result: Any) -> None:
     now = time.time()
     with _write(vault_root) as conn:
         conn.execute(
             "UPDATE intake SET state = ?, owner = NULL, arguments = NULL, outcome = ?, error_code = NULL, "
             "updated_at = ?, finished_at = ? WHERE id = ?",
-            (APPLIED, _canonical(_bounded_outcome(result)), now, now, intake_id),
+            (APPLIED, _report_json(_bounded_outcome(result)), now, now, claim.id),
         )
         conn.execute(
             "DELETE FROM intake WHERE state = ? AND finished_at < ?",
             (APPLIED, now - APPLIED_RETENTION_SECONDS),
         )
-    log.info("write intake applied %s", intake_id)
+    expires_at = now + claim.origin_ttl if claim.origin_ttl is not None else None
+    _note_finished(vault_root, claim.origin, claim.id, expires_at)
+    log.info("write intake applied %s", claim.id)
 
 
-def _finish_failed(vault_root: Path, intake_id: str, code: str, refusal: Mapping[str, Any]) -> None:
+def _finish_failed(vault_root: Path, claim: _Claim, code: str, refusal: Mapping[str, Any]) -> None:
     now = time.time()
     with _write(vault_root) as conn:
         conn.execute(
             "UPDATE intake SET state = ?, owner = NULL, error_code = ?, error = ?, updated_at = ?, "
             "finished_at = ? WHERE id = ?",
-            (FAILED, code, _canonical(dict(refusal)), now, now, intake_id),
+            (FAILED, code, _report_json(dict(refusal)), now, now, claim.id),
         )
-    log.warning("write intake save %s failed with %s", intake_id, code)
+    _note_finished(vault_root, claim.origin, claim.id, None)
+    log.warning("write intake save %s failed with %s", claim.id, code)
 
 
 # --------------------------------------------------------------------------- acceptance
@@ -669,21 +909,42 @@ class Admission:
 
     drainer: Drainer
     command: Any
-    arguments: dict[str, Any]
+    #: The arguments as JSON text, the form the drainer replays.
+    encoded: str
     control: dict[str, Any]
     principal: dict[str, Any]
     surface: dict[str, Any] | None
     origin: str | None
+    origin_ttl: float | None
 
     def run(self, call: Callable[[], Any]) -> Any:
+        """Run the save, or queue it when the boundary stays busy.
+
+        A save that never meets contention reads no store: a resend is recognised from the
+        drainer's in-memory index. Any intake fault before `call()` runs the save as if the
+        intake were off, and a fault while accepting keeps the original busy refusal.
+        """
         started = time.monotonic()
         deadline = started + intake_wait_seconds()
-        open_receipt = self._open_receipt()
-        if open_receipt is not None:
-            return open_receipt
-        if self.drainer.backlog() > 0 and not self.drainer.wait_for_empty_queue(deadline):
-            # Behind earlier queued saves: run after them, never before.
-            return self._accept(reason="queue_not_empty", started=started)
+        try:
+            answer = self._indexed_answer()
+        except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
+            log.warning("write intake could not check a resend of a %s save", self.command.name, exc_info=True)
+            answer = None
+        if answer is not None:
+            return answer
+        try:
+            behind = self.drainer.has_backlog() and not self.drainer.wait_for_empty_queue(deadline)
+        except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
+            log.warning("write intake could not wait behind its queue", exc_info=True)
+            behind = False
+        if behind:
+            try:
+                # Behind earlier queued saves: run after them, never before.
+                return self._accept(reason="queue_not_empty", started=started)
+            except Exception:  # noqa: BLE001 - an intake that cannot write runs the save now
+                log.warning("write intake could not queue a %s save behind its queue", self.command.name,
+                            exc_info=True)
         token = _WAIT_CAP.set(deadline)
         try:
             return call()
@@ -698,26 +959,30 @@ class Admission:
         finally:
             _WAIT_CAP.reset(token)
 
-    def _open_receipt(self) -> dict[str, Any] | None:
+    def _indexed_answer(self) -> dict[str, Any] | None:
         if self.origin is None:
             return None
-        return _with_store_retry(self._open_receipt_once)
+        intake_id = self.drainer.lookup(self.origin)
+        if intake_id is None:
+            return None
+        return _with_store_retry(lambda: self._stored_answer(intake_id))
 
-    def _open_receipt_once(self) -> dict[str, Any] | None:
+    def _stored_answer(self, intake_id: str) -> dict[str, Any] | None:
         try:
-            with _store(self.drainer.vault_root, create=False) as conn:
+            with _store(self.drainer.vault_root, mode="read") as conn:
                 row = conn.execute(
-                    "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?, ?) ORDER BY seq DESC LIMIT 1",
-                    (self.origin, *_OPEN_STATES, APPLIED),
+                    "SELECT * FROM intake WHERE id = ? AND origin = ?", (intake_id, self.origin)
                 ).fetchone()
                 if row is None:
                     return None
-                if row["state"] == APPLIED:
-                    # The original identity never committed; the queued replay did. Answer
-                    # the resend with that outcome instead of writing a second time.
+                if row["state"] in _OPEN_STATES:
+                    return _receipt(conn, row)
+                if row["state"] == APPLIED and row["finished_at"] + (row["origin_ttl"] or 0.0) > time.time():
+                    # The original identity never committed; the queued replay did. Answer the
+                    # resend with that outcome, within the original identity's retry window.
                     outcome = json.loads(row["outcome"]) if row["outcome"] else {}
                     return {**outcome, "queued_write": {"ref": ref_for(row["id"]), "state": APPLIED}}
-                return _receipt(conn, row)
+                return None
         except FileNotFoundError:
             return None
 
@@ -725,29 +990,37 @@ class Admission:
         return _with_store_retry(lambda: self._accept_once(reason=reason, started=started))
 
     def _accept_once(self, *, reason: str, started: float) -> dict[str, Any]:
+        try:
+            receipt, inserted = self._insert(reason, create=False)
+        except FileNotFoundError:
+            # The first acceptance on this vault creates the store.
+            receipt, inserted = self._insert(reason, create=True)
+        if inserted is not None:
+            self.drainer.note_accepted(self.origin, inserted)
+            _journal_queued(self, inserted, reason, started)
+        return receipt
+
+    def _insert(self, reason: str, *, create: bool) -> tuple[dict[str, Any], str | None]:
         intake_id = uuid.uuid4().hex
         now = time.time()
-        with _write(self.drainer.vault_root) as conn:
+        with _write(self.drainer.vault_root, create=create) as conn:
             if self.origin is not None:
                 row = conn.execute(
                     "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?)", (self.origin, *_OPEN_STATES)
                 ).fetchone()
                 if row is not None:
-                    return _receipt(conn, row)
+                    return _receipt(conn, row), None
             conn.execute(
-                "INSERT INTO intake (id, origin, command, arguments, principal, surface, state, "
-                "accepted_at, updated_at, next_attempt_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
+                "accepted_at, updated_at, next_attempt_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    intake_id, self.origin, self.command.name, _canonical(self.arguments),
-                    _canonical(self.principal), _canonical(self.surface) if self.surface else None,
+                    intake_id, self.origin, self.origin_ttl, self.command.name, self.encoded,
+                    _json(self.principal), _json(self.surface) if self.surface else None,
                     QUEUED, now, now, now, reason,
                 ),
             )
             row = conn.execute("SELECT * FROM intake WHERE id = ?", (intake_id,)).fetchone()
-            receipt = _receipt(conn, row)
-        self.drainer.note_accepted()
-        _journal_queued(self, intake_id, reason, started)
-        return receipt
+            return _receipt(conn, row), intake_id
 
 
 _STORE_RETRIES = 5
@@ -816,16 +1089,18 @@ def _receipt(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
 
 def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Admission | None:
     """The intake admission for one dispatched call, or ``None`` when the intake does not apply."""
-    if _REPLAYING.get() or not getattr(command, "busy_intake", False) or not injected or not enabled():
+    if _REPLAY.get() is not None or not getattr(command, "busy_intake", False) or not injected or not enabled():
         return None
     drainer = drainer_for(injected[0])
     if drainer is None:
         return None
-    arguments = {key: value for key, value in kwargs.items() if key not in _CONTROL_ARGUMENTS}
+    from . import writer_lease
     from .commands import invocation_is_read_only
     from .governance import principal as principal_module
     from .governance.egress import SelectorCoverageError
 
+    control_names = writer_lease.invoke_control_arguments()
+    arguments = {key: value for key, value in kwargs.items() if key not in control_names}
     try:
         if invocation_is_read_only(command, arguments):
             return None
@@ -835,28 +1110,35 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if principal is None:
         return None
     try:
-        encoded = _canonical(arguments)
-        json.loads(encoded)
+        # JSON mode: a typed argument (an MCP operation model) is stored as the JSON it came from.
+        jsonable = to_jsonable_python(arguments)
+        encoded = _json(jsonable)
     except (TypeError, ValueError):
         return None
     if len(encoded.encode("utf-8")) > MAX_ARGUMENT_BYTES:
         return None
-    control = {key: kwargs[key] for key in _CONTROL_ARGUMENTS if key in kwargs}
+    control = {key: kwargs[key] for key in control_names if key in kwargs}
+    try:
+        origin = writer_lease.replay_origin(command, injected, {**jsonable, **control})
+    except Exception:  # noqa: BLE001 - a call whose identity cannot be derived runs as before
+        log.debug("write intake could not derive the identity of a %s save", command.name, exc_info=True)
+        return None
     return Admission(
         drainer=drainer,
         command=command,
-        arguments=arguments,
+        encoded=encoded,
         control=control,
         principal=principal,
         surface=_surface_record(),
-        origin=origin_identity(command.name, arguments, control),
+        origin=origin[0] if origin is not None else None,
+        origin_ttl=origin[1] if origin is not None else None,
     )
 
 
 # --------------------------------------------------------------------------- reads and owner operations
 
 
-def _view(row: sqlite3.Row, conn: sqlite3.Connection, *, full: bool) -> dict[str, Any]:
+def _view(row: sqlite3.Row, *, full: bool, position: int | None) -> dict[str, Any]:
     view: dict[str, Any] = {
         "ref": ref_for(row["id"]),
         "command": row["command"],
@@ -866,7 +1148,7 @@ def _view(row: sqlite3.Row, conn: sqlite3.Connection, *, full: bool) -> dict[str
         "age_seconds": round(time.time() - row["accepted_at"], 1),
     }
     if row["state"] in _OPEN_STATES:
-        view["position"] = _position(conn, row["seq"])
+        view["position"] = position
         if row["error_code"]:
             view["last_wait_reason"] = row["error_code"]
     if row["state"] == FAILED:
@@ -896,7 +1178,7 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
                 "Pass the queued_write.ref from the receipt, or omit ref to list saves.",
             )
         try:
-            with _store(vault_root, create=False) as conn:
+            with _store(vault_root, mode="read") as conn:
                 row = conn.execute("SELECT * FROM intake WHERE id = ?", (ref[len(REF_PREFIX):],)).fetchone()
                 if row is None:
                     raise OpError(
@@ -904,7 +1186,8 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
                         "no queued save has this ref; an applied save is kept for 7 days",
                         "Check the page itself, or list the open saves without ref.",
                     )
-                view = _view(row, conn, full=True)
+                position = _position(conn, row["seq"]) if row["state"] in _OPEN_STATES else None
+                view = _view(row, full=True, position=position)
         except FileNotFoundError:
             raise OpError(
                 "QUEUED_WRITE_NOT_FOUND",
@@ -926,7 +1209,7 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
         return {"user_summary": summary, "queued_write": view}
     cap = max(1, min(int(limit or _LIST_LIMIT), _LIST_LIMIT))
     try:
-        with _store(vault_root, create=False) as conn:
+        with _store(vault_root, mode="read") as conn:
             counts = {
                 row["state"]: row["n"]
                 for row in conn.execute("SELECT state, COUNT(*) AS n FROM intake GROUP BY state")
@@ -935,9 +1218,17 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
                 "SELECT * FROM intake WHERE state IN (?, ?, ?) ORDER BY seq LIMIT ?",
                 (*_OPEN_STATES, FAILED, cap),
             ).fetchall()
-            items = [_view(row, conn, full=False) for row in rows]
     except FileNotFoundError:
-        counts, items = {}, []
+        counts, rows = {}, []
+    # The listing starts at the oldest row, so a running count of open rows is each one's position.
+    items = []
+    position = 0
+    for row in rows:
+        if row["state"] in _OPEN_STATES:
+            position += 1
+            items.append(_view(row, full=False, position=position))
+        else:
+            items.append(_view(row, full=False, position=None))
     listed = sum(counts.get(state, 0) for state in (*_OPEN_STATES, FAILED))
     return {
         "user_summary": _summary_line(counts),
@@ -950,7 +1241,7 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
 def status(vault_root: Path) -> dict[str, Any]:
     """Counts for `coordination_status`; ``unknown`` when the store cannot be read."""
     try:
-        with _store(vault_root, create=False) as conn:
+        with _store(vault_root, mode="read") as conn:
             counts = {
                 row["state"]: row["n"]
                 for row in conn.execute("SELECT state, COUNT(*) AS n FROM intake GROUP BY state")
@@ -976,15 +1267,22 @@ def dismiss(vault_root: Path, intake_id: str) -> dict[str, Any]:
     """Remove one failed save. Open or applied saves are not dismissed."""
     if intake_id.startswith(REF_PREFIX):
         intake_id = intake_id[len(REF_PREFIX):]
-    with _write(vault_root) as conn:
-        row = conn.execute("SELECT state FROM intake WHERE id = ?", (intake_id,)).fetchone()
-        if row is None:
-            raise OpError("QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`.")
-        if row["state"] != FAILED:
-            raise OpError(
-                "QUEUED_WRITE_NOT_FAILED",
-                f"save {intake_id} is {row['state']}; only a failed save can be dismissed",
-                "Wait for it to be applied, or list saves with `exomem intake list`.",
-            )
-        conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
+    try:
+        with _write(vault_root) as conn:
+            row = conn.execute("SELECT state FROM intake WHERE id = ?", (intake_id,)).fetchone()
+            if row is None:
+                raise OpError(
+                    "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+                )
+            if row["state"] != FAILED:
+                raise OpError(
+                    "QUEUED_WRITE_NOT_FAILED",
+                    f"save {intake_id} is {row['state']}; only a failed save can be dismissed",
+                    "Wait for it to be applied, or list saves with `exomem intake list`.",
+                )
+            conn.execute("DELETE FROM intake WHERE id = ?", (intake_id,))
+    except FileNotFoundError:
+        raise OpError(
+            "QUEUED_WRITE_NOT_FOUND", f"no queued save {intake_id}", "List saves with `exomem intake list`."
+        ) from None
     return {"dismissed": ref_for(intake_id)}

@@ -11,6 +11,7 @@ import atexit
 import ctypes
 import hashlib
 import http.client
+import inspect
 import ipaddress
 import json
 import logging
@@ -34,7 +35,7 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, S
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
-from functools import cached_property, partial, wraps
+from functools import cache, cached_property, partial, wraps
 from pathlib import Path
 from typing import Any, get_args
 
@@ -4719,6 +4720,101 @@ def _effective_idempotency_key(
     return None, None, None
 
 
+@dataclass(frozen=True)
+class _ReplayRoute:
+    """How `LeaseManager.invoke` keys one call; `replay_origin` derives the same identity from it.
+
+    `kwargs` are the canonical arguments that the command digest covers, without the
+    presentation detail. The flags name the closed protocol operations that own their
+    terminals instead of the generic idempotency replay.
+    """
+
+    kwargs: dict[str, Any]
+    response_detail: ResponseDetail
+    authorization_issuance: bool
+    session_open_admission: bool
+    capture_attempt_control: bool
+    capture_attempt_operation: bool
+    bypass_generic_replay: bool
+
+
+def _replay_route(command: Any, kwargs: dict[str, Any]) -> _ReplayRoute:
+    kwargs = _canonicalize_command_kwargs(kwargs)
+    configured_response_detail = getattr(command, "response_detail", None)
+    response_detail_default: ResponseDetail = (
+        configured_response_detail
+        # nosemgrep: ep-word-membership -- the closed response_detail values; moved from LeaseManager.invoke.
+        if configured_response_detail in {"compact", "full", "legacy"}
+        else "compact"
+    )
+    kwargs, response_detail = split_response_detail(kwargs, default=response_detail_default)
+    authorization_issuance = (
+        command.name == "govern_memory"
+        and kwargs.get("operation") == "session"
+        # nosemgrep: ep-word-membership -- closed session protocol actions; moved from LeaseManager.invoke.
+        and kwargs.get("session_action") in {"open", "rotate"}
+    ) or (
+        # Both closed transfer operations issue bearer capabilities, not
+        # durable mutations whose result may be replayed to another session.
+        command.name == "transfer_artifact"
+        # nosemgrep: ep-word-membership -- closed transfer operations; moved from LeaseManager.invoke.
+        and kwargs.get("operation", "upload") in {"upload", "download"}
+    )
+    session_open_admission = (
+        command.name == "govern_memory"
+        and kwargs.get("operation") == "session"
+        and kwargs.get("session_action") == "open"
+    )
+    # Closed protocol operations own their terminals; reservation and settlement must stay fresh.
+    # nosemgrep: ep-word-membership -- the capture protocol's command names; moved from LeaseManager.invoke.
+    capture_attempt_control = command.name in {"reserve_source_capture", "settle_source_capture"}
+    capture_attempt_operation = capture_attempt_control or (
+        command.name == "capture_source" and kwargs.get("capture_reservation") is not None
+    )
+    return _ReplayRoute(
+        kwargs=kwargs,
+        response_detail=response_detail,
+        authorization_issuance=authorization_issuance,
+        session_open_admission=session_open_admission,
+        capture_attempt_control=capture_attempt_control,
+        capture_attempt_operation=capture_attempt_operation,
+        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
+        bypass_generic_replay=(authorization_issuance or capture_attempt_operation
+                               or command.name == "erase_captured_source"),
+    )
+
+
+def replay_origin(
+    command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
+) -> tuple[str, float] | None:
+    """The dispatcher's replay identity for one call, bound to its payload, and its retention in seconds.
+
+    `kwargs` are the call's keyword arguments, `invoke_command`'s own included. The identity
+    joins the key that `LeaseManager.invoke` derives (the same canonical arguments, bypass
+    cases, digest and namespace) with the command digest, so a key reused for another
+    payload is another identity. `None` when the dispatcher would not replay the call: it
+    carries no key, or it is a closed operation that owns its terminals.
+    """
+    control = invoke_control_arguments()
+    route = _replay_route(command, {name: value for name, value in kwargs.items() if name not in control})
+    if route.bypass_generic_replay:
+        return None
+    manager = get_manager()
+    digest = _command_digest(command, route.kwargs)
+    key, expires_after, _on_replay = _effective_idempotency_key(
+        manager,
+        command=command,
+        mutation_subject=manager._mutation_subject(injected),
+        digest=digest,
+        idempotency_key=kwargs.get("idempotency_key"),
+        principal_scope=kwargs.get("idempotency_principal_scope"),
+        implicit_idempotency_scope=kwargs.get("implicit_idempotency_scope"),
+    )
+    if key is None or expires_after is None:
+        return None
+    return hashlib.sha256(f"{key}\0{digest}".encode()).hexdigest(), float(expires_after)
+
+
 def _is_receipt_vault_root(root: Path) -> bool:
     """Receipt storage is allowed only inside an existing vault scaffold."""
 
@@ -6066,42 +6162,18 @@ class LeaseManager:
         # the two bounds are comparable without converting between them, and
         # the earlier of the lease's own budget and the connector's.
         acknowledgement_deadline = acknowledgement_budget_deadline()
-        kwargs = _canonicalize_command_kwargs(kwargs)
-        configured_response_detail = getattr(command, "response_detail", None)
-        response_detail_default: ResponseDetail = (
-            configured_response_detail
-            if configured_response_detail in {"compact", "full", "legacy"}
-            else "compact"
-        )
-        kwargs, response_detail = split_response_detail(kwargs, default=response_detail_default)
+        route = _replay_route(command, kwargs)
+        kwargs, response_detail = route.kwargs, route.response_detail
         if public_idempotency_key is _PUBLIC_IDEMPOTENCY_KEY_UNSET:
             effective_public_idempotency_key = idempotency_key
         else:
             assert public_idempotency_key is None or isinstance(public_idempotency_key, str)
             effective_public_idempotency_key = public_idempotency_key
-        authorization_issuance = (
-            command.name == "govern_memory"
-            and kwargs.get("operation") == "session"
-            and kwargs.get("session_action") in {"open", "rotate"}
-        ) or (
-            # Both closed transfer operations issue bearer capabilities, not
-            # durable mutations whose result may be replayed to another session.
-            command.name == "transfer_artifact"
-            and kwargs.get("operation", "upload") in {"upload", "download"}
-        )
-        session_open_admission = (
-            command.name == "govern_memory"
-            and kwargs.get("operation") == "session"
-            and kwargs.get("session_action") == "open"
-        )
-        # Closed protocol operations own their terminals; reservation and settlement must stay fresh.
-        capture_attempt_control = command.name in {"reserve_source_capture", "settle_source_capture"}
-        capture_attempt_operation = capture_attempt_control or (
-            command.name == "capture_source" and kwargs.get("capture_reservation") is not None
-        )
-        # Erasure binds each operation_id to one target and reports fresh progress on every retry.
-        bypass_generic_replay = (authorization_issuance or capture_attempt_operation
-                                 or command.name == "erase_captured_source")
+        authorization_issuance = route.authorization_issuance
+        session_open_admission = route.session_open_admission
+        capture_attempt_control = route.capture_attempt_control
+        capture_attempt_operation = route.capture_attempt_operation
+        bypass_generic_replay = route.bypass_generic_replay
         capture_attempt_wire = None
         if capture_attempt_operation:
             from . import capture_attempts
@@ -8451,6 +8523,11 @@ class LeaseManager:
 
 def validate_active_write_fence() -> None:
     """Revalidate the active command's lease token at a vault commit boundary."""
+    from . import write_intake
+
+    # Before the first canonical byte: a queued save's replay records that it reached its
+    # commit, or refuses uncommitted, so a crash after this point never replays it afresh.
+    write_intake.mark_replay_reached_commit()
     active = _ACTIVE_WRITE_FENCE.get()
     if active is None:
         return
@@ -8723,7 +8800,11 @@ def _busy_write_intake(
     def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
         from . import write_intake
 
-        admission = write_intake.admission(command, injected, kwargs)
+        try:
+            admission = write_intake.admission(command, injected, kwargs)
+        except Exception:  # noqa: BLE001 - an intake fault runs the save as if the intake were off
+            logger.warning("write intake admission failed for %s", getattr(command, "name", command), exc_info=True)
+            admission = None
         if admission is None:
             return function(command, *injected, **kwargs)
         return admission.run(lambda: function(command, *injected, **kwargs))
@@ -9385,6 +9466,15 @@ def invoke_command(
 
         call_ledger.note_released_items(released_item_count(collector, result))
         return result
+
+
+@cache
+def invoke_control_arguments() -> frozenset[str]:
+    """The keyword arguments `invoke_command` takes for itself; a command leaf never receives them."""
+    parameters = inspect.signature(invoke_command).parameters.values()
+    return frozenset(
+        parameter.name for parameter in parameters if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    )
 
 
 def _coordination_readiness_status(
