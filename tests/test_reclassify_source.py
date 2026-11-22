@@ -483,6 +483,184 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         maintenance_jobs.stop_all(vault)
 
 
+def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
+    vault, source_schema, monkeypatch,
+):
+    """A long rotated receipt history under live appends must not stall governed paging.
+
+    Lifecycle reads prove the tombstone set for every preview admission and page release. A
+    history spanning many closed parts, still growing while the route runs, used to race the
+    reader's optimistic pass; the bounded locked retry keeps the pages live, and a tampered
+    closed part still withholds every report fact.
+    """
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+
+    from exomem import freshness, maintenance_jobs, reclassification_preview, server
+    from exomem import vault as vault_module
+    from exomem.governance import lifecycle, receipts
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 3)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 64 * 1024)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    paths = sorted(f"{KB}/Notes/measurement-{index}.md" for index in range(12))
+    for path in paths:
+        (vault / path).write_text(f"See [[{source}]].\n", encoding="utf-8")
+    unrelated = f"{KB}/Notes/unrelated.md"
+    (vault / unrelated).write_text("# An unrelated observation\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    from exomem import find
+
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(
+        __import__("exomem.file_watcher", fromlist=["x"]), "observing_inbound_recovery_stop", lambda _: stop,
+    )
+    mcp = server.build_server(require_auth=False)
+
+    # A long rotated history: at least 8 closed numbered parts of disclosure receipts.
+    fat = {"outcomes": [{"ref": f"Notes/pad-{index}", "size": index} for index in range(16)]}
+    for _attempt in range(4000):
+        parts = sorted(receipts._events_root(vault).glob("*/*.jsonl"))
+        if len(parts) >= 9 and sum(part.stat().st_size for part in parts) > 8 * 64 * 1024:
+            break
+        receipts.append_event(vault, event_type="disclosure", payload=fat)
+    else:
+        raise AssertionError("receipt history did not rotate into 9 parts")
+    history_bytes = sum(part.stat().st_size for part in parts)
+
+    appended = [0]
+    import os
+    import time as time_module
+
+    appending = threading.Event()
+
+    def keep_appending() -> None:
+        while not appending.is_set():
+            try:
+                receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+            except receipts.ReceiptError:
+                pass
+            appended[0] += 1
+            time_module.sleep(0.002)
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            async def call(tool, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
+
+            async def preview(**extra):
+                return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
+
+            # One real governed delete: a critical intent and a tombstone in the history.
+            governance = vault / KB / "_Governance"
+            (governance / "scopes").mkdir(parents=True, exist_ok=True)
+            (governance / "rules").mkdir(parents=True, exist_ok=True)
+            (governance / "scopes" / "unrelated.yaml").write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/unrelated.md"]\n',
+                encoding="utf-8",
+            )
+            (governance / "rules" / "unrelated.yaml").write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+                'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\nceiling: 0\n',
+                encoding="utf-8",
+            )
+            deletion = await call("manage_memory_file", operation="delete", path=unrelated, confirm=True)
+            assert not deletion.get("is_error"), deletion
+            async with asyncio.timeout(10):
+                while not lifecycle.is_tombstoned(vault, unrelated):
+                    await asyncio.sleep(0.05)
+            (governance / "rules" / "unrelated.yaml").unlink()
+            (governance / "scopes" / "unrelated.yaml").unlink()
+
+            latencies: list[float] = []
+
+            async def page(**extra):
+                async with asyncio.timeout(12):
+                    started = time_module.monotonic()
+                    while True:
+                        status = await preview(**extra)
+                        if (status.get("state") != "running"
+                                and status.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            latencies.append(time_module.monotonic() - started)
+                            return status
+                        for leaked in ("result", "references", "entries", "next_cursor"):
+                            assert leaked not in status, status
+                        await asyncio.sleep(0.05)
+
+            async with asyncio.timeout(12):
+                while True:
+                    queued = await preview()
+                    if queued.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                        break
+                    for leaked in ("result", "references", "entries", "next_cursor", "run_id"):
+                        assert leaked not in queued, queued
+                    await asyncio.sleep(0.05)
+            assert queued.get("state") == "running", queued
+            terminal = await page(preview_run_id=queued["run_id"])
+            assert terminal["state"] == "completed" and terminal["result"]["preview_digest"], terminal
+            assert terminal["result"]["path"] == source
+
+            cursor = first_cursor = terminal["next_cursor"]
+            seen: set[str] = set()
+            appends_at_paging_start = appended[0]
+            while cursor is not None:
+                current = await page(preview_run_id=queued["run_id"], cursor=cursor)
+                assert current["snapshot_current"]
+                seen.update(entry["path"] for entry in current["entries"])
+                cursor = current["next_cursor"]
+            assert set(paths).issubset(seen), seen
+            appends_during_paging = appended[0] - appends_at_paging_start
+
+            # A same-size in-place edit of a closed part, mtime restored: withheld facts, not bytes.
+            parts = sorted(receipts._events_root(vault).glob("*/*.jsonl"))
+            assert len(parts) >= 9, parts
+            closed_part = parts[0]
+            original = closed_part.read_bytes()
+            mtime = closed_part.stat().st_mtime_ns
+            index = original.index(b'"hash"') + 9
+            replacement = b"0" if original[index:index + 1] != b"0" else b"1"
+            with receipts._receipt_lock(vault):
+                closed_part.write_bytes(original[:index] + replacement + original[index + 1:])
+                os.utime(closed_part, ns=(mtime, mtime))
+            try:
+                refused = await preview(preview_run_id=queued["run_id"], cursor=first_cursor)
+                assert refused.get("error") or refused.get("is_error"), refused
+                for leaked in ("result", "references", "entries", "next_cursor", "preview_digest"):
+                    assert leaked not in refused, refused
+            finally:
+                with receipts._receipt_lock(vault):
+                    closed_part.write_bytes(original)
+                    os.utime(closed_part, ns=(mtime, mtime))
+
+            print(f"\nPARTS={len(parts)} HISTORY={history_bytes}B "
+                  f"PAGE_MS median={sorted(latencies)[len(latencies) // 2] * 1000:.0f} "
+                  f"max={max(latencies) * 1000:.0f} APPENDS_DURING_PAGING={appends_during_paging}")
+
+    appender = threading.Thread(target=keep_appending, name="receipt-appender", daemon=True)
+    try:
+        appender.start()
+        asyncio.run(exercise())
+    finally:
+        appending.set()
+        stop.set()
+        appender.join(10)
+        maintenance_jobs.stop_all(vault)
+
+
 @pytest.mark.parametrize("hold_at", [
     "after-verification", "after-planning", "policy-release", "receipt-release", "session-closed",
 ])
