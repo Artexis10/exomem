@@ -12,6 +12,7 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Run the scoped tests and one independent review of the batch; resolve findings.
+- [x] 3.1 Run the scoped tests and one independent review of the batch; resolve findings.
+  - [PR #2980](https://github.com/Artexis10/exomem/pull/2980) passed the scoped suites. The [final recheck](https://github.com/Artexis10/exomem/pull/2980#issuecomment-7060514235) approved the exact merged head with zero blocking findings.
 - [ ] 3.2 Merge. After merge, measure each change on real models with the evaluation that found it (one change at a time) before any claim of improvement.
 - [ ] 3.3 Synchronize this delta into the canonical specs and archive the change with `openspec archive`.
