@@ -4,7 +4,7 @@
 
 The topic brief shipped in `add-topic-brief`. That change's development evaluation (2026-11-22) found two things:
 
-- A routing line in the body of the client skill never reached the model. No run opened the skill, and the model followed the server's instructions instead.
+- A routing line in the body of an evaluation copy of the client skill never reached the model. No run opened the skill, and the model followed the server's instructions instead.
 - With the line given to the model directly, the model called the brief, but every call answered `index_warming`. The service's graph read snapshot waited on its background cold proof, which a CPU limit on the service delayed. The run therefore measured failed brief calls, not the routing line.
 
 Source consulted: the "Procedural knowledge is overloading global instructions" row of the agentic-engineering routing table (Agent Skills; Effective context engineering). A skill's body loads only when the skill is invoked; its description and the server's instructions are always in context.
