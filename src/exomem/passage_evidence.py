@@ -38,9 +38,9 @@ _log = logging.getLogger(__name__)
 _KEY_BLOCK_START = "## Passage keys\n\n```json\n"
 _KEY_BLOCK_END = "\n```\n\n"
 MAX_RESULTS = 200
-#: `hybrid`, the default, fuses lexical matching with dense similarity; `vector` ranks by
-#: dense similarity alone.
-PASSAGE_MODES = ("hybrid", "vector")  # nosemgrep: ep-word-set -- the search protocol's mode tokens
+#: `vector`, also used when the caller names no mode, ranks by dense similarity alone;
+#: `hybrid` fuses lexical matching with it.
+PASSAGE_MODES = ("vector", "hybrid")  # nosemgrep: ep-word-set -- the search protocol's mode tokens
 #: How deep each ranking reaches before fusion: the most passages a request may ask for, so a
 #: passage the other ranking places within any limit is never cut before it can vote.
 FUSION_DEPTH = MAX_RESULTS
@@ -217,7 +217,8 @@ def validate_ranking_options(options: Mapping[str, Any]) -> None:
     mode = options.get("mode")
     if mode is not None and mode not in PASSAGE_MODES:
         raise ValueError(
-            "INVALID_PASSAGE_OPTION: set mode to hybrid or vector when result_level is passage"
+            f"INVALID_PASSAGE_OPTION: set mode to {' or '.join(PASSAGE_MODES)}, or omit it, "
+            "when result_level is passage"
         )
     # These are closed search protocol fields and their ranking-neutral values, not vocabulary.
     neutral = {
@@ -643,13 +644,14 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         raise
     recall_space.require_same_space(index, identity, query_vector)
     _stop_if_caller_left("selection")
-    fusing = request.get("mode") != "vector"
+    fusing = request.get("mode") == "hybrid"
     lexical = index.select_passage_terms(query, FUSION_DEPTH, allowed_paths=allowed) if fusing else None
     selection = index.select_passage_chunks(
         query_vector, limit if lexical is None else FUSION_DEPTH,
         allowed_paths=allowed, encoded_for=identity,
     )
     selected = selection.hits if lexical is None else _fused(selection.hits, lexical, limit)
+    similarity = {(path, number): score for path, number, _ref, score in selection.hits}
     _stop_if_caller_left("verification")
     sources = _verified_sources(vault_root, walk_scope, snapshot, publication, selected)
 
@@ -680,6 +682,8 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
                 "passage_hash": chunk.passage_hash,
                 "span": {"start": chunk.start, "length": chunk.length},
                 "score": score,
+                # Unknown, not zero, for a lexical match beyond the dense ranking's depth.
+                "similarity": similarity.get((path, number)),
             }
         )
     space = identity or recall_space.current_identity(len(query_vector))
@@ -687,9 +691,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     summary = f"Found {len(hits)} passage matches."
     if withheld:
         summary += f" Withheld {withheld} chunks that do not match their current Source."
-    if fusing and lexical is None:
-        summary += " Lexical matching is still being prepared, so dense similarity alone ranked them."
-    return {
+    reply = {
         "user_summary": summary,
         "hits": hits,
         "recall_space": asdict(space),
@@ -699,6 +701,15 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         "scoring_mode": selection.scoring_mode,
         "withheld_chunks": withheld,
     }
+    if fusing:
+        # Fixed protocol tokens: whether the lexical stage could take part in this reply.
+        lexical_state = (
+            "ready" if lexical is not None
+            else "failed" if index.passage_terms_failed()
+            else "preparing"
+        )
+        reply["diagnostics"] = {"lexical": lexical_state}
+    return reply
 
 
 def _fused(dense: list[tuple], lexical: list[tuple], limit: int) -> list[tuple]:

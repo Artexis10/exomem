@@ -2,12 +2,16 @@
 
 ### Requirement: Passage results rank declared passages across Sources
 
-`search_memory` with `result_level: "passage"` SHALL return chunks of declared passages across every eligible Source, ranked by reciprocal rank fusion of their dense similarity to the query and their lexical match with it.
-With `mode: "vector"`, the passage level SHALL rank by dense similarity alone, exactly as an unfused request would.
-The passage level SHALL accept no `mode`, `mode: "hybrid"` or `mode: "vector"`, and SHALL refuse any other mode before retrieval with an error that names the accepted values.
+`search_memory` with `result_level: "passage"` SHALL return chunks of declared passages ranked by dense similarity to the query, across every eligible Source.
+With `mode: "hybrid"`, the passage level SHALL instead rank them by reciprocal rank fusion of their dense similarity to the query and their lexical match with it.
+The passage level SHALL accept no `mode`, `mode: "vector"` or `mode: "hybrid"`, and SHALL refuse any other mode before retrieval with an error that names the accepted values.
+No `mode` and `mode: "vector"` SHALL both rank by dense similarity alone.
 Lexical matching SHALL use the lexical store's analyser over the stored text of the same chunk rows that dense ranking scores.
-The lexical terms SHALL match those rows at the generation that the request reads, or the request SHALL rank by dense similarity alone and say so.
+The lexical terms SHALL match those rows at the generation that the request reads, or a `hybrid` request SHALL rank by dense similarity alone.
+A `hybrid` reply SHALL report the lexical state, `ready`, `preparing` or `failed`, as `diagnostics.lexical`, and its summary SHALL NOT mention it.
 Both rankings SHALL receive the same eligible chunks before ranking, and a lexical candidate SHALL pass the same byte verification as a dense candidate.
+A rebuild that replaces every chunk row SHALL NOT derive lexical terms inside its publication transaction. It SHALL mark the terms out of date, and the background backfill SHALL derive them again in batches.
+After a failed backfill, no request SHALL start another backfill, inline or in the background, before the retry delay has passed.
 More than one passage of one Source MAY appear.
 The passage level SHALL honour `limit` up to 200 and SHALL refuse a larger value with an error that names the bound.
 The passage path SHALL NOT run graph expansion, page fusion, rerank or usage boosts.
@@ -72,7 +76,7 @@ When the served encoder runs inferences concurrently, a passage request's query 
 
 #### Scenario: Two passages of one Source both rank
 
-- **WHEN** two declared passages of one Source are the two best fused matches to a query
+- **WHEN** two declared passages of one Source are the two most similar passages to a query
 - **THEN** both appear in the passage results, in score order
 
 #### Scenario: A ranking option is refused with its correction
@@ -81,14 +85,20 @@ When the served encoder runs inferences concurrently, a passage request's query 
 - **THEN** the request is refused before retrieval
 - **AND** the error names the option to remove
 
+#### Scenario: A caller names no mode
+
+- **WHEN** a passage request sets no `mode`
+- **THEN** its results, scores and backend equal those of `mode: "vector"`
+- **AND** the reply reports `ranking: "dense"` and carries no lexical state
+
 #### Scenario: A passage that dense similarity misses matches the query's words
 
-- **WHEN** dense similarity ranks a passage below `limit`, but the passage's stems match the query's terms
+- **WHEN** a `hybrid` request runs, and dense similarity ranks a passage below `limit`, but the passage's stems match the query's terms
 - **THEN** the fused ranking can return that passage within `limit`
 
 #### Scenario: A lexical candidate fails byte verification
 
-- **WHEN** a passage enters the fused top `limit` through stored chunk text that differs from its published Source bytes
+- **WHEN** a passage enters the fused top `limit` of a `hybrid` request through stored chunk text that differs from its published Source bytes
 - **THEN** its chunk is withheld and counted
 - **AND** the request does not refill the selection
 
@@ -100,9 +110,21 @@ When the served encoder runs inferences concurrently, a passage request's query 
 
 #### Scenario: Lexical terms are not yet prepared
 
-- **WHEN** the lexical terms do not match the chunk rows at the generation the request reads
+- **WHEN** a `hybrid` request reads a generation whose chunk rows the lexical terms do not match
 - **THEN** the request ranks by dense similarity alone
-- **AND** the reply reports `ranking: "dense"` and its summary says that lexical matching is still being prepared
+- **AND** the reply reports `ranking: "dense"` and `diagnostics.lexical` as `preparing`, or `failed` after a failed backfill
+- **AND** its summary does not mention lexical matching
+
+#### Scenario: A backfill fails
+
+- **WHEN** a backfill of the lexical terms fails
+- **THEN** a request within the retry delay starts no other backfill, inline or in the background
+
+#### Scenario: A rebuild replaces every chunk row
+
+- **WHEN** a rebuild publishes a whole new set of chunk rows
+- **THEN** its publication transaction derives no lexical terms
+- **AND** `hybrid` requests rank by dense similarity until the backfill has derived the terms of the new rows
 
 #### Scenario: A writer without lexical terms rewrites a chunk
 
@@ -111,9 +133,11 @@ When the served encoder runs inferences concurrently, a passage request's query 
 
 ### Requirement: A passage result identifies the caller's record
 
-Each passage result SHALL carry the Source reference, the Source's `source_identity`, the passage key, the passage ordinal, the SHA-256 hash of the whole passage's text as UTF-8, the span of the matched chunk in the Source body and a score.
+Each passage result SHALL carry the Source reference, the Source's `source_identity`, the passage key, the passage ordinal, the SHA-256 hash of the whole passage's text as UTF-8, the span of the matched chunk in the Source body, a score and a similarity.
 The score of the result at rank `r` SHALL be the dense similarity at dense rank `r` of the same request, and results whose fused values are equal SHALL share the score of the first of them.
 Scores SHALL therefore not increase down the results, and the first score SHALL equal the best dense similarity among eligible chunks.
+The similarity SHALL be the result's own dense similarity to the query, or null when the result is outside the dense ranking's top 200 chunks.
+In a dense-only reply, each result's similarity SHALL equal its score.
 The reply SHALL report `ranking: "fused"` when lexical and dense rankings were fused, and `ranking: "dense"` when dense similarity alone ranked the results.
 The response SHALL also return an opaque `recall_space_id` derived from its reported space identity, matching content-free cell discovery.
 The reply SHALL name the recall space of the scores.
@@ -131,3 +155,9 @@ A passage result SHALL NOT contain passage text.
 - **WHEN** a caller maps or floors passage scores with a map fitted to dense similarity
 - **THEN** a fused reply's scores have the distribution of a dense-only reply at the same `limit`
 - **AND** the reply's `ranking` field tells the caller which ranking ordered the results
+
+#### Scenario: A caller reads a fused result's own similarity
+
+- **WHEN** a fused reply returns a result that dense similarity ranked lower than its fused rank
+- **THEN** its score is the dense similarity of its fused rank
+- **AND** its similarity is its own dense similarity to the query, or null when the dense ranking did not reach it

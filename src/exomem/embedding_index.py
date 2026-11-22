@@ -2951,6 +2951,7 @@ class EmbeddingIndex:
 
         A sidecar of at most one backfill batch is made whole inline; a larger one starts
         the background backfill, and the caller ranks without lexical matching meanwhile.
+        After a failed backfill, neither runs again until the retry delay has passed.
         """
         if not self.path.exists():
             return None
@@ -2974,7 +2975,7 @@ class EmbeddingIndex:
             finally:
                 conn.rollback()
                 conn.close()
-            if attempt or rows_held > passage_terms.BACKFILL_ROWS:
+            if attempt or rows_held > passage_terms.BACKFILL_ROWS or self._terms_backing_off():
                 break
             self._backfill_passage_terms()
         self.prepare_passage_terms()
@@ -2988,9 +2989,7 @@ class EmbeddingIndex:
             running = self._terms_backfill
             if running is not None and running.is_alive():
                 return running
-            failed_at = self._terms_failed_at
-            # A failing backfill rescans every row, so a request does not restart it at once.
-            if failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS:
+            if self._terms_backing_off():
                 return None
             running = threading.Thread(
                 target=self._backfill_passage_terms, name="exomem-passage-terms", daemon=True
@@ -2998,6 +2997,15 @@ class EmbeddingIndex:
             running.start()
             self._terms_backfill = running
             return running
+
+    def passage_terms_failed(self) -> bool:
+        """Whether the last lexical backfill failed; the next waits out the retry delay."""
+        return self._terms_failed_at is not None
+
+    def _terms_backing_off(self) -> bool:
+        # A failing backfill rescans every row, so a request does not restart it at once.
+        failed_at = self._terms_failed_at
+        return failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS
 
     def _backfill_passage_terms(self) -> None:
         try:
@@ -4250,6 +4258,7 @@ class EmbeddingIndex:
                         "rebuild_embeddings: serving or source snapshot changed; publication refused"
                     )
                     return 0
+                passage_terms.suspend(conn)
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
                 recall_space.write_identity(conn, producer)

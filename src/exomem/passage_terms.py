@@ -53,30 +53,50 @@ def exists(conn: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def attach(conn: sqlite3.Connection) -> None:
-    """Bind this connection's chunk writes to their terms rows once the table exists."""
-    conn.create_function(_STEMS, 1, _stems, deterministic=True)
-    if not exists(conn):
-        return
+def _triggers() -> dict[str, str]:
+    """The connection's TEMP triggers, by name, that keep the terms rows level with the chunks."""
     # TEMP triggers may name main tables; their bodies resolve the unqualified names there.
     write = (
         f"DELETE FROM {TABLE} WHERE rowid = NEW.rowid; "
         f"INSERT INTO {TABLE}(rowid, terms) VALUES (NEW.rowid, {_STEMS}(NEW.chunk_text));"
     )
-    for statement in (
-        f"CREATE TEMP TRIGGER IF NOT EXISTS {TABLE}_insert AFTER INSERT ON main.chunks "
-        f"BEGIN {write} END",
-        f"CREATE TEMP TRIGGER IF NOT EXISTS {TABLE}_delete AFTER DELETE ON main.chunks "
-        f"BEGIN DELETE FROM {TABLE} WHERE rowid = OLD.rowid; END",
-        f"CREATE TEMP TRIGGER IF NOT EXISTS {TABLE}_update AFTER UPDATE ON main.chunks "
-        f"BEGIN DELETE FROM {TABLE} WHERE rowid = OLD.rowid; {write} END",
+    return {
+        f"{TABLE}_insert": f"AFTER INSERT ON main.chunks BEGIN {write} END",
+        f"{TABLE}_delete": (
+            f"AFTER DELETE ON main.chunks BEGIN DELETE FROM {TABLE} WHERE rowid = OLD.rowid; END"
+        ),
+        f"{TABLE}_update": (
+            f"AFTER UPDATE ON main.chunks BEGIN DELETE FROM {TABLE} WHERE rowid = OLD.rowid; "
+            f"{write} END"
+        ),
         # A write on this connection keeps the table whole, so coverage moves with it,
         # but only from the generation it already covered.
-        f"CREATE TEMP TRIGGER IF NOT EXISTS {TABLE}_coverage AFTER UPDATE OF value ON main.meta "
-        f"WHEN NEW.key = 'generation' BEGIN UPDATE meta SET value = NEW.value "
-        f"WHERE key = '{COVERAGE}' AND value = OLD.value; END",
-    ):
-        conn.execute(statement)
+        f"{TABLE}_coverage": (
+            "AFTER UPDATE OF value ON main.meta WHEN NEW.key = 'generation' BEGIN "
+            f"UPDATE meta SET value = NEW.value WHERE key = '{COVERAGE}' AND value = OLD.value; END"
+        ),
+    }
+
+
+def attach(conn: sqlite3.Connection) -> None:
+    """Bind this connection's chunk writes to their terms rows once the table exists."""
+    conn.create_function(_STEMS, 1, _stems, deterministic=True)
+    if not exists(conn):
+        return
+    for name, definition in _triggers().items():
+        conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {name} {definition}")
+
+
+def suspend(conn: sqlite3.Connection) -> None:
+    """Stop this connection deriving terms, and mark the terms rows out of date.
+
+    Call it in a write transaction that rewrites every chunk row. Deriving each row's terms
+    there holds the write lock as long as stemming the whole corpus takes. Without coverage,
+    lexical ranking waits while the background backfill rebuilds the table in batches.
+    """
+    for name in _triggers():
+        conn.execute(f"DROP TRIGGER IF EXISTS temp.{name}")
+    conn.execute("DELETE FROM meta WHERE key = ?", (COVERAGE,))
 
 
 def covered(conn: sqlite3.Connection, generation: int) -> bool:
