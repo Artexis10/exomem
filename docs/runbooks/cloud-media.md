@@ -67,6 +67,7 @@ The worker yields to foreground writers before publishing. It retries a busy pub
 A temporary hydration refusal delays the job without spending an attempt.
 If the worker stops at the attempt limit, it queues a check of the installed record. Ordinary media jobs run first.
 A read or flush refusal delays the check. The check opens only the private record.
+An unavailable record delays generation and preserves a successful receipt during reconciliation.
 The worker retains the outcome for that digest so reconciliation does not replay an exhausted preview.
 A retry leaves extraction results intact.
 The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.

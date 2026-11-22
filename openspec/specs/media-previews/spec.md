@@ -61,6 +61,11 @@ When the install enables previews, the existing media worker SHALL queue a previ
 - **THEN** the worker delays acknowledgement and gives ordinary media jobs priority
 - **AND** acknowledgement retries without opening or decoding the original
 
+#### Scenario: The installed record cannot be inspected during generation
+
+- **WHEN** private storage cannot determine whether a current record exists
+- **THEN** generation waits for a definite read before decoding or replacing the record
+
 #### Scenario: Processing is replayed
 
 - **WHEN** processing runs again with the same original digest and preview format
@@ -88,6 +93,11 @@ An unmarked historical filing and a marked digest with a terminal failure SHALL 
 
 - **WHEN** a restore keeps a successful preview outcome and omits its record
 - **THEN** reconciliation queues the still-current marked digest to rebuild the record
+
+#### Scenario: A successful preview record cannot be inspected during recovery
+
+- **WHEN** reconciliation cannot confirm the record is absent
+- **THEN** it retains the successful receipt and leaves generation unqueued for that digest
 
 ### Requirement: Preview reads use the original's live access rules
 

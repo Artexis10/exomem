@@ -82,6 +82,18 @@ def _read_record(path: Path, relative: str, digest: str) -> bytes | None:
     return None
 
 
+def _read_for_generation(path: Path, relative: str, digest: str) -> bytes | None:
+    try:
+        return _read_record(path, relative, digest)
+    except OSError as error:
+        from .cli_ops import OpError
+
+        raise OpError(
+            "PREVIEW_RECORD_UNAVAILABLE", "Could not inspect the installed preview.",
+            "Retry preview generation after the storage check is available.", details={"status": "retryable"},
+        ) from error
+
+
 def read(vault: Path, relative: str, digest: str) -> bytes | None:
     """Look up exactly one private record for a caller that has proved this original."""
     try:
@@ -187,7 +199,13 @@ def recover(
     root = store_path(vault)
 
     def missing_record(relative: str) -> bool:
-        return not os.path.lexists(_record_path(root, relative))
+        try:
+            _record_path(root, relative).lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            pass  # A failed stat cannot unset a successful receipt.
+        return False
 
     try:
         missing = store.recoverable_preview_demands(candidates, missing_record=missing_record) if store else candidates
@@ -301,6 +319,7 @@ def generate(
         current = originals.original_state(vault, relative)
         if not current.present or current.binary_sha256 != expected.sha256:
             return False
+    jpeg = _read_for_generation(_record_path(store_path(vault), relative), relative, expected.sha256)
     with media_store.open_original(vault, relative, job=job, deadline=deadline) as opened:
         if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
             return False
@@ -311,7 +330,6 @@ def generate(
         if (held.sha256, held.size) != (expected.sha256, expected.size):
             return False
         record = {"version": _FORMAT, "path": relative, "sha256": held.sha256, "jpeg": ""}
-        jpeg = read(vault, relative, held.sha256)
         if jpeg is None:
             inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
             opened.stream.seek(0)
@@ -327,7 +345,7 @@ def generate(
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if not stat.S_ISDIR(path.parent.lstat().st_mode):
                 return False
-            existing = read(vault, relative, held.sha256) is not None
+            existing = _read_for_generation(path, relative, held.sha256) is not None
             if not existing:
                 private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
             _sync_record(path, existing=existing)

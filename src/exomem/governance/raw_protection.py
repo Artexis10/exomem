@@ -168,14 +168,15 @@ def permits(
     """
     if not marked(path):
         return True
+    owner = is_owner(who)
+    # RAW release never approves extracted pixels for another audience.
+    if derived and not owner:
+        return False
     valid, trusted_purpose = _authority(root, who)
     if not valid:
         return False if resolve_bytes else None
-    if is_owner(who):
+    if owner:
         return True
-    # An original's release never approves newly extracted pixels or aliases.
-    if derived:
-        return False
     from . import policy
 
     current = policy.load(root)

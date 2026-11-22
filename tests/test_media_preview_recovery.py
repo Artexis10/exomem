@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import io
 import os
@@ -444,3 +445,156 @@ def test_uncertain_final_acknowledgement_retries_without_new_codec_work(vault, m
     media_processing.reconcile_all_media(vault)
     rebuild = ledger.get(claim.id)
     assert rebuild is not None and rebuild.state == media_jobs.PENDING and rebuild.preview_sha256 == digest
+
+
+@pytest.mark.parametrize("fault", ["reuse", "install"])
+def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, monkeypatch, fault):
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-read-fault-fixture.jpg",
+            stream=io.BytesIO(_photo(920, 640)),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    first = ledger.claim_next()
+    assert first is not None
+    assert media_previews.generate(vault, first, ledger, deadline=None)
+    record, = media_previews.store_path(vault).glob("*/*.json")
+    installed = record.read_bytes(), record.stat().st_ino
+    assert ledger.recover_interrupted() == 1
+
+    now = time.time()
+    monkeypatch.setattr(media_jobs, "time", SimpleNamespace(time=lambda: now))
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    manager = get_manager()
+    original_guard = manager.consistency_guard
+    original_load = media_previews._load
+    publishing = False
+    unavailable = False
+
+    @contextmanager
+    def guard(*args, **kwargs):
+        nonlocal publishing
+        with original_guard(*args, **kwargs) as held:
+            publishing = kwargs.get("operation") == "media_preview_publish"
+            try:
+                yield held
+            finally:
+                publishing = False
+
+    def load(path):
+        nonlocal unavailable
+        if path == record and (fault == "reuse" or publishing or unavailable):
+            unavailable = True
+            raise OSError(errno.EIO, "preview record temporarily unreadable")
+        return original_load(path)
+
+    def unnecessary_codec(*_args, **_kwargs):
+        pytest.fail("an unreadable installed preview must not be decoded again")
+
+    def unnecessary_replacement(*_args, **_kwargs):
+        pytest.fail("an unreadable installed preview must not be replaced")
+
+    def unnecessary_open(*_args, **_kwargs):
+        pytest.fail("an unreadable installed preview must not open or hydrate the original")
+
+    monkeypatch.setattr(media_previews, "_decode", unnecessary_codec)
+    monkeypatch.setattr(private_state, "write_record", unnecessary_replacement)
+    with monkeypatch.context() as blocked:
+        blocked.setattr(manager, "consistency_guard", guard)
+        blocked.setattr(media_previews, "_load", load)
+        if fault == "reuse":
+            blocked.setattr(media_store, "open_original", unnecessary_open)
+        claim = ledger.claim_next()
+        assert claim is not None and claim.id == first.id
+        worker._process(claim)
+        assert unavailable
+        pending = ledger.get(claim.id)
+        assert pending is not None and pending.state == media_jobs.PENDING
+        assert ledger.claim_next() is None
+
+        blocked.setattr(media_store, "open_original", unnecessary_open)
+        now += media_jobs.RETRY_FIRST_SECONDS * 2 ** (claim.attempts - 1)
+        last = ledger.claim_next()
+        assert last is not None and last.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+        worker._process(last)
+        assert ledger.claim_next() is None
+
+        now += media_jobs.RETRY_FIRST_SECONDS
+        acknowledgement = ledger.claim_next()
+        assert acknowledgement is not None and acknowledgement.attempts == last.attempts
+        worker._process(acknowledgement)
+        waiting = ledger.get(claim.id)
+        assert waiting is not None and waiting.state == media_jobs.PENDING
+        assert waiting.attempts == last.attempts and ledger.claim_next() is None
+
+    monkeypatch.setattr(media_store, "open_original", unnecessary_open)
+    now += 2 * media_jobs.RETRY_FIRST_SECONDS
+    retry = ledger.claim_next()
+    assert retry is not None and retry.id == claim.id
+    worker._process(retry)
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+    assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    assert media_previews.read(vault, saved.path, first.preview_sha256) is not None
+    assert (record.read_bytes(), record.stat().st_ino) == installed
+
+
+@pytest.mark.parametrize("fault", ["probe", "recheck"])
+def test_reconciliation_requires_confirmed_absence_before_rebuilding(vault, monkeypatch, fault):
+    original = _photo(921, 640)
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-rebuild-stat-fixture.jpg",
+            stream=io.BytesIO(original),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    claim = ledger.claim_next()
+    assert claim is not None
+    media_worker.MediaWorker(vault, execution_mode="process")._process(claim)
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+
+    record, = media_previews.store_path(vault).glob("*/*.json")
+    installed = record.read_bytes()
+    displaced = record.with_suffix(".held")
+    if fault == "recheck":
+        record.rename(displaced)
+    manager = get_manager()
+    original_guard = manager.consistency_guard
+    original_lstat = os.lstat
+    guarded = False
+    refusals = []
+
+    @contextmanager
+    def guard(*args, **kwargs):
+        nonlocal guarded
+        with original_guard(*args, **kwargs) as held:
+            guarded = kwargs.get("operation") == "media_preview_recover"
+            if guarded and fault == "recheck":
+                displaced.rename(record)
+            try:
+                yield held
+            finally:
+                guarded = False
+
+    def lstat(path, *args, **kwargs):
+        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(record) and (fault == "probe" or guarded):
+            refusals.append(fault)
+            raise OSError(errno.EIO, "preview record temporarily unreachable")
+        return original_lstat(path, *args, **kwargs)
+
+    def unexpected_read(*_args, **_kwargs):
+        pytest.fail("preview rebuild admission must check existence without opening the record")
+
+    digest = hashlib.sha256(original).hexdigest()
+    with monkeypatch.context() as blocked:
+        blocked.setattr(manager, "consistency_guard", guard)
+        blocked.setattr(os, "lstat", lstat)
+        blocked.setattr(media_previews, "_load", unexpected_read)
+        media_previews.recover(vault, ledger, [(vault / saved.path, vault / saved.sidecar_path, digest)])
+        assert refusals
+        assert ledger.get(claim.id) == settled
+        assert ledger.claim_next() is None
+
+    assert record.read_bytes() == installed
+    assert media_previews.read(vault, saved.path, digest) is not None

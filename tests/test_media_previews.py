@@ -170,6 +170,37 @@ def test_a_grant_to_download_raw_bytes_does_not_release_derived_pixels(vault, se
     assert str(refused.value) == str(missing.value)
 
 
+def test_a_raw_preview_denial_with_an_unverified_session_keeps_the_original_evicted(
+    vault, served, selected_store, monkeypatch,
+):
+    from test_media_store import _offload
+
+    from exomem import commands, media_store, originals, preserve
+    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    original = _photo(900, 600)
+    with library_scope():
+        captured = preserve.preserve_stream(
+            vault, scope="Archive", category="Photos", filename="sample.jpg",
+            stream=io.BytesIO(original), raw_protection=True, media_pending=True,
+        )
+    media_processing.reconcile_media(vault, captured.path)
+    assert _drain(vault)
+    assert media_previews.read(vault, captured.path, hashlib.sha256(original).hexdigest()) is not None
+    path = vault / captured.path
+    _offload(vault, path)
+    assert media_store.evict(vault, path)
+    assert originals.evicted(vault, captured.path)
+
+    reader = RequestPrincipal("external", surface="mcp", issuer_family="test-issuer",
+                              authorization_session_id="unverified-session")
+    with request_scope(reader), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        commands.op_read_media(vault, media="preview", path=captured.path)
+
+    assert originals.evicted(vault, captured.path)
+
+
 @pytest.mark.parametrize("drift", ["access", "binding", "after_pixel_check"])
 def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch, drift):
     from test_access_read_paths import _write_cfg
