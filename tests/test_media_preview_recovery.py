@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -572,7 +573,7 @@ def test_reconciliation_requires_confirmed_absence_before_rebuilding(vault, monk
         record.rename(displaced)
     manager = get_manager()
     original_guard = manager.consistency_guard
-    original_lstat = os.lstat
+    original_lstat = Path.lstat
     guarded = False
     refusals = []
 
@@ -588,11 +589,11 @@ def test_reconciliation_requires_confirmed_absence_before_rebuilding(vault, monk
             finally:
                 guarded = False
 
-    def lstat(path, *args, **kwargs):
-        if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(record) and (fault == "probe" or guarded):
+    def lstat(path):
+        if path == record and (fault == "probe" or guarded):
             refusals.append(fault)
             raise OSError(errno.EIO, "preview record temporarily unreachable")
-        return original_lstat(path, *args, **kwargs)
+        return original_lstat(path)
 
     def unexpected_read(*_args, **_kwargs):
         pytest.fail("preview rebuild admission must check existence without opening the record")
@@ -600,7 +601,7 @@ def test_reconciliation_requires_confirmed_absence_before_rebuilding(vault, monk
     digest = hashlib.sha256(original).hexdigest()
     with monkeypatch.context() as blocked:
         blocked.setattr(manager, "consistency_guard", guard)
-        blocked.setattr(os, "lstat", lstat)
+        blocked.setattr(Path, "lstat", lstat)
         blocked.setattr(media_previews, "_load", unexpected_read)
         media_previews.recover(vault, ledger, [(vault / saved.path, vault / saved.sidecar_path, digest)])
         assert refusals
