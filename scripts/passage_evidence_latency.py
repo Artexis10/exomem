@@ -74,10 +74,37 @@ def write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def load_profile(path: Path) -> dict:
+    """Read a profile; one that extends another overrides only the keys it declares."""
+    profile = json.loads(path.read_text())
+    if base := profile.pop("extends", None):
+        profile = {**load_profile(path.parent / base), **profile}
+    return profile
+
+
+def arm_cases(profile: dict, arm: str, cases: list[dict]) -> list[dict]:
+    """Copy the frozen cases with the arm's declared request mode and reply expectations.
+
+    An arm that the profile does not declare expects its own name as the scoring mode and
+    sends the frozen request unchanged.
+    """
+    declared = profile.get("arms", {}).get(arm, {})
+    values = json.loads(json.dumps(cases))
+    for case in values:
+        schema = case["expected"]["response_schema"]
+        schema["properties"]["scoring_mode"] = {"const": declared.get("scoring_mode", arm)}
+        if "ranking" in declared:
+            schema["required"] = [*schema["required"], "ranking"]
+            schema["properties"]["ranking"] = {"const": declared["ranking"]}
+        if "request_mode" in declared:
+            case["arguments"]["options"]["mode"] = declared["request_mode"]
+    return values
+
+
 def manifest() -> dict:
     paths = [*sorted(path for path in (ROOT / "src/exomem").rglob("*")
                     if path.is_file() and "__pycache__" not in path.parts),
-             *sorted((ROOT / "scripts").glob("*.py")), PROFILE, INVENTORY_PROFILE,
+             *sorted((ROOT / "scripts").glob("*.py")), *sorted(PROFILE.parent.glob("*profile.json")),
              *sorted((ROOT / "benchmarks/recall_parity").glob("*.py")),
              REFERENCE / "profile.json", REFERENCE / "cases.json", REFERENCE / "prose.txt",
              ROOT / "pyproject.toml", ROOT / "uv.lock"]
@@ -795,9 +822,8 @@ async def measure(arm: Arm, root: Path, profile: dict, preparation: dict, *,
             zip(profile["callers"], profile["decision"]["bars"], strict=True)}
     repeats = list(range(profile["repeats"])) if repeat_indices is None else repeat_indices
     cases_path = root / "frozen-cases.json"
-    values = frozen_cases(profile, preparation["encoder"], scoring_mode) if case_values is None else json.loads(json.dumps(case_values))
-    for case in values:
-        case["expected"]["response_schema"]["properties"]["scoring_mode"] = {"const": scoring_mode}
+    values = arm_cases(profile, scoring_mode, case_values if case_values is not None
+                       else frozen_cases(profile, preparation["encoder"], scoring_mode))
     write_json(cases_path, values)
     write_json(root / "frozen-protocol.json", {"profile": profile,
                "bars": {callers: bar.model_dump(mode="json") for callers, bar in bars.items()},
@@ -927,6 +953,8 @@ def summarize_mode(samples: list[dict], profile: dict) -> list[dict]:
                            "dispatch_verified": bool(selected) and all(
                                sample.get("dispatch", {}).get("overlap_verified", False) for sample in selected),
                            "outcomes": dict(Counter(sample["outcome"] for sample in selected)),
+                           "rankings": dict(Counter(
+                               (sample.get("response") or {}).get("ranking", "unavailable") for sample in selected)),
                            "latency_passed": len(judged) == 1 and judged[0]["verdict"] == "observed-within-bar"})
     return conditions
 
@@ -1246,7 +1274,8 @@ async def paired(root: Path, baseline: Path, profile: dict, *, plan_only: bool =
         "order": list(dict.fromkeys((slot["repeat"], slot["mode"]) for slot in slots)),
         "comparison": "same candidate source and publication repair; historical failure is not a comparison arm",
         "sampling_unit": "query; its paired mean includes every repeat and concurrent-client slot",
-        "choice_rule": "choose disk if it qualifies; otherwise resident if it qualifies; otherwise unqualified",
+        "choice_rule": "choose {} if it qualifies; otherwise {} if it qualifies; otherwise unqualified".format(
+            *profile["modes"]),
         "interval_scope": "conditional on captured rounds, not independent host experiments",
         "memory_peak_scope": "container cumulative; segment sampled maxima and counter deltas are separate"})
     frozen = freeze_source(root)
@@ -1352,13 +1381,14 @@ def main() -> int:
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--profile", type=Path, help="a profile beside profile.json, such as ranking-profile.json")
     args = parser.parse_args()
     if args.baseline is not None and (args.root.resolve().is_relative_to(args.baseline.resolve())
             or args.baseline.resolve().is_relative_to(args.root.resolve())):
         parser.error("paired output and retained baseline must have separate roots")
     args.root.mkdir(parents=True, exist_ok=True, mode=0o700)
     args.root.chmod(0o700)
-    profile = json.loads((INVENTORY_PROFILE if args.mode.startswith("inventory-") else PROFILE).read_text())
+    profile = load_profile(args.profile or (INVENTORY_PROFILE if args.mode.startswith("inventory-") else PROFILE))
     if args.smoke:
         profile["sources"] = 2
         profile["queries"] = 1

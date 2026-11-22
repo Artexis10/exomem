@@ -186,3 +186,31 @@ The container peak reached 3 GiB, including substantial file cache.
 The final segment recorded 2,352 memory-max events and zero OOM events or kills.
 Resource observations include startup and warm-up; the peak remains cumulative across segments.
 The qualification covers source `0e5a3bc84`, the file-mode reference and the real served query encoder with synthetic corpus vectors.
+
+## Ranking comparison
+
+`ranking-profile.json` extends `profile.json` and declares two arms on the same reference: the dense default and `mode: "hybrid"`.
+Both arms run with the 512 MiB resident matrix ceiling, which is the setting that cells deploy.
+The dense arm sends the frozen requests unchanged. The hybrid arm adds `options.mode = "hybrid"`.
+Each arm declares the ranking that its replies must report, so a hybrid reply that falls back to dense ranking fails its call.
+Warm-up repeats until the lexical terms are ready, and the report counts the replies of each ranking.
+Run it with `paired --profile benchmarks/passage-evidence/ranking-profile.json`, in the container runtime above.
+The arms alternate by repeat in the same way as the disk and resident modes, and the bars and the comparison are unchanged.
+A retained baseline must keep its embeddings sidecar in rollback-journal mode, so that a read-only mount can open it.
+Run `PRAGMA journal_mode=DELETE` on that sidecar once after `prepare`.
+
+The [22 November qualification](qualification-hybrid-2026-11-22.json) ran both arms with three repeats and 1,200 calls.
+The 14 November sidecar was no longer retained, so `prepare` generated the reference again.
+Its Source bytes hash, encoder artifact and query bytes equal the earlier preparation.
+
+| Request mode | Single-caller p50 / p95 | Four-caller p50 / p95 | Replies by ranking |
+| --- | ---: | ---: | --- |
+| Dense default | 146.391 / 173.184 ms | 298.912 / 480.120 ms | 600 dense |
+| `mode: "hybrid"` | 161.952 / 234.578 ms | 352.247 / 572.763 ms | 600 fused |
+
+All 1,200 calls completed with 30 hits, zero withheld chunks and zero busy refusals.
+The dense default meets both bars. Hybrid misses both: its p95 is 34.578 ms over the 200 ms bar and 72.763 ms over the 500 ms bar.
+The mean hybrid-minus-dense differences are +25.912 ms and +57.418 ms for one and four callers.
+The 95% intervals are [20.818, 31.430] ms and [46.488, 69.963] ms, conditional on the captured rounds.
+The first hybrid segment received four dense replies in warm-up while the lexical terms were preparing; no timed call did.
+Both arms shared one container and one shared host, so compare the arms with each other, not with the 14 November values.
