@@ -14600,6 +14600,7 @@ def op_record_memory(
         "append",
         "bulk_upsert",
         "update",
+        "retract",
         "revise",
         "rebaseline",
         "discard",
@@ -14670,7 +14671,7 @@ def op_record_memory(
         source: bulk_upsert default preserved Source/Evidence path.
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
-        item_id: Update only: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
+        item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
     """
     return record_memory_module.record_memory(
         vault_root,

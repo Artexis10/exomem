@@ -30,7 +30,7 @@ Effect = Literal["read", "write"]
 #: What a completed write did, in the one word the user-facing summary leads with. This is a closed
 #: contract set, not vault vocabulary: the summary sentence is built from it, and each write
 #: operation declares exactly one (a write that declares none gets no summary).
-OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored"]
+OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored", "retracted"]
 
 #: How the MCP surface publishes a converted command. `public` lists the typed tools and
 #: the two doors of `public_surface`, and `grouped` names the grouped command itself.
@@ -372,9 +372,9 @@ RECORDS = CommandOperations(
             CHANGE_RECORDS,
             "write",
             "Change records",
-            "Change human-owned Records: create a collection, append, update or bulk-upsert "
-            "items, discard a held candidate, revise or rebaseline a manifest, or start or "
-            "cancel an import. `operation.kind` selects the operation. Propose a new collection "
+            "Change human-owned Records: create a collection, append, update, retract or "
+            "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
+            "start or cancel an import. `operation.kind` selects the operation. Propose a new collection "
             "before creating it. Guarded writes need the hashes that the matching read returns. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
@@ -425,6 +425,14 @@ RECORDS = CommandOperations(
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
+        ),
+        # A retraction takes the row out of current state and keeps its history; the page it names stays.
+        _entry(
+            "retract", CHANGE_RECORDS,
+            ("collection", "item_id", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
+            effect="write", destructive=True, outcome_verb="retracted",
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,
