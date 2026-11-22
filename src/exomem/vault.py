@@ -9103,20 +9103,21 @@ def _inbound_candidate_keys(
 
 
 def _snapshot_inbound(
-    data: _InboundIndexData, target_rel_path: str, *, owner_keys: tuple[str, ...] | None = None,
+    data: _InboundIndexData, target_rel_path: str, *,
+    candidate_keys: tuple[str, ...] | None = None, include_stems: bool = True,
 ) -> _InboundIndexData:
     """Copy only this target's evidence. The caller holds `_INBOUND_INDEX_LOCK`.
 
     Visibility checks and ordering then run on the copy, outside the lock.
     """
     _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
-    keys = (full, stripped, basename) if owner_keys is None else owner_keys
+    keys = (full, stripped, basename) if candidate_keys is None else candidate_keys
     return _InboundIndexData(
         buckets={key: list(data.buckets.get(key, ())) for key in keys},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
         sources=(
             {rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())}
-            if owner_keys is None else {}
+            if include_stems else {}
         ),
     )
 
@@ -9529,14 +9530,14 @@ def cached_inbound_wikilinks(
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
 
-    A candidate limit applies to an unrestricted file-mode read. Current
-    evidence exceeding the limit raises InboundCandidatesExceeded.
+    A candidate limit applies to file-mode reads with a current index. The
+    bound covers possible candidates before the caller's view reads them.
     """
     if candidate_limit is None:
         stored = _store_inbound(vault_root, (target_rel_path,), visible)
         if stored is not None:
             return stored[target_rel_path]
-    elif visible is not None or _store_inbound_mode(vault_root):
+    elif _store_inbound_mode(vault_root):
         return None
     from .governance import egress
     from .published_admission import admission_of
@@ -9575,21 +9576,27 @@ def cached_inbound_wikilinks(
         if generation is None or checkpoint is None:
             return None
         if (
-            visible is None
+            (visible is None or read_hashes is not None or candidate_limit is not None)
             and (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
         ):
             return None
         cache_generation = state.generation
         data = cached[1]
-        owner_keys = None
+        candidate_keys = None
         exceeded = False
         if candidate_limit is not None:
             _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
-            owner_keys = _inbound_candidate_keys(
-                full, stripped, basename, basename_unique=data.stem_counts.get(basename) == 1,
+            stems = data.stem_counts.get(basename, 0)
+            candidate_keys = _inbound_candidate_keys(
+                full, stripped, basename, basename_unique=stems == 1 or (visible is not None and stems > 1),
             )
-            exceeded = sum(len(data.buckets.get(key, ())) for key in owner_keys) > max(0, candidate_limit)
-        snapshot = None if exceeded else _snapshot_inbound(data, target_rel_path, owner_keys=owner_keys)
+            checks = sum(len(data.buckets.get(key, ())) for key in candidate_keys)
+            if visible is not None and stems > 1:
+                checks += stems
+            exceeded = checks > max(0, candidate_limit)
+        snapshot = None if exceeded else _snapshot_inbound(
+            data, target_rel_path, candidate_keys=candidate_keys, include_stems=visible is not None,
+        )
     finally:
         _INBOUND_INDEX_LOCK.release()
 
@@ -9638,7 +9645,7 @@ def cached_inbound_wikilinks(
             and live == (instance, generation, None)
         ):
             held = frozenset()
-        elif visible is None:
+        elif visible is None or read_hashes is not None or candidate_limit is not None:
             return False
         else:
             try:

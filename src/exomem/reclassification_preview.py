@@ -22,7 +22,7 @@ from . import (
     request_budget,
 )
 from .cli_ops import OpError
-from .governance import connector_boundary
+from .governance import connector_boundary, lifecycle
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -33,9 +33,6 @@ from .governance.principal import (
 # Bound work before reading candidates' bodies. Results also meet the normal response-byte bound.
 _INLINE_CANDIDATES = 256
 _JOB_REPORT: ContextVar[dict[str, Any] | None] = ContextVar("source_reclassification_job_report", default=None)
-_RETAINED_ADMISSION: ContextVar[tuple[str, str | None] | None] = ContextVar(
-    "source_reclassification_report_admission", default=None,
-)
 
 
 def _bytes(value: Any) -> bytes:
@@ -76,19 +73,33 @@ class RetainedReport(dict):
 @dataclass(frozen=True)
 class _Authority:
     key: str
-    depends_on_membership: bool
     complete: bool
+    basis_key: str
+    marker_revision: str | None
+
+
+@dataclass(frozen=True)
+class _RetainedAdmission:
+    authority: _Authority
+    snapshot: str
+
+
+_RETAINED_ADMISSION: ContextVar[_RetainedAdmission | None] = ContextVar(
+    "source_reclassification_report_admission", default=None,
+)
+
+
+def _basis_key(root: Path, who: RequestPrincipal, basis: reclassify_source.PreviewReleaseBasis) -> str:
+    return _digest((asdict(basis), connector_boundary.cache_identity(root, who)[-1], asdict(who)))
 
 
 def _authority_binding(root: Path, who: RequestPrincipal) -> _Authority:
     if reclassify_source.managed_preview_stop(root, who) is None:
         raise _not_found()
     admission = reclassify_source.preview_release_authority(root, who)
-    key = _digest((
-        admission.policy_fingerprint, admission.access_fingerprint, admission.session_stamp,
-        connector_boundary.cache_identity(root, who)[-1], asdict(who), admission.erasure.fingerprint,
-    ))
-    return _Authority(key, admission.depends_on_membership, admission.complete)
+    basis_key = _basis_key(root, who, admission.basis)
+    key = _digest((basis_key, admission.erasure.fingerprint))
+    return _Authority(key, admission.basis.complete, basis_key, admission.erasure.marker_revision)
 
 
 def _snapshot_key(root: Path) -> str | None:
@@ -98,20 +109,34 @@ def _snapshot_key(root: Path) -> str | None:
     return _digest(generation)
 
 
-def retained_report_identity(root: Path, who: RequestPrincipal) -> tuple[str, str | None] | None:
+def retained_report_identity(root: Path, who: RequestPrincipal) -> _RetainedAdmission | None:
     """Recheck exactly the release inputs that a retained summary or page can depend on."""
     try:
         authority = _authority_binding(root, who)
     except OpError:
         return None
-    snapshot = _snapshot_key(root) if authority.depends_on_membership else None
-    if authority.depends_on_membership and snapshot is None:
+    snapshot = _snapshot_key(root)
+    if snapshot is None:
         raise request_budget.ReadBudgetExhausted()
-    return authority.key, snapshot
+    return _RetainedAdmission(authority, snapshot)
+
+
+def retained_report_still_current(root: Path, who: RequestPrincipal, admission: _RetainedAdmission) -> bool:
+    """Recheck release after egress's full proof and the request's receipt append."""
+    try:
+        basis = reclassify_source.preview_release_basis(root, who)
+    except OpError:
+        return False
+    markers = lifecycle.tombstone_marker_revision(root)
+    return (
+        _basis_key(root, who, basis) == admission.authority.basis_key
+        and markers is not None and markers == admission.authority.marker_revision
+        and _snapshot_key(root) == admission.snapshot
+    )
 
 
 @contextmanager
-def retained_report_admission(identity: tuple[str, str | None]) -> Iterator[None]:
+def retained_report_admission(identity: _RetainedAdmission) -> Iterator[None]:
     """Bind the authority the transport will recheck before releasing this report."""
     token = _RETAINED_ADMISSION.set(identity)
     try:
@@ -209,20 +234,23 @@ def report(
     authority = _authority_binding(root, who)
     if not authority.complete:
         raise _not_found()
+    try:
+        path, _ = reclassify_source._require_source(root, path)
+    except reclassify_source.ReclassifyError:
+        raise _not_found() from None
     snapshot_key = _snapshot_key(root)
     args = {"path": path, "source_kind": source_kind, "domain": domain}
     request_key = _digest(args)
     follow = {"operation": "propose-reclassification",
               **{key: value for key, value in args.items() if value is not None}}
     if preview_run_id is not None:
-        current = (authority.key, snapshot_key if authority.depends_on_membership else None)
-        if _RETAINED_ADMISSION.get() != current:
+        if _RETAINED_ADMISSION.get() != _RetainedAdmission(authority, snapshot_key):
             raise _not_found()
         result = maintenance_jobs.source_preview_status(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,
         )
-        if (authority.depends_on_membership and result.get("state") == maintenance_jobs.COMPLETED
+        if (result.get("state") == maintenance_jobs.COMPLETED
                 and result.get("snapshot_current") is not True):
             raise _stale_report()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":
@@ -240,7 +268,7 @@ def report(
         )
     if _authority_binding(root, who) != authority:
         raise _not_found()
-    if authority.depends_on_membership and _snapshot_key(root) != snapshot_key:
+    if _snapshot_key(root) != snapshot_key:
         raise _stale_report()
     if preview_run_id is None or result.get("state") == maintenance_jobs.RUNNING or result.get("next_cursor") is not None:
         follow["preview_run_id"] = result["run_id"]

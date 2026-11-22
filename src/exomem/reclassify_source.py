@@ -636,7 +636,8 @@ def propose(
 
     try:
         admission = preview_release_policy(vault_root, who)
-        visible = _preview_referrer_view(vault_root, who, admission.erasure.paths)
+        visible = _preview_referrer_view(vault_root, who, admission.erasure.paths,
+                                         bounded=candidate_limit is not None)
         with nullcontext() if paged else foreground_priority.cancellable(owner):
             foreground_priority.check_cancelled()
             result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner,
@@ -804,24 +805,28 @@ def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | Non
 
 
 @dataclass(frozen=True)
-class PreviewReleaseAuthority:
+class PreviewReleaseBasis:
     policy_fingerprint: str
     access_fingerprint: str
     session_stamp: tuple[str | None, tuple[str, ...]] | None
-    erasure: lifecycle.TombstoneSnapshot
-    depends_on_membership: bool
     complete: bool
 
 
-def preview_release_authority(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseAuthority:
-    """Read the live release basis, including whether the whole report is available."""
+@dataclass(frozen=True)
+class PreviewReleaseAuthority:
+    basis: PreviewReleaseBasis
+    erasure: lifecycle.TombstoneSnapshot
+
+
+def preview_release_basis(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseBasis:
+    """Read current actor and policy scope independently of lifecycle history."""
     compiled = policy.load(vault_root)
-    access_snapshot = access.publication_policy_snapshot(vault_root)
-    access_identity, indexable = access.indexable_filter(vault_root)
-    if access_snapshot is None or access_snapshot.fingerprint != access_identity:
+    exact_access = access.publication_policy_exclusions(vault_root)
+    if exact_access is None:
         raise preview_warming()
+    access_identity, excludes_paths = exact_access
     complete = not (
-        compiled.blocked or compiled.conflicted or indexable is not None
+        compiled.blocked or compiled.conflicted or excludes_paths
         or any(rule.audience == who.audience_id and rule.options.get("suspended") is not True
                for rule in compiled.rules)
     )
@@ -835,20 +840,30 @@ def preview_release_authority(vault_root: Path, who: RequestPrincipal) -> Previe
                 )
         except AuthorizationSessionUnavailable:
             raise preview_warming() from None
-    erasure = lifecycle.tombstone_snapshot(vault_root)
+    return PreviewReleaseBasis(compiled.fingerprint, access_identity, session_stamp, complete)
+
+
+def preview_release_authority(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseAuthority:
+    basis = preview_release_basis(vault_root, who)
+    try:
+        erasure = lifecycle.tombstone_snapshot(vault_root)
+    except request_budget.ReadBudgetExhausted:
+        stop = file_watcher.observing_inbound_recovery_stop(vault_root)
+        if stop is not None:
+            from .find import schedule_tombstone_proof_warm
+
+            schedule_tombstone_proof_warm(vault_root, stop=stop)
+        raise
     request_budget.checkpoint()
     if lifecycle.FAIL_CLOSED_TOMBSTONE in erasure.paths:
         raise preview_warming()
-    return PreviewReleaseAuthority(
-        compiled.fingerprint, access_identity, session_stamp, erasure,
-        not compiled.empty or access_identity != access.MISSING_POLICY_FINGERPRINT, complete,
-    )
+    return PreviewReleaseAuthority(basis, erasure)
 
 
 def preview_release_policy(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseAuthority:
     """Admit a managed report only when the caller can approve its full write plan."""
     authority = preview_release_authority(vault_root, who)
-    if not authority.complete:
+    if not authority.basis.complete:
         raise OpError(
             "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
             "The current policy does not authorize a complete managed reference report.",
@@ -857,11 +872,24 @@ def preview_release_policy(vault_root: Path, who: RequestPrincipal) -> PreviewRe
 
 
 def _preview_referrer_view(
-    vault_root: Path, who: RequestPrincipal, tombstones: frozenset[str],
+    vault_root: Path, who: RequestPrincipal, tombstones: frozenset[str], *,
+    bounded: bool = False,
+    failure: Callable[[], Exception] | None = None,
 ) -> Callable[[str], bool]:
-    keep = egress.release_walk_filter(vault_root, principal=who, tombstones=tombstones)
+    def unavailable() -> None:
+        raise (failure or preview_warming)()
+
+    def read_inline_page(path: str) -> bytes:
+        try:
+            return _read_inline_text(vault_root, vault_root.resolve() / path)[0].encode()
+        except (OSError, PathGuardError, UnicodeError):
+            raise (failure or preview_warming)() from None
+
+    read_page = read_inline_page if bounded else None
+    keep = egress.release_walk_filter(vault_root, principal=who, tombstones=tombstones,
+                                     read_page=read_page, on_unavailable=unavailable)
     if keep is None:
-        keep = egress.content_permits_filter(vault_root, who)
+        keep = egress.content_permits_filter(vault_root, who, read_page=read_page, on_unavailable=unavailable)
 
     def visible(path: str) -> bool:
         request_budget.checkpoint()
@@ -922,14 +950,12 @@ def _managed_preview_inbound(
 
     try:
         inbound = vault.cached_inbound_wikilinks(
-            vault_root, rel, read_hashes=read_hashes, candidate_limit=candidate_limit,
+            vault_root, rel, visible=visible, read_hashes=read_hashes, candidate_limit=candidate_limit,
         )
     except vault.InboundCandidatesExceeded:
         raise PreviewNeedsJob() from None
     if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
-            if visible is not None:
-                return [hit for hit in inbound if visible(hit.path)]
             return inbound
         find.schedule_inbound_rebuild(vault_root, stop=owner)
     raise preview_warming()
@@ -1196,7 +1222,7 @@ def _write_correction(
 
     approved_generation = current_reference_generation() if paged else None
     approved_view = (
-        _preview_referrer_view(vault_root, who, approved_generation[1].erasure.paths)
+        _preview_referrer_view(vault_root, who, approved_generation[1].erasure.paths, failure=_stale_paged_approval)
         if approved_generation is not None else None
     )
     if approved_view is not None and not approved_view(rel):
@@ -1218,7 +1244,8 @@ def _write_correction(
             current_generation, current_authority = current_reference_generation()
             if (current_generation, current_authority) != approved_generation:
                 raise _stale_paged_approval()
-            still_visible = _preview_referrer_view(vault_root, who, current_authority.erasure.paths)
+            still_visible = _preview_referrer_view(vault_root, who, current_authority.erasure.paths,
+                                                  failure=_stale_paged_approval)
             if not still_visible(rel) or any(not still_visible(item.path) for item in plans):
                 raise _stale_paged_approval()
             try:

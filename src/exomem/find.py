@@ -8668,6 +8668,7 @@ _RECALL_RESOLVER_REBUILDS: set[Path] = set()
 _QUERY_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with an inbound-index background build running; same lock as above.
 _INBOUND_INDEX_REBUILDS: set[Path] = set()
+_TOMBSTONE_PROOF_REBUILDS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -8769,6 +8770,16 @@ def schedule_inbound_rebuild(vault_root: Path, *, stop: threading.Event | None =
         lambda root: vault_module.prime_inbound_index(root, defer_to_patch=stop is not None),
         "exomem-inbound-index-warm",
         stop=stop,
+    )
+
+
+def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) -> None:
+    """Warm the shared exact proof after a managed preview reaches its deadline."""
+    from .governance import lifecycle
+
+    _schedule_resolver_warm(
+        vault_root, _TOMBSTONE_PROOF_REBUILDS, lifecycle.tombstone_snapshot,
+        "exomem-tombstone-proof-warm", stop=stop,
     )
 
 

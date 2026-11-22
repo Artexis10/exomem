@@ -520,6 +520,7 @@ def register_rest_facade(
                                     from .reclassification_preview import (
                                         retained_report_admission,
                                         retained_report_identity,
+                                        retained_report_still_current,
                                     )
 
                                     with request_budget.checking(check):
@@ -544,9 +545,9 @@ def register_rest_facade(
                             with request_budget.checking(check):
                                 if await run_in_threadpool(managed_preview_stop, vault_root, bound_principal) is None:
                                     raise authorization_request.AuthorizationContextUnavailable
-                                if retained_identity is not None and await run_in_threadpool(
-                                    retained_report_identity, vault_root, bound_principal,
-                                ) != retained_identity:
+                                if retained_identity is not None and not await run_in_threadpool(
+                                    retained_report_still_current, vault_root, bound_principal, retained_identity,
+                                ):
                                     raise authorization_request.AuthorizationContextUnavailable
                             check()
                             preview_response = RestJSONResponse(cli_ops.envelope(True, data=result))

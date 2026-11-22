@@ -197,6 +197,8 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
 def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     vault, source_schema, monkeypatch,
 ):
+    from dataclasses import replace
+
     from _public_call import public_call
     from fastmcp import Client
     from record_fixtures import copy_dataset_fixture
@@ -219,8 +221,10 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 3)
     source = _capture(vault, source_schema, title="Field measurements").path
     paths = {f"{KB}/Notes/measurement-{index}.md" for index in range(6)}
+    title_link = f"[[{Path(source).stem}]]"
     for path in paths:
-        (vault / path).write_text(f"See [[{source}]].\n", encoding="utf-8")
+        extra = f" Also see {title_link}." if path == min(paths) else ""
+        (vault / path).write_text(f"See [[{source}]].{extra}\n", encoding="utf-8")
     evidence = f"{KB}/Evidence/field-log.md"
     (vault / evidence).parent.mkdir(parents=True, exist_ok=True)
     (vault / evidence).write_text(f"# Field log\n\nSee [[{source}]].\n", encoding="utf-8")
@@ -253,18 +257,31 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             async def call(tool, **arguments):
                 return await _call(client, *public_call(tool, arguments))
 
-            args = {"path": source, "source_kind": "dataset-export"}
+            args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
 
             async def preview(**extra):
                 return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
 
             async def ready(run_id):
                 async with asyncio.timeout(12):
-                    while (status := await preview(preview_run_id=run_id)).get("state") == "running":
+                    while True:
+                        status = await preview(preview_run_id=run_id)
+                        if (status.get("state") != "running"
+                                and status.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            break
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
                 assert status.get("state") == "completed", status
                 return status
+
+            async def fresh_report():
+                async with asyncio.timeout(12):
+                    while True:
+                        job = await preview()
+                        if job.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                            assert job.get("run_id"), job
+                            return await ready(job["run_id"])
+                        await asyncio.sleep(0.05)
 
             queued = await preview()
             assert queued["state"] == "running" and "preview_digest" not in queued, queued
@@ -278,10 +295,18 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
 
             terminal = await ready(run_id)
             digest = terminal["result"]["preview_digest"]
+            assert terminal["result"]["path"] == source
             cursor = terminal["next_cursor"]
+            capture_admission = reclassification_preview.retained_report_identity
+
+            def foreign_receipt(*args):
+                admission = capture_admission(*args)
+                assert admission is not None
+                return replace(admission, authority=replace(admission.authority, key="foreign"))
+
             with monkeypatch.context() as changed_admission:
                 changed_admission.setattr(
-                    reclassification_preview, "retained_report_identity", lambda *_: ("other-authority", None),
+                    reclassification_preview, "retained_report_identity", foreign_receipt,
                 )
                 refused = await preview(preview_run_id=run_id, cursor=cursor)
             assert refused["error"]["code"] == "NOT_FOUND", refused
@@ -304,20 +329,21 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             seen = set()
             while cursor is not None:
                 page = await preview(preview_run_id=run_id, cursor=cursor)
-                if not seen:
-                    assert page["snapshot_current"]
-                    unrelated = vault / KB / "Notes" / "unrelated.md"
-                    unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
-                    freshness.on_files_changed(vault, changed=[unrelated])
-                    vault_module.on_inbound_files_changed(
-                        vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
-                    )
-                else:
-                    assert not page["snapshot_current"]
+                assert page["snapshot_current"]
                 seen.update((entry["kind"], entry["path"]) for entry in page["entries"])
                 cursor = page["next_cursor"]
             assert {("rewritten", path) for path in paths}.issubset(seen)
             assert ("pointer_repointed", evidence) in seen
+
+            unrelated = vault / KB / "Notes" / "unrelated.md"
+            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[unrelated])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
+            )
+            stale = await preview(preview_run_id=run_id)
+            assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
+            assert "result" not in stale
 
             governance = vault / KB / "_Governance"
             scope = governance / "scopes" / "field-log.yaml"
@@ -341,8 +367,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert "references" not in restricted and "run_id" not in restricted
             erased = sorted(paths)[0]
             rule.write_text(rule.read_text().replace("audience: owner", "audience: principal:report-reader"))
-            bridge = vault / KB / "Notes" / "unapproved-summary.md"
-            title_link = f"[[{Path(source).stem}]]"
+            bridge = vault / KB / "Notes" / Path(source).name
             bridge.write_text(_bridge_text(sources=f"  - '{title_link}'\n",
                                            relations=f"- derived_from {title_link}\n"), encoding="utf-8")
             bridge_rel = bridge.relative_to(vault).as_posix()
@@ -352,7 +377,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             lexstore.ensure_fresh(vault)
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
-            governed = await ready((await preview())["run_id"])
+            governed = await fresh_report()
             assert governed["result"]["references"] == terminal["result"]["references"], governed
             bridge.unlink()
             deletion = await call("manage_memory_file", operation="delete", path=erased, confirm=True)
@@ -382,7 +407,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
 
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
-            refreshed = await ready((await preview())["run_id"])
+            refreshed = await fresh_report()
             prepare_epoch = graph_sync.prepare_rename_epoch
             prior_graph = graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)
             late = vault / KB / "Notes" / "late-referrer.md"
@@ -406,7 +431,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             lexstore.ensure_fresh(vault)
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
-            refreshed = await ready((await preview())["run_id"])
+            refreshed = await fresh_report()
             corrected = await call("manage_memory_file", operation="reclassify", **args,
                                    reason="Correct the Source kind", preview_digest=refreshed["result"]["preview_digest"])
             destination = refreshed["result"]["destination"]
@@ -552,7 +577,7 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
 @pytest.mark.parametrize("fault", [
     "release", "render", "cold-resolver", "uncertified-resolver", "removed-link", "changed-source", "catalogue-link",
     "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "catalogue-unsupported-overflow",
-    "inbound-freshness-lock",
+    "inbound-freshness-lock", "unreadable-container",
 ])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
@@ -561,6 +586,7 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
     from test_agent_tool_surface import _call
 
     from exomem import (
+        document_containers,
         file_watcher,
         find,
         freshness,
@@ -638,6 +664,15 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         monkeypatch.setattr(lexstore, "_usable", lambda: False)
         if fault == "catalogue-unsupported-overflow":
             monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 0)
+    elif fault == "unreadable-container":
+        parent_for_path = document_containers.parent_for_path
+
+        def unreadable_parent(root, path, **kwargs):
+            if path == referrer:
+                raise OSError("referrer custody could not be read")
+            return parent_for_path(root, path, **kwargs)
+
+        monkeypatch.setattr(document_containers, "parent_for_path", unreadable_parent)
     elif fault == "inbound-freshness-lock":
         lookup_inbound = vault_module.cached_inbound_wikilinks
         held = threading.Event()
@@ -687,7 +722,11 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
                     "source_kind": "dataset-export", "preview_run_id": run_id,
                 })
                 async with asyncio.timeout(5):
-                    while (retry := await _call(client, *status)).get("state") == "running":
+                    while True:
+                        retry = await _call(client, *status)
+                        if (retry.get("state") != "running"
+                                and retry.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            break
                         await asyncio.sleep(0.1)
             error = retry.get("error", {})
             if fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):

@@ -1282,7 +1282,7 @@ def _move_file_local(
     else:
         inbound = (
             find_inbound_wikilinks(
-                vault_root, old_rel, visible=visible if limited_mover else None, lineage=False
+                vault_root, old_rel, visible=referrer_visible, lineage=False
             )
             if update_wikilinks
             else []

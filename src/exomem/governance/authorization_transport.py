@@ -694,6 +694,7 @@ class AuthorizationSessionMiddleware(Middleware):
                         from ..reclassification_preview import (
                             retained_report_admission,
                             retained_report_identity,
+                            retained_report_still_current,
                         )
 
                         retained_identity = await anyio.to_thread.run_sync(
@@ -745,9 +746,9 @@ class AuthorizationSessionMiddleware(Middleware):
                         managed_preview_stop, self.vault_root, bound,
                     ) is None:
                         raise AuthorizationContextUnavailable
-                    if retained_identity is not None and await anyio.to_thread.run_sync(
-                        retained_report_identity, self.vault_root, bound,
-                    ) != retained_identity:
+                    if retained_identity is not None and not await anyio.to_thread.run_sync(
+                        retained_report_still_current, self.vault_root, bound, retained_identity,
+                    ):
                         raise AuthorizationContextUnavailable
                     request_budget.checkpoint()
                 except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):

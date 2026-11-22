@@ -2115,25 +2115,38 @@ def _independent_content_permits(vault_root: Path, path: str, who: RequestPrinci
 
 
 def _container_parents_permit(vault_root: Path, path: str, who: RequestPrincipal, *,
-                              snapshot: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+                              snapshot: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None,
+                              on_unavailable: Callable[[], None] | None = None) -> bool:
     """A container member's current parents meet every content floor before the member does."""
     from .. import document_containers
 
     try:
         dependency = document_containers.parent_for_path(vault_root, path, content=snapshot, artifact_copy=artifact_copy)
-    except (ValueError, OSError, reserved_paths.ReservedPathLeafError):
+    except ValueError:
         return False
-    return dependency is None or all(content_permits(vault_root, parent, who) for parent in dependency)
+    except (OSError, reserved_paths.ReservedPathLeafError):
+        if on_unavailable is not None:
+            on_unavailable()
+        return False
+    return dependency is None or all(
+        content_permits(vault_root, parent, who, on_unavailable=on_unavailable) for parent in dependency
+    )
 
 
 def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
-                    snapshot: bytes | None = None, derived: bool = False, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+                    snapshot: bytes | None = None, derived: bool = False,
+                    artifact_copy: reserved_paths.GenericFileCopy | None = None,
+                    on_unavailable: Callable[[], None] | None = None) -> bool:
     """Apply current container dependencies and independent content floors to a real path."""
-    return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy)
+    return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy,
+                                      on_unavailable=on_unavailable)
             and _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
 
 
-def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
+def content_permits_filter(
+    vault_root: Path, who: RequestPrincipal, *,
+    read_page: Callable[[str], bytes] | None = None, on_unavailable: Callable[[], None] | None = None,
+) -> Callable[[str], bool]:
     """`content_permits` for each path of one walk.
 
     Inside a request scope the connector snapshot is read once for the walk;
@@ -2149,11 +2162,14 @@ def content_permits_filter(vault_root: Path, who: RequestPrincipal) -> Callable[
     containers: dict[str, bool] = {}
 
     def containers_permit(path: str) -> bool:
+        if read_page is not None:
+            return _container_parents_permit(vault_root, path, who, snapshot=read_page(path),
+                                             on_unavailable=on_unavailable)
         if scope is None or state_paths.request_memo_scope() is not scope:
-            return _container_parents_permit(vault_root, path, who)
+            return _container_parents_permit(vault_root, path, who, on_unavailable=on_unavailable)
         verdict = containers.get(path)
         if verdict is None:
-            verdict = _container_parents_permit(vault_root, path, who)
+            verdict = _container_parents_permit(vault_root, path, who, on_unavailable=on_unavailable)
             if verdict:
                 containers[path] = True
         return verdict
@@ -2391,6 +2407,8 @@ def _decide_path(
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
     tombstones: frozenset[str] | None = None,
     principal: RequestPrincipal | None = None,
+    page_snapshot: bytes | None = None,
+    on_unavailable: Callable[[], None] | None = None,
 ) -> Decision | None:
     """Decide one path, memoized per request identity AND page identity.
 
@@ -2420,7 +2438,8 @@ def _decide_path(
     who = principal if principal is not None else effective_principal()
     if who.audience_id != audience:
         who = RequestPrincipal(audience_id=audience)
-    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
+    if not content_permits(vault_root, rel_path, who, snapshot=page_snapshot, artifact_copy=artifact_copy,
+                           on_unavailable=on_unavailable):
         return Decision(DISCLOSURE_MIN)
     from ..collection_store.connection import CollectionStoreError
 
@@ -2441,7 +2460,7 @@ def _decide_path(
     live_content_hash: str | None = artifact_copy.sha256 if artifact_copy is not None else None
     if _is_markdown_path(rel_path) and artifact_copy is None:
         try:
-            raw = _page_bytes(vault_root, rel_path)
+            raw = _page_bytes(vault_root, rel_path) if page_snapshot is None else page_snapshot
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
@@ -8075,6 +8094,8 @@ def release_walk_filter(
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
     tombstones: frozenset[str] | None = None,
+    read_page: Callable[[str], bytes] | None = None,
+    on_unavailable: Callable[[], None] | None = None,
 ) -> Any:
     """A per-file `keep(rel_path) -> bool` predicate for a leaf that WALKS.
 
@@ -8106,12 +8127,12 @@ def release_walk_filter(
         who = principal if principal is not None else effective_principal()
         if unrestricted_content_access(vault_root, who):
             return None
-        return content_permits_filter(vault_root, who)
+        return content_permits_filter(vault_root, who, read_page=read_page, on_unavailable=on_unavailable)
 
     vault_root = Path(vault_root)
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
-    content_ok = content_permits_filter(vault_root, who)
+    content_ok = content_permits_filter(vault_root, who, on_unavailable=on_unavailable)
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     verdicts: dict[tuple, tuple[bool, bool]] = {}
@@ -8125,7 +8146,8 @@ def release_walk_filter(
         if fail_closed:
             _record_blocked_outcome(who.audience_id)
             return False, False
-        if not content_ok(rel_path):
+        raw = read_page(rel_path) if read_page is not None else None
+        if raw is None and not content_ok(rel_path):
             return False, True
         boundary_key = connector_boundary.cache_identity(vault_root, who)
         cached = verdicts.get((rel_path, boundary_key))
@@ -8141,7 +8163,11 @@ def release_walk_filter(
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
             tombstones=tombstones,
+            page_snapshot=raw,
+            on_unavailable=on_unavailable,
         )
+        if decision is None and on_unavailable is not None:
+            on_unavailable()
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         _outcome_for_decision(
             vault_root,
