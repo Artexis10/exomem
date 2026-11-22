@@ -178,7 +178,10 @@ def _released_for_model(
         source = project_source(root, path, caller, check=check)
     if source is None:
         return None
-    shared = project_source(root, path, caller, expected_hash=source.raw_hash, provider=provider, check=check)
+    # A local placement's audience is the caller, so its projection is the caller's own; only a provider needs another.
+    shared = source if provider is None else project_source(
+        root, path, caller, expected_hash=source.raw_hash, provider=provider, check=check,
+    )
     if shared is None:
         return None
     text = egress.redact_withheld_references(
@@ -308,13 +311,15 @@ def select_methods(
         if not carriers or limit <= 0 or not turn.strip():
             return [], {"state": "empty"}
         budget = request_budget.current()
+        allowance = config.timeout_seconds
+        if budget is not None:
+            # One deadline for reading the carriers and the model call together: at most half the request's budget,
+            # so a door that its client abandons early (the start-of-turn hook) still answers when the model is slow.
+            allowance = min(allowance, budget.seconds / 2, budget.remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS)
+        deadline = started + allowance
 
         def judgment_timeout() -> float:
-            timeout = config.timeout_seconds
-            if budget is not None:
-                # At most half the request's budget, so a door that a client abandons early (the start-of-turn hook)
-                # still answers inside its patience when the model is slow.
-                timeout = min(timeout, budget.seconds / 2, budget.remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS)
+            timeout = deadline - time.monotonic()
             if timeout <= 0:
                 raise TimeoutError("no method-fit allowance")
             return timeout

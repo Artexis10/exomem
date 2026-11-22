@@ -301,7 +301,7 @@ def test_method_fit_sends_an_api_provider_only_what_that_provider_may_see(vault:
     manifest = _page(vault, "firing-log", body=f"One item per firing. See [[{hidden}]] for the calibration.\n")
     config = context_fit.Placement(
         placement="api", runtime="openai", endpoint="https://provider.invalid/v1", model="fixture-model",
-        model_revision="fixture-model", runtime_version="fixture-runtime", timeout_seconds=1.0, max_input_chars=32000,
+        model_revision="fixture-model", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=32000,
         max_output_tokens=200, resource_allowance_gib=1.0, provider_audience="fixture-provider", disclosure_authorized=True,
     )
     sent = []
@@ -326,3 +326,44 @@ def test_method_fit_sends_an_api_provider_only_what_that_provider_may_see(vault:
     payload = json.dumps(sent)
     assert hidden not in payload and "Provider-confined" not in payload
     assert [item["label"] for item in sent[0]["methods"]] == ["kiln-firing", "Firing log"]
+
+
+def test_method_fit_reading_and_model_call_share_one_deadline_of_half_the_request(vault: Path) -> None:
+    """The half-budget cap once covered only the model call, so slow carrier reading pushed the hook door past its client."""
+    import time
+
+    from exomem import request_budget
+
+    skill = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=30.0, max_input_chars=32000,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    asked = []
+
+    def slow_description(source):
+        time.sleep(0.4)
+        return "Fire the kiln."
+
+    def handler(request):
+        asked.append(request)
+        return httpx.Response(500)
+
+    carriers = [{"name": f"m{n}", "path": skill, "kind": "skill", "description_of": slow_description, "max_chars": 200}
+                for n in range(12)]
+    # A 6 s door: half is 3 s, while the request's own remaining time minus its reserve would allow 5 s.
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=6.0))
+    try:
+        with principal.request_scope(OWNER):
+            caller = context_views.CallerView.current(vault)
+            started = time.monotonic()
+            chosen, status = context_fit.select_methods(
+                vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+                limit=1, placement=config, transport=httpx.MockTransport(handler),
+            )
+            elapsed = time.monotonic() - started
+    finally:
+        request_budget.reset_current(token)
+    assert chosen == [] and status["state"] == "unavailable"
+    assert elapsed < 3.5 and not asked  # stopped at the 3 s judgment deadline, before any model call
