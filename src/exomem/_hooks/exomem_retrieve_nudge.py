@@ -216,8 +216,9 @@ _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last che
 _CAPTURE_POLICY_MAX_CHARS = 1600
 # The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
 # text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
-# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus 1
-# (the separator) plus the rules allowance.
+# no room from the working set or from `say`: the charged working set plus `rules` is at most the working-set
+# ceiling plus 1 (the separator) plus the rules allowance. The positions, stance, skills and profile blocks render
+# beside them under their own bounds.
 # A longer text is omitted whole, never cut.
 _CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
