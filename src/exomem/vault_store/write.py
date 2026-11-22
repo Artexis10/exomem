@@ -725,18 +725,18 @@ def _incoming_graph_pages(
 @contextmanager
 def _reserve_payload_pages(
     writer: CollectionWriter, puts: tuple[PagePut, ...], moves: dict[str, PageMove],
-) -> Iterator[tuple[dict[str, _PreparedOriginal], derive.ReserveGraph | None]]:
+) -> Iterator[tuple[dict[str, _PreparedOriginal], derive.ReserveGraph | None, Callable[[], None]]]:
     """Protect original payload allocation and its direct write metadata on the vault device."""
     from .. import media_capacity
 
     originals = tuple(put for put in puts if put.media_allocation)
     if not originals and not moves:
-        yield {}, None
+        yield {}, None, lambda: None
         return
     database = writer.handle.path
     with media_capacity.upload_room(writer.root, device=database.stat().st_dev, reserve=True) as room:
         if room is None:
-            yield {}, None
+            yield {}, None, lambda: None
             return
         conn = writer.connection
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
@@ -787,12 +787,13 @@ def _reserve_payload_pages(
         graph = _CellPages()
         replaced = _CellPages()  # the graph rows of re-derived pages, deleted before their records land
         replaced_layouts: dict[str, tuple[list[str], list[int], list[tuple[str, ...]]]] = {}
-        recorded = False
+        recorded = 0  # the checkpoint target this commit last recorded
+        estimated = 0  # the largest checkpoint target that its estimates reached
         graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
         encoding, = conn.execute("PRAGMA encoding").fetchone()
 
         def reserve() -> None:
-            nonlocal recorded
+            nonlocal recorded, estimated
             # WAL writes each dirty page once per transaction, so the starting page count also
             # bounds the existing pages it rewrites. New graph pages also grow the database.
             graph_pages = graph.added(usable, depth)
@@ -803,13 +804,19 @@ def _reserve_payload_pages(
                 "wal_bytes": 32 + (wal_pages + graph_pages + redistributed) * (page_size + 24),
                 "upload_size": upload_size,
             }
-            # Record the target once. Each later page only checks the room in memory; the commit
-            # records the real page count below, still under the allocation lock.
+            # Record the target once. Each later page only checks the room in memory, and `settle`
+            # records the final estimate before COMMIT; the real page count replaces it after.
             if recorded:
-                room.require_store_pages(database, **estimate)
+                estimated = max(estimated, room.require_store_pages(database, **estimate))
             else:
                 room.reserve_store_pages(database, **estimate)
-                recorded = True
+                recorded = estimated = estimate["target_bytes"]
+
+        def settle() -> None:
+            nonlocal recorded
+            if estimated > recorded:
+                room.set_store_pages(database, estimated)
+                recorded = estimated
 
         def reserve_graph(rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
             cells = _incoming_graph_pages(conn, rel, records, usable, encoding=encoding, layouts=graph_layouts)
@@ -821,7 +828,7 @@ def _reserve_payload_pages(
 
         reserve()
         try:
-            yield prepared, reserve_graph
+            yield prepared, reserve_graph, settle
         finally:
             try:
                 target = conn.execute("PRAGMA page_count").fetchone()[0] * page_size
@@ -861,7 +868,7 @@ def commit(
             ).fetchone():
                 raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
         retained_moves = _marked_moves(tx, change)
-        prepared, reserve_graph = allocations.enter_context(
+        prepared, reserve_graph, settle_reservation = allocations.enter_context(
             _reserve_payload_pages(writer, change.puts, retained_moves),
         )
         _degrade_moves(tx, change.paths)
@@ -886,6 +893,7 @@ def commit(
             prepared_lexical={rel: original.lexical for rel, original in prepared.items()},
             reserve_graph=reserve_graph,
         )
+        settle_reservation()
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
