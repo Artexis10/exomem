@@ -36,7 +36,34 @@ A vault that never runs a `hybrid` passage search builds no terms table, unless 
 
 A rebuild of the whole sidecar replaces every chunk row in one publication transaction. The terms triggers would derive every row's stems inside that transaction, and at about 200,000 chunks the write lock then outlasts the 5-second busy timeout of other writers. The rebuild therefore drops its own connection's triggers and deletes the coverage marker in that transaction. The background backfill then rebuilds the table in committed batches, and `hybrid` requests rank by dense similarity until it finishes.
 
-The query keeps the rarest 16 units through the lexical store's term budget and drops a unit that occurs on more than a tenth of the chunks. On 40,500 chunks of 40-word prose in 1,500 Sources, the lexical stage measured p95 from 10 to 26 ms in process for queries of 3 to 250 words. The full backfill took 1.3 s. Fusion of two 200-entry rankings costs under a millisecond, and the dense partial sort to 200 entries costs no more than one to `limit`. The passage latency bars at the MCP boundary stay unchanged, and the reference qualification must pass with fusion on.
+### Rank lexical candidates from the terms index alone
+
+The lexical stage is on the request path of every `hybrid` call, so its cost counts against the passage latency bars. Three choices keep it small.
+
+The terms table alone orders the matches by BM25, and a map from rowid to path and chunk number names them. The stage keeps the eligible matches in rank order until it holds `limit` rows. A join or a lookup of each match's chunk row reads one leaf page of the chunks table per candidate. A search reads a few hundred of them, spread over the 21 MB of leaf pages on the 40,500-chunk reference. In the 3 GiB reference container, the file cache reaches the memory limit, and the kernel reads evicted pages again. One hybrid segment then read 209 MB from disk in its single-caller window, and its mean tool time was 282 ms. Another, which read 4.5 MB, had a mean of 133 ms. The map is read from the primary key index, which covers the path and chunk number, so building it reads no chunk row. It took 20 to 25 ms and 5.4 MB on the reference.
+
+BM25 term selection also needs the row count and each query stem's count of rows. The index keeps the map and these counts for one sidecar token: the epoch, generation and instance of the chunk proof. When a backfill proves coverage, the index reads the map and every stem's count at once. After a chunk write, the first search at the new token builds the map, and each stem's count is read once, on the first search that needs it. One build runs per token, and concurrent searches wait for it. A map and counts from an older token are replaced and never edited. The index keeps no query results, rankings or embeddings across requests.
+
+The stage reads the sidecar on a read-only connection, as the chunk inventory does, without the write ceremony of a sidecar connection. It serves no text: the fused top `limit` is verified against the published bytes as before.
+
+### Keep the rarest distinctive units
+
+The MATCH reads every row of each stem that it asks for, so the rows of common units set its cost. From 500 chunks, a query unit on more than 3% of the chunks is common and is dropped. The query keeps the rarest 6 remaining units. A query of only common units gets no lexical candidates, and its fused ranking equals its dense ranking. Below 500 chunks the MATCH is cheap whatever it reads, so no unit is common there.
+
+The budget was chosen by measurement on 49 real chat questions over 33,454 chunks, with key coverage counted in the fused top 5, 15 and 30. On the 40,500-chunk reference, the lexical stage was timed in process for the 40 reference queries, with all counts read.
+
+| Budget | Top 5 | Top 15 | Top 30 | Lexical stage median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Dense ranking alone | 6 | 13 | 21 | none |
+| Previous: rarest 16 under 10%, else the rarest common units | 11 | 20 | 27 | 5.7 / 14.6 ms |
+| Rarest 6 under 2% | 6 | 19 | 24 | 1.9 / 3.3 ms |
+| Rarest 6 under 3% (chosen) | 9 | 21 | 25 | 2.2 / 3.1 to 4.1 ms |
+| Rarest 16 under 3% | 10 | 20 | not run | 2.7 / 6.2 ms |
+| Rarest 16 under 10%, no common units kept | 11 | not run | not run | 5.2 / 12.7 ms |
+
+The chosen budget keeps the top-15 gain and most of the top-5 gain. It gives up 2 cases at top 30. Keeping the rarest common units when no other unit remained cost a p95 of 14.3 ms under 2%, because 5 of the 40 reference queries have no unit under that share. The previous budget measured on the same code, so its cost is the cost of the rows it reads.
+
+Fusion of two 200-entry rankings costs under a millisecond, and the dense partial sort to 200 entries costs no more than one to `limit`. The passage latency bars at the MCP boundary stay unchanged, and the reference qualification must pass with fusion on. In process on the reference, a `hybrid` search cost 6 to 7 ms more than a dense one, of which the lexical stage took 3.5 ms. The 22 November qualification met the single-caller bar with fusion on and missed the four-caller bar by 24.9 ms; task 3.2 records the numbers.
 
 ## Risks and Trade-offs
 

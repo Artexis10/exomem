@@ -88,6 +88,8 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
     """Defect: the archive omits an evicted original, live or in Trash, or a note whose companion header cannot be
     read, or carries what the runtime wrote after the pause."""
     vault = cell.vault
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     cached = cell.original("cached.txt", b"cached bytes")
     _offload(vault, cached)
     evicted = cell.original("evicted.txt", b"evicted bytes")
@@ -105,8 +107,6 @@ def test_an_export_carries_every_member_and_each_evicted_original_byte_identical
     note.write_text("written before the pause")
 
     staging = tmp_path_factory.mktemp("staging")
-    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
-    monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", CELL)
     monkeypatch.setenv("SSL_CERT_FILE", str(storage["ca"]))
     common = ["--export-id", str(uuid.uuid4()), "--max-bytes", str(PLENTY), "--vault", str(vault),
               "--staging", str(staging)]

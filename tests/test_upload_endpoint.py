@@ -353,9 +353,14 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     events: list[str] = []
+    real_manager = writer_lease.get_manager()
 
     class RecordingManager:
         depth = 0
+
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
 
         def ensure_writer(self) -> None:
             events.append("legacy-ensure")
@@ -408,6 +413,10 @@ def test_upload_media_reconciliation_holds_the_boundary_only_for_its_commit(
     seen: list[tuple[int, int]] = []
 
     class Manager:
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
+
         @contextmanager
         def reserved_identity_guard(self, _vault, **_kwargs):
             yield
@@ -434,6 +443,7 @@ def test_upload_media_reconciliation_holds_the_boundary_only_for_its_commit(
             seen.append((before, depth))
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    real_manager = writer_lease.get_manager()
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
     monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
     response = client.post(

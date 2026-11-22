@@ -32,17 +32,19 @@ from __future__ import annotations
 import enum
 import json
 import logging
+import sqlite3
+import stat
 import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from contextlib import closing, contextmanager
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
-from .. import held_fs, lexstore, memory_refs, vault
+from .. import held_fs, lexstore, media_capacity, memory_refs, private_state, state_paths, vault
 from ..cli_ops import OpError
 from ..collection_store import ownership as collection_ownership
 from ..media_store import DEFER, SUPPRESS
@@ -66,10 +68,14 @@ MEDIA_STORE_UNREADABLE = "the media store could not say whether this original wa
 #: What ``ImportReport.unjudged`` says of a path whose commit met a busy vault boundary: ordinary
 #: contention, which the next event or sweep settles.
 BOUNDARY_BUSY = "the vault boundary was busy; the next event or sweep settles it"
+RENAME_PENDING = "the exact outside rename is waiting for revalidation"
 
 #: Paths settled by one store-thread job. A job holds the store thread, so a large change (a git
 #: pull) is cut into jobs that let a governed write run between them; each path is its own commit.
 APPLY_BATCH = 32
+_RENAME_STORE = "outside-renames"
+_RENAME_DATABASE = "pending.sqlite"
+_RENAME_COLUMNS = "id, source, destination, revision, sha256, version"
 
 #: The hash of the bytes that each unowned file's rows were derived from: its lexical row's, or, for
 #: a page that recall policy keeps out of the lexical rows (a raw Records item), its identity row's.
@@ -214,6 +220,23 @@ class _Rename:
     dst: str
     disk: OnDisk
     page: bool
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingRename:
+    id: int
+    src: str
+    dst: str
+    revision: int
+    sha256: str
+    version: str
+
+
+def _version(version: held_fs.FileVersion | None) -> str | None:
+    if version is None:
+        return None
+    return json.dumps(asdict(version), sort_keys=True, separators=(",", ":"))
 
 
 class Importer:
@@ -237,6 +260,7 @@ class Importer:
         self._rowless: dict[str, str] = {}
         #: The version and hash of each binary that the last sweep found equal to its record.
         self._clean: dict[str, tuple[held_fs.FileVersion, str]] = {}
+        self._rename_cursor = 0
 
     @staticmethod
     def takes(rel: str) -> bool:
@@ -274,6 +298,7 @@ class Importer:
         report = ImportReport()
         skipped: list[ownership.Skipped] = []
         with self._exclusive, self._filesystem() as filesystem:
+            self._retry_renames(filesystem, report)
             known = self._known_hashes()
             held_deletes = self._held_deletes()
             seen: set[str] = set()
@@ -381,6 +406,174 @@ class Importer:
             )
             return frozenset(path for (path,) in rows)
 
+    @contextmanager
+    def _rename_db(self, *, writable: bool = False) -> Iterator[sqlite3.Connection | None]:
+        directory = (private_state.store(self._root, _RENAME_STORE) if writable
+                     else state_paths.vault_state_dir(self._root) / _RENAME_STORE)
+        path = directory / _RENAME_DATABASE
+        try:
+            entry = path.lstat()
+        except FileNotFoundError:
+            if not writable:
+                yield None
+                return
+        else:
+            if not stat.S_ISREG(entry.st_mode):
+                raise OSError("outside rename state is not a regular file")
+        # Existing databases open without creation, but SQLite may need to
+        # roll back a hot journal left by a stopped importer.
+        target = str(path) if writable else path.absolute().as_uri() + "?mode=rw"
+        with closing(sqlite3.connect(target, uri=not writable, timeout=0.25)) as db:
+            if writable:
+                db.execute("PRAGMA synchronous=FULL")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS pending (id INTEGER PRIMARY KEY, "
+                "source TEXT NOT NULL UNIQUE, destination TEXT NOT NULL UNIQUE, "
+                "revision INTEGER NOT NULL, sha256 TEXT NOT NULL, version TEXT NOT NULL) STRICT"
+            )
+            yield db
+
+    def _pending_endpoints(self, rels: list[str]) -> set[str]:
+        endpoints = set()
+        if not rels:
+            return endpoints
+        with self._rename_db() as db:
+            if db is None:
+                return endpoints
+            for batch in _chunks(rels, read.KEYS_PER_QUERY // 2):
+                marks = ", ".join("?" * len(batch))
+                pairs = db.execute(
+                    f"SELECT source, destination FROM pending WHERE source IN ({marks}) "
+                    f"OR destination IN ({marks})", (*batch, *batch),
+                )
+                endpoints.update(path for pair in pairs for path in pair)
+        return endpoints
+
+    def _remember_rename(self, rename: _Rename) -> _PendingRename | None:
+        version = _version(rename.disk.version)
+        if version is None:
+            return None
+        pair = (rename.src, rename.dst, rename.revision, rename.disk.sha256, version)
+        with self._rename_db(writable=True) as db:
+            assert db is not None
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                existing = db.execute(
+                    f"SELECT {_RENAME_COLUMNS} FROM pending WHERE source IN (?, ?) "
+                    "OR destination IN (?, ?)", (rename.src, rename.dst, rename.src, rename.dst),
+                ).fetchall()
+                if existing:
+                    return _PendingRename(*existing[0]) if len(existing) == 1 and existing[0][1:] == pair else None
+                row = db.execute(
+                    "INSERT INTO pending(source, destination, revision, sha256, version) "
+                    "VALUES (?, ?, ?, ?, ?) RETURNING id", pair,
+                ).fetchone()
+            directory = state_paths.vault_state_dir(self._root) / _RENAME_STORE
+            private_state.sync_directory(directory)
+            private_state.sync_directory(directory.parent)
+        return _PendingRename(row[0], *pair)
+
+    def _retire_rename(self, pending: _PendingRename) -> None:
+        with self._rename_db(writable=True) as db:
+            assert db is not None
+            with db:
+                db.execute(
+                    f"DELETE FROM pending WHERE ({_RENAME_COLUMNS}) = (?, ?, ?, ?, ?, ?)",
+                    (pending.id, pending.src, pending.dst, pending.revision, pending.sha256, pending.version),
+                )
+
+    def _refresh_rename_version(self, pending: _PendingRename, version: str) -> _PendingRename | None:
+        with self._rename_db(writable=True) as db:
+            assert db is not None
+            with db:
+                saved = db.execute(
+                    f"UPDATE pending SET version = ? WHERE ({_RENAME_COLUMNS}) = (?, ?, ?, ?, ?, ?)",
+                    (version, pending.id, pending.src, pending.dst, pending.revision, pending.sha256, pending.version),
+                ).rowcount
+        return replace(pending, version=version) if saved else None
+
+    def _current_renames(self, pending: list[_PendingRename]) -> set[int]:
+        # Each of at most APPLY_BATCH pairs probes existing path keys. The
+        # write's expectations recheck the projected source under the writer.
+        values = ", ".join("(?, ?, ?, ?, ?)" for _ in pending)
+        parameters = [value for pair in pending for value in (pair.id, pair.src, pair.dst, pair.revision, pair.sha256)]
+        with read.snapshot(self._root) as view:
+            return {row[0] for row in view.connection.execute(
+                f"WITH pairs(id, src, dst, revision, sha256) AS (VALUES {values}) "
+                "SELECT id FROM pairs WHERE EXISTS (SELECT 1 FROM store_pages "
+                "WHERE path = pairs.src AND revision = pairs.revision AND sha256 = pairs.sha256) "
+                "AND NOT EXISTS (SELECT 1 FROM store_pages WHERE path = pairs.dst) "
+                "AND NOT EXISTS (SELECT 1 FROM store_binaries WHERE path = pairs.dst) "
+                "AND NOT EXISTS (SELECT 1 FROM store_manifest WHERE path = pairs.dst) "
+                "AND NOT EXISTS (SELECT 1 FROM store_held WHERE path = pairs.dst)",
+                parameters,
+            )}
+
+    def _retry_renames(self, filesystem: held_fs.HeldFilesystem, report: ImportReport) -> None:
+        query = f"SELECT {_RENAME_COLUMNS} FROM pending WHERE id > ? ORDER BY id LIMIT ?"
+        with self._rename_db() as db:
+            if db is None:
+                return
+            rows = db.execute(query, (self._rename_cursor, APPLY_BATCH)).fetchall()
+            if not rows and self._rename_cursor:
+                rows = db.execute(query, (0, APPLY_BATCH)).fetchall()
+        self._rename_cursor = rows[-1][0] if rows else 0
+        pending = [_PendingRename(*row) for row in rows]
+        if not pending:
+            return
+        current = self._current_renames(pending)
+        ready = []
+        for pair in pending:
+            if pair.id not in current:
+                self._retire_rename(pair)
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = CHANGED_WHILE_READ
+                continue
+            try:
+                source_present = projector.witness(filesystem, pair.src) is not None
+                version = projector.witness(filesystem, pair.dst)
+            except (held_fs.HeldFsError, OSError) as error:
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = getattr(error, "code", type(error).__name__)
+                continue
+            if source_present or version is None:
+                self._retire_rename(pair)
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = CHANGED_WHILE_READ
+                continue
+            if _version(version) == pair.version:
+                # The initial held read hashed this exact file version.
+                disk = OnDisk(pair.sha256, version.size, version.mtime_ns, version.identity, None, version=version)
+                ready.append((pair, _Rename(pair.src, pair.dst, disk, True, pair.revision)))
+                continue
+
+            # An editor can save the same bytes under a new native identity.
+            # A stable held read may refresh the proof but still needs admission.
+            disk = self._observe(filesystem, pair.dst, report)
+            reason = report.unjudged.get(pair.dst, CHANGED_WHILE_READ)
+            if disk is None or disk.version is None:
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = reason
+                continue
+            rename = _Rename(pair.src, pair.dst, disk, True, pair.revision)
+            if not self._same_files(filesystem, rename):
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = CHANGED_WHILE_READ
+                continue
+            if disk.sha256 != pair.sha256:
+                self._retire_rename(pair)
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = CHANGED_WHILE_READ
+                continue
+            saved_version = _version(disk.version)
+            assert saved_version is not None
+            refreshed = self._refresh_rename_version(pair, saved_version)
+            if refreshed is None:
+                report.unjudged[pair.src] = report.unjudged[pair.dst] = RENAME_PENDING
+                continue
+            ready.append((refreshed, rename))
+
+        def settle(writer: CollectionWriter, unit: tuple[_PendingRename, _Rename]) -> None:
+            pair, rename = unit
+            self._settle_marked_rename(writer, filesystem, rename, report, pending=pair)
+
+        for pair, _rename in self._in_holds(ready, settle):
+            report.unjudged[pair.src] = report.unjudged[pair.dst] = BOUNDARY_BUSY
+
     # -- judging and settling ---------------------------------------------------------------------
 
     def _settle(
@@ -391,7 +584,12 @@ class Importer:
         report: ImportReport,
     ) -> None:
         looks: dict[str, _Look] = {}
+        pending = self._pending_endpoints(rels)
         for rel in rels:
+            if rel in pending:
+                report.unjudged.setdefault(rel, RENAME_PENDING)
+            if rel in report.unjudged:
+                continue
             if ownership.classify(rel) is ownership.Ownership.NONE:
                 self._judge_unowned(filesystem, rel, report)
                 continue
@@ -463,9 +661,17 @@ class Importer:
     ) -> list[_Rename]:
         """Commit each rename; return the ones that the store refused."""
         refused: list[_Rename] = []
+        pages = tuple(write.PageMove(rename.src, rename.dst, on_disk=True) for rename in renames if rename.page)
+        marked = {}
+        if pages:
+            change = write.StoreChange(write.Origin.OUTSIDE_EDITOR, "an outside rename", moves=pages)
+            with read.snapshot(self._root) as view:
+                marked = write._marked_moves(view.connection, change)
 
         def settle(writer: CollectionWriter, rename: _Rename) -> None:
-            if self._commit_rename(writer, filesystem, rename):
+            if rename.src in marked:
+                self._settle_marked_rename(writer, filesystem, rename, report)
+            elif self._commit_rename(writer, filesystem, rename):
                 report.moved[rename.dst] = rename.src
             else:
                 refused.append(rename)
@@ -500,12 +706,29 @@ class Importer:
             left = left[settled:]
         return []
 
+    def _settle_marked_rename(
+        self, writer: CollectionWriter, filesystem: held_fs.HeldFilesystem, rename: _Rename, report: ImportReport,
+        *, pending: _PendingRename | None = None,
+    ) -> None:
+        try:
+            accepted = self._commit_rename(writer, filesystem, rename, marked=True, pending=pending)
+        except OpError as refusal:
+            if refusal.code != media_capacity.UPLOAD_SPACE_BUSY:
+                raise
+            report.unjudged[rename.src] = report.unjudged[rename.dst] = refusal.code
+        else:
+            if accepted:
+                report.moved[rename.dst] = rename.src
+            else:
+                # These were paired already. Neither path may take the unmarked
+                # single-file route after pressure or a conflicting observation.
+                report.unjudged[rename.src] = report.unjudged[rename.dst] = CHANGED_WHILE_READ
+
     def _commit_rename(
-        self, writer: CollectionWriter, filesystem: held_fs.HeldFilesystem, rename: _Rename
+        self, writer: CollectionWriter, filesystem: held_fs.HeldFilesystem, rename: _Rename,
+        *, marked: bool = False, pending: _PendingRename | None = None,
     ) -> bool:
-        source = projector.read_facts(self._root, rename.src)
-        stored = source.manifest if rename.page else source.binary
-        if stored is None or not self._same_files(filesystem, rename):
+        if not self._same_files(filesystem, rename):
             return False
         if rename.page:
             change = write.StoreChange(
@@ -513,13 +736,18 @@ class Importer:
                 "an outside rename",
                 moves=(write.PageMove(rename.src, rename.dst, on_disk=True),),
                 expect={
-                    rename.src: write.Expect(revision=stored.revision, projected=True),
+                    rename.src: write.Expect(revision=rename.revision, sha256=rename.disk.sha256, projected=True),
                     rename.dst: write.Expect(absent=True),
                 },
             )
         else:
             # The store has no binary move: the new record and the old one's removal are one commit.
             # A hold on a binary keeps no bytes, so the commit that settles either path ends it.
+            source = projector.read_facts(self._root, rename.src)
+            stored = source.binary
+            if (stored is None or stored.revision != rename.revision
+                    or source.stored_sha256 != rename.disk.sha256):
+                return False
             destination = projector.read_facts(self._root, rename.dst)
             change = write.StoreChange(
                 write.Origin.OUTSIDE_EDITOR,
@@ -532,10 +760,23 @@ class Importer:
                 },
                 resolves_held=_held_rows(source, destination),
             )
+        if marked and pending is None:
+            # Persist the pairing before the allocation check can interrupt the
+            # move. A fresh watcher will otherwise see just unrelated names.
+            pending = self._remember_rename(rename)
+            if pending is None or not self._same_files(filesystem, rename):
+                return False
+
+        def validate() -> None:
+            if not self._same_files(filesystem, rename):
+                raise write.StoreConflict(rename.dst, CHANGED_WHILE_READ)
+
         try:
-            write.commit(writer, change)
+            write.commit(writer, change, before_move_commit=validate)
         except write.StoreConflict:
             return False
+        if pending is not None:
+            self._retire_rename(pending)
         return True
 
     @staticmethod
@@ -1004,8 +1245,12 @@ def _pair_renames(looks: Mapping[str, _Look], hints: Mapping[str, str]) -> list[
         targets = by_disk.get(key, [])
         if len(sources) == 1 and len(targets) == 1:
             pairs[targets[0]] = sources[0]
-    return [
-        _Rename(src, dst, disk, ownership.classify(dst) is ownership.Ownership.PAGE)
-        for dst, src in sorted(pairs.items())
-        if (disk := created[dst].disk) is not None
-    ]
+    renames = []
+    for dst, src in sorted(pairs.items()):
+        disk = created[dst].disk
+        source = gone[src].facts
+        page = ownership.classify(dst) is ownership.Ownership.PAGE
+        stored = source.manifest if page else source.binary
+        if disk is not None and stored is not None:
+            renames.append(_Rename(src, dst, disk, page, stored.revision))
+    return renames

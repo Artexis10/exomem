@@ -16,6 +16,7 @@ from exomem import (
     commands,
     embedding_index,
     embeddings,
+    lexstore,
     passage_evidence,
     passage_terms,
     schema,
@@ -285,3 +286,35 @@ def test_a_chunk_rewritten_by_a_release_without_lexical_terms_is_matched_on_its_
         (path, 0)
     ]
     assert index.select_passage_terms("keeper", 5, allowed_paths={path}) == []
+
+
+def test_a_word_that_a_write_made_common_no_longer_chooses_the_lexical_matches(
+    vault, passage_tools, monkeypatch
+):
+    """Term selection keeps a query's rarest words by row counts that the index keeps, with the
+    rows' names, for one sidecar generation. Counts kept from before a write would still pick
+    the word it made common."""
+    # Keeping one word makes the rarer word alone decide which rows match.
+    monkeypatch.setattr(passage_terms, "term_budget", lambda: lexstore.QueryTermBudget(
+        max_units=1, max_stems=40, common_fraction=1.0, common_min_pages=100,
+    ))
+
+    def capture(title, *texts):
+        return commands.op_capture_source(
+            vault, schema.load_source_schema(vault), title=title, source_kind="session",
+            passages=[{"key": f"{title.lower()}-{n}", "text": text} for n, text in enumerate(texts)],
+        )["source"]["path"]
+
+    lantern = capture("Lamp log", "The lantern hangs.")
+    whale = capture("Sea log", "A whale passed.", "The whale returned.")
+    embeddings.index_incremental(vault)
+    index = embeddings.get_embedding_index(vault)
+
+    def matched_paths(allowed):
+        return {path for path, *_rest in index.select_passage_terms("lantern whale", 5, allowed_paths=allowed)}
+
+    assert matched_paths({lantern, whale}) == {lantern}
+    more = capture("Shop log", "A lantern sold.", "Two lanterns sold.", "No lantern left.")
+    embeddings.index_incremental(vault)
+
+    assert matched_paths({lantern, whale, more}) == {whale}

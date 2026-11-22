@@ -1451,6 +1451,8 @@ def mark_graph_full_rebuild(
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                     (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY, fatal_family),
                 )
+            elif current is None:
+                _discard_orphaned_fatal_family_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1484,6 +1486,8 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
             current = int(rows.get(_GRAPH_FULL_REBUILD_KEY, 0))
             sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
             generation = max(current, sequence, int(after_generation)) + 1
+            if _GRAPH_FULL_REBUILD_KEY not in rows:
+                _discard_orphaned_fatal_family_locked(conn)
             conn.execute(
                 "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1503,6 +1507,21 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
         conn.close()
     _note_graph_debt()
     return generation
+
+
+def _discard_orphaned_fatal_family_locked(conn: sqlite3.Connection) -> None:
+    """Drop a fatal-family row that outlived its marker.
+
+    Retirement deletes the family with its marker, but an older release that
+    retires only the marker leaves the row behind after a downgrade. Raising
+    new debt with no marker standing must not inherit that stale fence: a
+    healthy sidecar that reuses the damaged file's identity would otherwise be
+    refused as needing replacement.
+    """
+    conn.execute(
+        "DELETE FROM maintenance_state WHERE key = ?",
+        (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY,),
+    )
 
 
 def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:

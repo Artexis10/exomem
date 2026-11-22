@@ -478,11 +478,12 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
             return applied and reached == head
 
 
-def _pages(vault: Path, *, join_request: bool = False):
+def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = False):
     """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own."""
     from contextlib import nullcontext
 
     from .kbdir import managed_join, managed_root_rel
+    from .runtime_resources import SEMANTIC_SOURCE_MAX_BYTES
     from .vault_store import mode, read
 
     with (read.snapshot(vault, join_request=join_request) if mode.store_mode_for_reads(vault)
@@ -498,11 +499,57 @@ def _pages(vault: Path, *, join_request: bool = False):
         with reserved_paths.open_generic_tree(
             vault, managed_root_rel(), require_complete=True,
             select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
+            markdown_header_limit=SEMANTIC_SOURCE_MAX_BYTES if headers_only else None,
         ) as entries:
             for entry in entries:
                 rel = managed_join(entry.relative_path)
                 if not read.serves(vault, rel):
-                    yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+                    if not headers_only:
+                        yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+                    elif entry.markdown is None:
+                        raise ValueError("a companion header cannot be read")
+                    else:
+                        yield rel, entry.markdown
+
+
+def _store_bindings(vault: Path) -> Iterator[tuple[str | None, tuple[str, ...]]]:
+    """Read canonical stored-object and replica names, including retired and moved companions."""
+    from .vault import parse_frontmatter
+
+    with closing(_pages(vault, headers_only=True)) as pages:
+        for _path, data in pages:
+            fields = parse_frontmatter(data.decode("utf-8"), custody=True)[0]
+            primary = None
+            if "stored_object" in fields:
+                pointer = originals.stored_reference(fields["stored_object"])
+                if pointer is None:
+                    raise ValueError("a stored original reference cannot be read")
+                primary = pointer.store
+            replicas = fields.get("replicas", [])
+            if not isinstance(replicas, list):
+                raise ValueError("a replica list cannot be read")
+            stores = []
+            for raw in replicas:
+                replica = originals.stored_reference(raw)
+                if replica is None:
+                    raise ValueError("a replica reference cannot be read")
+                stores.append(replica.store)
+            yield primary, tuple(stores)
+
+
+def store_role_conflict(vault: Path, selected: str, target: str) -> str | None:
+    with closing(_store_bindings(vault)) as bindings:
+        for primary, replicas in bindings:
+            if target != selected and primary == selected:
+                return "the selected store still serves a stored original"
+            if target in replicas:
+                return "the requested store already holds a replica"
+    return None
+
+
+def store_is_bound(vault: Path, name: str) -> bool:
+    with closing(_store_bindings(vault)) as bindings:
+        return any(name == primary or name in replicas for primary, replicas in bindings)
 
 
 def source_checkpoint(vault: Path) -> tuple[int | None, int | None]:
@@ -778,16 +825,28 @@ def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]]
     return rows()
 
 
-def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
+class ObjectBindingProofLimit(Exception):
+    """The allowed input cannot establish every binding of this object."""
+
+
+def object_facts(conn: sqlite3.Connection, key: str, *, binding_limit: int | None = None) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)
     if not state.complete:
         return None
+    parameters: dict[str, str | int] = {"key": key}
+    bindings = "media_bindings"
+    if binding_limit is not None:
+        # The indexed seek and sentinel precede both aggregation and deduplication.
+        bindings = "(SELECT * FROM media_bindings WHERE object_key = :key ORDER BY binary_rel LIMIT :limit)"
+        parameters["limit"] = binding_limit + 1
     row = conn.execute(
         "SELECT COUNT(*), MIN(b.sha256), MAX(b.sha256), MIN(b.size), MAX(b.size), "
         "MAX(b.resident_only), MIN(b.reference IS NOT NULL), MAX(c.owner_read) "
-        "FROM media_bindings b LEFT JOIN media_cache c ON c.binary_rel = b.object_key WHERE b.object_key = ?",
-        (key,)).fetchone()
+        f"FROM {bindings} b LEFT JOIN media_cache c ON c.binary_rel = b.object_key WHERE b.object_key = :key",
+        parameters).fetchone()
+    if binding_limit is not None and row[0] > binding_limit:
+        raise ObjectBindingProofLimit()
     if row[0] == 0 or row[1] != row[2] or row[3] != row[4]:
         return None
     # Legacy NULL pins retain bytes until startup recovery resolves them. A claimed
@@ -798,8 +857,8 @@ def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
         "AND (object_key = ? OR object_key IS NULL)) "
         "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1)", (key, key)).fetchone()[0])
     pointers = conn.execute(
-        "SELECT reference, MIN(binary_rel) FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL "
-        "GROUP BY reference ORDER BY reference", (key,)).fetchall()
+        f"SELECT reference, MIN(binary_rel) FROM {bindings} b WHERE object_key = :key AND reference IS NOT NULL "
+        "GROUP BY reference ORDER BY reference", parameters).fetchall()
     references = tuple(originals.stored_reference(json.loads(item[0])) for item in pointers)
     if any(reference is None for reference in references):
         return None

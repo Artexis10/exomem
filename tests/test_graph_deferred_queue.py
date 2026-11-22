@@ -285,6 +285,31 @@ def test_value_clear_retires_only_its_markers_fatal_family(vault: Path) -> None:
     assert ordinary is not None and ordinary.fatal_family is None
 
 
+@pytest.mark.parametrize(
+    "raise_debt",
+    [
+        lambda vault: deferred_index.mark_graph_full_rebuild(vault, generation=9),
+        lambda vault: deferred_index.advance_graph_full_rebuild(vault),
+    ],
+    ids=["mark", "advance"],
+)
+def test_new_debt_does_not_inherit_a_fatal_family_left_by_an_older_release(vault: Path, raise_debt) -> None:
+    """A downgrade that retired only the marker must not fence the next ordinary marker."""
+    deferred_index.mark_graph_full_rebuild(vault, generation=7, fatal_family="b" * 64)
+    with closing(sqlite3.connect(deferred_index.store_path(vault))) as conn:
+        with conn:
+            # The older release's retirement: the marker goes, the family row stays.
+            conn.execute(
+                "DELETE FROM maintenance_state WHERE key = ?",
+                (deferred_index._GRAPH_FULL_REBUILD_KEY,),
+            )
+
+    raise_debt(vault)
+
+    details = deferred_index.graph_full_rebuild_details(vault)
+    assert details is not None and details.fatal_family is None
+
+
 def test_a_poisoned_path_is_rotated_behind_the_rest_of_the_queue(vault: Path) -> None:
     """One unindexable page must not pin every later page in the sorted batch."""
     receipts = deferred_index.add_graph_receipts(vault, [PAGE_A, PAGE_B])
