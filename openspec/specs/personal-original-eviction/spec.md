@@ -7,11 +7,25 @@ Keep space available on a personal vault disk while preserving the owner’s abi
 
 ### Requirement: An owner command makes a declared store serve eviction
 
-An owner command SHALL make one declared `filesystem` store serve eviction on a personal install, and SHALL set the vault disk's free-space floor. Eviction SHALL stay off until the owner runs it. The command SHALL refuse a store that was not declared, a store whose adapter is not `filesystem`, and a store that holds replicas. Its output SHALL say that an evicted original's plaintext leaves any mirror of the vault, and that the store and the exported key are then its recovery path. A second command SHALL turn eviction off, and the existing drain SHALL bring evicted originals back as space allows.
+An owner command SHALL make one declared `filesystem` store serve eviction on a personal install, and SHALL set the vault disk's free-space floor. Eviction SHALL stay off until the owner runs it. The command SHALL refuse a store that was not declared, a store whose adapter is not `filesystem`, and a store that holds replicas.
+
+#### Scenario: A store that holds replicas
+
+- **WHEN** the owner names a declared store that holds a replica of any original
+- **THEN** the command refuses and the configuration does not change
+
+### Requirement: The owner learns the recovery path and can turn eviction off
+
+The owner command's output SHALL say that an evicted original's plaintext leaves any mirror of the vault, and that the store and the exported key are then its recovery path. A second command SHALL turn eviction off, and the existing drain SHALL bring evicted originals back as space allows.
+
+#### Scenario: The owner turns eviction off
+
+- **WHEN** the owner turns eviction off while originals are evicted
+- **THEN** no further original is evicted, and the drain hydrates evicted originals that fit while the rest stay readable from the store
+
+### Requirement: A personal install keeps its media store configuration under its state root
 
 When `EXOMEM_MEDIA_STORE_CONFIG` is unset, a personal install SHALL read its media store configuration from a file under its state root, and the owner command SHALL write the vault's entry there. A set variable SHALL take precedence.
-
-A filesystem store declared for personal eviction SHALL reside on a different device from the vault. Declaration SHALL retain that device's open directory through marker publication and confirm the configured path still reaches it before recording the declaration.
 
 #### Scenario: The owner turns eviction on
 
@@ -19,21 +33,18 @@ A filesystem store declared for personal eviction SHALL reside on a different de
 - **THEN** the state root's configuration file names that store as the vault's `store`, with eviction enabled and a target derived from the floor
 - **AND** the output names the recovery path of an evicted original
 
-#### Scenario: A store that holds replicas
+### Requirement: A personal eviction store lives on another device
 
-- **WHEN** the owner names a declared store that holds a replica of any original
-- **THEN** the command refuses and the configuration does not change
+A filesystem store declared for personal eviction SHALL reside on a different device from the vault. Declaration SHALL retain that device's open directory through marker publication and confirm the configured path still reaches it before recording the declaration.
 
-#### Scenario: The owner turns eviction off
+#### Scenario: A store on the vault's own device
 
-- **WHEN** the owner turns eviction off while originals are evicted
-- **THEN** no further original is evicted, and the drain hydrates evicted originals that fit while the rest stay readable from the store
+- **WHEN** the owner declares a filesystem store whose root is on the vault's device
+- **THEN** the declaration is refused with `MEDIA_STORE_DECLARATION_REFUSED` and no store is recorded
 
 ### Requirement: Eviction on a personal install keeps every original recoverable
 
-On a personal install, eviction SHALL NOT drop an original's local bytes unless the owner has confirmed an export of the decryption identity of its pointer's key version. Eviction SHALL require a settled publication and verify the size and SHA-256 of the whole ciphertext. It SHALL retain the verified store and version through the unlink and confirm that they remain reachable at the configured path. A pointer without a recorded publication time SHALL keep its original. A configuration without `eviction_settle_seconds` SHALL read as 0.
-
-Before a filesystem version authorizes eviction, the service SHALL flush its containing directory and the retained store root.
+On a personal install, eviction SHALL NOT drop an original's local bytes unless the owner has confirmed an export of the decryption identity of its pointer's key version. Eviction SHALL require a settled publication and verify the size and SHA-256 of the whole ciphertext. A pointer without a recorded publication time SHALL keep its original. A configuration without `eviction_settle_seconds` SHALL read as 0.
 
 #### Scenario: The key is not exported
 
@@ -50,6 +61,10 @@ Before a filesystem version authorizes eviction, the service SHALL flush its con
 - **WHEN** something reads an evicted original while the eviction store's volume is not mounted
 - **THEN** the read fails with `MEDIA_STORE_UNAVAILABLE`, nothing is written at the original's path, and no replica is quarantined
 
+### Requirement: Eviction keeps the verified copy durable and reachable through the unlink
+
+Eviction SHALL retain the verified store and version through the unlink and confirm that they remain reachable at the configured path. Before a filesystem version authorizes eviction, the service SHALL flush its containing directory and the retained store root.
+
 #### Scenario: The named store changes after verification
 
 - **WHEN** the configured path loses its verified volume or version before unlink
@@ -60,25 +75,27 @@ Before a filesystem version authorizes eviction, the service SHALL flush its con
 
 The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume. This includes multipart spools, resumable parts, final storage copies, signed-container extraction, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
 
-The floor SHALL cover the database, search and graph writes derived directly from a stored Markdown original, including the graph rows of pages that re-derive because they link to it and the rows that a move deletes at its source. Other pages that the same commit writes or deletes are outside the floor, as they are in a commit that carries no original. A move that updates lineage SHALL keep the original's floor protection for later projection.
-
 #### Scenario: An upload that would cross the floor
 
 - **WHEN** the next upload allocation would consume the available room above the floor
 - **THEN** the allocation is refused with `MEDIA_SPACE_BUSY` and a retry hint
 - **AND** the listener retains any bytes it acknowledged on prior resumable requests
 
-#### Scenario: A small original in a large store
-
-- **WHEN** a stored Markdown original is small and the store database is large
-- **THEN** the floor reserves room in proportion to the records the write inserts and deletes, including the graph rows of pages that link to the original
-- **AND** the size of the store database does not refuse the original
-
 #### Scenario: Another write needs space reserved for a completed upload
 
 - **WHEN** a final part has reserved space for its ordinary or pooled commit stages
 - **THEN** another upload or hydration cannot spend that room
 - **AND** a space refusal during commit leaves the full original available to the background retry
+
+### Requirement: The floor covers the store writes an original causes
+
+The floor SHALL cover the database, search and graph writes derived directly from a stored Markdown original, including the graph rows of pages that re-derive because they link to it and the rows that a move deletes at its source. Other pages that the same commit writes or deletes are outside the floor, as they are in a commit that carries no original. A move that updates lineage SHALL keep the original's floor protection for later projection.
+
+#### Scenario: A small original in a large store
+
+- **WHEN** a stored Markdown original is small and the store database is large
+- **THEN** the floor reserves room in proportion to the records the write inserts and deletes, including the graph rows of pages that link to the original
+- **AND** the size of the store database does not refuse the original
 
 #### Scenario: An outside rename meets the floor
 
@@ -91,8 +108,6 @@ The floor SHALL cover the database, search and graph writes derived directly fro
 
 The owner status SHALL report the count and plaintext bytes of local and evicted bound physical originals as of its last complete inventory. Filings of one shared object SHALL contribute one physical original. The status SHALL report the result and time of the latest attempt separately. The last eviction pass can report `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. An unreadable value SHALL show as unknown.
 
-Personal eviction SHALL use the space available to the service for both the starting threshold and the low-water target.
-
 #### Scenario: Eviction waits for the key export
 
 - **WHEN** the vault disk is above its target and every idle original's key version is unexported
@@ -102,6 +117,10 @@ Personal eviction SHALL use the space available to the service for both the star
 
 - **WHEN** a complete inventory precedes a failed walk of the shared bindings
 - **THEN** the status preserves the earlier counts and reports that the new attempt failed
+
+### Requirement: Personal eviction measures pressure from the space available to the service
+
+Personal eviction SHALL use the space available to the service for both the starting threshold and the low-water target.
 
 #### Scenario: Earlier candidates keep their originals
 
