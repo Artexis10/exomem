@@ -2414,12 +2414,14 @@ class PageGraphRecords:
 
     def write(self, conn: sqlite3.Connection) -> None:
         if self.values:
-            conn.executemany(_graph_insert(self.table, self.columns, replace=self.replace), self.values)
+            statement = _graph_insert(self.table, self.columns, replace=self.replace)
+            conn.executemany(statement, self.values)
 
 
 def _graph_insert(table: str, columns: tuple[str, ...], *, replace: bool = True) -> str:
     command = "INSERT OR REPLACE" if replace else "INSERT"
-    return f"{command} INTO {table}({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})"
+    placeholders = ", ".join("?" for _ in columns)
+    return f"{command} INTO {table}({', '.join(columns)}) VALUES ({placeholders})"
 
 
 def graph_registry_stamps(vault_root: Path) -> tuple[tuple[str, str], ...]:
@@ -2518,15 +2520,18 @@ def write_page_graph_rows(
         tuple((rel, lookup_key, raw_target) for lookup_key, raw_target in rows.dependencies),
     )
     coverage = PageGraphRecords(
-        "graph_dependency_coverage", ("source_path", "source_hash", "dependency_format", "expected_count"),
+        "graph_dependency_coverage",
+        ("source_path", "source_hash", "dependency_format", "expected_count"),
         ((rel, rows.source_hash, _DEPENDENCY_FORMAT, len(rows.dependencies)),),
     )
     if before_write is not None:
         nodes = PageGraphRecords(
-            "graph_nodes", _NODE_COLUMNS, tuple(_node_values(node) for node in rows.nodes), replace=True,
+            "graph_nodes", _NODE_COLUMNS, tuple(_node_values(node) for node in rows.nodes),
+            replace=True,
         )
         edges = PageGraphRecords(
-            "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges), replace=True,
+            "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges),
+            replace=True,
         )
         before_write((nodes, parent, edges, dependencies, coverage))
 
@@ -12863,7 +12868,9 @@ def _file_node(
     frontmatter = page.frontmatter
     origin_date = frontmatter.get("created") or frontmatter.get("captured")
     updated = frontmatter.get("updated")
-    structure = semantic_index.structural_metadata(state) if prepared_structure is None else prepared_structure
+    structure = prepared_structure
+    if structure is None:
+        structure = semantic_index.structural_metadata(state)
     metadata: dict[str, Any] = {
         "page_type": page.page_type,
         "status": frontmatter.get("status") if isinstance(frontmatter.get("status"), str) else None,
