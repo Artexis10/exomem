@@ -601,53 +601,65 @@ def _selected_methods(
         # A missing, unreadable or in-vault placement file is a failed judgment, never a failed turn.
         log.warning("method-fit placement unusable", exc_info=True)
         return [], {"state": "unavailable"}
-    pending = set(catalogue.pending())
-    carriers: list[dict[str, Any]] = []
-    # Skills first: when the input allowance runs out, the user's own skills are offered before collections.
-    for entry in catalogue.entries_by_id(catalogue.skill_ids()):
-        if entry.path and entry.path not in pending:
-            carriers.append({
-                "name": entry.skill, "path": entry.path, "kind": SKILL_KIND, "description_of": _skill_description,
-                "max_chars": vault_skills.DESCRIPTION_MAX_CHARS,
-            })
-    # A Records collection's manifest body is its authored contract. The manifests come from the index the update
-    # published, so this enumerates no directory; their text is read only when the judgment offers them.
-    manifests = working_set_index.records_manifests(root, index_token[1], token=index_token) if index_token else ()
-    for manifest in manifests[:MAX_COLLECTION_CARRIERS]:
-        path = str(getattr(manifest, "path", ""))
-        if path:
-            carriers.append({
-                "name": str(manifest.title or path), "path": path, "kind": COLLECTION_KIND,
-                "description_of": _body_text, "max_chars": COLLECTION_DESCRIPTION_CHARS,
-            })
+    try:
+        pending = set(catalogue.pending())
+        carriers: list[dict[str, Any]] = []
+        # Skills first: when the input allowance runs out, the user's own skills are offered before collections.
+        for entry in catalogue.entries_by_id(catalogue.skill_ids()):
+            if entry.path and entry.path not in pending:
+                carriers.append({
+                    "name": entry.skill, "path": entry.path, "kind": SKILL_KIND, "description_of": _skill_description,
+                    "max_chars": vault_skills.DESCRIPTION_MAX_CHARS,
+                })
+        # A Records collection's manifest body is its authored contract. The manifests come from the index the update
+        # published, so this enumerates no directory; their text is read only when the judgment offers them.
+        manifests = working_set_index.records_manifests(root, index_token[1], token=index_token) if index_token else ()
+        for manifest in manifests[:MAX_COLLECTION_CARRIERS]:
+            path = str(getattr(manifest, "path", ""))
+            if path:
+                carriers.append({
+                    "name": str(manifest.title or path), "path": path, "kind": COLLECTION_KIND,
+                    "description_of": _body_text, "max_chars": COLLECTION_DESCRIPTION_CHARS,
+                })
+    except TaskDeadline:
+        raise
+    except Exception:  # noqa: BLE001 - a carrier list that cannot be read is a failed judgment, never a failed turn
+        log.warning("method-fit carriers unreadable", exc_info=True)
+        return [], {"state": "unavailable"}
     chosen, state = context_fit.select_methods(
         root, caller=caller, carriers=carriers, turn=turn, conversation=conversation, limit=limit, sources=sources,
     )
     methods = []
     for carrier in chosen:
         try:
-            source = project_source(root, carrier["path"], caller, cache=sources)
+            methods.extend(_selected_method(root, carrier, caller, sources, contract_chars))
         except TaskDeadline:
             break
-        except Exception:  # noqa: BLE001 - a selected method that cannot be read costs that method, never the turn
-            source = None
-        if source is None:
-            continue
-        if carrier["kind"] == SKILL_KIND:
-            items = _method_items(source, carrier["path"], whole=True, selection=METHOD_FIT, contract_chars=contract_chars)
-            methods.extend(item for item in items if item.get("kind") == SKILL_KIND)
-            continue
-        method = {
-            "ref": skill_ref(source), "source_ref": carrier["path"], "source_version": source.version,
-            "applicability": "read_required", "read_ref": skill_ref(source), "kind": COLLECTION_KIND,
-            "name": source.title or carrier["name"], "selection": METHOD_FIT,
-            # The contract below carries the whole body, so the line's description is only its opening sentence.
-            "description": vault_skills.summary(" ".join(egress.without_wikilinks(_body_text(source)).split()), 200),
-        }
-        if contract := contract_of(str(source.public.get("body") or ""), contract_chars):
-            method["contract"] = contract
-        methods.append(method)
+        except Exception:  # noqa: BLE001 - a selected method that cannot be read or built costs that method, never the turn
+            log.warning("selected method unreadable", exc_info=True)
     return methods, state
+
+
+def _selected_method(
+    root: Path, carrier: dict[str, Any], caller: Any, sources: dict, contract_chars: int,
+) -> list[dict[str, Any]]:
+    """The served items of one selected carrier: a skill's whole method, or a collection with its contract."""
+    source = project_source(root, carrier["path"], caller, cache=sources)
+    if source is None:
+        return []
+    if carrier["kind"] == SKILL_KIND:
+        items = _method_items(source, carrier["path"], whole=True, selection=METHOD_FIT, contract_chars=contract_chars)
+        return [item for item in items if item.get("kind") == SKILL_KIND]
+    method = {
+        "ref": skill_ref(source), "source_ref": carrier["path"], "source_version": source.version,
+        "applicability": "read_required", "read_ref": skill_ref(source), "kind": COLLECTION_KIND,
+        "name": source.title or carrier["name"], "selection": METHOD_FIT,
+        # The contract below carries the whole body, so the line's description is only its opening sentence.
+        "description": vault_skills.summary(" ".join(egress.without_wikilinks(_body_text(source)).split()), 200),
+    }
+    if contract := contract_of(str(source.public.get("body") or ""), contract_chars):
+        method["contract"] = contract
+    return [method]
 
 
 def _declared_methods(

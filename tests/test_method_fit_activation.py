@@ -175,3 +175,21 @@ def test_two_selected_methods_both_keep_their_place_under_a_tight_allowance(
     _judge(monkeypatch, {"methods": ["kiln-firing", "Depot stock"]})
     selected = _selected(_activate(vault, turn=TURN, max_chars=1600))
     assert [item["kind"] for item in selected] == ["skill", "collection"]
+
+
+def test_an_unreadable_carrier_index_costs_the_judgment_not_the_turn(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing manifest index read once emptied the whole task context and reported the judgment as disabled."""
+    import sqlite3
+
+    from exomem import working_set_index
+
+    _seed(vault)
+    _judge(monkeypatch, {"methods": ["kiln-firing"]})
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(working_set_index, "records_manifests", locked)
+    packet = _activate(vault, turn=TURN, max_chars=6000)
+    assert packet["task_context"]["method_fit"]["state"] == "unavailable"
+    assert packet["task_context"]["state"] != "unavailable"

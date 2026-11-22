@@ -8,7 +8,7 @@ Let the owner see whether a method that activation served was then used, from ev
 
 The owner served-context command SHALL report, for each method that retained served-context rows served, how often it was served and what use evidence followed each serving.
 Use evidence SHALL be computed when the owner reads it, from the newest `MAX_JOINED_ROWS` (2000) retained rows that served a method and the existing local read and write logs; the report SHALL say when that cap applied. Activation SHALL do no extra work for it.
-A committed Records item write SHALL be logged in the write log under its collection's manifest path, as a page write is logged under its page.
+A Records item write that commits within its `record_memory` call (an item write or a bulk upsert) SHALL be logged in the write log under its collection's manifest path, as a page write is logged under its page. An import starts a job whose batches commit later, outside the call, so the write log does not attribute them, and the readout's meaning SHALL say so.
 For one serving, evidence SHALL be:
 
 - `opened` when the read log holds a read of the method page, or for a skill a file in the skill's folder, after the serving and within `METHOD_USE_WINDOW_MINUTES` (120);

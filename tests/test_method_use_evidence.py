@@ -123,3 +123,30 @@ def test_a_write_into_a_served_collection_itself_reads_followed_and_an_open_wind
 
     assert entry["followed"]["observed"] == 1  # the closed window saw a write into the collection
     assert entry["followed"]["unknown"] == 1  # the open window has seen nothing yet
+
+
+@pytest.mark.parametrize("shape,logged", [
+    # `records.bulk_upsert_records` reports a bulk batch as `committed: true` with no `outcome` key.
+    ({"operation": "bulk_upsert", "committed": True, "counts": {"inserted": 1}}, True),
+    ({"operation": "bulk_upsert", "committed": False, "counts": {"rejected": 1}}, False),
+])
+def test_a_committed_bulk_upsert_reaches_the_write_log_under_its_manifest(
+    tmp_path: Path, logs: Path, monkeypatch: pytest.MonkeyPatch, shape: dict, logged: bool
+) -> None:
+    """A bulk upsert once never reached the write log, because only `outcome: committed` counted as a commit."""
+    from exomem import commands, structured_collections
+    from exomem import record_memory as record_memory_module
+
+    from exomem import query_log
+
+    monkeypatch.setattr(query_log, "_disabled", lambda: False)  # the suite turns local logging off
+    monkeypatch.setattr(record_memory_module, "record_memory", lambda *_args, **_kwargs: dict(shape))
+    monkeypatch.setattr(
+        structured_collections, "resolve_collection", lambda *_args, **_kwargs: type("M", (), {"path": MANIFEST})(),
+    )
+
+    commands.op_record_memory(tmp_path, action="bulk_upsert", collection=MANIFEST, rows=[{"item": {}}], why="Log it.")
+
+    written = (logs / "writes.jsonl").read_text(encoding="utf-8").splitlines() if (logs / "writes.jsonl").exists() else []
+    paths = [json.loads(line)["written_path"] for line in written]
+    assert paths == ([MANIFEST] if logged else [])

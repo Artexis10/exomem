@@ -14734,7 +14734,10 @@ def op_record_memory(
         query=query,
         item_id=item_id,
     )
-    if action in _record_writes() and isinstance(result, dict) and result.get("outcome") == "committed":
+    # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
+    # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
+    committed = isinstance(result, dict) and (result.get("outcome") == "committed" or result.get("committed") is True)
+    if action in _record_writes() and committed:
         _log_record_write(vault_root, collection)
     return result
 
