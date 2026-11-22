@@ -9,8 +9,8 @@ The first attempt to route these requests put one line in an evaluation copy of 
 ## What Changes
 
 - Add one clause to the server's instructions (`SERVER_INSTRUCTIONS`): when the person asks to bring back or recap a subject they researched before, read its brief first and follow `more`, then use recall or search only for gaps.
-- Keep the clause short. Some clients cut long server instructions off, so the clause adds the fewest words that name the request, the call and the gap rule.
-- Evaluate the clause before release against today's instructions, with the protocol of the closed `add-topic-brief` evaluation, once the brief serves on the personal service. A brief call that answers `index_warming` is an infrastructure failure of that run, not a result.
+- Keep the instructions within their 900-character bound, which the `conversation-aware-activation` spec says shall not be raised. Today's text uses 897 characters, so the clause replaces existing words: other wording is shortened and every existing instruction stays.
+- Evaluate the exact candidate text before release against today's instructions, with the protocol of the closed `add-topic-brief` evaluation, once the brief serves on the personal service. A brief call that answers `index_warming` is an infrastructure failure of that run, not a result.
 
 ## Capabilities
 
@@ -20,6 +20,6 @@ The first attempt to route these requests put one line in an evaluation copy of 
 
 ## Impact
 
-- `src/exomem/server.py` (`SERVER_INSTRUCTIONS`) and the tests that pin its delivery to every client surface.
+- `src/exomem/server.py` (`SERVER_INSTRUCTIONS`) and the tests that pin its delivery to every client surface and its 900-character bound.
 - The client skill references keep documenting the brief and carry no routing line.
 - No change to the brief itself, its caches or its egress.
