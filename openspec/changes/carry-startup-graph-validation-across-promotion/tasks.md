@@ -17,5 +17,5 @@
 
 ## 4. Closure
 
-- [ ] 4.1 Review the exact batch independently, resolve findings and recheck changed content. Verify the 13,000-page proof budget and before/after boundary work, preserve store-mode and rollback behavior, pass required PR checks, and merge under standing delivery authority.
+- [x] 4.1 Review the exact batch independently, resolve findings and recheck changed content. Verify the 13,000-page proof budget and before/after boundary work, preserve store-mode and rollback behavior, pass required PR checks, and merge under standing delivery authority.
 - [ ] 4.2 Release through the existing publisher and perform authorized managed-upgrade acceptance with a governed write during startup. Record promotion-to-admitted-graph and unjustified rebuild count. Run the installed-wheel product restart step ten times in isolated state, using server-side evidence. Synchronize and archive only after the required deployed outcome is verified.
