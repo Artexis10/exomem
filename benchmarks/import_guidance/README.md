@@ -179,3 +179,17 @@ This family measures recall on short follow-up turns: a carried subject ("and th
 - Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
 - The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
 - `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.
+
+## Method check
+
+This check shows which of the user's own methods the product serves when the user never names them. The cases are in `scenarios/method-activation/`: a user discusses a technology for a project, approves a trial, reports an outcome, or points out a memory failure, plus negative twins. A lane that never saw the implementation wrote the 18 cases, their seed vault (`seeds/m00/`) and the keys. Each key adds `methods` (the skill pages the trigger turn should be served), `destination` and `trigger_turn` to the session-close key fields.
+
+The check is model-free except for the method-fit placement under test. It runs no actor.
+
+1. Write a placement file for each arm that selects methods. A local placement names a loopback Ollama endpoint, its model, the model's digest from `/api/tags` and the runtime version from `/api/version`.
+2. Run `PYTHONPATH=benchmarks python -m import_guidance.method_check --arm base=<checkout> --arm local=<checkout>:<placement.json> --cases benchmarks/import_guidance/scenarios/method-activation --out <dir outside every repository>`.
+3. Read `<out>/summary.json`. It gives each arm's exact matches, false selections and misses, and each arm's per-case difference from the first arm with its 95% bootstrap interval.
+
+Each arm seeds its own vault with its own scaffold, starts its own stdio server, and waits until the index stops warming before it asks a case. An arm without a placement shows what the product serves today.
+
+The capture cases for the same brief stay in their own suite, `benchmarks/membench/outcome/incidents/cases/` (suites `structured-capture`, `capture-routing` and `reported-failed-advice`). They seed collections through the product, inject transport faults and check vault state, so they are referenced by suite and case id, never copied here.

@@ -84,6 +84,55 @@ Delivery SHALL grant no authority: the agent reads the skill and decides whether
 - **WHEN** a turn asks for work that a visible skill's description covers and task discovery admits that skill page
 - **THEN** `task_context.methods` contains the skill with its full description and the read reference
 
+### Requirement: A bounded judgment selects the methods a turn needs
+
+When a method-fit placement is configured, task context SHALL offer a bounded model the visible skill pages and Records collection manifests, each labelled by its name and described by the text its author wrote to say what it is for: a skill's frontmatter `description`, a collection manifest's body.
+The model SHALL see the turn, the recent conversation excerpts and the focus, and SHALL answer only through a schema whose items are the supplied labels, at most the vault's `method_fit_max_items` (shipped default 2, accepted 0..6; 0 turns selection off).
+The product SHALL hold no word list, threshold or list of methods for this selection.
+Each selected page SHALL be served first in `task_context.methods`, whole, with `selection: "method_fit"`, `kind` `skill` or `collection`, its `name`, its description, a `read_ref` and its contract. A selected page SHALL NOT also be served as a plain lead.
+The placement SHALL be deployment configuration outside the vault (`EXOMEM_METHOD_FIT_CONFIG`), separate from the lead-ordering interpretation placement, with the same local and API rules: a local placement is a loopback Ollama endpoint; an API placement requires explicit disclosure authorization and a provider audience, and offers only pages that audience may see.
+`task_context.method_fit` SHALL report `disabled` without a placement, `empty` when nothing could be offered, `ready` with the model identity after a judgment, and `unavailable` when the call fails, times out or answers outside the schema. Every state except `ready` SHALL select nothing and leave the rest of the response unchanged.
+Selection SHALL grant no authority: the agent decides whether the method applies and acts only within its existing authority.
+
+#### Scenario: An ordinary turn selects the matching skill without naming it
+
+- **WHEN** a turn asks for work that one visible skill covers without naming the skill, the product or any skill vocabulary, and the judgment selects it
+- **THEN** `task_context.methods` leads with that skill, with `selection: "method_fit"` and its contract
+
+#### Scenario: A judgment of none selects nothing
+
+- **WHEN** the judgment answers with no label
+- **THEN** no method item carries `selection: "method_fit"` and `method_fit.state` is `ready`
+
+#### Scenario: A failed judgment keeps the turn
+
+- **WHEN** the model call times out or names a label it was not offered
+- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the leads and other methods are served as without a placement
+
+#### Scenario: No placement, no judgment
+
+- **WHEN** no method-fit placement is configured
+- **THEN** no model is called and `method_fit.state` is `disabled`
+
+### Requirement: A selected method carries its contract
+
+A method the judgment selected SHALL carry `contract` with `text` and `complete`.
+The text SHALL be the page body as released to the caller, cut at a line boundary to at most the vault's `method_contract_max_chars` (shipped default 2400, accepted 0..8000; 0 omits the contract).
+`complete` SHALL be true only when the text is the whole released body.
+The rendered line SHALL tell the agent to follow the contract where it fits when `complete` is true, and to read the page for the rest when it is false.
+The contract SHALL count against the turn-context allowance. A contract that does not fit SHALL be cut further, never dropped with its method. A method that does not fit even with an empty contract SHALL be omitted and reported as `budget`.
+The contract SHALL grant no authority and SHALL be rendered as quoted page text.
+
+#### Scenario: A short skill arrives whole
+
+- **WHEN** a selected skill's released body fits within `method_contract_max_chars`
+- **THEN** its method item carries the whole body with `complete: true`
+
+#### Scenario: A long skill arrives cut with a read handle
+
+- **WHEN** a selected skill's released body exceeds `method_contract_max_chars`
+- **THEN** its method item carries the leading lines with `complete: false` and the `read_ref` to load the rest
+
 ### Requirement: Skills follow page admission and egress
 
 Every skills catalogue item and projected skill method SHALL pass the same admission and terminal egress checks as other served page material.
