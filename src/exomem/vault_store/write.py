@@ -571,53 +571,75 @@ def _key_runs(
         return len(keys)
     ordered.sort()
     columns = ", ".join('"' + name.replace('"', '""') + '"' for name in names)
-    marks = ", ".join("?" * len(names))
+    width = len(names)
+    lows = ", ".join(f"p.l{at}" for at in range(width))
+    highs = ", ".join(f"p.h{at}" for at in range(width))
     if others is None:
-        probe = f"SELECT 1 FROM {table} WHERE ({columns}) > ({marks}) AND ({columns}) <= ({marks})"
+        between = f"({columns}) > ({lows}) AND ({columns}) <= ({highs})"
         extra: tuple[str, ...] = ()
         if replacing is not None:
-            probe += f" AND {replacing[0]} != ?"
+            between += f" AND {replacing[0]} != ?"
             extra = (replacing[1],)
-        probe += " LIMIT 1"
     else:
         source, going = others
-        probe = (f"SELECT 1 FROM {table} WHERE ({columns}) >= ({marks}) AND ({columns}) <= ({marks}) "
-                 f"AND {source} NOT IN ({', '.join('?' * len(going))}) LIMIT 1")
+        between = (f"({columns}) >= ({lows}) AND ({columns}) <= ({highs}) "
+                   f"AND {source} NOT IN ({', '.join('?' * len(going))})")
         extra = going
     runs += 1 if ordered else 0
-    for low, high in zip(ordered, ordered[1:], strict=False):
-        runs += tx.execute(probe, (*low, *high, *extra)).fetchone() is not None
+    pairs = list(zip(ordered, ordered[1:], strict=False))
+    # One statement per batch of neighbouring pairs; each pair is one indexed range probe.
+    batch = max(1, (900 - len(extra)) // (2 * width))
+    labels = ", ".join([*(f"l{at}" for at in range(width)), *(f"h{at}" for at in range(width))])
+    for start in range(0, len(pairs), batch):
+        chunk = pairs[start : start + batch]
+        rows = ", ".join("(" + ", ".join("?" * (2 * width)) + ")" for _ in chunk)
+        (found,) = tx.execute(
+            f"WITH p({labels}) AS (VALUES {rows}) "
+            f"SELECT count(*) FROM p WHERE EXISTS (SELECT 1 FROM {table} WHERE {between})",
+            (*(value for low, high in chunk for value in (*low, *high)), *extra),
+        ).fetchone()
+        runs += found
     return runs
+
+
+def _source_layout(tx: Connection, table: str, key: str, usable: int) -> tuple[list[str], list[int], list[tuple[str, ...]]]:
+    """The record size expressions, payload limits and placing keys of a table and its indexes."""
+    table_limit, index_limit = _tree_limits(usable)
+    columns = tuple(name for (name,) in tx.execute(
+        "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
+    ))
+    sizes = [_catalogue_record_size(columns)]
+    limits = [table_limit]
+    keys: list[tuple[str, ...]] = []
+    for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table,)):
+        indexed = []
+        for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
+            if cid == -2:
+                raise ValueError("cannot size an expression index in the source catalogue")
+            indexed.append("rowid" if cid == -1 else name)
+        sizes.append(_catalogue_record_size(tuple(indexed)))
+        limits.append(index_limit)
+        # A key without its trailing rowid places the cell among other rows. Rows of one source
+        # sit together once the key reaches the source column, so the key stops there.
+        placed = [name for name in indexed if name != "rowid"]
+        if key in placed:
+            placed = placed[: placed.index(key) + 1]
+        keys.append(tuple(placed))
+    return sizes, limits, keys
 
 
 def _source_derived_pages(
     tx: Connection, sources: tuple[str, ...], usable: int,
     tables: tuple[tuple[str, str], ...] = _LEXICAL_SOURCE_TABLES + _GRAPH_SOURCE_TABLES,
+    layouts: dict[str, tuple[list[str], list[int], list[tuple[str, ...]]]] | None = None,
 ) -> _CellPages:
     """Size the stored records that the writers delete for these source paths."""
     cells = _CellPages()
-    table_limit, index_limit = _tree_limits(usable)
+    layouts = {} if layouts is None else layouts
     for table, key in tables:
-        columns = tuple(name for (name,) in tx.execute(
-            "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
-        ))
-        sizes = [_catalogue_record_size(columns)]
-        limits = [table_limit]
-        keys: list[tuple[str, ...]] = []
-        for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table,)):
-            indexed = []
-            for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
-                if cid == -2:
-                    raise ValueError("cannot size an expression index in the source catalogue")
-                indexed.append("rowid" if cid == -1 else name)
-            sizes.append(_catalogue_record_size(tuple(indexed)))
-            limits.append(index_limit)
-            # A key without its trailing rowid places the cell among other rows. Rows of one source
-            # sit together once the key reaches the source column, so the key stops there.
-            placed = [name for name in indexed if name != "rowid"]
-            if key in placed:
-                placed = placed[: placed.index(key) + 1]
-            keys.append(tuple(placed))
+        if table not in layouts:
+            layouts[table] = _source_layout(tx, table, key, usable)
+        sizes, limits, keys = layouts[table]
         # Count each existing row's record separately. A partial index can only omit
         # some of these rows, so including its key gives a safe upper bound.
         quoted = ['"' + name.replace('"', '""') + '"' for placed in keys for name in placed]
@@ -674,13 +696,12 @@ def _incoming_graph_pages(
         # index they gather at one position per distinct key ahead of the rowid.
         cells.runs[(table.table, 0)] = 1
         # Within an index, the page's cells gather at one position per distinct key ahead of the
-        # first column that holds one value for all of them, such as the page's own path.
+        # page's own source column, which no other page shares.
+        source_at = table.columns.index(source_column)
         placed = []
         for columns, _limit in shapes[1:]:
             keyed = [column for column in columns if column < len(table.columns)]
-            fixed = next((at for at, column in enumerate(keyed)
-                          if len({record[column] for record in table.values}) == 1), None)
-            placed.append(tuple(keyed if fixed is None else keyed[: fixed + 1]))
+            placed.append(tuple(keyed[: keyed.index(source_at) + 1] if source_at in keyed else keyed))
         prefixes: list[set[tuple[Any, ...]]] = [set() for _ in placed]
         for record in table.values:
             sizes = tuple(
@@ -765,26 +786,36 @@ def _reserve_payload_pages(
                      + 6 * btree_paths + 1)  # Includes the revision row.
         graph = _CellPages()
         replaced = _CellPages()  # the graph rows of re-derived pages, deleted before their records land
+        replaced_layouts: dict[str, tuple[list[str], list[int], list[tuple[str, ...]]]] = {}
+        recorded = False
         graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
         encoding, = conn.execute("PRAGMA encoding").fetchone()
 
         def reserve() -> None:
+            nonlocal recorded
             # WAL writes each dirty page once per transaction, so the starting page count also
             # bounds the existing pages it rewrites. New graph pages also grow the database.
             graph_pages = graph.added(usable, depth)
             redistributed = min(before, graph.run_rewrites(depth, before)
                                 + replaced.deleted_rewrites(usable, depth, before))
-            room.reserve_store_pages(
-                database, target_bytes=(before + database_pages + graph_pages) * page_size,
-                wal_bytes=32 + (wal_pages + graph_pages + redistributed) * (page_size + 24),
-                upload_size=upload_size,
-            )
+            estimate = {
+                "target_bytes": (before + database_pages + graph_pages) * page_size,
+                "wal_bytes": 32 + (wal_pages + graph_pages + redistributed) * (page_size + 24),
+                "upload_size": upload_size,
+            }
+            # Record the target once. Each later page only checks the room in memory; the commit
+            # records the real page count below, still under the allocation lock.
+            if recorded:
+                room.require_store_pages(database, **estimate)
+            else:
+                room.reserve_store_pages(database, **estimate)
+                recorded = True
 
         def reserve_graph(rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
             cells = _incoming_graph_pages(conn, rel, records, usable, encoding=encoding, layouts=graph_layouts)
             graph.merge(cells)
             # A page that links to an original replaces its existing graph rows; a new page has none.
-            old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES)
+            old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES, replaced_layouts)
             replaced.merge(old)
             reserve()
 

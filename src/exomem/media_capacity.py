@@ -68,12 +68,24 @@ class UploadRoom:
         self, database: Path, *, target_bytes: int, wal_bytes: int, upload_size: int,
     ) -> None:
         """Fence the WAL append and the database growth it can require at checkpoint."""
+        self.set_store_pages(database, self.require_store_pages(
+            database, target_bytes=target_bytes, wal_bytes=wal_bytes, upload_size=upload_size,
+        ))
+
+    def require_store_pages(
+        self, database: Path, *, target_bytes: int, wal_bytes: int, upload_size: int,
+    ) -> int:
+        """Refuse store growth beyond the floor without recording it; return the checkpoint target.
+
+        A writer that already recorded a target in this room checks a later estimate in memory,
+        and records the real page count once it commits.
+        """
         prior = self.store_pages[1] if self.store_pages is not None and self.store_pages[0] == database else 0
         target = max(target_bytes, prior)
         current = _file_size(database)
         extra = max(0, target - max(prior, current))
         self._require_physical(self.allocated(wal_bytes) + self.allocated(extra), upload_size)
-        self.set_store_pages(database, target)
+        return target
 
     def set_store_pages(self, database: Path, target_bytes: int) -> None:
         """Remember checkpoint growth even when a reader keeps the WAL after commit."""
