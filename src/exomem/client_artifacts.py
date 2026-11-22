@@ -1774,6 +1774,7 @@ def _commit_staged_sources(
     outcomes: list[dict | None],
     source_fields: Mapping[str, object],
     import_key: str | None = None,
+    correction_original: Path | None = None,
 ) -> dict:
     """Capture each staged file as a Source under the mutation guard, releasing the staged bytes.
 
@@ -1783,6 +1784,7 @@ def _commit_staged_sources(
     from . import (
         document_containers,
         document_identity,
+        media_jobs,
         source_capture,
         source_corrections,
         source_imports,
@@ -1867,6 +1869,13 @@ def _commit_staged_sources(
                             vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                         )
                     if duplicate is None:
+                        diarize = artifact.diarize
+                        if correction_original is not None and media_jobs.job_store_path(vault_root).is_file():
+                            # A request can update the queue while we copy the original.
+                            store = media_jobs.MediaJobStore(vault_root, create=False)
+                            pending = store.get_by_binary(correction_original, readonly=True)
+                            if pending is not None and pending.do_ocr and pending.diarize is not None:
+                                diarize = pending.diarize
                         result = add_module.add(
                             vault_root,
                             source_schema,
@@ -1876,7 +1885,7 @@ def _commit_staged_sources(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
-                                diarize=artifact.diarize,
+                                diarize=diarize,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
                             import_capture=import_capture,
@@ -2052,6 +2061,7 @@ def capture_source_correction(
     )
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
+        correction_original=vault_root.resolve() / stored,
         source_fields={
             **source_fields,
             # The plan read above, so `add` commits it without scanning every canonical Source again.

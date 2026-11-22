@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import cloud_cell, held_fs, media_brakes, reserved_paths
+from . import cloud_cell, held_fs, media_brakes, media_engines, reserved_paths
 from .asr_facts import AsrFacts
 from .asr_runtime import COMPUTE_RUNTIME_MARKERS, is_compute_runtime_failure
 from .capture_metadata import CaptureFacts
@@ -2435,10 +2435,12 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def get_by_binary(self, binary_path: Path, *, media_type: str | None = None) -> MediaJob | None:
+    def get_by_binary(
+        self, binary_path: Path, *, media_type: str | None = None, readonly: bool = False,
+    ) -> MediaJob | None:
         """Return processing work, or the exact requested queue kind, for a binary."""
         binary_rel = self._relative(binary_path)
-        conn = self._connect()
+        conn = self._connect(readonly=readonly)
         try:
             if media_type is None:
                 row = conn.execute(
@@ -2477,13 +2479,21 @@ class MediaJobStore:
                 continue
         if not paths:
             return set()
-        slots = ",".join("?" for _ in paths)
+        path_slots = ",".join("?" for _ in paths)
+        speech_kinds = tuple(sorted(media_engines.SPEECH_KINDS))
+        kind_slots = ",".join("?" for _ in speech_kinds)
         with contextlib.closing(self._connect(readonly=True)) as conn:
-            if not any(row["name"] == "diarize" for row in conn.execute("PRAGMA table_info(jobs)")):
-                return set()  # An earlier ledger has no explicit speaker requests.
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+            # These are the only request fields in the ledger schema. An older ledger may omit them.
+            flags = {"reprocess": "reprocess = 1", "diarize": "diarize IS NOT NULL",
+                     "language": "language IS NOT NULL", "language_mode": "language_mode IS NOT NULL"}
+            request = " OR ".join(test for field, test in flags.items() if field in columns)
+            if not request:
+                return set()
             rows = conn.execute(
-                f"SELECT binary_rel FROM jobs WHERE binary_rel IN ({slots}) AND do_ocr = 1 AND diarize IS NOT NULL",
-                paths,
+                f"SELECT binary_rel FROM jobs WHERE binary_rel IN ({path_slots}) "
+                f"AND media_type IN ({kind_slots}) AND do_ocr = 1 AND ({request})",
+                [*paths, *speech_kinds],
             )
             return {self.vault_root / row["binary_rel"] for row in rows}
 

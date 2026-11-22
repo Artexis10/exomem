@@ -6,7 +6,7 @@ The media intake and explicit reprocessing operations SHALL accept an optional s
 
 The command interfaces SHALL accept `diarize` as a boolean on an intake file or media processing request. Direct multipart and resumable uploads SHALL accept the optional `diarize` field as `true` or `false`. The direct and resumable attachment CLI SHALL expose both choices. A caller sets the choice for a held upload when it presents the file handle for preservation.
 
-Capture SHALL disclose when it reuses an existing recording and keeps its choice. A request for speaker labels SHALL refuse a supplied transcript on the same capture. A metadata-only Source correction SHALL carry the original's explicit choice. Bulk backfill SHALL honor the stored choice and leave an explicit queued extraction to the worker.
+Capture SHALL disclose when it reuses an existing recording and keeps its choice. A request for speaker labels SHALL refuse a supplied transcript on the same capture. A metadata-only Source correction SHALL carry the latest accepted choice for the original, including a choice in the queue. Bulk backfill SHALL use the stored choice with timed extraction and leave an explicit queued extraction to the worker.
 
 #### Scenario: One deployment processes two different choices
 

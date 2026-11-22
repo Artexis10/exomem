@@ -1166,6 +1166,7 @@ def register_transfer_routes(
         if diarize_refusal is not None:
             return JSONResponse({"code": "INVALID_UPLOAD", "reason": diarize_refusal}, status_code=400)
         try:
+            preserve_module.validate_diarize_text(diarize, text)
             manager = get_manager()
             if archive:
                 receipt, stored = await run_in_threadpool(

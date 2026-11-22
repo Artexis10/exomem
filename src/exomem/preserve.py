@@ -315,6 +315,15 @@ class PreserveError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+def validate_diarize_text(diarize: bool | None, text: str | None) -> None:
+    """A supplied transcript skips the speech extraction that assigns speaker labels."""
+    if diarize and text and text.strip():
+        raise PreserveError(
+            "DIARIZE_NOT_APPLICABLE", ["diarize", "text"],
+            "submit the recording without supplied text to request speaker labels",
+        )
+
+
 def validate_raw_capture(
     filename: str | None = None, *, destination: str = "", raw_protection: bool = False,
 ) -> bool:
@@ -620,11 +629,7 @@ def preserve(
 
         if media_engines.engine_for(media_type) != media_engines.SPEECH:
             return _raise("DIARIZE_NOT_APPLICABLE", ["diarize"], "speaker labels apply to audio and video only")
-        if diarize and text and text.strip():
-            return _raise(
-                "DIARIZE_NOT_APPLICABLE", ["diarize", "text"],
-                "submit the recording without supplied text to request speaker labels",
-            )
+        validate_diarize_text(diarize, text)
 
     now = today or temporal.now()
     date_iso = temporal.render_date(now)

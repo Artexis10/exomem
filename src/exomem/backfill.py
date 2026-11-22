@@ -31,6 +31,7 @@ from . import (
     embeddings,
     extract,
     index_sync,
+    media_engines,
     media_jobs,
     media_store,
     preserve,
@@ -415,7 +416,7 @@ def backfill_media(
         extract_here = do_ocr and canonical_root / rel not in queued_speech
         need_ocr = extract_here and not _ocr_done(sidecar)
         diarize = None
-        if extract_here and (need_ocr or rediarize or retime) and not need_sidecar and media_type in ("audio", "video"):
+        if extract_here and (need_ocr or rediarize or retime) and not need_sidecar and media_type in media_engines.SPEECH_KINDS:
             try:
                 with sidecar.open("rb") as page:
                     header = read_frontmatter_header(page, runtime_resources.SEMANTIC_SOURCE_MAX_BYTES)
@@ -484,13 +485,13 @@ def backfill_media(
                 continue
             try:
                 speech_guard = None
-                if media_type in ("audio", "video"):
+                if media_type in media_engines.SPEECH_KINDS:
                     basis, speech_guard = read_guarded_text(vault_root, sidecar)
                     if preserve.diarize_pin(basis) is not diarize:
                         stats.skipped += 1
                         continue
                 with media_store.logical_view(vault_root, f) as view:
-                    options = {} if diarize is None else {"diarize": diarize}
+                    options = {} if diarize is None else {"diarize": diarize, "timestamps": True}
                     res = extract.extract_text(view, media_type=media_type, vault_root=vault_root, **options)
                 if not _is_automatic_media_candidate(vault_root, f):
                     _purge_suppressed_clip(clip_store, vault_root, f)

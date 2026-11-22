@@ -158,7 +158,8 @@ def test_held_audio_capture_preserves_the_per_item_diarization_choice(
     assert parse_frontmatter(queued.sidecar_path.read_text())[0]["diarize_requested"] is False
 
 
-def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, source_schema):
+@pytest.mark.parametrize("override", [None, True])
+def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, source_schema, override):
     from exomem import commands, preserve
     from exomem.vault import content_hash
 
@@ -172,6 +173,8 @@ def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, s
         [stored] = commands.op_capture_source(
             vault, source_schema=source_schema, title="Recording", source_kind="session", files=[file],
         )["files"]
+        if override is not None:
+            commands.op_process_media(vault, path=stored["stored_path"], diarize=override)
         old_hash = content_hash((vault / stored["page"]).read_text())
         [corrected] = commands.op_capture_source(
             vault, source_schema=source_schema, title="Corrected recording",
@@ -180,7 +183,7 @@ def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, s
 
     assert corrected["outcome"] == "stored"
     assert (vault / corrected["stored_path"]).read_bytes() == data
-    assert preserve.diarize_pin((vault / corrected["page"]).read_text()) is False
+    assert preserve.diarize_pin((vault / corrected["page"]).read_text()) is (override is True)
 
 
 def test_revoked_expired_and_foreign_tickets_share_one_refusal(upload_env, monkeypatch):

@@ -243,7 +243,8 @@ def test_backfill_respects_a_skipped_speaker_choice(vault, monkeypatch, queued) 
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     choices = []
 
-    def transcribe(_, *, media_type, diarize, **_options):
+    def transcribe(_, *, media_type, diarize, timestamps, **_options):
+        assert timestamps is True
         choices.append(diarize)
         return extract.ExtractResult(text="[0:00] recorded speech", engine="test+timed", media_type=media_type)
 
@@ -401,6 +402,24 @@ def test_retime_reextracts_flat_sidecar(vault, monkeypatch: pytest.MonkeyPatch) 
     body = sidecar.read_text("utf-8")
     assert "extracted_by: faster-whisper:large-v3+timed" in body
     assert "[0:05] hello there" in body
+
+
+def test_retime_leaves_the_transcript_a_queued_reprocess_will_archive(vault, monkeypatch) -> None:
+    from exomem import commands, media_jobs
+
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    binary, sidecar = _drop_audio_with_plain_transcript(vault)
+    sidecar.write_text(preserve.set_diarize_pin(sidecar.read_text(), False))
+    queued = commands.op_process_media(vault, path=binary.relative_to(vault).as_posix(), operation="reprocess")
+    before = sidecar.read_bytes()
+    monkeypatch.setattr(extract, "extract_text", _timed_result)
+
+    stats = backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+
+    assert stats.retimed == 0
+    assert sidecar.read_bytes() == before
+    job = media_jobs.MediaJobStore(vault).get(queued["job_id"])
+    assert job is not None and job.reprocess and job.diarize is None
 
 
 def test_retime_second_run_is_noop(vault, monkeypatch: pytest.MonkeyPatch) -> None:
