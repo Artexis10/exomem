@@ -13,6 +13,13 @@ A round SHALL read the configured stores' budgets and earliest due times in one 
 - **WHEN** one byte of a replica's ciphertext changes in a `filesystem` store whose `head` recomputes content
 - **THEN** the next check of that replica quarantines it, and the status reports the finding with the level `content`
 
+#### Scenario: A store does not return its marker or HEAD
+
+- **WHEN** a scheduled marker probe or HEAD call outlasts the store’s turn
+- **THEN** the worker stops waiting and gives the remaining stores their turns
+- **AND** only one read can stay in flight for that store
+- **AND** a late result changes neither the evidence nor quarantine
+
 #### Scenario: A store that does not recompute
 
 - **WHEN** a replica's store declares `head_recomputes: false` and the version exists with its recorded size and digest
@@ -43,7 +50,7 @@ The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL 
 
 - **WHEN** a pending store read outlasts the sample window
 - **THEN** the worker ends its wait and records an incomplete read without quarantining the replica
-- **AND** the pending operation holds one sample slot until its handles close
+- **AND** the pending operation holds that store’s maintenance read slot until its handles close
 - **AND** a later sample deferred by that slot spends no budget
 
 #### Scenario: The budget is spent

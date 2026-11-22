@@ -70,6 +70,10 @@ _RETRY_SECONDS = 30.0
 _IDLE_SECONDS = 30.0
 #: The least time between two observations of whether each store answers as itself.
 _OBSERVE_SECONDS = 60.0
+# Keep a stalled marker read from using a round's transfer window.
+_STORE_PROBE_SECONDS = 2.0
+# Let a cooperative filesystem hash verify its held witness and return.
+_HEAD_RETURN_SECONDS = 0.05
 #: A scan writes its queue rows this many at a time.
 _SCAN_BATCH = 500
 DEFAULT_CHECK_CYCLE_DAYS = 30.0
@@ -150,6 +154,7 @@ def _status_schema(conn: sqlite3.Connection) -> set[str]:
 
 _EXPORT_COVERAGE_KEY = "replica.key_export_coverage"
 _EXPORT_EVIDENCE_UNAVAILABLE = "key export evidence unavailable"
+_SET_UNASSESSED_EXPORT_COVERAGE = "UPDATE meta SET value = ? WHERE key = ? AND value = 'unassessed'"
 
 
 def _initialize_export_coverage(conn: sqlite3.Connection, existing: set[str]) -> None:
@@ -160,9 +165,11 @@ def _initialize_export_coverage(conn: sqlite3.Connection, existing: set[str]) ->
     lost = (missing_table and "media_replicas" in existing
             or (projected or recorded)
             and (not recorded or missing_table or not _EXPORT_STATUS_TRIGGERS.issubset(existing)))
+    # A blank ledger cannot tell a new vault from one that still carries bindings from a lost ledger.
+    coverage = "unassessed" if not existing and not recorded else ("incomplete" if lost else "complete")
     conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value "
                  "WHERE excluded.value = 'incomplete' AND meta.value <> excluded.value",
-                 (_EXPORT_COVERAGE_KEY, "incomplete" if lost else "complete"))
+                 (_EXPORT_COVERAGE_KEY, coverage))
 
 
 def _export_coverage_complete(conn: sqlite3.Connection, schema: set[str]) -> bool:
@@ -777,6 +784,8 @@ def rebuild(vault: Path) -> int:
         conn.execute("UPDATE media_replica_generation SET value = value + 1 WHERE id = 1")
         generation = conn.execute("SELECT value FROM media_replica_generation WHERE id = 1").fetchone()[0]
         conn.execute("DELETE FROM media_replica_census")
+        assess_exports = conn.execute("SELECT 1 FROM meta WHERE key = ? AND value = 'unassessed'",
+                                      (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
     unread = 0
 
     def skip(error: originals.RetirementUnconfirmed) -> None:
@@ -792,9 +801,24 @@ def rebuild(vault: Path) -> int:
         return conn.execute("SELECT value FROM media_replica_generation WHERE id = 1").fetchone()[0] == generation
 
     def flush() -> bool:
+        nonlocal assess_exports
         with closing(ledger._connect()) as conn, conn:
             if not still_current(conn):
                 return False
+            if assess_exports and batch:
+                # Test the bindings against this ledger before inserting them. Record incomplete coverage in
+                # the same transaction as the recovered replicas so an interrupted walk cannot hide the loss.
+                recovered = conn.execute(
+                    "SELECT 1 FROM json_each(?) AS binding WHERE NOT EXISTS (SELECT 1 FROM media_replicas AS r "
+                    "WHERE r.binary_rel = json_extract(binding.value, '$[0]') "
+                    "AND r.store = json_extract(binding.value, '$[1]') "
+                    "AND r.object = json_extract(binding.value, '$[2]') "
+                    "AND r.version = json_extract(binding.value, '$[3]')) LIMIT 1",
+                    (json.dumps([row[:4] for row in batch]),),
+                ).fetchone() is not None
+                if recovered:
+                    conn.execute(_SET_UNASSESSED_EXPORT_COVERAGE, ("incomplete", _EXPORT_COVERAGE_KEY))
+                    assess_exports = False
             conn.executemany(_UPSERT_REBUILT, batch)
         batch.clear()
         return True
@@ -828,6 +852,8 @@ def rebuild(vault: Path) -> int:
         conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
                      "token = random() WHERE state = ? AND (kind = ? OR code = ?)",
                      (PENDING, REFUSED, RECOPY, media_store.NO_VERIFIED_SOURCE))
+        if assess_exports:
+            conn.execute(_SET_UNASSESSED_EXPORT_COVERAGE, ("incomplete" if unread else "complete", _EXPORT_COVERAGE_KEY))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -919,22 +945,35 @@ def _note_reach(vault: Path, store: str, answer: bool, *, force: bool = False) -
                      "observed_at = excluded.observed_at", (store, int(answer), time.time()))
 
 
-def observe(vault: Path) -> None:
+def _reachable_now(vault: Path, name: str, *, deadline: float | None = None, force: bool = False) -> bool:
+    """Wait briefly for an identity probe, leaving busy slots and other stores alone."""
+    from . import media_store
+
+    timeout = _STORE_PROBE_SECONDS if deadline is None else min(_STORE_PROBE_SECONDS, deadline - time.monotonic())
+    try:
+        answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name), timeout=timeout)
+    except media_store.StoreReadPending:
+        return False
+    except media_store.StoreReadTimedOut:
+        answer = False
+    if answer is not None:
+        _note_reach(vault, name, answer, force=force)
+    return answer is not False
+
+
+def observe(vault: Path, *, deadline: float | None = None) -> None:
     """Record whether each store that has a cheap check answers as itself now.
 
     Only the worker calls it (and the drain, when a copy meets a store that does not answer), so a status reports an
     observation with its time and never reads a store itself. A store with no cheap check (a remote one) is not
     probed and keeps no record.
     """
-    from . import media_store
-
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None:
         return
     for name in originals.store_entries(config):
-        if (answer := media_store.store_reachable(vault, name)) is not None:
-            _note_reach(vault, name, answer, force=True)
+        _reachable_now(vault, name, deadline=deadline, force=True)
 
 
 # --- the id that the owner's declaration recorded for a store's marker ------------------------------
@@ -1591,9 +1630,7 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         if row is None:
             break
         foreground_priority.yield_to_foreground()
-        if (answer := media_store.store_reachable(vault, row["store"])) is not None:
-            _note_reach(vault, row["store"], answer)
-        if answer is False:
+        if not _reachable_now(vault, row["store"], deadline=limit):
             # The store does not answer as itself: an outage, which spends no attempt and writes no refusal. Its
             # queue waits for the next round, and the other stores go on.
             paused.add(row["store"])
@@ -1708,7 +1745,7 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
         return False
     if time.monotonic() - _observed.get(vault, -_OBSERVE_SECONDS) >= _OBSERVE_SECONDS:
         _observed[vault] = time.monotonic()
-        observe(vault)
+        observe(vault, deadline=deadline)
     if rebuild_due(vault):
         rebuild(vault)
         return True
@@ -1723,7 +1760,12 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
     drain_until = now + _DRAIN_SECONDS if deadline is None else min(deadline, now + _DRAIN_SECONDS)
     if next_check is not None:
         drain_until = min(drain_until, next_check + _CHECK_INTERVAL)
-    settled = drain(vault, deadline=drain_until)
+    try:
+        settled = drain(vault, deadline=drain_until)
+    except sqlite3.Error:
+        # The request stays pending. A broken copy write cannot stop due verification.
+        log.warning("media replicas: a copy round could not update its ledger", exc_info=True)
+        settled = 0
     # Verification does not wait for an empty queue: a backlog of copies would otherwise hold every check and sample
     # back for as long as it lasts, with replicas overdue. A round costs one bounded drain and one bounded check.
     now = time.monotonic()
@@ -1768,12 +1810,13 @@ class _ReadCap:
         self.rate, self.limit, self.key = rate, limit, key
         self.due = _owed.get(key, 0.0) if key is not None else 0.0
 
-    def ready(self) -> bool:
+    def ready(self, *, until: float | None = None) -> bool:
         """False when the wait that earlier reads left owing outlasts this round; else waits it out, and the read may go."""
-        if self.due >= self.limit:
+        limit = self.limit if until is None else min(self.limit, until)
+        if self.due >= limit:
             return False
         foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
-        return time.monotonic() < self.limit
+        return time.monotonic() < limit
 
     def charge(self, started: float, size: int) -> None:
         if size > 0:
@@ -1790,12 +1833,12 @@ class _ReadCap:
         fails after most of the bytes must not be read faster than the cap for it.
         An invalid locator or a confirmed missing version costs no bytes.
         """
-        from .media_store import ReplicaAbsent, SampleReadPending
+        from .media_store import ReplicaAbsent, StoreReadPending
 
         started, charged = time.monotonic(), True
         try:
             yield
-        except (ValueError, ReplicaAbsent, SampleReadPending):
+        except (ValueError, ReplicaAbsent, StoreReadPending):
             charged = False
             raise
         finally:
@@ -1929,6 +1972,11 @@ def _round_seconds(content_bytes: int, rate: float) -> float:
 _scheduled_reads: dict[tuple[Path, str], media_store.ScheduledRead] = {}
 
 
+def _store_deadline(round_deadline: float, stores_left: int) -> float:
+    now = time.monotonic()
+    return now + (round_deadline - now) / stores_left
+
+
 def check(vault: Path, *, deadline: float | None = None) -> int:
     """One bounded round of scheduled checks over every store whose descriptor allows one; return the replicas attempted.
 
@@ -1959,8 +2007,12 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
     if deadline is not None:
         limit = min(limit, deadline)
     cap = _ReadCap(rate, limit, (vault, "check"))
-    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit, share, reads_bytes=name in reads_bytes)
-               for name, share in plan.items())
+    checked = 0
+    for index, (name, share) in enumerate(plan.items()):
+        until = _store_deadline(limit, len(plan) - index)
+        checked += _check_store(vault, ledger, name, levels[name], cycle, cap, until, share,
+                                reads_bytes=name in reads_bytes)
+    return checked
 
 
 def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycle: float, cap: _ReadCap,
@@ -1970,9 +2022,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
 
     if time.monotonic() >= limit:
         return 0
-    if (answer := media_store.store_reachable(vault, name)) is not None:
-        _note_reach(vault, name, answer)
-    if answer is False:
+    if not _reachable_now(vault, name, deadline=limit):
         return 0
     rows, budget = share
     attempted = spent = failing = 0
@@ -1983,7 +2033,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
         if not picked:
             break
         for row in picked:
-            if time.monotonic() >= limit or (reads_bytes and (spent >= budget or not cap.ready())):
+            if time.monotonic() >= limit or (reads_bytes and (spent >= budget or not cap.ready(until=limit))):
                 return attempted
             foreground_priority.yield_to_foreground()
             attempted += 1
@@ -1997,22 +2047,35 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
             started = time.monotonic()
             if started >= limit:
                 return attempted - 1
-            read.bytes_read = None
             size = replica.ciphertext_size if reads_bytes else 0
+            charged = None
+
+            def head(reference=replica):
+                read.bytes_read = None
+                return media_store.check_replica(vault, reference, deadline=limit - _HEAD_RETURN_SECONDS, scheduled=read)
+
             try:
-                failure = media_store.check_replica(vault, replica, deadline=limit, scheduled=read)
+                failure = media_store.wait_store_read(vault, name, head, timeout=limit - started)
+            except media_store.StoreReadPending:
+                charged = 0
+                return attempted - 1
+            except media_store.StoreReadTimedOut:
+                # The timed-out read may still be updating its count.
+                charged = size
+                _failed(vault, row, READ_FAILED, attempted=replica)
+                return attempted
             except media_store.ReplicaCheckPending:
                 return attempted
             except media_store.ReplicaAbsent as missing:
-                size = 0
+                charged = 0
                 failure = missing.failure
             except ValueError:
-                size = 0  # refused before it read anything
+                charged = 0  # refused before it read anything
                 _failed(vault, row, RECORD_INVALID, attempted=replica)  # the store answered; it cannot address this version
                 continue
             except media_store.MediaStoreError:
-                if media_store.store_reachable(vault, name) is False:
-                    _note_reach(vault, name, False)  # the store went away mid-round: an outage, and no row's finding
+                if not _reachable_now(vault, name, deadline=limit):
+                    # The store went away mid-round. Keep the prior evidence.
                     return attempted - 1
                 _failed(vault, row, READ_FAILED, attempted=replica)  # unavailable is no proof of loss: not quarantined
                 failing += 1
@@ -2020,7 +2083,8 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                     return attempted
                 continue
             finally:
-                charged = size if read.bytes_read is None else read.bytes_read
+                if charged is None:
+                    charged = size if read.bytes_read is None else read.bytes_read
                 spent += charged
                 cap.charge(started, charged)
             failing = 0
@@ -2187,21 +2251,20 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
         limit = min(limit, deadline)
     cap, cycle = _ReadCap(check_read_rate(), limit, (vault, "sample")), check_cycle()
     month, key_version, sampled = _month(time.time()), str(config.get("key_version")), 0
-    for name, entry in originals.store_entries(config).items():
+    stores = [(name, entry) for name, entry in originals.store_entries(config).items()
+              if _unscheduled_reason(entry) is None and entry.sample_bytes_per_month > 0
+              and media_store.unreadable_reason(vault, name, key_version) is None]
+    for index, (name, entry) in enumerate(stores):
         if time.monotonic() >= limit:
             break
-        if (_unscheduled_reason(entry) is not None or entry.sample_bytes_per_month <= 0
-                or media_store.unreadable_reason(vault, name, key_version) is not None):
-            continue
-        if (answer := media_store.store_reachable(vault, name)) is not None:
-            _note_reach(vault, name, answer)
-        if answer is False:
+        until = _store_deadline(limit, len(stores) - index)
+        if not _reachable_now(vault, name, deadline=until):
             continue
         with closing(ledger._connect()) as conn, conn:
             conn.execute(_SAMPLE_RESET, (name, key_version, month, _SAMPLE_RELEASE))
         reads = skips = failing = 0
         second_look = True  # a quarantined replica comes first, once per round
-        while reads < _SAMPLE_READS and skips < _SAMPLE_SKIPS and time.monotonic() < limit:
+        while reads < _SAMPLE_READS and skips < _SAMPLE_SKIPS and time.monotonic() < until:
             with closing(ledger._connect(readonly=True)) as conn:
                 row = conn.execute(_REPROOF, (name, key_version, time.time() - cycle)).fetchone() if second_look else None
                 quarantined = row is not None
@@ -2237,7 +2300,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 continue
             reserved = False
             if replica.ciphertext_size <= remaining:
-                if not cap.ready():
+                if not cap.ready(until=until):
                     break  # an earlier round's read is not yet paid for: nothing is charged or read until it is
                 with closing(ledger._connect()) as conn, conn:  # the balance read above may be stale: reserve against the budget
                     reserved = _charge(conn, name, month, replica.ciphertext_size, entry.sample_bytes_per_month)
@@ -2246,7 +2309,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     _mark_sample(vault, row, month, attempted=replica)
                     skips += 1
                 continue
-            if time.monotonic() >= limit:
+            if time.monotonic() >= until:
                 with closing(ledger._connect()) as conn, conn:
                     _charge(conn, name, month, -replica.ciphertext_size)
                 break
@@ -2255,8 +2318,8 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
             try:
                 with cap.reading(replica.ciphertext_size):
                     damage = media_store.sample_replica(
-                        vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256), deadline=limit)
-            except media_store.SampleReadPending:
+                        vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256), deadline=until)
+            except media_store.StoreReadPending:
                 with closing(ledger._connect()) as conn, conn:
                     _charge(conn, name, month, -replica.ciphertext_size)
                 return sampled - 1

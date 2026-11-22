@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
-from typing import TYPE_CHECKING, BinaryIO, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar, cast
 
 from . import (
     held_fs,
@@ -1599,46 +1599,65 @@ class _NullSink:
         return None
 
 
-class SampleReadPending(MediaStoreError):
-    """A preceding sample still owns the transport slot."""
+class StoreReadPending(MediaStoreError):
+    """A preceding operation still owns this store's maintenance read slot."""
 
     def __init__(self) -> None:
-        super().__init__(STORE_BUSY_CODE, "a preceding replica sample is still releasing its read")
+        super().__init__(STORE_BUSY_CODE, "a preceding replica operation is still releasing its read")
 
 
-# A stalled syscall can outlive the sample deadline. One disposable reader owns
-# this slot until its handles close, so later rounds cannot accumulate readers.
-_sample_reader = threading.BoundedSemaphore(1)
+class StoreReadTimedOut(MediaStoreError):
+    """The maintenance worker ended its wait for a store operation."""
+
+    def __init__(self) -> None:
+        super().__init__("MEDIA_STORE_UNAVAILABLE", "the replica store operation exceeded its deadline")
 
 
-def _bounded_sample(read: Callable[[], str | None], deadline: float) -> str | None:
-    _require_transfer_time(deadline)
-    if not _sample_reader.acquire(blocking=False):
-        raise SampleReadPending()
-    completed: Queue[tuple[str | None, BaseException | None]] = Queue(maxsize=1)
+_ReadResult = TypeVar("_ReadResult")
+_pending_reads: set[tuple[Path, str]] = set()
+_pending_reads_lock = threading.Lock()
+
+
+def wait_store_read(vault: Path, name: str, read: Callable[[], _ReadResult], *, timeout: float) -> _ReadResult:
+    """Wait for read-only adapter I/O. An unanswered syscall keeps only its own store's slot."""
+    if timeout <= 0:
+        raise StoreReadPending()
+    key = vault, name
+    with _pending_reads_lock:
+        if key in _pending_reads:
+            raise StoreReadPending()
+        _pending_reads.add(key)
+    completed: Queue[tuple[float, _ReadResult | None, BaseException | None]] = Queue(maxsize=1)
+
+    def release() -> None:
+        with _pending_reads_lock:
+            _pending_reads.discard(key)
 
     def read_and_release() -> None:
         try:
-            outcome = (read(), None)
+            value = read()
+            outcome = (time.monotonic(), value, None)
         except BaseException as error:  # noqa: BLE001 - report on the calling thread
-            outcome = (None, error)
+            outcome = (time.monotonic(), None, error)
         finally:
-            _sample_reader.release()
+            release()
         completed.put_nowait(outcome)
 
+    deadline = time.monotonic() + timeout
     try:
-        threading.Thread(target=read_and_release, name="media-replica-sample", daemon=True).start()
+        threading.Thread(target=read_and_release, name="media-replica-read", daemon=True).start()
     except BaseException:
-        _sample_reader.release()
+        release()
         raise
     try:
-        finding, failure = completed.get(timeout=max(0.0, deadline - time.monotonic()))
+        finished, value, failure = completed.get(timeout=max(0.0, deadline - time.monotonic()))
     except Empty as error:
-        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the sampled read exceeded its deadline") from error
-    _require_transfer_time(deadline)
+        raise StoreReadTimedOut() from error
+    if finished >= deadline:
+        raise StoreReadTimedOut()
     if failure is not None:
         raise failure
-    return finding
+    return cast(_ReadResult, value)
 
 
 def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead, *, deadline: float | None = None) -> str | None:
@@ -1658,7 +1677,11 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead, *, 
             return mismatch.failure
         return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
 
-    return read() if deadline is None else _bounded_sample(read, deadline)
+    if deadline is None:
+        return read()
+    finding = wait_store_read(vault, replica.store, read, timeout=deadline - time.monotonic())
+    _require_transfer_time(deadline)
+    return finding
 
 
 def replica_damage(error: MediaStoreError) -> str | None:

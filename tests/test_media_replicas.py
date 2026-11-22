@@ -504,6 +504,24 @@ def test_a_worker_round_that_settles_copies_still_runs_the_checks_that_are_due(
     assert _replica_row(vault)["checked_at"] > 0
 
 
+def test_a_settlement_error_cannot_hide_the_first_due_verification(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    _replicated(vault)
+    _due_again(vault)
+    monkeypatch.delitem(media_replicas._checked, vault, raising=False)
+
+    def settlement_error(_vault, *, deadline):
+        raise sqlite3.IntegrityError("cannot record the queued copy")
+
+    monkeypatch.setattr(media_replicas, "drain", settlement_error)
+
+    assert media_replicas.work(vault)
+
+    assert _replica_row(vault)["checked_at"] > 0
+    assert "cannot record the queued copy" in caplog.text
+
+
 def test_a_repeated_replicate_keeps_the_progress_of_a_running_request_and_starts_a_new_one_when_it_ends(
         vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
@@ -1840,6 +1858,42 @@ def test_export_coverage_marker_loss_stays_unknown_across_current_writer_initial
         assert aggregate["totals"]["recoverability_unknown"] == 2
         [listed] = media_replicas.page(vault)["originals"]
         assert [item["recoverable"] for item in listed["replicas"]] == [None, None]
+
+
+def test_a_rebuild_of_a_lost_ledger_keeps_missing_export_receipts_unknown(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault, replica.key_version)
+    assert media_replicas.status(vault)["totals"]["recoverable"] == 2
+    media_jobs.job_store_path(vault).unlink()  # The canonical binding and both stored versions survive.
+
+    walk = media_store.bound_originals
+
+    def stop_after_recovering_the_binding(root, **options):
+        for snapshot in walk(root, **options):
+            yield snapshot
+            if snapshot.path == vault / relative:
+                raise RuntimeError("stopped before the recovered census committed")
+
+    with monkeypatch.context() as stopped:
+        stopped.setattr(media_store, "bound_originals", stop_after_recovering_the_binding)
+        stopped.setattr(media_replicas, "_SCAN_BATCH", 1)
+        with pytest.raises(RuntimeError, match="stopped before the recovered census committed"):
+            media_replicas.rebuild(vault)
+    assert media_replicas.rebuild(vault) == 2
+
+    exact = media_replicas.original_view(vault, relative)
+    assert [item["recoverable"] for item in exact["replicas"]] == [None, None]
+    [listed] = media_replicas.page(vault)["originals"]
+    assert [item["recoverable"] for item in listed["replicas"]] == [None, None]
+    rebuilt = media_replicas.status(vault)
+    assert rebuilt["state"] == "partial"
+    assert (rebuilt["totals"]["not_recoverable"], rebuilt["totals"]["recoverability_unknown"]) == (0, 2)
+
+    media_replicas.confirm_key_export(vault, replica.key_version)
+    reopened = media_replicas.status(vault)
+    assert reopened["totals"]["recoverable"] == 2
+    assert reopened["state"] == "partial"
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -3918,7 +3972,7 @@ def test_the_idle_worker_starts_the_next_round_when_it_is_due(
     media_jobs.MediaJobStore(vault)
     clock, starts = [0.0], []
     monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
-    monkeypatch.setattr(media_replicas, "observe", lambda _vault: None)
+    monkeypatch.setattr(media_replicas, "observe", lambda _vault, *, deadline: None)
     monkeypatch.setattr(media_replicas, "rebuild_due", lambda _vault: False)
     monkeypatch.setattr(media_replicas, "sample", lambda _vault, *, deadline: 0)
     monkeypatch.setattr(media_replicas, "_wake", types.SimpleNamespace(
@@ -4312,6 +4366,10 @@ def test_a_blocked_sample_returns_by_its_deadline_and_allocates_one_read(
     @contextmanager
     def blocked_open(backend, name, version):
         with opened(backend, name, version) as stream:
+            if name != replica.object:
+                yield stream
+                return
+
             def read(size):
                 reads.append(name)
                 entered.set()
@@ -4340,20 +4398,60 @@ def test_a_blocked_sample_returns_by_its_deadline_and_allocates_one_read(
         assert entered.wait(5)
         assert returned.wait(2.5), "the worker still waits for the pending store read"
         assert failures == ["MEDIA_STORE_UNAVAILABLE"]
-        with pytest.raises(media_store.SampleReadPending):
+        with pytest.raises(media_store.StoreReadPending):
             media_store.sample_replica(vault, replica, plaintext, deadline=time.monotonic() + 1.5)
         _unproven(vault)
         with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
-            charges = ledger.execute("SELECT SUM(bytes) FROM media_replica_samples WHERE bytes > 0").fetchone()
-            assert media_replicas.sample(vault, deadline=time.monotonic() + 1.5) == 0
-            assert ledger.execute("SELECT SUM(bytes) FROM media_replica_samples WHERE bytes > 0").fetchone() == charges
+            budget = "SELECT SUM(bytes) FROM media_replica_samples WHERE store = ?"
+            charges = ledger.execute(budget, (MIRROR,)).fetchone()
+            assert media_replicas.sample(vault, deadline=time.monotonic() + 1.5) == 1
+            assert ledger.execute(budget, (MIRROR,)).fetchone() == charges
         assert reads == [replica.object]
         _due_again(vault)
-        assert media_replicas.check(vault) == 2
+        assert media_replicas.check(vault) == 1
+        assert _replica_row(vault, store="test-store")["checked_at"] > 0
     finally:
         release.set()
         caller.join(5)
         assert left.wait(5)
+
+
+@pytest.mark.parametrize("operation", ["marker", "head"])
+def test_a_stalled_store_leaves_another_store_a_turn(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    _replicated(vault)
+    _due_again(vault)
+    entered, release, returned = (threading.Event() for _ in range(3))
+    calls = []
+    method = "require_identity" if operation == "marker" else "head"
+    real = getattr(media_store.FilesystemStore, method)
+
+    def stalled(backend, *args, **kwargs):
+        if backend.name != "test-store":
+            return real(backend, *args, **kwargs)
+        calls.append(backend.name)
+        entered.set()
+        release.wait(10)
+        returned.set()
+        if operation == "marker":
+            return None
+        return media_store.ObjectHead(1, "0" * 64)
+
+    monkeypatch.setattr(media_store.FilesystemStore, method, stalled)
+    try:
+        media_replicas.check(vault, deadline=time.monotonic() + 1.2)
+        assert entered.is_set()
+        assert not returned.is_set()
+        assert _replica_row(vault)["checked_at"] > 0
+        assert media_replicas.check(vault, deadline=time.monotonic() + 1.2) == 0
+        assert calls == ["test-store"]
+    finally:
+        release.set()
+        assert returned.wait(5)
+
+    row = _replica_row(vault, store="test-store")
+    assert row["state"] == media_replicas.UPLOAD_VERIFIED and row["checked_at"] == 0
 
 
 def test_a_sample_under_a_wrong_key_still_finds_a_large_replica_that_is_damaged(

@@ -58,8 +58,8 @@ Expected result: the next status shows the new `budget_bytes` for that store.
 The sample takes the replica whose sample turn came longest ago first.
 It charges a replica's bytes to the month before it downloads them, so an interrupted download still counts.
 When the sample window ends, the worker stops waiting and the decoder terminates. The reader stops before another chunk.
-An outstanding store read keeps the single sample slot until its transport or filesystem returns.
-Later rounds skip that slot without using the monthly budget.
+An outstanding marker probe, HEAD, or sample keeps that store's read slot until the transport or filesystem returns.
+The worker gives other stores their turns. A deferred sample spends none of its monthly budget.
 A replica larger than the remaining budget waits for the next month and counts in `skipped_for_size`.
 The month is a calendar month in UTC.
 An older release ignores this field.

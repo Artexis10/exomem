@@ -979,10 +979,15 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
         try:
             reference = None
             expected = row
-            if replica:
+            if downloaded:
                 if replica_inputs is None:
                     replica_inputs = _repair_replicas(vault, row)
                 versions, bound_size, unreadable = replica_inputs
+                if not replica and unreadable == "unreadable":
+                    result.rescheduled += 1  # Keep the download until the current binding can be read.
+                    return
+                expected = replace(row, size=bound_size)
+            if replica:
                 key = None if copy["source"] == MEDIA_STORE else (copy["store"], copy["object"], copy["version"])
                 if (entry := versions.get(key)) is None:
                     tried.append({**copy, "failed": unreadable})
@@ -994,7 +999,6 @@ def _repair(vault: Path, row: Row, hashed: _Hashed, cause: str, pace: _Pace, res
                 if (reason := _replica_unusable(vault, reference)) is not None:
                     tried.append({**copy, "failed": reason})
                     continue
-                expected = replace(row, size=bound_size)
             staged = _stage(vault, expected, copy, pace, reference=reference)
         except _Changed:
             result.rescheduled += 1  # The binding was rebound since the row was read: the next pass decides afresh.

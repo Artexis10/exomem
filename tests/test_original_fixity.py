@@ -416,8 +416,14 @@ def test_a_busy_restore_reuses_the_verified_download(
 
     original = _stored(vault, "Recordings")
     _offload(vault, original)
+    companion = original.with_name(original.name + ".md")
+    current = companion.read_text()
+    stale = current.replace(f"binary_size: {len(TRANSCRIPT)}", f"binary_size: {len(TRANSCRIPT) + 1}")
+    stale = stale.replace(f"artifact_size: {len(TRANSCRIPT)}", f"artifact_size: {len(TRANSCRIPT) + 1}")
+    assert stale != current
+    companion.write_text(stale)
     original_fixity.walk(vault)
-    original_fixity.run_pass(vault)
+    companion.write_text(current)
     original.write_bytes(DAMAGED)
     downloads = _count_downloads(monkeypatch)
     guard = media_store._guard
@@ -429,7 +435,7 @@ def test_a_busy_restore_reuses_the_verified_download(
 
     with monkeypatch.context() as busy:
         busy.setattr(media_store, "_guard", temporarily_busy)
-        original_fixity.run_pass(vault, budget=0)
+        original_fixity.run_pass(vault, budget=len(TRANSCRIPT))
 
     assert original.read_bytes() == DAMAGED
     assert len(downloads) == 1
@@ -438,7 +444,7 @@ def test_a_busy_restore_reuses_the_verified_download(
     [failed] = _findings(vault)
     assert failed.meta["route"][-1]["code"] == "MUTATION_BUSY"
 
-    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+    assert original_fixity.run_pass(vault, budget=len(TRANSCRIPT)).outcomes == {"restored": 1}
 
     assert original.read_bytes() == TRANSCRIPT
     assert len(downloads) == 1
