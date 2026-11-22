@@ -492,3 +492,22 @@ def test_a_rename_that_raised_in_this_process_is_retried_by_the_resume(
     assert result["phase"] == "completed"
     assert calls == 2
     assert _lineage(vault, _moved(NOTES[0])) == [NOTES[0]]
+
+
+def test_a_link_rewrite_commits_under_the_vault_boundary(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link rewrite takes no guard of its own. Curation must hold the vault boundary across its
+    batch itself, whichever dispatcher called it, or the rewrite races other writers."""
+    _with_identity(vault, NOTES[0])
+    _append(vault, SOURCE, f"See {_link(NOTES[0])} for tuning.")
+    proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
+    held_in_batch: dict[str, bool] = {}
+    real_finalize = curation._finalize_witness_batch
+
+    def observe_the_batch(vault_root, step, binding, writes, content):  # noqa: ANN001, ANN202
+        held_in_batch[step["kind"]] = writer_lease.active_manager().holds_mutation_boundary(vault_root)
+        return real_finalize(vault_root, step, binding, writes, content)
+
+    monkeypatch.setattr(curation, "_finalize_witness_batch", observe_the_batch)
+
+    assert _run(vault, proposed)["phase"] == "completed"
+    assert held_in_batch == {"move": True, "repoint-links": True}
