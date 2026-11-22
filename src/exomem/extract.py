@@ -243,6 +243,7 @@ def extract_text(
     timestamps: bool = False,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -253,6 +254,9 @@ def extract_text(
     `language` is a code the caller asks the speech engine to use, and `multilingual` asks it to
     detect the language per decoding window instead; only audio and video read either, and a
     caller gives at most one.
+
+    `diarize` requests or skips speaker labeling for this audio or video item. An omitted
+    choice uses the deployment default.
     """
     p = Path(path)
     mt = media_type or media_type_for(p)
@@ -262,6 +266,8 @@ def extract_text(
             options["language"] = language
         if multilingual:
             options["multilingual"] = True
+        if diarize is not None:
+            options["diarize"] = diarize
         result = _transcribe(p, mt, vault_root=vault_root, **options)
         if mt == "video":
             result.capture = capture_metadata.read(p, mt)
@@ -832,6 +838,7 @@ def _transcribe(
     timestamps: bool = False,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
@@ -845,13 +852,11 @@ def _transcribe(
     )
     seg_list = list(segments)  # materialize once: diarization needs per-segment timing
     asr = _asr_facts(report, forced, source, multilingual)
+    diarize = _diarize_enabled() if diarize is None else diarize
 
-    # OPTIONAL speaker diarization (EXOMEM_DIARIZE, default OFF). A pretrained
-    # clustering model (deterministic transduction, not an LLM) labels who-spoke-when
-    # and prefixes turns with `[Speaker A]: …`. Soft-fail: if the dep/model is absent
-    # or diarization errors, fall back to the plain transcript below — extraction with
-    # the flag off (or unavailable) is byte-for-byte unchanged.
-    if _diarize_enabled():
+    # The deterministic clustering model adds labels such as `[Speaker A]: …`.
+    # If it is unavailable or fails, publish the transcript without speaker labels.
+    if diarize:
         # Boundary guard for the WHOLE optional layer: the spec's Soft-Fail Degradation
         # requirement says a diarization failure MUST NOT break extraction, and inner
         # guards can't cover everything (a mid-run source change once escaped via an
@@ -907,7 +912,7 @@ def _transcribe(
                 text="[0:00] (no speech detected)",
                 media_type=media_type,
                 engine=f"{engine}+timed",
-                speaker_verification="unavailable" if _diarize_enabled() else None,
+                speaker_verification="unavailable" if diarize else None,
                 asr=asr,
             )
         try:
@@ -928,7 +933,7 @@ def _transcribe(
                     text=timed_text,
                     media_type=media_type,
                     engine=f"{engine}+timed",
-                    speaker_verification="unavailable" if _diarize_enabled() else None,
+                    speaker_verification="unavailable" if diarize else None,
                     asr=asr,
                 )
             if timestamps:
@@ -949,7 +954,7 @@ def _transcribe(
         text=text,
         media_type=media_type,
         engine=engine,
-        speaker_verification="unavailable" if _diarize_enabled() else None,
+        speaker_verification="unavailable" if diarize else None,
         asr=asr,
     )
 

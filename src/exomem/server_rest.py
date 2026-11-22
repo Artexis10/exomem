@@ -99,6 +99,7 @@ _OPENAPI_TYPES = {
                 "file_id": {"type": "string", "minLength": 1, "maxLength": 256},
                 "mime_type": {"type": "string", "maxLength": 255},
                 "file_name": {"type": "string"},
+                "diarize": {"type": "boolean"},
             },
             "required": ["download_url", "file_id"],
         },

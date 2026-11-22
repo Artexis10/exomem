@@ -110,6 +110,22 @@ def _upload_flags(raw_flag: str, archive: str) -> tuple[bool, bool, str | None]:
     return raw_protection, bool(archive), None
 
 
+def _diarize_upload_option(value: object, *, filename: str, members: bool) -> tuple[bool | None, str | None]:
+    if value is None:
+        return None, None
+    # Multipart and Upload-Metadata use the literal spellings of a JSON boolean.
+    if value not in ("true", "false"):
+        return None, "`diarize` must be true or false"
+    if members:
+        return None, "archive=members takes no speaker-label choice"
+    from . import media_engines, media_types
+
+    artifact = _preserve_module()._sanitize_filename(filename)
+    if media_engines.engine_for(media_types.media_type_for(artifact)) != media_engines.SPEECH:
+        return None, "speaker labels apply to audio and video only"
+    return value == "true", None
+
+
 def _preserve_module():
     from . import preserve as preserve_module
 
@@ -194,6 +210,7 @@ def _capture_source_under_guard(
     add_module: Any,
     max_bytes: int,
     raw_protection: bool = False,
+    diarize: bool | None = None,
 ) -> Any:
     """Capture an out-of-band upload as a Source, under vault authority.
 
@@ -225,6 +242,7 @@ def _capture_source_under_guard(
                         filename=filename,
                         content_type=content_type,
                         staged=staged,
+                        diarize=diarize,
                     ),
                     raw_protection=raw_protection,
                 )
@@ -298,7 +316,10 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             result = add.add(
                 root, schema.load_source_schema(root), content="", title=target["title"],
                 source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
-                artifact=add.SourceArtifact(part, target["filename"], target.get("content_type"), staged=staged),
+                artifact=add.SourceArtifact(
+                    part, target["filename"], target.get("content_type"),
+                    staged=staged, diarize=target.get("diarize"),
+                ),
                 raw_protection=target["raw_protection"], expected_sha256=sha256,
             ).as_dict()
         except BatchWriteError as error:
@@ -415,6 +436,7 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
                     max_bytes=int(record["length"]),
                     raw_protection=bool(target.get("raw_protection")),
                     media_pending=True,
+                    diarize=target.get("diarize"),
                 )
             except preserve_module.PreserveError as exc:
                 stored = _stored_already(vault_root, record) if exc.code == "ARTIFACT_EXISTS" else None
@@ -431,13 +453,16 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
 def _stored_already(vault_root: Path, record: dict) -> dict | None:
     """The `already_stored` receipt when the session's target holds exactly its bytes."""
     target = record["target"]
-    stored = _preserve_module().stored_artifact(
+    preserve_module = _preserve_module()
+    stored = preserve_module.stored_artifact(
         vault_root, scope=target["scope"], category=target["category"], filename=target["filename"],
         sha256=record["sha256"], raw_protection=bool(target.get("raw_protection")),
     )
     if stored is None:
         return None
-    return stored.receipt(size=int(record["length"]), content_type=mimetypes.guess_type(stored.path)[0])
+    receipt = stored.receipt(size=int(record["length"]), content_type=mimetypes.guess_type(stored.path)[0])
+    preserve_module.disclose_retained_speaker_choice(receipt, target.get("diarize"))
+    return receipt
 
 
 def resume_upload_sessions(vault_root: Path) -> None:
@@ -1108,6 +1133,11 @@ def register_transfer_routes(
                     },
                     status_code=400,
                 )
+            if form.get("diarize") is not None:
+                return JSONResponse(
+                    {"code": "INVALID_UPLOAD", "reason": "set `diarize` on the file handle when redeeming it"},
+                    status_code=400,
+                )
             from .client_artifacts import fetch_budget
 
             try:
@@ -1130,7 +1160,13 @@ def register_transfer_routes(
         from . import archive_members
 
         preserve_module = _preserve_module()
+        diarize, diarize_refusal = _diarize_upload_option(
+            form.get("diarize"), filename=filename, members=archive,
+        )
+        if diarize_refusal is not None:
+            return JSONResponse({"code": "INVALID_UPLOAD", "reason": diarize_refusal}, status_code=400)
         try:
+            preserve_module.validate_diarize_text(diarize, text)
             manager = get_manager()
             if archive:
                 receipt, stored = await run_in_threadpool(
@@ -1168,6 +1204,7 @@ def register_transfer_routes(
                     add_module=add_module,
                     max_bytes=max_bytes,
                     raw_protection=raw_protection,
+                    diarize=diarize,
                 )
             else:
                 result = await run_in_threadpool(
@@ -1185,6 +1222,7 @@ def register_transfer_routes(
                     max_bytes=max_bytes,
                     raw_protection=raw_protection,
                     media_pending=True,
+                    diarize=diarize,
                 )
         except preserve_module.PreserveError as exc:
             status = {
@@ -1340,12 +1378,16 @@ def register_transfer_routes(
             "raw_protection": raw_protection,
             "archive": ARCHIVE_MEMBERS if members else None,
         }
+        diarize, diarize_refusal = _diarize_upload_option(
+            metadata.get("diarize"), filename=target["filename"], members=members,
+        )
         refusals = [
             refusal
             for refusal in (
                 preserve_module.destination_segment_refusal(target["scope"], field="scope") if lane == "evidence" else None,
                 preserve_module.destination_segment_refusal(target["category"], field="category") if lane == "evidence" else None,
                 flag_refusal,
+                diarize_refusal,
                 "archive=members preserves Evidence directly" if members and lane == "source" else None,
             )
             if refusal
@@ -1386,6 +1428,8 @@ def register_transfer_routes(
                         "Evidence is append-only, so pick a new filename",
                         409,
                     )
+            if diarize is not None:
+                target["diarize"] = diarize
             if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
                 return _tus_refusal(refused["code"], refused["reason"], 413)
             session, secret = await run_in_threadpool(

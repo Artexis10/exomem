@@ -219,6 +219,7 @@ class SourceArtifact:
     #: The same bytes in a private upload stage (`upload_stage.StagedUpload`), already hashed before the
     #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
     staged: Any | None = None
+    diarize: bool | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -638,6 +639,14 @@ def add(
     if artifact is not None:
         safe_name = source_artifact_name(artifact.filename)
         artifact_suffix = source_artifact_suffix(artifact.filename)
+        if artifact.diarize is not None:
+            from . import media_engines, media_types
+
+            if media_engines.engine_for(media_types.media_type_for(safe_name)) != media_engines.SPEECH:
+                raise AddError(
+                    code="DIARIZE_NOT_APPLICABLE", missing=["diarize"],
+                    reason="speaker labels apply to audio and video only",
+                )
         if artifact.staged is not None:
             # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
             artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
@@ -887,6 +896,10 @@ def add(
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
+    if artifact is not None and artifact.diarize is not None:
+        from .preserve import set_diarize_pin
+
+        source_md = set_diarize_pin(source_md, artifact.diarize)
     if raw_protection:
         source_md = raw_guard.protect(
             source_md, artifact_path=artifact_path.relative_to(vault_root).as_posix(),

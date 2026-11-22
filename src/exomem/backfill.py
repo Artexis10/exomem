@@ -23,6 +23,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass
+from functools import partial
 from itertools import chain
 from pathlib import Path
 
@@ -30,22 +31,31 @@ from . import (
     embeddings,
     extract,
     index_sync,
+    media_engines,
+    media_jobs,
     media_store,
     preserve,
     prior_claims,
     recall_policy,
     rename_journal,
+    runtime_resources,
     scene_frames,
     semantic_segments,
 )
 from .kbdir import managed_join, managed_root
-from .vault import VAULT_SCAN_SKIP_DIRS, in_append_only_tree
+from .vault import (
+    FrontmatterError, MISSING_CONTENT_HASH, PathGuard, PathGuardError, PlannedWrite,
+    VAULT_SCAN_SKIP_DIRS, in_append_only_tree, post_commit_batch_fanout, read_frontmatter_header,
+    read_guarded_text,
+)
 
 log = logging.getLogger(__name__)
 
 _EXTRACTED_BY_RE = re.compile(r"(?m)^extracted_by:\s*(.+?)\s*$")
 _PARENT_MEDIA_RE = re.compile(r"(?m)^parent_media:\s*\S")
 _NOT_DONE = {"none", "pending"}
+# Each bulk queue lookup uses one SQLite parameter per binary.
+_REQUEST_LOOKUP_BATCH = 128
 
 
 def iter_kb_files(root: Path):
@@ -134,7 +144,7 @@ def _needs_rediarize(sidecar: Path, media_type: str | None) -> bool:
     return not v.endswith("+diarized")
 
 
-def _needs_retime(sidecar: Path, media_type: str | None) -> bool:
+def _needs_retime(sidecar: Path, media_type: str | None, *, diarize: bool | None = None) -> bool:
     """True for an audio/video sidecar transcribed BEFORE timed transcripts: a
     completed ASR engine (not pending/failed/no-audio) without the `+timed`
     marker — that marker is the re-time done-state, keeping the pass idempotent."""
@@ -149,7 +159,7 @@ def _needs_retime(sidecar: Path, media_type: str | None) -> bool:
     # re-extraction would DROP the speaker labels the sidecar already holds.
     # Refuse rather than silently downgrade — the user re-runs with EXOMEM_DIARIZE
     # (or --rediarize), which regenerates the labels alongside the timestamps.
-    if v.endswith("+diarized") and not extract._diarize_enabled():
+    if v.endswith("+diarized") and not (extract._diarize_enabled() if diarize is None else diarize):
         return False
     return True
 
@@ -246,6 +256,58 @@ def backfill_artifact_pages(
     return created
 
 
+class _BackfillSuperseded(Exception):
+    """A newer sidecar or queued extraction owns publication."""
+
+
+def _publish_speech_backfill(
+    vault_root: Path, writes: tuple[PlannedWrite, ...], *, binary: Path, sidecar_guard: PathGuard,
+) -> list[Path]:
+    """Publish only while the request and sidecar still match the extraction's basis."""
+    from .vault_store import media as store_media
+    from .writer_lease import get_manager
+
+    manager = get_manager()
+    operation = "backfill_speech_commit"
+    intents: list[object] = []
+
+    def commit() -> list[Path]:
+        try:
+            sidecar_guard.recheck(vault_root)
+        except PathGuardError as error:
+            raise _BackfillSuperseded from error
+        # The batch lookup avoids needless decode. Recheck the exact job here because
+        # a foreground request can queue it during decoding without changing the page.
+        if media_jobs.job_store_path(vault_root).is_file():
+            store = media_jobs.MediaJobStore(vault_root, create=False)
+            if store.explicit_speech_requests((binary,)):
+                raise _BackfillSuperseded
+        written = preserve.commit_media_sidecar_writes(
+            vault_root, writes, post_commit_fanout=False, publication_intents_out=intents,
+        )
+        assert isinstance(written, list)
+        return written
+
+    manager.yield_to_waiting_writes(vault_root)
+    written: list[Path] = []
+    completed = False
+    try:
+        written = store_media.holding_boundary(
+            vault_root, operation, commit,
+            lambda: manager.mutation_guard(vault_root, operation=operation, holder_kind="background"),
+        )
+        completed = post_commit_batch_fanout(
+            vault_root, written, None, None, publication_intents=intents,
+            created_paths=[write.path for write in writes if write.create_only or write.expected_hash == MISSING_CONTENT_HASH],
+        )
+    finally:
+        if not completed and intents:
+            from . import file_watcher
+
+            file_watcher.abort_publication_intents(intents, force_paths=written or [write.path for write in writes])
+    return written
+
+
 def backfill_media(
     vault_root: Path,
     *,
@@ -274,12 +336,11 @@ def backfill_media(
     stats.artifact_pages_created = backfill_artifact_pages(
         vault_root, dry_run=dry_run, log_fn=log_fn
     )
-    if rediarize and not extract._diarize_enabled():
+    diarize_default = extract._diarize_enabled()
+    if rediarize and not diarize_default:
         log_fn(
-            "--rediarize requested but EXOMEM_DIARIZE is not enabled; "
-            "skipping re-diarization (set EXOMEM_DIARIZE=1)"
+            "EXOMEM_DIARIZE is off; re-diarizing only recordings that request speaker labels"
         )
-        rediarize = False
     if retime and not semantic_segments.semantic_segments_enabled():
         log_fn(
             "--retime requested but EXOMEM_SEMANTIC_SEGMENTS is not enabled; "
@@ -328,8 +389,14 @@ def backfill_media(
     )
     stats.scanned = len(files)
     log_fn(f"scanning {len(files)} media file(s) under {managed_join('')} (dry_run={dry_run})")
+    requests = (media_jobs.MediaJobStore(vault_root, create=False)
+                if do_ocr and media_jobs.job_store_path(vault_root).is_file() else None)
+    queued_speech: set[Path] = set()
+    canonical_root = vault_root.resolve()
 
     for i, f in enumerate(files, 1):
+        if requests is not None and (i - 1) % _REQUEST_LOOKUP_BATCH == 0:
+            queued_speech = requests.explicit_speech_requests(files[i - 1:i - 1 + _REQUEST_LOOKUP_BATCH])
         if not _is_automatic_media_candidate(vault_root, f):
             if dry_run:
                 log_fn(
@@ -341,12 +408,23 @@ def backfill_media(
             continue
         media_type = extract.media_type_for(f)
         try:
-            rel = f.resolve().relative_to(vault_root.resolve()).as_posix()
+            rel = f.resolve().relative_to(canonical_root).as_posix()
         except (ValueError, OSError):
             continue
         sidecar = _sidecar_for(f)
         need_sidecar = not sidecar.exists()
-        need_ocr = do_ocr and not _ocr_done(sidecar)
+        extract_here = do_ocr and canonical_root / rel not in queued_speech
+        need_ocr = extract_here and not _ocr_done(sidecar)
+        diarize = None
+        if extract_here and (need_ocr or rediarize or retime) and not need_sidecar and media_type in media_engines.SPEECH_KINDS:
+            try:
+                with sidecar.open("rb") as page:
+                    header = read_frontmatter_header(page, runtime_resources.SEMANTIC_SOURCE_MAX_BYTES)
+                diarize = preserve.diarize_pin(header.decode("utf-8"))
+            except (OSError, UnicodeError, FrontmatterError):
+                log_fn(f"  [{i}/{len(files)}] {rel} -> could not read speech sidecar")
+                stats.skipped += 1
+                continue
         # Video idempotency keys on per-keyframe rows (has_frames), so a legacy
         # single-vector video (frame_ts NULL) is re-indexed per-keyframe, not skipped.
         # Images stay on has() (one row = done). Scene-frame children are excluded:
@@ -367,10 +445,11 @@ def backfill_media(
         # need_ocr`): a pending/missing sidecar takes the normal OCR path, which
         # diarizes anyway when the flag is on.
         need_rediarize = (
-            rediarize and do_ocr and not need_ocr and _needs_rediarize(sidecar, media_type)
+            rediarize and extract_here and not need_ocr and (diarize_default if diarize is None else diarize)
+            and _needs_rediarize(sidecar, media_type)
         )
         need_retime = (
-            retime and do_ocr and not need_ocr and _needs_retime(sidecar, media_type)
+            retime and extract_here and not need_ocr and _needs_retime(sidecar, media_type, diarize=diarize)
         )
         if not (need_sidecar or need_ocr or need_clip or need_scenes or need_rediarize
                 or need_retime):
@@ -405,8 +484,15 @@ def backfill_media(
                 _purge_suppressed_clip(clip_store, vault_root, f)
                 continue
             try:
+                speech_guard = None
+                if media_type in media_engines.SPEECH_KINDS:
+                    basis, speech_guard = read_guarded_text(vault_root, sidecar)
+                    if preserve.diarize_pin(basis) is not diarize:
+                        stats.skipped += 1
+                        continue
                 with media_store.logical_view(vault_root, f) as view:
-                    res = extract.extract_text(view, media_type=media_type, vault_root=vault_root)
+                    options = {} if diarize is None else {"diarize": diarize, "timestamps": True}
+                    res = extract.extract_text(view, media_type=media_type, vault_root=vault_root, **options)
                 if not _is_automatic_media_candidate(vault_root, f):
                     _purge_suppressed_clip(clip_store, vault_root, f)
                     continue
@@ -435,14 +521,14 @@ def backfill_media(
                 if need_ocr or upgrade_gained:
                     from . import media_processing
 
+                    hints = media_processing.read_timestamp_hints(media_processing.held_path(vault_root, f))
+
+                    commit_batch = (partial(_publish_speech_backfill, binary=f, sidecar_guard=speech_guard)
+                                    if speech_guard is not None else None)
                     preserve.update_sidecar_extraction(
-                        vault_root, sidecar,
-                        text=res.sidecar_text, engine=res.engine,
-                        speakers=res.speakers, ocr=res.ocr,
-                        # A page stored with its original holds null hints; it records these.
-                        binary_hints=media_processing.read_timestamp_hints(
-                            media_processing.held_path(vault_root, f)
-                        ),
+                        vault_root, sidecar, text=res.sidecar_text, engine=res.engine,
+                        speakers=res.speakers, ocr=res.ocr, binary_hints=hints, commit_batch=commit_batch,
+                        speaker_verification=res.speaker_verification if diarize is not None else None,
                     )
                     if need_ocr:
                         stats.extracted += 1
@@ -450,6 +536,9 @@ def backfill_media(
                         stats.rediarized += 1
                     if need_retime and got_timed:
                         stats.retimed += 1
+            except _BackfillSuperseded:
+                stats.skipped += 1
+                continue
             except extract.ExtractionUnavailable as e:
                 log_fn(f"  ! extraction engine unavailable ({e}); skipping OCR for the rest")
                 do_ocr = False

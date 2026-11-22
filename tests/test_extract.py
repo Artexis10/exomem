@@ -672,6 +672,20 @@ def test_transcribe_labels_speakers_when_enabled(monkeypatch: pytest.MonkeyPatch
     assert r.speakers[0]["text"] == "hello there"
 
 
+@pytest.mark.parametrize(("deployment_default", "requested"), [("1", False), ("0", True)])
+def test_speech_item_choice_overrides_deployment_diarization(
+    monkeypatch: pytest.MonkeyPatch, deployment_default: str, requested: bool
+) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", deployment_default)
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper([_FakeSeg("hello", 0.0, 1.0)]))
+    monkeypatch.setattr(extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")])
+
+    result = extract.extract_text(Path("speech.wav"), timestamps=True, diarize=requested)
+
+    assert result.text.startswith("[0:00]")
+    assert ("Speaker A" in result.text) is requested
+
+
 def test_transcribe_merges_consecutive_same_speaker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     segs = [_FakeSeg("part one", 0.0, 1.0), _FakeSeg("part two", 1.0, 2.0)]
@@ -844,16 +858,17 @@ def test_transcribe_accepts_legacy_two_tuple_diarization_result(
     assert result.speaker_verification == "anonymous"
 
 
-def test_transcribe_records_unavailable_when_configured_diarization_cannot_run(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("deployment_default", "requested"), [("1", None), ("0", True)])
+def test_transcribe_records_unavailable_when_requested_diarization_cannot_run(
+    monkeypatch: pytest.MonkeyPatch, deployment_default: str, requested: bool | None,
 ) -> None:
     monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
-    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", deployment_default)
     segs = [_FakeSeg("plain fallback", 2.0, 3.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
     monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
 
-    result = extract._transcribe(Path("no-diarizer.m4a"), "audio", timestamps=True)
+    result = extract.extract_text(Path("no-diarizer.m4a"), timestamps=True, diarize=requested)
 
     assert result.text == "[0:02] plain fallback"
     assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
