@@ -142,8 +142,9 @@ class Card:
 class Lane:
     """What the lane found and, when it could not search everything, why.
 
-    `warming` names the lane while datasets are still being indexed; `failed` names it when
-    the sidecar could not answer. Both are visible states, never an empty result.
+    `warming` names the lane while datasets are still being indexed, or while a card or original
+    read gave nothing before the private-identity inventory existed; `failed` names it when the
+    sidecar could not answer. Both are visible states, never an empty result.
     """
 
     hits: list[Hit] = field(default_factory=list)
@@ -324,20 +325,39 @@ def _card_of(page: ParsedPage) -> Card | None:
     return Card(page.rel_path, original, page.snapshot_hash, sha, page)
 
 
-#: The qualified cards of each (vault, scope), valid while the scope's projection key holds.
-_CARDS: dict[tuple[str, str], tuple[tuple, tuple[Card, ...]]] = {}
+#: Per (vault, scope): the projection key, the qualified cards, and the card paths that gave no
+#: page when last read. The cards hold while the key holds; the unread paths are read again.
+_CARDS: dict[tuple[str, str], tuple[tuple, tuple[Card, ...], tuple[str, ...]]] = {}
+
+
+def _qualify(vault_root: Path, paths: Iterable[str]) -> tuple[list[Card], list[str]]:
+    """`(qualified cards, paths that gave no page)` for card paths of the recall projection."""
+    from . import find as find_module
+
+    qualified: list[Card] = []
+    unread: list[str] = []
+    for path in paths:
+        page = find_module._resolve_page(vault_root, path)
+        if page is None:
+            unread.append(path)
+            continue
+        card = _card_of(page)
+        if card is not None and access.is_indexable(vault_root, card.original):
+            qualified.append(card)
+    return qualified, unread
 
 
 def _cards_in_scope(
-    vault_root: Path, scope: str, admit_path: Callable[[str], bool] | None
-) -> tuple[dict[str, Card], frozenset[str], str]:
-    """`(cards by original path, the scope's recall paths, scope prefix)` for a request.
+    vault_root: Path, scope: str, admit_path: Callable[[str], bool] | None, *, settled: bool
+) -> tuple[dict[str, Card], frozenset[str], str, bool]:
+    """`(cards by original path, the scope's recall paths, scope prefix, cards unread)`.
 
     Cards come from the request's own recall projection, so the exclusion rules of ordinary
     recall (Records and Planning descendants, access tiers) apply to the card before it is
     read, and the access tier applies to the original. The caller's content admission then
     applies to the card and to the original, so a dataset the caller may not read never
-    reaches the pool.
+    reaches the pool. The last value says that some projected card gave no page. `settled` says
+    whether the private-identity inventory existed before any read of this request.
     """
     from . import find as find_module
 
@@ -348,23 +368,28 @@ def _cards_in_scope(
     key = (str(vault_root.resolve()), walk_scope)
     version = snapshot.projection_key(walk_scope)
     known = _CARDS.get(key)
+    # Card reads wait on the private-identity inventory. A card that gave no page before the
+    # inventory existed may only have waited out its budget, so the next search reads it again;
+    # remembering it as absent would hide its dataset for the life of the process. Once the
+    # inventory existed before the read, no wait explains a missing page (a linked, refused or
+    # unparsable card), so it is not read again until the projection key moves.
     if known is None or known[0] != version:
         # Reading every card on every search would cost more than the lane. The projection key
         # moves whenever a card is added, changed or removed, or the access policy changes, so
         # a search with no change reads no card.
-        qualified = []
-        for path in sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix)):
-            page = find_module._resolve_page(vault_root, path)
-            card = _card_of(page) if page is not None else None
-            if card is not None and access.is_indexable(vault_root, card.original):
-                qualified.append(card)
-        _CARDS[key] = known = (version, tuple(qualified))
+        paths = sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
+        qualified, unread = _qualify(vault_root, paths)
+        _CARDS[key] = known = (version, tuple(qualified), () if settled else tuple(unread))
+    elif known[2]:
+        found, unread = _qualify(vault_root, known[2])
+        merged = tuple(sorted(known[1] + tuple(found), key=lambda card: card.card_path))
+        _CARDS[key] = known = (version, merged, () if settled else tuple(unread))
     cards = {
         card.original: card
         for card in known[1]
         if admit_path is None or (admit_path(card.card_path) and admit_path(card.original))
     }
-    return cards, projected, prefix
+    return cards, projected, prefix, bool(known[2])
 
 
 def _read_original(vault_root: Path, card: Card) -> bytes | None:
@@ -398,11 +423,12 @@ def _reconcile(
     cards: dict[str, Card],
     projected: frozenset[str],
     prefix: str,
-) -> tuple[frozenset[str], bool]:
+) -> tuple[frozenset[str], bool, bool]:
     """Bring the rows in step with `cards`.
 
     Returns the originals whose row was built from the card's current bytes, the only rows a
-    search may read, and whether datasets are still unindexed.
+    search may read, whether datasets are still unindexed, and whether an original read gave
+    no bytes this request.
     """
     stored = {
         original: (card_path, card_hash)
@@ -415,13 +441,15 @@ def _reconcile(
             conn.execute("COMMIT")
     current = {original for original, card in cards.items() if stored.get(original, ("", ""))[1] == card.card_hash}
     pending = [card for original, card in cards.items() if original not in current]
+    missed = False
     for card in pending[:MAX_BUILDS_PER_REQUEST]:
         data = _read_original(vault_root, card)
         if data is None:
+            missed = True
             continue  # the original is missing or not the recorded bytes: retried next request
         _store(conn, card, source_inspection.render_values(data, Path(card.original).suffix))
         current.add(card.original)
-    return frozenset(current), len(pending) > MAX_BUILDS_PER_REQUEST
+    return frozenset(current), len(pending) > MAX_BUILDS_PER_REQUEST, missed
 
 
 # ------------------------------------------------------------------ matching
@@ -802,15 +830,19 @@ def search(
     if not fts5_available():
         return Lane(failed=(LANE,))
     try:
-        cards, projected, prefix = _cards_in_scope(vault_root, scope, admit_path)
+        # Read once, before any read: an inventory that finishes during the reads explains them.
+        settled = reserved_paths.identity_catalogue_ready(vault_root)
+        cards, projected, prefix, unread = _cards_in_scope(vault_root, scope, admit_path, settled=settled)
+        missed = False
+        if cards:
+            conn = _connect(vault_root)
+            try:
+                indexed, unindexed, missed = _reconcile(conn, vault_root, cards, projected, prefix)
+                matches = _match(conn, groups, needles, indexed)
+            finally:
+                conn.close()
         if not cards:
-            return Lane()
-        conn = _connect(vault_root)
-        try:
-            indexed, unindexed = _reconcile(conn, vault_root, cards, projected, prefix)
-            matches = _match(conn, groups, needles, indexed)
-        finally:
-            conn.close()
+            return Lane(warming=_loading(settled, unread))
     except (sqlite3.Error, OSError) as error:
         log.warning("dataset value search unavailable: %s", error)
         return Lane(failed=(LANE,))
@@ -833,7 +865,19 @@ def search(
         for original, match in ordered
         if (hit := _hit(vault_root, cards[original], match, needles)) is not None
     ]
-    return Lane(hits, warming=(LANE,) if unindexed else ())
+    # A hit drops when its original reads nothing at this point, as a build read can.
+    loading = _loading(settled, unread or missed or len(hits) < len(ordered))
+    return Lane(hits, warming=(LANE,) if unindexed else loading)
+
+
+def _loading(settled: bool, read_nothing: bool) -> tuple[str, ...]:
+    """The lane as warming when a card or original read gave nothing while it may still load.
+
+    Those reads wait on the private-identity inventory; until it exists, a read that gave nothing
+    is still loading. Once it exists, it is a card that does not parse or an original that is not
+    the recorded bytes, which no wait changes.
+    """
+    return (LANE,) if read_nothing and not settled else ()
 
 
 def fuse(pages: list[Hit], values: Iterable[Hit], *, limit: int, rrf_k: int) -> list[Hit]:
