@@ -150,10 +150,10 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     monkeypatch.setattr(request_budget, "budget_seconds", lambda: 1.0)
     target, operation = {
         "admission": (authorization_request, "verify_authorization_context"),
-        "planning": (move_file, "plan_inbound_rewrites"),
+        "planning": (move_file, "iter_inbound_rewrites"),
         "release": (egress, "postfilter"),
         "response": (server_rest.RestJSONResponse, "render"),
-        "no-observer": (move_file, "plan_inbound_rewrites"),
+        "no-observer": (move_file, "iter_inbound_rewrites"),
     }[stage]
     original = getattr(target, operation)
 
