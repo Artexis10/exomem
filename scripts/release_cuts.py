@@ -554,7 +554,7 @@ def reconcile_files(root: Path, record: dict, notes: str) -> None:
 @contextmanager
 def reconciliation_tree(base: str, record: dict, notes: str):
     """Project current metadata and maintained generators from one exact main tree."""
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     with tempfile.TemporaryDirectory(prefix="release-reconcile-") as temporary:
         root = Path(temporary)
         evidence.command("git", "clone", "--quiet", "--shared", ".", str(root))
@@ -618,7 +618,7 @@ def reconciliation_tree(base: str, record: dict, notes: str):
 
 
 def push_reconciliation(root: Path, record: dict) -> str:
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     git(
         "-c",
         "core.hooksPath=/dev/null",
@@ -666,7 +666,7 @@ def reconcile(record: dict) -> None:
     """Refresh only mismatched projections and repair a raced squash before publication."""
     tag, source = record["tag"], record["source"]
     notes = evidence.api(f"releases/tags/{tag}")["body"]
-    branch = f"release-reconcile/{source}"
+    branch = evidence.reconcile_branch(source)
     verified = False
     projections = {}
 
@@ -754,33 +754,31 @@ def reconcile(record: dict) -> None:
     raise ValueError("reconciliation refresh is pending after bounded retries; resume the same cut")
 
 
-def check_reconciliation(head: str, main: str) -> str:
-    """A reconciliation PR runs no CI test job, sound only while it is the controller's projection.
+def check_reconciliation(head: str, main: str, source: str) -> str:
+    """A reconciliation PR runs no CI test job, sound only while merging it gives the projection.
 
-    The head must be one commit on a main commit whose tree equals what reconcile() writes
-    there for an accepted release origin. Anything else lands through an ordinary PR.
+    This is reconcile()'s own acceptance test: the head merged onto main must equal what the
+    controller projects onto that main for the accepted origin of `source`. Repairs that add
+    no origin and branches updated from main pass; any other content lands through a normal PR.
     """
-    git("fetch", "--quiet", "origin", head)
-    parents = git("rev-list", "--parents", "-n", "1", head).split()[1:]
-    if len(parents) != 1:
-        raise ValueError("a reconciliation must be one commit on a main commit")
-    parent = parents[0]
-    if subprocess.run(("git", "merge-base", "--is-ancestor", parent, main), timeout=30).returncode:
-        raise ValueError("a reconciliation must build on a main commit")
-    added = git(
-        "diff", "--name-only", "--diff-filter=A", parent, head, "--", ORIGIN_DIRECTORY
-    ).splitlines()
-    if len(added) != 1:
-        raise ValueError("a reconciliation adds exactly one release origin")
-    record = read_json(head, added[0])
-    if added[0] != origin_path(record["tag"]):
-        raise ValueError("release origin path differs from its tag")
+    evidence.cut_branch(source)
+    merged = prospective_tree(main, head)
+    if merged is None:
+        raise ValueError("reconciliation does not merge cleanly onto main")
+    version = json.loads(git("show", f"{merged}:.release-please-manifest.json"))["."]
+    tag = "v" + version
+    record = json.loads(git("show", f"{merged}:{origin_path(tag)}"))
+    if record.get("source") != source or record.get("tag") != tag:
+        raise ValueError("reconciliation origin differs from its branch's release source")
+    # The record comes from the PR; its Git object names reach git commands below.
+    for name in (record["head"], record["release"], record["predecessor"]["reconciliation_commit"]):
+        evidence.cut_branch(name)
     verify_origin(record, main, require_evidence=False)
-    notes = evidence.api(f"releases/tags/{record['tag']}")["body"]
-    with reconciliation_tree(parent, record, notes) as (_, tree):
-        if tree != git("rev-parse", f"{head}^{{tree}}"):
-            raise ValueError("reconciliation differs from the projection of its main commit")
-    return record["tag"]
+    notes = evidence.api(f"releases/tags/{tag}")["body"]
+    with reconciliation_tree(main, record, notes) as (_, tree):
+        if tree != merged:
+            raise ValueError("reconciliation differs from the projection onto main")
+    return tag
 
 
 def verify_origin(record: dict, main: str, *, require_evidence: bool) -> None:
@@ -925,9 +923,9 @@ def main() -> None:
             time.sleep(5)
         raise ValueError("accepted origin is pending on main; retry this cut before publication")
     elif args.operation == "check-reconciliation":
-        if not args.head or not args.trusted_main:
-            parser.error("check-reconciliation requires --head and --trusted-main")
-        tag = check_reconciliation(args.head, args.trusted_main)
+        if not args.head or not args.trusted_main or not args.source:
+            parser.error("check-reconciliation requires --head, --trusted-main and --source")
+        tag = check_reconciliation(args.head, args.trusted_main, args.source)
         print(f"the reconciliation PR is the controller's projection for {tag}")
     else:
         if not args.tag or not args.trusted_main:

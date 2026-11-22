@@ -1062,56 +1062,81 @@ def test_generated_push_waits_until_the_proposal_reports_the_pushed_head(tmp_pat
         )
 
 
-@pytest.mark.parametrize("extra", [None, "code", "merge"])
-def test_reconciliation_pr_skips_tests_only_as_the_exact_projection(tmp_path, monkeypatch, extra):
-    """A reconciliation-named PR that carries anything beyond the projection must run the test jobs."""
+@pytest.mark.parametrize("case", ["projection", "updated-branch", "race-repair", "forged-code"])
+def test_reconciliation_pr_skips_tests_only_when_merging_it_gives_the_projection(
+    tmp_path, monkeypatch, case
+):
+    """CI accepts exactly the heads the controller accepts, and nothing that carries other content."""
     repository(tmp_path)
+    source = "a" * 40
+    record = {
+        "tag": "v1.1.0",
+        "source": source,
+        "head": "b" * 40,
+        "release": "c" * 40,
+        "predecessor": {"reconciliation_commit": "d" * 40},
+    }
     (tmp_path / "src").mkdir()
     (tmp_path / "src/app.py").write_text("VALUE = 1\n")
+    (tmp_path / "src/generator_input.txt").write_text("one\n")
+    (tmp_path / "generated.txt").write_text("one\n")
     (tmp_path / ".release-please-manifest.json").write_text('{".": "1.0.0"}\n')
     main = commit(tmp_path, "feat: ship")
-    record = {"tag": "v1.1.0", "source": main}
-    origin = tmp_path / cuts.origin_path("v1.1.0")
-    origin.parent.mkdir(parents=True)
-    origin.write_text(json.dumps(record))
-    (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
-    projection = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
-    head = projection
-    if extra == "code":
-        # The same metadata and one code line, as one commit on the same main parent.
-        git(tmp_path, "checkout", "--quiet", "-b", "forged", main)
-        git(tmp_path, "checkout", "--quiet", projection, "--", ".")
+
+    def project(base):
+        """What reconcile() writes onto `base`: version, origin, regenerated package."""
+        git(tmp_path, "checkout", "--quiet", "--detach", base)
+        origin = tmp_path / cuts.origin_path("v1.1.0")
+        origin.parent.mkdir(parents=True, exist_ok=True)
+        origin.write_text(json.dumps(record))
+        (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
+        (tmp_path / "generated.txt").write_text((tmp_path / "src/generator_input.txt").read_text())
+        projected = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
+        git(tmp_path, "checkout", "--quiet", "main")
+        return projected
+
+    head = project(main)
+    if case == "updated-branch":
+        # Someone presses "Update branch": main moved, and the head becomes a merge commit.
         (tmp_path / "src/app.py").write_text("VALUE = 2\n")
+        main = commit(tmp_path, "feat: later work")
+        git(tmp_path, "checkout", "--quiet", "--detach", head)
+        git(tmp_path, "merge", "--quiet", "--no-edit", main)
+        head = git(tmp_path, "rev-parse", "HEAD")
+        git(tmp_path, "checkout", "--quiet", "main")
+    elif case == "race-repair":
+        # The squash landed after a generator input moved; the repair only regenerates.
+        git(tmp_path, "merge", "--quiet", "--ff-only", head)
+        (tmp_path / "src/generator_input.txt").write_text("two\n")
+        git(tmp_path, "checkout", "--quiet", "HEAD~1", "--", "generated.txt")
+        main = commit(tmp_path, "feat: change a generator input")
+        head = project(main)
+    elif case == "forged-code":
+        git(tmp_path, "checkout", "--quiet", "--detach", head)
+        (tmp_path / "src/app.py").write_text("VALUE = 3\n")
         head = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
         git(tmp_path, "checkout", "--quiet", "main")
-    elif extra == "merge":
-        git(tmp_path, "checkout", "--quiet", "-b", "side", main)
-        (tmp_path / "src/other.py").write_text("OTHER = 1\n")
-        side = commit(tmp_path, "feat: side")
-        git(tmp_path, "checkout", "--quiet", "main")
-        git(tmp_path, "merge", "--quiet", "--no-edit", side)
-        head = git(tmp_path, "rev-parse", "HEAD")
-    git(tmp_path, "update-ref", "refs/remotes/origin/main", main)
-    verified = []
 
     class Projection:
         def __init__(self, base, origin_record, notes):
             assert (base, origin_record, notes) == (main, record, "notes")
+            self.tree = git(tmp_path, "rev-parse", f"{project(base)}^{{tree}}")
 
         def __enter__(self):
-            return tmp_path, git(tmp_path, "rev-parse", f"{projection}^{{tree}}")
+            return tmp_path, self.tree
 
         def __exit__(self, *exc):
             return False
 
+    verified = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "" if args[0] == "fetch" else git(tmp_path, *args))
     monkeypatch.setattr(cuts, "verify_origin", lambda *args, **kwargs: verified.append(args))
     monkeypatch.setattr(cuts.evidence, "api", lambda path: {"body": "notes"})
     monkeypatch.setattr(cuts, "reconciliation_tree", Projection)
-    if extra is None:
-        assert cuts.check_reconciliation(head, main) == "v1.1.0"
-        assert verified == [(record, main)]
+    if case == "forged-code":
+        with pytest.raises(ValueError, match="differs from the projection"):
+            cuts.check_reconciliation(head, main, source)
     else:
-        with pytest.raises(ValueError, match="projection|one commit|main commit"):
-            cuts.check_reconciliation(head, main)
+        assert cuts.check_reconciliation(head, main, source) == "v1.1.0"
+        assert verified == [(record, main)]

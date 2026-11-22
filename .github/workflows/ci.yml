@@ -939,6 +939,11 @@ jobs:
     runs-on: ubuntu-latest
     # A reconciliation check syncs the project and runs the package generators.
     timeout-minutes: 15
+    # Read-only: the checks read PR files, runs, artifacts and tags, and write nothing.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     # Release metadata validates its source; every other context succeeds here
     # while the selected ordinary and Full jobs supply their own evidence.
     steps:
@@ -992,8 +997,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/release_evidence.py select --source "$BASE_SHA"
-      # A reconciliation PR runs no test job, which is sound only while its
-      # commit is exactly what the cut controller projects onto its main parent
+      # A reconciliation PR runs no test job, which is sound only while merging
+      # it gives exactly what the cut controller projects onto main
       # (release_cuts.py check-reconciliation). The checker runs from the base.
       - name: Check out the reconciliation checker at the PR base
         if: needs.scope.outputs.reconcile == 'true'
@@ -1019,13 +1024,14 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           NODE_PATH: ${{ runner.temp }}/release-please/node_modules
         run: |
           if test "$HEAD_REPO" != "$GH_REPO"; then
             echo "a reconciliation PR must come from $GH_REPO, not $HEAD_REPO" >&2
             exit 1
           fi
-          python3 scripts/release_cuts.py check-reconciliation --head "$HEAD_SHA" --trusted-main "$BASE_SHA"
+          python3 scripts/release_cuts.py check-reconciliation --head "$HEAD_SHA" --trusted-main "$BASE_SHA" --source "${HEAD_REF#release-reconcile/}"
 
   # A dispatched or scheduled full run is a superset of the push run at the
   # same revision: the same jobs plus the full tier and py3.13. The push run is
