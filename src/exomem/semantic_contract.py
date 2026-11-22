@@ -2391,8 +2391,9 @@ def _store_resident_entry(
     if resident is None:
         return None
     entry = resident[0]
-    # The entry and its configuration still match the resolver's proof. Revalidation and
-    # ordinary readers never consume this proof, so each of them still checks the disk.
+    # The entry and its configuration still match the resolver's proof. The first
+    # eligible preflight consumes it. Creation revalidation and ordinary readers
+    # take their own census.
     if writer_proof is not None and writer_proof[0] == root and writer_proof[1] is entry:
         return entry
     disk = _disk_page_census(root)
@@ -2771,12 +2772,13 @@ def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
     def strict_walk(directory: Path, directory_rel: str) -> None:
         # Mirror of _build_identity_census: every canonical entry under KB,
         # alias-free. Closed runtime namespaces are never knowledge inputs.
+        at_kb_root = directory == kb
         for child in os.scandir(directory):
             request_budget.checkpoint()
-            if _prune_identity_census_directory(kb, directory, child.name):
-                continue
             rel = f"{directory_rel}/{child.name}"
             if owned is not None and owned(rel):
+                continue
+            if _prune_identity_census_name(child.name, at_kb_root=at_kb_root):
                 continue
             # Alias refusal comes first and applies to EVERY entry, exactly as
             # in the walk this mirrors: an aliased subtree can hide or
@@ -3050,7 +3052,7 @@ def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
 
     if not find_corpus.store_serves(root):
         return None
-    return lambda rel: ownership.classify(rel) is ownership.Ownership.PAGE
+    return ownership.page_classifier()
 
 
 def _is_page_entry(entry: tuple) -> bool:
@@ -4222,11 +4224,18 @@ def build_corpus_context_with_census(
                 memo = None
             if memo is not None and memo[0] is context and not restricted:
                 return memo[2], census
-        previous = memo[0].pages if memo is not None else {}
-        reused = memo[3] if memo is not None else {}
         # A filter decides every page: as one set, under one snapshot.
         admitted = None if visible is None else egress.admitted(visible, context.pages)
         withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
+        # The current admission proved every page. Reuse the validated enrichment
+        # without copying its page states into a second mapping.
+        if not withheld and memo is not None and memo[0] is context:
+            enriched = memo[2]
+            if writer_visibility is not None:
+                enriched = replace(enriched, writer_visibility=writer_visibility)
+            return enriched, census
+        previous = memo[0].pages if memo is not None else {}
+        reused = memo[3] if memo is not None else {}
         # A page this caller may not see keeps its raw state and is enriched by no one on its behalf:
         # nothing it enriches reaches the caller's context, and the memo only ever holds a build of every page.
         states = {
@@ -4314,21 +4323,18 @@ def build_corpus_context_with_census(
         # This caller's context is its own: cut from the owner's memo when it validates it, else built in
         # full, and never kept.
         return derive(states, writer_visibility, patching=memo[2] if memo is not None else None), census
-    if memo is not None and memo[0] is context:
-        enriched = memo[2]
-    else:
-        # The shared enrichment stands for no caller: it carries no writer view.
-        enriched = derive(states, None, patching=memo[2] if memo is not None else None)
-        # The reused states keep this basis object, so record the dependency it will have once a
-        # later read loads it.
-        dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
-        # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
-        # match it, so it is no enrichment to share, and it must not replace one that others can.
-        if not any(vocabulary_registry.dependency_unavailable(each) for each in dependency[:2]):
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
-                if cached is not None and cached[1] is context:
-                    _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
+    # The shared enrichment stands for no caller: it carries no writer view.
+    enriched = derive(states, None, patching=memo[2] if memo is not None else None)
+    # The reused states keep this basis object, so record the dependency it will have once a
+    # later read loads it.
+    dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
+    # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
+    # match it, so it is no enrichment to share, and it must not replace one that others can.
+    if not any(vocabulary_registry.dependency_unavailable(each) for each in dependency[:2]):
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
+            if cached is not None and cached[1] is context:
+                _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
     if writer_visibility is not None:
         enriched = replace(enriched, writer_visibility=writer_visibility)
     return enriched, census
