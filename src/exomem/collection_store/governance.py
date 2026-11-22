@@ -2036,10 +2036,14 @@ class OperationAuthorization:
     def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:
         """Whether ``content`` is the current render of ``projection``, or a migrated original.
 
+        An adoption or a takeover starts a new store instance and rewrites no view, so the current
+        render may name an earlier instance of the store's lineage: the one whose stamp ``content``
+        carries. Every other byte, the version and the hash included, must still match exactly.
+
         This proof is a function of the store and the bytes alone, never of the caller or the policy,
         so a repeat at the same store stamp keeps it. The verdict built on it is decided again each time.
         """
-        from . import legacy_originals, views
+        from . import edit_back, legacy_originals, views
 
         cache, key = self.cache, (projection["path"], digest)
         # Read before the render, so a commit that lands in between can only make a later lookup miss.
@@ -2059,6 +2063,12 @@ class OperationAuthorization:
             self.conn, views.store_identity(self.conn), projection, manifest,
             root=self.root, cache=cache, operation=self,
         )
+        if content != rendered.encode("utf-8"):
+            earlier = edit_back.earlier_identity(self.conn, projection, manifest, content)
+            if earlier is not None:
+                _version, rendered = views.render_view(
+                    self.conn, earlier, projection, manifest, root=self.root, cache=cache, operation=self,
+                )
         if content == rendered.encode("utf-8"):
             if keepable:
                 cache._remember(cache.render_proofs, key, stamp, _MAX_CACHED_SUBJECTS)
