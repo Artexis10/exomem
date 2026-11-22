@@ -183,6 +183,7 @@ def test_an_oversized_edge_absence_envelope_is_unavailable(tmp_path: Path, opera
 
 
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)
     credential = tmp_path / "credential"
@@ -207,6 +208,7 @@ def test_a_condemned_version_is_never_evicted_on_or_reused_and_its_bytes_go_up_a
         vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
     """A restored or exported cell can hold an original whose name a later hold condemned. Evicting on that version,
     or reusing it for a duplicate, would leave the bytes only in a version that the bucket rule deletes."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)
     credential = tmp_path / "credential"

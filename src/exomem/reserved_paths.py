@@ -4436,6 +4436,7 @@ def _read_owner_bytes(
     descriptor_id: str,
     *,
     limit: int,
+    deadline: float | None = None,
 ) -> bytes:
     """Read one exact private owner file through a retained no-follow handle."""
 
@@ -4467,6 +4468,7 @@ def _read_owner_bytes(
         root,
         descriptor_ids=(descriptor_id,),
         identity_may_change=False,
+        deadline=deadline,
     ):
         acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
@@ -4637,6 +4639,7 @@ def _stage_owner_chunks(
     vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
     *, expected_sha256: str, expected_size: int, temporary_name: str | None = None,
     on_created: Callable[[held_fs.StableIdentity], None] | None = None,
+    meter_allocation: bool = False,
 ) -> Iterator[StagedOwnerFile]:
     """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
     root = Path(os.path.abspath(vault_root))
@@ -4680,7 +4683,17 @@ def _stage_owner_chunks(
                     digest.update(part)
                     yield part
 
-            filesystem.write(writable, held_fs.Chunks(chunks)).require()
+            parts = chunks()
+            if meter_allocation:
+                from . import media_capacity
+
+                parts = media_capacity.metered_chunks(
+                    root, os.fstat(writable.descriptor).st_dev, parts, upload_size=expected_size,
+                )
+            try:
+                filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
+            finally:
+                parts.close()
             if size != expected_size or digest.hexdigest() != expected_sha256:
                 raise ValueError("private original differs from its declared bytes")
             version = writable.version()
@@ -5049,6 +5062,7 @@ def _remove_owner_file(
     missing_ok: bool = False,
     expected_version: held_fs.FileVersion | None = None,
     expected_identity: held_fs.StableIdentity | None = None,
+    before_unlink: Callable[[], None] | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -5122,6 +5136,11 @@ def _remove_owner_file(
                             raise OSError("private remove target changed")
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private remove parent changed")
+                    if before_unlink is not None:
+                        before_unlink()
+                        if expected_version is not None and file.version() != expected_version:
+                            raise OSError("private remove target changed")
+                        _require_owner_parent(filesystem, route, parent)
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")

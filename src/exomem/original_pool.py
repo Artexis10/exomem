@@ -313,7 +313,7 @@ class PreparedOriginal:
 def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
             temporary_name: str | None = None,
             on_created: Callable[[held_fs.StableIdentity], None] | None = None,
-            replacing: bool = False) -> Iterator[PreparedOriginal]:
+            replacing: bool = False, meter_allocation: bool = False) -> Iterator[PreparedOriginal]:
     """Stage every supplied byte before examining physical reuse; retain custody through commit.
 
     `replacing` stages a repair of a damaged object, which `PreparedOriginal.replace` swaps out.
@@ -326,7 +326,8 @@ def prepare(vault: Path, digest: str, size: int, data: held_fs.Chunks, *,
     with reserved_paths._subsystem_authority_scope(OWNER):
         with reserved_paths._stage_owner_chunks(vault, target, DESCRIPTOR_ID,
                 data, expected_sha256=digest, expected_size=size,
-                temporary_name=temporary_name, on_created=on_created) as staged:
+                temporary_name=temporary_name, on_created=on_created,
+                meter_allocation=meter_allocation) as staged:
             # An OS handle alone does not exclude eviction. Keep the ledger pin
             # outside winner handles so confirmation retries cannot release it.
             with _pin(vault, target, object_key=target.relative_to(vault).as_posix()), ExitStack() as handles:
@@ -372,8 +373,11 @@ def remove_stage(vault: Path, object_key: str, name: str, identity: held_fs.Stab
         reserved_paths._remove_owner_stage(vault, (vault / object_key).with_name(name), DESCRIPTOR_ID, identity)
 
 
-def evict_object(vault: Path, digest: str, *, expected_version: held_fs.FileVersion) -> None:
+def evict_object(
+    vault: Path, digest: str, *, expected_version: held_fs.FileVersion,
+    before_unlink: Callable[[], None] | None = None,
+) -> None:
     """Remove one verified physical version after the ledger proves every binding recoverable."""
     with reserved_paths._subsystem_authority_scope(OWNER):
         reserved_paths._remove_owner_file(vault, object_path(vault, digest), DESCRIPTOR_ID,
-                                         expected_version=expected_version)
+                                         expected_version=expected_version, before_unlink=before_unlink)

@@ -216,8 +216,9 @@ _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last che
 _CAPTURE_POLICY_MAX_CHARS = 1600
 # The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
 # text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
-# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus 1
-# (the separator) plus the rules allowance.
+# no room from the working set or from `say`: the charged working set plus `rules` is at most the working-set
+# ceiling plus 1 (the separator) plus the rules allowance. The positions, stance, skills and profile blocks render
+# beside them under their own bounds.
 # A longer text is omitted whole, never cut.
 _CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
@@ -2626,16 +2627,33 @@ def _positions_overflow_line(refs: list[str], omitted: int) -> str:
     return f"- positions not shown, read by ref: {', '.join(f'[{ref}]' for ref in refs)}{more}"
 
 
+#: A reason is one of the service's closed tokens; this only caps a malformed one.
+_POSITIONS_REASON_MAX_CHARS = 40
+
+
+def _positions_state_line(block: dict) -> str:
+    """The line that says the block is not the whole, so a position the service did not read never reads as none."""
+    # nosemgrep: ep-word-set -- the positions block's closed states that say the block is not the whole
+    state = block.get("state")
+    if state not in ("partial", "unavailable"):
+        return ""
+    reason = " ".join(str(block.get("reason") or "").split())[:_POSITIONS_REASON_MAX_CHARS]
+    because = f" ({reason})" if reason else ""
+    return f"- positions {state}{because}: a recorded position may exist that is not shown; search before you treat one as absent"
+
+
 def _format_positions_block(block: object) -> str:
     """The person's recorded positions under the service's framing line, whole lines; nothing when none is served.
 
     The block has its own bound beside the working set's, so it takes nothing from the map's or the turn's room.
     The refs of the positions the service could not fit as lines follow them, within the same bound, and a count of
-    the rest always renders, so a full block never reads as the whole.
+    the rest always renders, so a full block never reads as the whole. A partial or unavailable block ends with a
+    line that says so, beside the bound, even when it carries no position.
     """
-    # nosemgrep: ep-word-set -- the positions block's closed states that carry items or references
-    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial"):
+    # nosemgrep: ep-word-set, ep-word-membership -- the positions block's closed states that render
+    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial", "unavailable"):
         return ""
+    note = _positions_state_line(block)
     lines, used = [], 0
     for item in block.get("items") or ():
         if not isinstance(item, dict) or not item.get("text"):
@@ -2654,10 +2672,10 @@ def _format_positions_block(block: object) -> str:
         shown.append(ref)
     unseen = len(refs) - len(shown) + omitted
     if not lines and not shown and not unseen:
-        return ""
+        return note
     tail = [_positions_overflow_line(shown, unseen)] if shown or unseen else []
     about = " ".join(str(block.get("about") or "").split())
-    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail])
+    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail, *([note] if note else [])])
 
 
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:

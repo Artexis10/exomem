@@ -578,7 +578,11 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
                 handoff = result["handoff"]
                 assert handoff["standby"] == "ready", handoff
                 assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
-                assert handoff["promotion"]["snapshot"] == "current"
+                # This supervisor fixture has no file observer to seal a graph proof.
+                # Real-vault carry is covered by test_standby_handoff_writes.py.
+                assert handoff["promotion"]["snapshot"] == "rebuild-after-promotion"
+                assert handoff["promotion"]["reproof_declined"] == "observer_unavailable"
+                assert handoff["promotion"]["startup_validation"] == "pending"
                 after = await client.call_tool("counted", {"marker": "after"})
                 assert after.data["pid"] != serving
 

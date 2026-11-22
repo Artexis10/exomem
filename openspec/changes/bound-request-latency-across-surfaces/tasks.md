@@ -106,6 +106,12 @@
 - [ ] 3.16 After installation, compare `ask_memory`, `activate_context` and `read_memory` dispatch timings in the request ledger by concurrency bucket: alone, 1.5 to 3, and 3 to 6.
   - Use at least 100 calls per tool per arm, report the write count per window, and give bootstrap 95% intervals.
   - Record each site's span check from 3.8-3.14.
+  - Measured 2026-11-22 from the installed request ledger: the release before task 3.20 (1,798 calls, 444 writes, about 16.5 h) against the release that carries it (1,563 calls, 290 writes, about 15.5 h). A call's concurrency is 1 plus the time-weighted count of other calls in flight during it. Median wall time, later release minus earlier, with bootstrap 95% intervals:
+    - Alone: `ask_memory` −0.28 s [−0.66, +0.01]; `activate_context` +0.02 s [−1.19, +1.20]; `read_memory` −0.04 s [−0.07, −0.01] (54 and 120 calls).
+    - 1.5 to 3: `ask_memory` −7.80 s [−14.85, −1.12]; `activate_context` −4.82 s [−22.93, +13.08]; `read_memory` −0.25 s [−0.50, −0.02].
+    - 3 to 6: `ask_memory` +31.86 s [−20.84, +54.43]; `activate_context` +20.67 s [+8.18, +29.46]; `read_memory` +0.14 s [−0.29, +0.60].
+    - Every tool has at least 100 calls per arm; most buckets have fewer. The release also shortened the worker's GIL switch interval, and the windows differ in time of day and write count. So the result is no consistent gain, not a gain.
+  - Still open: the span check of each site from 3.8-3.14.
 - [x] 3.18 Bind the id of a stored due entry from the entry, before any review queue is read.
   - Evidence: merged in #2795 (4a8a8a517).
   - Baseline, from the request ledger of the installed service, 2026-11-11 to 2026-11-13: 9 of 9 `decide_review_item` calls by id were refused `ITEM_NOT_FOUND` after 752 to 1,758 s each. All 8 ids are current `note_cohesion` entries of the stored projection. The binder read only the review listings, and no listing holds that family.
@@ -131,16 +137,23 @@
   - Still open: a restricted caller and a bound collection writer keep the request path and its cost, so a decision on a vault whose pages a collection store owns is not faster.
   - Still open: the refusal of an unknown id still reads every queue. A lookup by id needs an index of item ids.
   - Installed 2026-11-14 (release 0.179.1), from the installed request ledger: a decision by a listed id took 0.83 s and 1.06 s, where one took 970 s that morning on the release before; a listing from the held pass took 0.13 s. The open items above keep this task open.
-- [ ] 3.20 Run the working-set warm, graph drain, vocabulary recovery, freshness reconcile, watcher flush, identity catalogue warm and matrix load in `foreground_priority.bulk()`, with a yield between natural units (design decision 10).
+- [x] 3.20 Run the working-set warm, graph drain, vocabulary recovery, freshness reconcile, watcher flush, identity catalogue warm and matrix load in `foreground_priority.bulk()`, with a yield between natural units (design decision 10).
   - Verify: one test per pass holds a request in flight and shows the pass makes no progress until it ends, then makes all of it; a request that joins a pass's single flight does not wait out the progress floor.
   - Verify: no yield runs under a lock, boundary, single-flight build or connection that a request waits on; a site with no safe point stays unchanged and the design names why.
   - Verify: a background follower of a stopped identity-build leader gets the built inventory, and a request-budgeted one gets the unavailable outcome without walking; stopping the graph drain beside a request ends it inside the join.
   - Verify: the pass spans and the matrix background-load log line carry the wait inside them as `waited_ms`.
   - Measured 2026-11-20 on a copy of one vault with about 15,600 pages: the real server on one laptop, no network, one server at a time, the unchanged code and this change in two alternating pairs, 21 recalls per block. Every comparable pair after the first full answer and on a settled server held the same packet apart from per-call ids and generation counters (95 of 95). Per case, this change minus the unchanged code: on a settled server −0.76 s [−1.06, −0.46] (n=84; the pairs gave −1.21 s and −0.32 s); beside ten episode writes, in the second pair only, −0.10 s [−0.65, +0.45], no change (the first pair's arms made 4 and 3 writes, so it is not compared); during a review pass −0.14 s [−0.30, +0.02], no change. Right after start the two pairs disagree (−1.03 s and +0.50 s). That block began 73 s and 78 s after the start in the first pair and 77 s and 51 s in the second, so it likely met different amounts of start-up work. Background work still finished: the server settled after 480 s and 340 s with this change and after 560 s and 520 s without it, and each review pass ended 206 to 235 s after its request. The copy lacks the installed service's continuous background load, so task 3.16 decides the installed gain. The wait share keeps its default of 0.5, because no block gave a reason to change it.
-- [ ] 3.21 End a derived-drain turn when a request is in flight, as for a waiting writer, and wait for it between turns outside the boundary.
+  - Evidence: merged in #2970 (25739fc93), with the pass tests in `tests/test_graph_drain.py`, `tests/test_vocabulary_recovery.py`, `tests/test_file_watcher.py`, `tests/test_identity_catalogue_single_flight.py`, `tests/test_embedding_matrix_cache.py`, `tests/test_working_set_index.py` and `tests/test_foreground_priority.py`. The installed comparison is task 3.16.
+- [x] 3.21 End a derived-drain turn when a request is in flight, as for a waiting writer, and wait for it between turns outside the boundary.
   - Verify: `tests/test_derived_drain_turns.py` ends a turn beside a request and keeps a loan to one unit.
-- [ ] 3.22 Make the bulk-pass wait share the setting `EXOMEM_BULK_WAIT_SHARE`, with 0.5 unchanged as the default.
+  - Evidence: merged in #2970 (25739fc93).
+- [x] 3.22 Make the bulk-pass wait share the setting `EXOMEM_BULK_WAIT_SHARE`, with 0.5 unchanged as the default.
   - Verify: `tests/test_foreground_priority.py` reads the setting, and an unset or invalid value keeps the default allowance.
+  - Evidence: merged in #2970 (25739fc93); `tests/test_foreground_priority.py::test_the_wait_share_is_a_setting_that_keeps_its_default`.
+- [ ] 3.23 After installation, compare canary recalls with nothing else in flight on the release with incremental corpus statistics (design decision 11) and on the release before it.
+  - Verify: the own-CPU gap between a recall after a write and one with no write since the last recall, with a bootstrap interval.
+  - Verify: `lexical.query` CPU per query in recalls that rebuilt their statistics, with a bootstrap interval.
+  - Verify: the share of recalls that exhaust the request budget, for the canary and for agents.
 
 ## 4. Verify installed behavior and deliver
 

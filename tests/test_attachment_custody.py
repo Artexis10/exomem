@@ -217,6 +217,7 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
             "file_id",
             "mime_type",
             "file_name",
+            "diarize",
         ]
 
 

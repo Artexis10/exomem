@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from . import capabilities, guards
+from . import capabilities, guards, media_capacity
 
 if TYPE_CHECKING:
     from .commands import Param
@@ -203,6 +203,7 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "MUTATION_LOCK_UNAVAILABLE",
         "RECORD_RECOVERY_REQUIRED",
         "MODEL_BUSY",
+        media_capacity.UPLOAD_SPACE_BUSY,
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
         # prove completeness — retryable with bounded `retry_after_ms`, never a

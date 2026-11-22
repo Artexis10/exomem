@@ -1,0 +1,26 @@
+{
+  "extends": "profile.json",
+  "modes": [
+    "dense",
+    "hybrid"
+  ],
+  "mode_environment": {
+    "dense": {
+      "EXOMEM_PASSAGE_MATRIX_BYTES": "536870912"
+    },
+    "hybrid": {
+      "EXOMEM_PASSAGE_MATRIX_BYTES": "536870912"
+    }
+  },
+  "arms": {
+    "dense": {
+      "scoring_mode": "resident",
+      "ranking": "dense"
+    },
+    "hybrid": {
+      "scoring_mode": "resident",
+      "ranking": "fused",
+      "request_mode": "hybrid"
+    }
+  }
+}

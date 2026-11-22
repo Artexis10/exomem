@@ -199,6 +199,9 @@ class FileHandle(Wire):
     file_id: str = Field(min_length=1, max_length=256)
     mime_type: str | None = Field(default=None, max_length=255)
     file_name: str | None = None
+    diarize: Annotated[bool, Field(strict=True)] | None = Field(
+        default=None, description="Request or skip speaker labels for this audio or video file."
+    )
 
 
 _UNLINKED = Field(default=None, description="Why your review found no useful link; never added to note text.")

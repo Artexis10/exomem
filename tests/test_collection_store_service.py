@@ -287,7 +287,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
 
     from test_media_store import _offload
 
-    from exomem import add, indexes, media_store
+    from exomem import add, indexes, media_replicas, media_store
 
     root = _served_vault(tmp_path / "served", monkeypatch)
     shutil.copytree(vault / "Knowledge Base/_Schema", root / "Knowledge Base/_Schema", dirs_exist_ok=True)
@@ -309,6 +309,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
                     source_identity={"system": "archive", "record_id": "observation", "revision": "one"})
             path = root / saved.artifact_path
             _offload(root, path)
+            media_replicas.confirm_key_export(root)
             assert media_store.evict(root, path)
             yield started, saved.ref, path, expected, saved.path
         finally:
@@ -561,6 +562,38 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
     assert (preview["step"], applied["status"]) == ("adopt-local", "adopted"), applied.get("reason")
     refused(lambda: remote(mode="collections-store-export", apply=True, plan_id="reviewed", why="export"),
             "MAINTENANCE_REQUIRES_CLI")
+
+
+def test_an_adoption_leaves_every_view_readable_by_its_owner(service):
+    """Defect: an adoption starts a new store instance and rewrites no view. The release proof
+    wanted the render under the new instance, so every view was withheld from every caller, the
+    owner included, until a row change rendered it again."""
+    root = service.root
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    def views():
+        # History pages carry no instance stamp, so an adoption cannot strand them.
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return dict(reader.execute("SELECT path,state FROM projection_state WHERE kind!='history'"))
+
+    found = SimpleNamespace(root=root, meta=lambda: store_meta(root))
+    _published(found)
+    _until(lambda: views() and set(views().values()) == {"current"})
+    before = store_meta(root)[schema.META_INSTANCE_ID]
+    path = replica.replica_path(root)
+    path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
+    _preserved(found)
+    with capabilities.active_surface(descriptor):
+        preview = call(root, "maintain_memory", mode="collections-store-adopt-local")
+        applied = call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
+                       plan_id=preview["plan_id"], why="adopt the copy this host holds")
+    assert applied["status"] == "adopted", applied.get("reason")
+    assert store_meta(root)[schema.META_INSTANCE_ID] != before
+
+    for view in views():
+        assert call(root, "read_memory", path=view)["path"] == view
 
 
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(

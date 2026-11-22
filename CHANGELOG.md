@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.199.0](https://github.com/Artexis10/exomem/compare/v0.198.0...v0.199.0) (2026-11-22)
+
+
+### Features
+
+* **passages:** fuse lexical ranking with dense similarity in passage search ([#3031](https://github.com/Artexis10/exomem/issues/3031)) ([25c9f1e](https://github.com/Artexis10/exomem/commit/25c9f1e959ff3d4327c6cb425fb89bb4bf28b3b1))
+
+
+### Bug Fixes
+
+* **curation:** count a preference saved later on the profile's own day ([#3038](https://github.com/Artexis10/exomem/issues/3038)) ([de39e53](https://github.com/Artexis10/exomem/commit/de39e5319ec4a99efaa6e6be0ec7952ea385d526))
+* **positions:** report a cut-short task discovery as unavailable or partial ([#3029](https://github.com/Artexis10/exomem/issues/3029)) ([f9bbcd1](https://github.com/Artexis10/exomem/commit/f9bbcd1ba58063dd25e480b965881501641b538d))
+* **release:** land cuts without manual retries and stop waiting on latency suites ([#3036](https://github.com/Artexis10/exomem/issues/3036)) ([9421ca5](https://github.com/Artexis10/exomem/commit/9421ca5337d8d208618e81f1d01ae3f20ac1c818))
+
+## [0.198.0](https://github.com/Artexis10/exomem/compare/v0.197.0...v0.198.0) (2026-11-22)
+
+
+### Features
+
+* **media-replicas:** verify stored replicas on a cycle, quarantine and copy again ([#2978](https://github.com/Artexis10/exomem/issues/2978)) ([c91290c](https://github.com/Artexis10/exomem/commit/c91290ce3e541071c1097c540c92333823311def))
+* **media:** persist governed previews ([#3016](https://github.com/Artexis10/exomem/issues/3016)) ([14f3f3d](https://github.com/Artexis10/exomem/commit/14f3f3db648324d395fca019f128cedaddde49c0))
+* **records:** retract a store-backed row from current state, keeping its history (store schema 19) ([#2988](https://github.com/Artexis10/exomem/issues/2988)) ([d9c3727](https://github.com/Artexis10/exomem/commit/d9c37275500446f808997c8b82d397b1541ce316))
+
+
+### Performance
+
+* **governance:** avoid resolving page version IDs as file paths ([#3019](https://github.com/Artexis10/exomem/issues/3019)) ([cb3f040](https://github.com/Artexis10/exomem/commit/cb3f0401da43d8dd657c89673b72fabc9012d4d2))
+
 ## [0.197.0](https://github.com/Artexis10/exomem/compare/v0.196.0...v0.197.0) (2026-11-22)
 
 
