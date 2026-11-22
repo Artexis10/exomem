@@ -280,6 +280,74 @@ def test_restart_acknowledges_a_ready_record_on_the_final_attempt(vault):
     assert media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None
 
 
+@pytest.mark.parametrize("replacement_during", ["lookup", "existing_record", "lookup_fault", "after_install", "companion"])
+def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkeypatch, replacement_during):
+    from test_shared_originals import _pooled_capture
+
+    original = _photo(913, 633)
+    captured = _pooled_capture(vault, tmp_path, monkeypatch, "pooled-preview-publication-fixture.jpg", original)
+    relative = captured.artifact_path
+    binary = vault / relative
+    assert not binary.exists()
+    media_processing.reconcile_media(vault, relative)
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.media_type == media_jobs.PREVIEW_MEDIA_TYPE
+    existing = None
+    if replacement_during in {"existing_record", "lookup_fault"}:
+        assert media_previews.generate(vault, claim, ledger, deadline=None)
+        [record] = media_previews.store_path(vault).glob("*/*.json")
+        existing = record.read_bytes(), record.stat().st_ino
+        assert ledger.recover_interrupted() == 1
+        prior = claim
+        claim = ledger.claim_next()
+        assert claim is not None and claim.id == prior.id
+        if replacement_during == "lookup_fault":
+            while claim.attempts < media_jobs.MAX_PREVIEW_ATTEMPTS:
+                assert ledger.recover_interrupted() == 1
+                claim = ledger.claim_next()
+                assert claim is not None and claim.id == prior.id
+
+    replacement = _photo(634, 914)
+    if replacement_during in {"after_install", "companion"}:
+        publish_preview = media_jobs.MediaJobStore.publish_preview
+
+        def replace_after_install(*args):
+            assert publish_preview(*args)
+            if replacement_during == "companion":
+                claim.sidecar_path.write_bytes(b"\xff")
+            else:
+                binary.write_bytes(replacement)
+            return True
+
+        monkeypatch.setattr(media_jobs.MediaJobStore, "publish_preview", replace_after_install)
+    else:
+        read_for_publication = media_previews._read_for_publication
+
+        def replace_during_lookup(*args):
+            result = read_for_publication(*args)
+            binary.write_bytes(replacement)
+            if replacement_during == "lookup_fault":
+                raise OpError("PREVIEW_RECORD_UNAVAILABLE", "Temporary record read failure.", "Retry the worker.",
+                              details={"status": "retryable"})
+            return result
+
+        monkeypatch.setattr(media_previews, "_read_for_publication", replace_during_lookup)
+
+    media_worker.MediaWorker(vault, execution_mode="process")._process(claim)
+
+    if replacement_during == "companion":
+        assert claim.sidecar_path.read_bytes() == b"\xff"
+    else:
+        assert binary.read_bytes() == replacement
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is not None
+    if existing is None:
+        assert not list(media_previews.store_path(vault).glob("*/*.json"))
+    else:
+        assert (record.read_bytes(), record.stat().st_ino) == existing
+
+
 def test_retryable_hydration_contention_keeps_preview_pending(vault, monkeypatch):
     original = _photo(900, 640)
     with library_scope():

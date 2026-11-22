@@ -2318,6 +2318,7 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
             yield source
         return
     from . import original_pool
+    from .vault import FrontmatterError
 
     assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
     bound = originals.BinaryBinding(relative, snapshot.binary_sha256, snapshot.binary_size)
@@ -2325,7 +2326,10 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
     def require_binding() -> None:
         # The bound path, digest and size name the bytes; the companion's other fields, such as the
         # extraction text that a pinned job writes, may change while the bytes are held.
-        current = originals.bound_companion(vault, relative)
+        try:
+            current = originals.bound_companion(vault, relative)
+        except (UnicodeError, FrontmatterError) as error:
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED") from error
         if (current is None or vault / current[0] != snapshot.sidecar_path
                 or originals.binary_binding(current[1]) != bound):
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
@@ -2457,10 +2461,10 @@ def logical_view(vault: Path, path: str | Path, *, job: MediaJob | None = None):
 
 
 def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                  deadline: float | None = None):
+                  deadline: float | None = None, strict_exit: bool = False):
     """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""
     return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True, deadline=deadline),
-                                           recorded_sha256=recorded_sha256, deadline=deadline)
+                                           recorded_sha256=recorded_sha256, deadline=deadline, strict_exit=strict_exit)
 
 
 def read_original_bytes(vault: Path, path: str, *, max_bytes: int | None = None) -> reserved_paths.GenericFileSnapshot:

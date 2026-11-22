@@ -290,6 +290,7 @@ def stage(
     byte_proofs: dict | None = None,
     materialize: bool = True,
     canonical: bool = False,
+    strict_exit: bool = False,
     preflight: Callable[[], bool] | None = None,
     additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
 ):
@@ -325,7 +326,9 @@ def stage(
                     # that differ from the binding. A pin taken here, or by a caller that passes
                     # `materialize=False`, has already fetched an evicted file.
                     hold = media_store.hold_original if materialize and canonical else reserved_paths.hold_generic_file
-                    held = stack.enter_context(hold(root, path, recorded_sha256=recorded, deadline=deadline))
+                    held = stack.enter_context(
+                        hold(root, path, recorded_sha256=recorded, deadline=deadline, strict_exit=strict_exit)
+                    )
                 except reserved_paths.ReservedPathLeafError as error:
                     if canonical or error.code != "MISSING":
                         raise
@@ -339,7 +342,9 @@ def stage(
                     if not pooled:
                         raise
                     held = stack.enter_context(
-                        media_store.hold_original(root, path, recorded_sha256=recorded, deadline=deadline)
+                        media_store.hold_original(
+                            root, path, recorded_sha256=recorded, deadline=deadline, strict_exit=strict_exit,
+                        )
                     )
                 descriptor = _descriptor(path, metadata, held)
                 if (
@@ -353,6 +358,8 @@ def stage(
                 if binding() != (path, metadata):
                     raise RecoveryUnavailable
                 yield held, descriptor
+                if strict_exit:
+                    stack.close()  # Translate a final custody refusal before the caller returns the response.
             except (
                 reserved_paths.ReservedPathLeafError,
                 media_store.MediaStoreError,

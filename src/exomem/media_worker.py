@@ -700,11 +700,15 @@ class MediaWorker:
                     elif ((isinstance(error, OpError) and error.code in _TRANSIENT_OPERATION_CODES)
                           or _ledger_busy(error)):
                         store.retry_preview(job)
+                    elif (isinstance(error, (reserved_paths.ReservedPathLeafError, originals.RetirementUnconfirmed))
+                          or (isinstance(error, media_store.MediaStoreError)
+                              and error.code in {"MEDIA_ORIGINAL_CHANGED", "MEDIA_ORIGINAL_UNVERIFIED"})):
+                        store.finish_preview(job, error="preview original unavailable", recover_install=False)
                     else:
                         log.warning("media preview unavailable (%s)", type(error).__name__)
                         store.finish_preview(job, error="preview unavailable")
                 else:
-                    store.finish_preview(job, error=None if installed else "preview unavailable")
+                    store.finish_preview(job, error=None if installed else "preview unavailable", recover_install=False)
             else:
                 store.retry_preview(job)
             return _ProcessOutcome(_COMPLETE)

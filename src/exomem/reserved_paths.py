@@ -1856,21 +1856,22 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
 
 def hold_generic_file(vault_root: Path, value: object, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Retain one ordinary file for checked delivery, reusing a proven digest when available."""
     return _hold_binary_file(vault_root, value, open_generic_binary(vault_root, value),
-                             recorded_sha256=recorded_sha256, deadline=deadline)
+                             recorded_sha256=recorded_sha256, deadline=deadline, strict_exit=strict_exit)
 
 
 @contextmanager
 def _hold_binary_file(vault_root: Path, value: object, open_source, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Hold the canonical source open and prove its bytes with no private copy.
 
     `recorded_sha256` gives the digest that a record proves for the file at the held
     version, or None. A recorded digest reads no byte. Otherwise one pass through the
     handle hashes the file. The caller then reads bytes with `read_held`.
+    Use `strict_exit` when the caller waits for teardown before returning any bytes.
     """
     _copy_deadline(deadline)
     finished = False
@@ -1883,7 +1884,7 @@ def _hold_binary_file(vault_root: Path, value: object, open_source, *,
         # Only the name check that `open_generic_binary` runs at exit can raise here once the caller finished
         # cleanly. `read_held` already proved each byte sent against the held version, so a rename after the
         # last byte changes nothing that was delivered and must not fail a complete response.
-        if not finished:
+        if strict_exit or not finished:
             raise
 
 

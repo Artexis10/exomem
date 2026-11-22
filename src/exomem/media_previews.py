@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Generator, Iterable, Mapping, Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, BinaryIO
@@ -331,7 +331,8 @@ def generate(
         current = originals.original_state(vault, relative)
         if not current.present or current.binary_sha256 != expected.sha256:
             return False
-    with media_store.open_original(vault, relative, job=job, deadline=deadline) as opened:
+    with ExitStack() as original:
+        opened = original.enter_context(media_store.open_original(vault, relative, job=job, deadline=deadline))
         if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
             return False
         held = reserved_paths.prove_held_binary(
@@ -347,24 +348,42 @@ def generate(
             jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
         record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
 
+        written = None
+
         def install() -> bool:
+            nonlocal written
             if _current_intent(vault, relative, job.preview_sha256) != (job.sidecar_path, expected):
                 return False
-            reserved_paths.require_generic_copy_source_version(held)
             root = private_state.store(vault, STORE)
             path = _record_path(root, relative)
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if not stat.S_ISDIR(path.parent.lstat().st_mode):
                 return False
             existing = _read_for_publication(path, relative, held.sha256) is not None
+            reserved_paths.require_generic_copy_source_version(held)
             if not existing:
                 private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
+                written = path
             _sync_record(path, existing=existing)
             return True
 
         manager.yield_to_waiting_writes(vault)
         with manager.consistency_guard(vault, operation="media_preview_publish", holder_kind="background"):
-            return store.publish_preview(job, install)
+            try:
+                try:
+                    return store.publish_preview(job, install)
+                finally:
+                    # Recheck custody even after a storage failure. Pin release writes the ledger after the transaction.
+                    original.close()
+            except reserved_paths.ReservedPathLeafError:
+                if written is not None:
+                    # This guard still excludes any other preview writer for the record this claim installed.
+                    try:
+                        written.unlink(missing_ok=True)
+                        _sync_record(written, existing=False)
+                    except OSError as error:
+                        log.warning("preview rollback deferred (%s)", type(error).__name__)
+                raise
 
 
 def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
@@ -394,7 +413,8 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
         return egress.content_permits(vault, relative, who, derived=True, artifact_copy=held)
 
     with artifact_recovery.stage(
-        vault, selected, who, byte_proofs=proofs, canonical=True, preflight=possible, additional_release=allows_pixels,
+        vault, selected, who, byte_proofs=proofs, canonical=True, strict_exit=True,
+        preflight=possible, additional_release=allows_pixels,
     ) as (held, descriptor):
         jpeg = read(vault, selected, held.sha256)
         artifact_recovery.require_current(

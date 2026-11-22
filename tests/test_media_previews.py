@@ -261,7 +261,8 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
     assert all(block.type != "image" for block in result.content)
 
 
-def test_pooled_preview_refuses_a_resident_replacement_during_lookup(vault, served, tmp_path, monkeypatch):
+@pytest.mark.parametrize("replacement_during", ["lookup", "teardown"])
+def test_pooled_preview_refuses_a_resident_replacement(vault, served, tmp_path, monkeypatch, replacement_during):
     from test_shared_originals import _pooled_capture
 
     mcp, _ = served
@@ -273,15 +274,28 @@ def test_pooled_preview_refuses_a_resident_replacement_during_lookup(vault, serv
     media_processing.reconcile_media(vault, path)
     assert _drain(vault) == ["complete"]
     assert any(block.type == "image" for block in _call(mcp, {"kind": "preview", "path": path}).content)
-    read = media_previews.read
+    replacement = _photo(600, 900)
+    if replacement_during == "lookup":
+        read = media_previews.read
 
-    def replace_during_lookup(*args):
-        jpeg = read(*args)
-        assert jpeg is not None
-        (vault / path).write_bytes(_photo(600, 900))
-        return jpeg
+        def replace_during_lookup(*args):
+            jpeg = read(*args)
+            assert jpeg is not None
+            (vault / path).write_bytes(replacement)
+            return jpeg
 
-    monkeypatch.setattr(media_previews, "read", replace_during_lookup)
+        monkeypatch.setattr(media_previews, "read", replace_during_lookup)
+    else:
+        require_current = artifact_recovery.require_current
+
+        def replace_after_release(*args, **kwargs):
+            result = require_current(*args, **kwargs)
+            if kwargs.get("selected") == path:
+                (vault / path).write_bytes(replacement)
+            return result
+
+        monkeypatch.setattr(artifact_recovery, "require_current", replace_after_release)
+
     result = _call(mcp, {"kind": "preview", "path": path})
 
     assert all(block.type != "image" for block in result.content)

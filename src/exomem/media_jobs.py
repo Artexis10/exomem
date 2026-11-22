@@ -1373,9 +1373,9 @@ class MediaJobStore:
             conn.execute("BEGIN IMMEDIATE")
             return self._current_preview_claim(conn, job) and bool(install())
 
-    def finish_preview(self, job: MediaJob, *, error: str | None = None) -> None:
-        """Retain the terminal outcome, honoring an install whose acknowledgement was interrupted."""
-        if error is not None:
+    def finish_preview(self, job: MediaJob, *, error: str | None = None, recover_install: bool = True) -> None:
+        """Retain the outcome. Only an uncertain install can be recovered from its record."""
+        if error is not None and recover_install:
             from . import media_previews
             from .cli_ops import OpError
 
