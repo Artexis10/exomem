@@ -1,3 +1,5 @@
+<!-- authority:non-specification -->
+
 # Verify Cloud backup repositories
 
 The Cloud controller allows one restic verification check at a time. It starts with an empty allowlist.

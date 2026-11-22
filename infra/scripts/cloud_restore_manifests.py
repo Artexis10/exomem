@@ -373,9 +373,11 @@ def _verifier_pod(pod: dict, image_repository: str) -> bool:
     labels = metadata.get("labels") or {}
     name = labels.get("batch.kubernetes.io/job-name", "")
     uid = labels.get("batch.kubernetes.io/controller-uid")
+    if not isinstance(uid, str) or not uid:
+        return False
     owners = metadata.get("ownerReferences") or []
     # When Kubernetes orphans a Pod, it removes the Job owner reference and retains Job labels.
-    return (_verifier_label(pod) and bool(uid) and bool(RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(name))
+    return (_verifier_label(pod) and bool(RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(name))
             and (not owners or any(_job_owner(owner, name, uid) for owner in owners))
             and _verifier_spec(pod["spec"], image_repository))
 
@@ -442,7 +444,7 @@ def check_idle(context: str, cell_id: str) -> None:
         if not _verifier_spec(template["spec"], image_repository):
             raise ValueError("a Job is running in the cell namespace")
         verifiers[metadata["uid"]] = metadata["name"]
-    if verifiers:
+    if verifiers and image_repository is not None:  # the first admitted verifier Job set the repository
         for pod in _list_workloads(context, source, "pods"):
             owners = pod["metadata"].get("ownerReferences") or []
             if (any(uid in verifiers and _job_owner(owner, verifiers[uid], uid)
