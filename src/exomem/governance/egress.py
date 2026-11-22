@@ -6973,6 +6973,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "append": "mutation",
         "bulk_upsert": "mutation",
         "update": "mutation",
+        "retract": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",

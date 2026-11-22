@@ -1012,6 +1012,13 @@ A release that does not support the ID then refuses at its own startup. Schema
 11 has no ID, because every release since 0.114.0 treats an unknown ID the same
 way, so an ID would also refuse 0.119.0 and later.
 
+Schema 19 makes a Records row retractable. It renames the table that holds every
+row to `item_rows`, adds a `retracted_txn` column, and puts a view named `items`
+over the current rows. The migration keeps every row and every history entry. A
+release before the one that introduced schema 19 cannot open the migrated store: it
+refuses a store schema newer than it supports, as it does for any newer schema. Back
+up the store with the release that you run now before you upgrade.
+
 If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
 or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
 that the release cannot use. Roll forward to a release that supports it.
