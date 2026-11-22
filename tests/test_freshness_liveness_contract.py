@@ -954,7 +954,7 @@ def test_watcher_drain_allocates_no_epoch_when_the_fan_out_publication_is_refuse
             encoding="utf-8",
         )
         # Exactly what `_record` does when watchdog observes an out-of-band edit.
-        pending_epoch = freshness.mark_external_pending(root)
+        pending_epoch = freshness.mark_external_pending(root, paths=(edited,))
         watcher._dispatch_batch(
             [edited],
             [INSIGHT_A],
@@ -1015,7 +1015,7 @@ def test_watcher_drain_still_marks_unclassified_graph_incompleteness(
         _page("Contract A", "A claims against [[contract-b]] -- unclassified."),
         encoding="utf-8",
     )
-    pending_epoch = freshness.mark_external_pending(root)
+    pending_epoch = freshness.mark_external_pending(root, paths=(edited,))
     watcher._dispatch_batch(
         [edited], [INSIGHT_A], [], cap=False, pending_epoch=pending_epoch
     )
@@ -1188,7 +1188,7 @@ def test_a_busy_boundary_does_not_latch_the_external_pending_epoch(
     watcher = FileWatcher(root)
     edited = root / INSIGHT_A
     edited.write_text(_page("Contract A", "A revised under contention."), encoding="utf-8")
-    pending_epoch = freshness.mark_external_pending(root)
+    pending_epoch = freshness.mark_external_pending(root, paths=(edited,))
 
     watcher._dispatch_batch(
         [edited], [INSIGHT_A], [], cap=False, pending_epoch=pending_epoch

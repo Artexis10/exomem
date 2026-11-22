@@ -4132,7 +4132,7 @@ class EpistemicGraphIndex:
                 current_checkpoint = (
                     freshness.recall_checkpoint(self.vault_root, "vault")
                     if stored_checkpoint is not None
-                    else None
+                    else freshness.live_recall_checkpoint(self.vault_root, "vault")
                 )
                 current_identity = (
                     _incremental_projection_identity(self.vault_root)

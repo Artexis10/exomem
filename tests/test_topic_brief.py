@@ -899,6 +899,7 @@ def test_the_mcp_surface_serves_the_brief_the_library_serves(vault: Path, monkey
 
     async def read() -> dict[str, Any]:
         async with Client(mcp) as client:
+            assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
             result = await client.call_tool("read_page", {"page": f"{NOTES}/hub.md", "part": "brief"})
         return result.structured_content
 
