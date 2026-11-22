@@ -686,23 +686,20 @@ class MediaWorker:
             from . import media_previews
 
             store = self._store or MediaJobStore(self._vault_root, create=False)
-            if media_engines.PREVIEWS in media_engines.enabled_engines():
-                def publish(install):
-                    return self._holding_boundary(
-                        "background_media_preview", lambda: store.publish_preview(job, install)
-                    )
-
+            if media_engines.preview_generation_enabled():
                 try:
-                    outcome = media_previews.generate(self._vault_root, job, publish, deadline=deadline)
+                    installed = media_previews.generate(self._vault_root, job, store, deadline=deadline)
                 except Exception as error:  # noqa: BLE001 - a preview failure ends only this claim
-                    outcome = None
                     if ((isinstance(error, OpError) and error.code in _TRANSIENT_OPERATION_CODES)
                             or _ledger_busy(error)):
-                        outcome = _BUSY
+                        store.retry_preview(job)
                     else:
                         log.warning("media preview unavailable (%s)", type(error).__name__)
-                if outcome is _BUSY:
-                    store.retry_preview(job)
+                        store.finish_preview(job, error="preview unavailable")
+                else:
+                    store.finish_preview(job, error=None if installed else "preview unavailable")
+            else:
+                store.retry_preview(job)
             return _ProcessOutcome(_COMPLETE)
 
         offload_error = None
@@ -1427,7 +1424,7 @@ class MediaWorker:
             exceeded = media_brakes.timeout_context(config)
             for job in self._store.running_jobs():
                 if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
-                    self._store.complete(job)
+                    self._store.finish_preview(job, error="preview worker timed out")
                     continue
                 verdict = self._store.record_timeout_stop(
                     job,
@@ -1446,7 +1443,7 @@ class MediaWorker:
             context = self._context_for(cell, config)
             for job in self._store.running_jobs():
                 if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
-                    self._store.complete(job)
+                    self._store.finish_preview(job, error="preview worker exceeded memory")
                     continue
                 self._store.record_memory_stop(
                     job,
@@ -3292,6 +3289,9 @@ def run_child(
         return _budget_for(job, config)
 
     def fail(job: _Job, error: str | None) -> None:
+        if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+            store.finish_preview(job, error="preview worker failed")
+            return
         worker._discard_speech_progress(job)
         store.mark(job, FAILED, error)
 
@@ -3366,6 +3366,9 @@ def run_child(
                         media_brakes.lift_hard_limit()
             except MemoryError as exc:
                 assert job.id is not None
+                if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                    store.finish_preview(job, error="preview worker exceeded memory")
+                    return _MEMORY_RECYCLE_EXIT_CODE
                 if config is None:
                     log.exception("media child job crashed: %s", job.binary_path)
                     fail(job, f"{type(exc).__name__}: {exc}")

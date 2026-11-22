@@ -8746,6 +8746,30 @@ def reader_view(
     )
 
 
+def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) -> bool:
+    """Stop a known preview denial using only the selected path and current policy."""
+    if (not who.resolved or reserved_paths.classify_logical(path).blocked
+            or not _identity_path_accessible(vault_root, path)
+            or raw_protection.permits(vault_root, path, who, derived=True, resolve_bytes=False) is False):
+        return False
+    policy = policy_module.load(vault_root)
+    if policy.blocked:
+        return False
+    if policy.empty or bound_writer(vault_root) is not None:
+        return True
+    try:
+        scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).require_classified()
+    except membership_module.MembershipUnresolved:
+        return True
+    boundary = connector_boundary.snapshot(vault_root, policy)
+    if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
+        return False
+    # A byte-bound grant can widen the path-only result. The held authorization checks it for this path.
+    return who.verified_authorization_session is not None or decide(
+        scopes, audience=who.audience_id, purpose=_declared_purpose(vault_root, who, None), policy=policy,
+    ).level >= LEVEL_FULL
+
+
 def release_allows_download(
     vault_root: Path,
     rel_path: str,

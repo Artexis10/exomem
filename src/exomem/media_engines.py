@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
 WORKER_MODE_ENV = "EXOMEM_MEDIA_WORKER_MODE"
+RUNTIME_DISABLE_ENV = "EXOMEM_DISABLE_MEDIA_EXTRACTION"
 
 # A closed set: each name is media code this package implements, so a new
 # engine is a code change. Which of them run is deployment configuration.
@@ -98,13 +99,18 @@ def worker_mode(env: Mapping[str, str] | None = None) -> str:
 
 def preview_worker_available(env: Mapping[str, str] | None = None) -> bool:
     """Preview creation needs a consumer for the durable row and enforceable child limits."""
-    if worker_mode(env) != "process" or os.name != "posix":
+    values = os.environ if env is None else env
+    if values.get(RUNTIME_DISABLE_ENV) or worker_mode(values) != "process" or os.name != "posix":
         return False
     try:
         import resource
     except ImportError:
         return False
     return all(hasattr(resource, name) for name in ("RLIMIT_DATA", "RLIMIT_AS", "RLIMIT_FSIZE"))
+
+
+def preview_generation_enabled() -> bool:
+    return PREVIEWS in enabled_engines() and preview_worker_available()
 
 
 def stage_available(media_type: str | None) -> bool:

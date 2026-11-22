@@ -29,6 +29,12 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def enable_preview_worker(monkeypatch):
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+
+
 @pytest.mark.parametrize("kind", ["image", "video"])
 def test_a_worker_persists_one_preview_and_mcp_shows_it_without_decoding(
     vault, served, request, monkeypatch, kind,
@@ -37,7 +43,8 @@ def test_a_worker_persists_one_preview_and_mcp_shows_it_without_decoding(
 
     mcp, client = served
     filename, original, content_type = (
-        ("preview-color-swatch.jpg", _photo(1600, 900, orientation=6, taken="2020:01:01 12:00:00"), "image/jpeg")
+        ("preview-color-swatch.jpg", _photo(1600, 900, orientation=6, taken="2020:01:01 12:00:00",
+                                           comment=b"comment from original"), "image/jpeg")
         if kind == "image" else ("sample.mp4", request.getfixturevalue("codec_video").read_bytes(), "video/mp4")
     )
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "frames,previews")
@@ -74,6 +81,7 @@ def test_a_worker_persists_one_preview_and_mcp_shows_it_without_decoding(
     with Image.open(io.BytesIO(jpeg)) as shown:
         assert max(shown.size) <= 512
         assert not shown.getexif()
+        assert "comment" not in shown.info
         if kind == "image":
             assert shown.height > shown.width
     media_processing.reconcile_media(vault, path)
@@ -162,7 +170,7 @@ def test_a_grant_to_download_raw_bytes_does_not_release_derived_pixels(vault, se
     assert str(refused.value) == str(missing.value)
 
 
-@pytest.mark.parametrize("drift", ["access", "binding"])
+@pytest.mark.parametrize("drift", ["access", "binding", "after_pixel_check"])
 def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch, drift):
     from test_access_read_paths import _write_cfg
 
@@ -176,13 +184,28 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
     reconciled = media_processing.reconcile_media(vault, path)
     assert _drain(vault) == ["complete", "complete"]
     read = media_previews.read
+    if drift == "after_pixel_check":
+        from exomem import access
+
+        is_excluded = access.refuse_if_excluded
+
+        def change_after_check(root, selected):
+            answer = is_excluded(root, selected)
+            if selected == path and reading_preview:
+                _write_cfg(vault, 'excluded:\n  - "Evidence"\n')
+            return answer
+
+        monkeypatch.setattr(access, "refuse_if_excluded", change_after_check)
+    reading_preview = False
 
     def drift_during_lookup(*args):
+        nonlocal reading_preview
         jpeg = read(*args)
         assert jpeg is not None
+        reading_preview = True
         if drift == "access":
             _write_cfg(vault, 'excluded:\n  - "Evidence"\n')
-        else:
+        elif drift == "binding":
             sidecar = reconciled.sidecar_path
             content = sidecar.read_text(encoding="utf-8")
             digest = hashlib.sha256(original).hexdigest()
@@ -261,6 +284,9 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
     import time
     from types import SimpleNamespace
 
+    from exomem.cli_ops import OpError
+    from exomem.writer_lease import get_manager
+
     mcp, client = served
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr,previews")
     extractions = []
@@ -285,9 +311,16 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
     monkeypatch.setattr(media_jobs, "time", clock)
     first = store.claim_next()
     assert first is not None and first.media_type == media_jobs.PREVIEW_MEDIA_TYPE
-    hold_boundary = worker._holding_boundary
+    manager = get_manager()
+    consistency_guard = manager.consistency_guard
+
+    def contended(root, **kwargs):
+        if kwargs.get("operation") == "media_preview_publish":
+            raise OpError("MUTATION_BUSY", "a writer holds the vault", details={"status": "retryable"})
+        return consistency_guard(root, **kwargs)
+
     with monkeypatch.context() as busy:
-        busy.setattr(worker, "_holding_boundary", lambda operation, unit: media_worker._BUSY)
+        busy.setattr(manager, "consistency_guard", contended)
         assert worker._process(first).state == "complete"
     store.complete(first)
     pending = store.get(first.id)
@@ -296,7 +329,6 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
     now += media_jobs.RETRY_FIRST_SECONDS
     second = store.claim_next()
     assert second is not None and second.id == first.id and second.attempts == 2
-    assert worker._holding_boundary == hold_boundary
     assert worker._process(second).state == "complete"
     store.complete(second)
     assert store.claim_next() is None and extractions == [1]
@@ -304,7 +336,7 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
 
 
 def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selected_store, monkeypatch):
-    from test_governance_egress import _external, _reset_governance_caches, write_rule, write_scope
+    from test_governance_egress import _external, _reset_governance_caches, write_broken_policy, write_rule, write_scope
     from test_media_store import _offload
 
     from exomem import commands, index_sync, media_store, originals
@@ -329,6 +361,12 @@ def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selecte
     media_processing.reconcile_all_media(vault)
     assert media_previews.read(vault, path, digest) == jpeg
 
+    write_broken_policy(vault)
+    _reset_governance_caches()
+    refused = _call(mcp, {"kind": "preview", "path": path})
+    assert refused.structured_content["error"]["code"] == "ORIGINAL_UNAVAILABLE"
+    assert originals.evicted(vault, path)
+
     write_scope(vault, paths=path.removeprefix("Knowledge Base/"))
     write_rule(vault, ceiling=5)
     _reset_governance_caches()
@@ -339,3 +377,26 @@ def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selecte
     result = _call(mcp, {"kind": "preview", "path": path})
     [image] = [item for item in result.content if item.type == "image"]
     assert base64.b64decode(image.data) == jpeg
+
+
+def test_an_original_path_that_became_a_folder_never_hydrates_descendants(vault, served, selected_store, monkeypatch):
+    from exomem import media_store, originals
+
+    mcp, client = served
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    path = _upload(client, "former-photo.jpg", _photo(900, 600), "image/jpeg")
+    folder = vault / path
+    folder.unlink()
+    folder.mkdir()
+    child = folder / "nested-photo.jpg"
+    child.write_bytes(_photo(600, 900))
+    assert media_processing.reconcile_media(vault, child) is not None
+    media_store.offload(vault, child)
+    assert media_store.evict(vault, child)
+    assert originals.evicted(vault, child)
+
+    result = _call(mcp, {"kind": "preview", "path": path})
+
+    assert result.structured_content["error"]["code"] == "ORIGINAL_UNAVAILABLE"
+    assert originals.evicted(vault, child)

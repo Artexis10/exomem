@@ -55,17 +55,23 @@ Media status and stored originals remain available.
 Add `previews` to the cell's media engine selection to generate previews for new image and video filings.
 On personal installs, include `previews` in `EXOMEM_MEDIA_ENGINES` with the other engines you use.
 Preview generation is off by default. The existing worker claims due preview jobs after ordinary media work.
-Previews can run with text extraction and CLIP disabled. Enabling previews adds no backfill.
+Previews can run with the text and CLIP engines off. `EXOMEM_DISABLE_MEDIA_EXTRACTION` disables the whole worker, including preview generation.
+Enabling previews adds no backfill. New and replaced filings record demand for their exact original digest.
+If queue admission fails, media reconciliation can recover that demand while retaining the filing.
+After a restore omits preview records, reconciliation can rebuild previously successful previews for current marked versions.
 The codec child needs POSIX resource limits. Its wall time is at most 15 seconds within the remaining job budget.
 Preview generation is unavailable in the inline debug worker. Stored previews remain readable through the same proof.
 The preview engine uses the existing memory brakes. The video decoder caps input frames at 16 million pixels.
-The worker retries a busy publication at most twice after the first attempt. A retry leaves extraction results intact.
+The worker yields to foreground writers before publishing. It retries a busy publication at most twice after the first attempt.
+The worker retains the outcome for that digest so reconciliation does not replay an exhausted preview.
+A retry leaves extraction results intact.
 The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.
 
 Use `inspect_memory` with operation `media.preview` and the canonical original path.
 On Cloud, select `frames` to offer this operation.
 Each read adds one keyed record lookup and reads at most 64 KiB of preview state, with a 25 ms p95 lookup budget at 500,000 records.
-The read refuses known denials before hydration. It can still hydrate an original to prove custody before release.
+Before hydration, the recovery slot checks access-tier, cold-blocked, RAW derived-pixel and path-only disclosure and connector denials.
+The held proof checks current lifecycle state and byte-bound grants. It can hydrate an original to prove custody before release.
 
 ## Speech and image query artifacts
 

@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from . import (
+    access,
     download_links,
     held_fs,
     media_store,
@@ -191,12 +192,15 @@ def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCop
     }
 
 
-def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy) -> tuple:
+def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy, *, check_access: bool = False) -> tuple:
     try:
         companion, _ = _companion(root, copied.relative_path)
         snapshot = reserved_paths.read_generic_bytes(root, companion)
         source_version = reserved_paths.require_generic_copy_source_version(copied)
         compiled = policy.load(root)
+        access_policy = access.publication_policy_snapshot(root) if check_access else None
+        if check_access and access_policy is None:
+            raise RecoveryUnavailable
         return (
             compiled.fingerprint,
             compiled.blocked,
@@ -205,6 +209,7 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
             snapshot.identity,
             hashlib.sha256(snapshot.data).hexdigest(),
             source_version,
+            access_policy,
         )
     except (
         reserved_paths.ReservedPathLeafError,
@@ -222,7 +227,8 @@ def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_pr
     def fresh():
         for proof in byte_proofs.values():
             reserved_paths.require_generic_copy_source_version(proof)
-        before = _admission_revision(root, who, copied)
+        check_access = additional_release is not None
+        before = _admission_revision(root, who, copied, check_access=check_access)
         with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
             allowed = egress.release_allows_download(
                 root, copied.relative_path, principal=who, artifact_copy=copied
@@ -235,7 +241,7 @@ def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_pr
                 if path != copied.relative_path:
                     raise RecoveryUnavailable
                 _descriptor(path, metadata, copied)
-        after = _admission_revision(root, who, copied)
+        after = _admission_revision(root, who, copied, check_access=check_access)
         for proof in byte_proofs.values():
             reserved_paths.require_generic_copy_source_version(proof)
         if not allowed or before != after:
@@ -284,6 +290,7 @@ def stage(
     byte_proofs: dict | None = None,
     materialize: bool = True,
     canonical: bool = False,
+    preflight: Callable[[], bool] | None = None,
     additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
@@ -304,8 +311,10 @@ def stage(
                 def binding():
                     return (selected, _companion(root, selected)[1]) if canonical else _resolve(root, selected)
 
+                if preflight is not None and not Context().run(preflight):
+                    raise RecoveryUnavailable
                 path, metadata = binding()
-                if materialize:
+                if materialize and not canonical:
                     stack.enter_context(media_store.local_originals(root, (path,), read=True))
 
                 def recorded(version):
@@ -315,11 +324,10 @@ def stage(
                     # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
                     # that differ from the binding. A pin taken here, or by a caller that passes
                     # `materialize=False`, has already fetched an evicted file.
-                    held = stack.enter_context(
-                        reserved_paths.hold_generic_file(root, path, recorded_sha256=recorded, deadline=deadline)
-                    )
+                    hold = media_store.hold_original if materialize and canonical else reserved_paths.hold_generic_file
+                    held = stack.enter_context(hold(root, path, recorded_sha256=recorded, deadline=deadline))
                 except reserved_paths.ReservedPathLeafError as error:
-                    if error.code != "MISSING":
+                    if canonical or error.code != "MISSING":
                         raise
                     # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
                     # Only an object the pool already holds is read: an ordinary file that went missing is

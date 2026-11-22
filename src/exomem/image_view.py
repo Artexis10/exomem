@@ -188,7 +188,8 @@ def _rgb(image):
 
 
 def _render(
-    source: BinaryIO, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int, inline_side: int
+    source: BinaryIO, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int, inline_side: int,
+    *, pixels_only: bool = False,
 ) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes, bool]:
     from PIL import Image, ImageOps
 
@@ -235,6 +236,8 @@ def _render(
         shrunk = max(image.size) > inline_side
         image.thumbnail((inline_side, inline_side), Image.Resampling.LANCZOS)
         image = _rgb(image)
+        if pixels_only:
+            image.info.clear()  # Pillow otherwise takes the JPEG comment from the decoded image.
         jpeg, shrank_to_fit = fit_jpeg(image, inline_bytes, _jpeg)
         return original, image.size, taken_at, jpeg, shrunk or shrank_to_fit
 
@@ -263,7 +266,7 @@ def fit_jpeg(image, inline_bytes: int, encode: Callable[..., bytes]) -> tuple[by
 def render_preview(source: BinaryIO, suffix: str, *, max_side: int, inline_bytes: int) -> bytes:
     """Render the upright pixels of a held source within the preview's smaller budget."""
     with _DECODE:
-        return _render(source, suffix, max_side, None, inline_bytes, max_side)[3]
+        return _render(source, suffix, max_side, None, inline_bytes, max_side, pixels_only=True)[3]
 
 
 def _jpeg(image) -> bytes:

@@ -5,6 +5,8 @@
 - [x] 1.1 Prove that an eligible image and video produce bounded JPEGs with the bound input digest.
 - [x] 1.2 Run preview codec work under separate limits in the existing queue and retry deferred publication within a bounded budget.
 - [x] 1.3 Wire preview retirement into existing media cleanup and prove that an interrupted cleanup exposes no stale output.
+- [x] 1.4 Prove cross-process publication and reconstruction of a missing successful preview in a store-mode vault.
+- [x] 1.5 Prove recovery after queue admission fails, terminal retry limits, the global disable and the absence of backfill.
 
 ## 2. Preview read
 

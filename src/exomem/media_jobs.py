@@ -16,7 +16,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -691,8 +691,7 @@ def _next_pending_row(conn: sqlite3.Connection, *, max_hydrations: int | None, m
         return None
     from . import media_engines
 
-    if (media_engines.PREVIEWS not in media_engines.enabled_engines()
-            or not media_engines.preview_worker_available()):
+    if not media_engines.preview_generation_enabled():
         return None
     return conn.execute(
         f"SELECT *, {needs_hydration} AS needs_hydration FROM jobs "
@@ -1284,11 +1283,20 @@ class MediaJobStore:
             conn.close()
 
     def enqueue_preview(self, binary: Path, sidecar: Path, sha256: str) -> None:
+        self.enqueue_previews(((binary, sidecar, sha256),))
+
+    def enqueue_previews(
+        self, candidates: Sequence[tuple[Path, Path, str]], *, rebuild: frozenset[Path] = frozenset(),
+    ) -> None:
         """Admit one preview per original. A replacement fences the old claim."""
-        relative = self._relative(binary)
         now = time.time()
+        rows = []
+        for binary, sidecar, sha256 in candidates:
+            relative = self._relative(binary)
+            rows.append((self._key(relative, PREVIEW_MEDIA_TYPE), relative, self._relative(sidecar),
+                         PREVIEW_MEDIA_TYPE, sha256, now, now, binary in rebuild))
         with contextlib.closing(self._connect()) as conn, conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO jobs (
                     job_key, binary_rel, sidecar_rel, media_type, preview_sha256, created_at, updated_at
@@ -1296,26 +1304,68 @@ class MediaJobStore:
                 ON CONFLICT(job_key) DO UPDATE SET
                     sidecar_rel = excluded.sidecar_rel, preview_sha256 = excluded.preview_sha256,
                     state = 'pending', attempts = 0, claim_revision = jobs.claim_revision + 1,
-                    pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, updated_at = excluded.updated_at
+                    pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, last_error = NULL,
+                    updated_at = excluded.updated_at
                 WHERE jobs.preview_sha256 IS NOT excluded.preview_sha256 OR jobs.sidecar_rel != excluded.sidecar_rel
+                    OR (? AND jobs.state = 'completed' AND jobs.last_error IS NULL)
                 """,
-                (self._key(relative, PREVIEW_MEDIA_TYPE), relative, self._relative(sidecar),
-                 PREVIEW_MEDIA_TYPE, sha256, now, now),
+                rows,
             )
 
-    def publish_preview(self, job: MediaJob, install: Callable[[], None]) -> None:
+    def recoverable_preview_demands(
+        self, candidates: Sequence[tuple[Path, Path, str]], *, missing_record: Callable[[str], bool],
+    ) -> list[tuple[Path, Path, str]]:
+        """Recover unqueued demand and successful previews whose private record is missing."""
+        keys = [self._key(self._relative(binary), PREVIEW_MEDIA_TYPE) for binary, _, _ in candidates]
+        if not keys:
+            return []
+        with contextlib.closing(self._connect(readonly=True)) as conn:
+            known = {
+                row["job_key"]: row
+                for row in conn.execute(
+                    f"SELECT * FROM jobs WHERE job_key IN ({','.join('?' * len(keys))})",
+                    keys,
+                )
+            }
+        recoverable = []
+        for key, item in zip(keys, candidates, strict=True):
+            _, sidecar, digest = item
+            row = known.get(key)
+            if (row is None or (row["sidecar_rel"], row["preview_sha256"]) != (self._relative(sidecar), digest)
+                    or (row["state"] == COMPLETED and row["last_error"] is None and missing_record(row["binary_rel"]))):
+                recoverable.append(item)
+        return recoverable
+
+    @staticmethod
+    def _current_preview_claim(conn: sqlite3.Connection, job: MediaJob) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM jobs WHERE id = ? AND claim_revision = ? AND state = 'running' AND preview_sha256 = ?",
+            (job.id, job.claim_revision, job.preview_sha256),
+        ).fetchone() is not None
+
+    def preview_claimed(self, job: MediaJob) -> bool:
+        with contextlib.closing(self._connect(readonly=True)) as conn:
+            return self._current_preview_claim(conn, job)
+
+    def publish_preview(self, job: MediaJob, install: Callable[[], bool]) -> bool:
         """Keep the generation current through its guarded atomic record replacement."""
         with contextlib.closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            if conn.execute(
-                "SELECT 1 FROM jobs WHERE id = ? AND claim_revision = ? AND state = 'running' AND preview_sha256 = ?",
-                (job.id, job.claim_revision, job.preview_sha256),
-            ).fetchone() is not None:
-                install()
+            return self._current_preview_claim(conn, job) and bool(install())
+
+    def finish_preview(self, job: MediaJob, *, error: str | None = None) -> None:
+        """Keep the digest's terminal outcome so recovery cannot re-admit it indefinitely."""
+        with contextlib.closing(self._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE jobs SET state = ?, pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, "
+                "last_error = ?, updated_at = ? WHERE id = ? AND claim_revision = ? AND state = 'running' AND media_type = ?",
+                (COMPLETED, error, time.time(), job.id, job.claim_revision, PREVIEW_MEDIA_TYPE),
+            )
 
     def retry_preview(self, job: MediaJob) -> None:
         """Spend a busy publication attempt and release its pin before the next claim."""
         if job.attempts >= MAX_PREVIEW_ATTEMPTS:
+            self.finish_preview(job, error="preview retry limit reached")
             return
         now = time.time()
         with contextlib.closing(self._connect()) as conn, conn:
@@ -2495,9 +2545,10 @@ class MediaJobStore:
         conn = self._connect()
         try:
             with conn:
-                dropped = conn.execute(
-                    "DELETE FROM jobs WHERE state = 'running' AND media_type = ? AND attempts >= ?",
-                    (PREVIEW_MEDIA_TYPE, MAX_PREVIEW_ATTEMPTS),
+                finished = conn.execute(
+                    "UPDATE jobs SET state = ?, pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, "
+                    "last_error = ?, updated_at = ? WHERE state = 'running' AND media_type = ? AND attempts >= ?",
+                    (COMPLETED, "preview retry limit reached", time.time(), PREVIEW_MEDIA_TYPE, MAX_PREVIEW_ATTEMPTS),
                 ).rowcount
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', updated_at = ?, "
@@ -2508,7 +2559,7 @@ class MediaJobStore:
                     "WHERE media_job_results.job_id = jobs.id)",
                     (time.time(), *states),
                 ).rowcount
-                return int(changed + dropped)
+                return int(changed + finished)
         finally:
             conn.close()
 
@@ -2823,7 +2874,9 @@ class MediaJobStore:
     def counts(self) -> dict[str, int]:
         conn = self._connect()
         try:
-            rows = conn.execute("SELECT state, count(*) AS n FROM jobs GROUP BY state").fetchall()
+            rows = conn.execute(
+                "SELECT state, count(*) AS n FROM jobs WHERE state IN (?, ?, ?, ?) GROUP BY state", STATES
+            ).fetchall()
         finally:
             conn.close()
         out = {state: 0 for state in STATES}
@@ -2863,8 +2916,7 @@ class MediaJobStore:
                 "UNION ALL SELECT 1 FROM jobs WHERE state = 'running' AND media_type = ? LIMIT 1",
                 (time.time(), PREVIEW_MEDIA_TYPE),
             ).fetchone()
-            if (work is None and media_engines.PREVIEWS in media_engines.enabled_engines()
-                    and media_engines.preview_worker_available()):
+            if work is None and media_engines.preview_generation_enabled():
                 work = conn.execute(
                     f"SELECT 1 FROM jobs WHERE {_PENDING_PREVIEW} AND {_PREVIEW_DUE} <= ? "
                     "LIMIT 1",

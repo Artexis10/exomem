@@ -72,6 +72,7 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
 
 def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(vault, monkeypatch):
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     store = media_jobs.MediaJobStore(vault)
     original = _job(vault)
     store.enqueue_preview(original.binary_path, original.sidecar_path, "a" * 64)
@@ -84,14 +85,20 @@ def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(
     def unexpected_install():
         pytest.fail("the old preview claim published after the filing changed")
 
-    store.publish_preview(first, unexpected_install)
+    assert not store.publish_preview(first, unexpected_install)
     store.retry_preview(first)
-    store.complete(first)
+    store.finish_preview(first)
     installed = []
-    store.publish_preview(second, lambda: installed.append(second.preview_sha256))
+
+    def install():
+        installed.append(second.preview_sha256)
+        return True
+
+    assert store.publish_preview(second, install)
     assert installed == ["b" * 64]
-    store.complete(second)
-    assert store.get(second.id) is None
+    store.finish_preview(second)
+    settled = store.get(second.id)
+    assert settled.state == media_jobs.COMPLETED and settled.preview_sha256 == "b" * 64
 
 
 def test_interrupted_offload_column_upgrade_recovers_the_pending_job(vault: Path) -> None:

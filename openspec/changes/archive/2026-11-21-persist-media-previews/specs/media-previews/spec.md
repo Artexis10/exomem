@@ -16,6 +16,11 @@ When the install enables previews, the existing media worker SHALL queue a previ
 - **THEN** generation reports unavailable and admits no preview work
 - **AND** an authorized read can still return a current stored preview
 
+#### Scenario: The install disables the media worker
+
+- **WHEN** the global media worker switch is off
+- **THEN** preview generation reports unavailable and admits no preview work
+
 #### Scenario: Normal processing of a photo and a video
 
 - **WHEN** a worker processes a governed photo and a governed video with previews enabled
@@ -30,17 +35,41 @@ When the install enables previews, the existing media worker SHALL queue a previ
 #### Scenario: Publication is busy
 
 - **WHEN** a preview decodes but its guarded publication is busy
-- **THEN** the worker retries preview publication within a bounded attempt limit
+- **THEN** the worker yields to foreground writers and retries within a three-attempt limit
 - **AND** a completed extraction stays completed
+- **AND** reconciliation leaves the terminal digest settled
+
+#### Scenario: A process-mode worker publishes a preview
+
+- **WHEN** a worker has decoded an original and the claim, binding and held version remain current
+- **THEN** the worker installs the record under the cross-process consistency guard
+- **AND** it flushes the record and its directories through the external state root before acknowledging publication
 
 #### Scenario: Processing is replayed
 
 - **WHEN** processing runs again with the same original digest and preview format
 - **THEN** the filing still has one preview bound to that digest
 
+### Requirement: Preview demand survives queue and derived state loss
+
+When generation is enabled, the filing write SHALL record preview demand for an eligible new or rebound digest.
+The bounded media reconciliation pass SHALL recover marked current demand that has no queue row or has lost its successful output.
+An unmarked historical filing and a marked digest with a terminal failure SHALL stay unqueued.
+
+#### Scenario: Preview queue admission fails after filing
+
+- **WHEN** a filing commits while the preview queue is unavailable
+- **THEN** the filing succeeds and retains its preview demand for the exact digest
+- **AND** a later bounded reconciliation pass recovers that demand
+
+#### Scenario: A restore omits the preview record
+
+- **WHEN** a restore keeps a successful preview outcome and omits its record
+- **THEN** reconciliation queues the still-current marked digest to rebuild the record
+
 ### Requirement: Preview reads use the original's live access rules
 
-Where `read_media` is offered, its preview action SHALL accept the canonical original path. It SHALL check provable denials before hydration and require current full release and derived-pixel access before returning the held preview. A video poster SHALL also satisfy the video frame boundary. An allowed caller whose current preview is missing SHALL receive a distinct unavailable result. The read SHALL use the existing read budget.
+Where `read_media` is offered, its preview action SHALL accept the canonical original path. Within the existing recovery slot, it SHALL check provable access-tier, cold-blocked, RAW derived-pixel and path-only disclosure and connector denials before hydration. It SHALL require current full release and derived-pixel access, including lifecycle checks and byte-bound grants, before returning the held preview. A video poster SHALL also satisfy the video frame boundary. An allowed caller whose current preview is missing SHALL receive a distinct unavailable result. The read SHALL use the existing read budget.
 
 #### Scenario: A caller requests a stored preview
 
@@ -51,7 +80,7 @@ Where `read_media` is offered, its preview action SHALL accept the canonical ori
 
 - **WHEN** the current policy denies derived pixels, even if the caller can download the original
 - **THEN** the preview request refuses without revealing whether the preview exists
-- **AND** a denial that the precheck can prove leaves the original evicted
+- **AND** a denial within the bounded precheck leaves the original evicted
 
 #### Scenario: The filing now names another original
 

@@ -13,21 +13,21 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Generator, Mapping, Sequence
 from contextlib import nullcontext
-from contextvars import Context
 from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, BinaryIO
 
-from . import media_types, originals, private_state, reserved_paths, state_paths
+from . import media_engines, media_types, originals, private_state, reserved_paths, state_paths
 
 if TYPE_CHECKING:
-    from .media_jobs import MediaJob
+    from .media_jobs import MediaJob, MediaJobStore
 
 log = logging.getLogger(__name__)
 
 STORE = reserved_paths.MEDIA_PREVIEWS_DIRNAME
+_INTENT_DIGEST = "preview_requested_sha256"
 MAX_RECORD_BYTES = 64 * 1024
 DECODE_SECONDS = 15
 _FORMAT = 1
@@ -79,37 +79,136 @@ def read(vault: Path, relative: str, digest: str) -> bytes | None:
     return None
 
 
-def enqueue(vault: Path, binary: Path, *, expected_sha256: str | None) -> None:
-    """Queue a preview for an admitted, currently bound original version."""
-    from . import media_engines, media_jobs, recall_policy
+def stamp_intent(
+    content: str, relative: str, digest: str | None, *, previous: str | None = None, admit: bool = True,
+) -> str:
+    """Carry existing demand across media rewrites, and mark a new or rebound filing."""
+    from . import preserve, vault
+
+    if digest is None or not supports(relative):
+        return content
+    prior = vault.parse_frontmatter(previous)[0] if previous is not None else {}
+    old_binding = originals.binary_binding(prior)
+    changed = previous is None or (old_binding is not None and (old_binding.path, old_binding.sha256) != (relative, digest))
+    carried = requested_digest(prior, relative) == digest
+    if not carried and not (admit and changed and media_engines.preview_generation_enabled()):
+        return content
+
+    fields = vault.parse_frontmatter(content)[0]
+    binding = originals.binary_binding(fields)
+    if fields.get("parent_media") or binding is None or (binding.path, binding.sha256) != (relative, digest):
+        return content
+    if fields.get(_INTENT_DIGEST) != digest:
+        return preserve._set_frontmatter_field(content, _INTENT_DIGEST, f'"{digest}"')
+    return content
+
+
+def requested_digest(fields: dict[str, object], relative: str) -> str | None:
+    if _INTENT_DIGEST not in fields or fields.get("parent_media") or not supports(relative):
+        return None
+    binding = originals.binary_binding(fields)
+    if binding is not None and binding.path == relative and fields[_INTENT_DIGEST] == binding.sha256:
+        return binding.sha256
+    return None
+
+
+def _current_intent(
+    vault: Path, relative: str, digest: str | None, *, companions: Mapping[str, bytes] | None = None,
+) -> tuple[Path, originals.BinaryBinding] | None:
+    from . import recall_policy
+
+    companion = originals.bound_companion(vault, relative, companions=companions)
+    if companion is None or digest is None or requested_digest(companion[1], relative) != digest:
+        return None
+    sidecar = vault / companion[0]
+    admitted = (recall_policy.is_recall_candidate(vault, sidecar) if companions is None
+                else recall_policy.admits_markdown_content(vault, companion[0], companion[2]))
+    if not admitted:
+        return None
+    binding = originals.binary_binding(companion[1])
+    assert binding is not None
+    return sidecar, binding
+
+
+def enqueue(vault: Path, binary: Path, *, expected_sha256: str | None) -> bool:
+    """Queue marked work. A held ledger leaves the filing and its demand durable."""
+    from . import media_jobs
     from .writer_lease import get_manager
 
-    if (expected_sha256 is None or not supports(binary)
-            or media_engines.PREVIEWS not in media_engines.enabled_engines()
-            or not media_engines.preview_worker_available()):
-        return
+    if expected_sha256 is None or not supports(binary) or not media_engines.preview_generation_enabled():
+        return True
     try:
         relative = binary.relative_to(vault).as_posix()
         manager = get_manager()
         boundary = (nullcontext() if manager.holds_mutation_boundary(vault) else
                     manager.consistency_guard(vault, operation="media_preview_admit", holder_kind="background"))
         with boundary:
-            companion = originals.bound_companion(vault, relative)
-            if companion is None or companion[1].get("parent_media"):
-                return
-            sidecar = vault / companion[0]
-            binding = originals.binary_binding(companion[1])
-            if (binding is not None and binding.sha256 == expected_sha256
-                    and recall_policy.is_recall_candidate(vault, sidecar)
-                    and read(vault, relative, binding.sha256) is None):
+            intent = _current_intent(vault, relative, expected_sha256)
+            if intent is not None:
+                sidecar, binding = intent
                 media_jobs.MediaJobStore(vault).enqueue_preview(binary, sidecar, binding.sha256)
     except Exception as error:  # noqa: BLE001 - optional admission cannot fail the filing or extraction
         log.warning("media preview admission deferred (%s)", type(error).__name__)
+        return False
+    return True
+
+
+def recover(
+    vault: Path, store: MediaJobStore | None, candidates: Sequence[tuple[Path, Path, str]],
+) -> MediaJobStore | None:
+    """Recover the marked candidates from one bounded discovery pass."""
+    from . import media_jobs
+    from .vault import MALFORMED_FRONTMATTER_ERRORS
+    from .vault_store import read as store_read
+    from .writer_lease import get_manager
+
+    root = state_paths.vault_state_dir(vault) / STORE
+
+    def missing_record(relative: str) -> bool:
+        return not os.path.lexists(_record_path(root, relative))
+
+    try:
+        missing = store.recoverable_preview_demands(candidates, missing_record=missing_record) if store else candidates
+        if not missing:
+            return store
+        manager = get_manager()
+        manager.yield_to_waiting_writes(vault)
+        with manager.consistency_guard(vault, operation="media_preview_recover", holder_kind="background"):
+            paths = {
+                binary: originals.companion_paths(binary.relative_to(vault).as_posix())
+                for binary, _, _ in missing
+            }
+            served = store_read.serves_many(vault, {path for names in paths.values() for path in names})
+            stored = None
+            if any(served.values()):
+                with store_read.snapshot(vault, join_request=False) as view:
+                    stored = view.bodies(path for path, owned in served.items() if owned)
+
+            current = []
+            rebuild = set()
+            for binary, sidecar, digest in missing:
+                relative = binary.relative_to(vault).as_posix()
+                companions = stored if all(served[path] for path in paths[binary]) else None
+                try:
+                    intent = _current_intent(vault, relative, digest, companions=companions)
+                except (*MALFORMED_FRONTMATTER_ERRORS, reserved_paths.ReservedPathLeafError):
+                    continue
+                if intent is not None and intent[0] == sidecar:
+                    current.append((binary, sidecar, digest))
+                    if missing_record(relative):
+                        rebuild.add(binary)
+            if current:
+                if store is None:
+                    store = media_jobs.MediaJobStore(vault)
+                store.enqueue_previews(current, rebuild=frozenset(rebuild))
+    except Exception as error:  # noqa: BLE001 - the next discovery rotation retries optional work
+        log.warning("media preview recovery deferred (%s)", type(error).__name__)
+    return store
 
 
 def _decode(source: BinaryIO, kind: str, suffix: str, inline_bytes: int, deadline: float) -> bytes:
     """Run one codec with a bounded private stdout and the original as seekable stdin."""
-    from . import media_brakes, media_engines
+    from . import media_brakes
 
     if os.name != "posix":
         raise OSError("preview codec limits are unavailable on this platform")
@@ -137,61 +236,75 @@ def _decode(source: BinaryIO, kind: str, suffix: str, inline_bytes: int, deadlin
 def generate(
     vault: Path,
     job: MediaJob,
-    publish: Callable[[Callable[[], None]], object],
+    store: MediaJobStore,
     *,
     deadline: float | None,
-) -> object:
+) -> bool:
     """Render outside the publication hold, then recheck the held bytes and their filing."""
-    from . import image_view, media_brakes, media_store, recall_policy
+    from . import image_view, media_brakes, media_store
+    from .writer_lease import get_manager
 
     relative = job.binary_path.relative_to(vault).as_posix()
     kind = media_types.media_type_for(relative)
     assert kind is not None
     if deadline is None:
         deadline = time.monotonic() + media_brakes.settings().job_timeout_seconds
+    manager = get_manager()
+    manager.yield_to_waiting_writes(vault)
+    with manager.consistency_guard(vault, operation="media_preview_claim", holder_kind="background"):
+        intent = _current_intent(vault, relative, job.preview_sha256)
+        if intent is None or intent[0] != job.sidecar_path or not store.preview_claimed(job):
+            return False
+        expected = intent[1]
+        current = originals.original_state(vault, relative)
+        if not current.present or current.binary_sha256 != expected.sha256:
+            return False
     with media_store.open_original(vault, relative, job=job, deadline=deadline) as opened:
         if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
-            return None
+            return False
         held = reserved_paths.prove_held_binary(
             vault, relative, opened, deadline=deadline,
             recorded_sha256=lambda version: media_store.cached_sha256(vault, job.binary_path, version),
         )
-        expected = originals.BinaryBinding(relative, held.sha256, held.size)
-
-        def current_filing() -> bool:
-            companion = originals.bound_companion(vault, relative)
-            return (companion is not None and vault / companion[0] == job.sidecar_path
-                    and not companion[1].get("parent_media")
-                    and originals.binary_binding(companion[1]) == expected
-                    and recall_policy.is_recall_candidate(vault, job.sidecar_path))
-
-        if held.sha256 != job.preview_sha256 or not current_filing() or read(vault, relative, held.sha256) is not None:
-            return None
+        if (held.sha256, held.size) != (expected.sha256, expected.size):
+            return False
         record = {"version": _FORMAT, "path": relative, "sha256": held.sha256, "jpeg": ""}
-        inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
-        opened.stream.seek(0)
-        jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
+        jpeg = read(vault, relative, held.sha256)
+        if jpeg is None:
+            inline_bytes = MAX_RECORD_BYTES - len(json.dumps(record))
+            opened.stream.seek(0)
+            jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
         record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
 
-        def install() -> None:
-            if not current_filing() or read(vault, relative, held.sha256) is not None:
-                return
+        def install() -> bool:
+            if _current_intent(vault, relative, job.preview_sha256) != (job.sidecar_path, expected):
+                return False
             reserved_paths.require_generic_copy_source_version(held)
             root = private_state.store(vault, STORE)
             path = _record_path(root, relative)
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if not stat.S_ISDIR(path.parent.lstat().st_mode):
-                return
-            private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
+                return False
+            if read(vault, relative, held.sha256) is None:
+                private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
+            else:
+                # The previous install may have stopped between rename and directory sync.
+                with path.open("rb") as cached:
+                    os.fsync(cached.fileno())
             private_state.sync_directory(path.parent)
+            private_state.sync_directory(root)
+            private_state.sync_directory(root.parent)
+            return True
 
-        return publish(install)
+        manager.yield_to_waiting_writes(vault)
+        with manager.consistency_guard(vault, operation="media_preview_publish", holder_kind="background"):
+            return store.publish_preview(job, install)
 
 
 def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
     """Return a stored JPEG only after a live authorization for its original and pixels."""
     from . import access, artifact_recovery
-    from .governance import egress, raw_protection
+    from .governance import egress
     from .governance.principal import request_scope
 
     who = artifact_recovery.delegated_principal()
@@ -204,14 +317,7 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
 
     def possible() -> bool:
         with request_scope(who):
-            return (raw_protection.permits(vault, selected, who, derived=True, resolve_bytes=False) is not False
-                    and bool(egress.pending_identity_candidates(
-                        vault, (selected,), principal=who, minimum_level=egress.LEVEL_FULL,
-                    )))
-
-    # This only short-circuits known denials. The held proof still decides release.
-    if not Context().run(possible):
-        raise artifact_recovery.RecoveryUnavailable
+            return egress.preview_may_materialize(vault, selected, who)
 
     def allows_pixels(held: reserved_paths.GenericFileCopy) -> bool:
         relative = held.relative_path
@@ -222,7 +328,7 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
         return egress.content_permits(vault, relative, who, derived=True, artifact_copy=held)
 
     with artifact_recovery.stage(
-        vault, selected, who, byte_proofs=proofs, canonical=True, additional_release=allows_pixels,
+        vault, selected, who, byte_proofs=proofs, canonical=True, preflight=possible, additional_release=allows_pixels,
     ) as (held, descriptor):
         jpeg = read(vault, selected, held.sha256)
         artifact_recovery.require_current(
