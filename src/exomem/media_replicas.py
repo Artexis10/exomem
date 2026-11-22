@@ -1122,12 +1122,16 @@ def status(vault: Path) -> dict[str, object]:
         stats["oldest_verified_at"] = _iso(stats["oldest_verified_at"])
         for proof in stats["checks"].values():
             proof["oldest_at"] = _iso(proof["oldest_at"])
+    return {**_coverage(census),
+            "source": "media ledger table, rebuilt from the bindings",
+            "stores": list(stores.values()), "totals": totals}
+
+
+def _coverage(census: sqlite3.Row) -> dict[str, object]:
     unread = census["unread"]
     return {"state": "partial" if unread else "measured",
             "reason": "some bindings could not be read during the rebuild" if unread else None,
-            "as_of": _iso(census["rebuilt_at"]), "unread_originals": unread,
-            "source": "media ledger table, rebuilt from the bindings",
-            "stores": list(stores.values()), "totals": totals}
+            "as_of": _iso(census["rebuilt_at"]), "unread_originals": unread}
 
 
 _CHECK_COLUMNS = (
@@ -1164,6 +1168,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
     limit = max(1, min(int(limit), 500))
     try:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
+            conn.execute("BEGIN")
             census = _census(conn)
             exports = _exports(conn)
             paths = [row[0] for row in conn.execute(
@@ -1190,7 +1195,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
             "recoverable": recoverable, "reason": reason, "key_version": row["key_version"],
             **_check_view(row),
         })
-    return {"state": "measured", "reason": None, "as_of": _iso(census["rebuilt_at"]),
+    return {**_coverage(census),
             "originals": [{"path": path, "replicas": found} for path, found in listed.items()],
             "next_after": next(reversed(listed)) if more and listed else None}
 
@@ -1215,6 +1220,7 @@ def findings(vault: Path, *, after: tuple[str, str] | None = None, limit: int = 
     limit = max(1, min(int(limit), 500))
     try:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
+            conn.execute("BEGIN")
             census = _census(conn)
             rows = conn.execute(_FINDINGS, (*(after or ("", "")), limit + 1)).fetchall()
     except (sqlite3.Error, OSError) as error:
@@ -1222,7 +1228,7 @@ def findings(vault: Path, *, after: tuple[str, str] | None = None, limit: int = 
     if census is None:
         return _unknown("the replica table is being rebuilt from the bindings", findings=None, next_after=None)
     shown = rows[:limit]
-    return {"state": "measured", "reason": None, "as_of": _iso(census["rebuilt_at"]),
+    return {**_coverage(census),
             "findings": [{
                 "path": row["binary_rel"], "store": row["store"], "object": row["object"], "version": row["version"],
                 "failed_level": row["level"], "failure": row["failure"], "found_at": _iso(row["checked_at"]),
@@ -1693,6 +1699,9 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
             try:
                 with cap.reading(size):
                     failure = media_store.check_replica(vault, replica)
+            except media_store.ReplicaAbsent as missing:
+                spent -= size
+                failure = missing.failure
             except ValueError:
                 spent -= size  # refused before it read anything
                 _failed(vault, row, RECORD_INVALID, attempted=replica)  # the store answered; it cannot address this version
@@ -1776,8 +1785,8 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
     transaction. The ciphertext decrypted, so every filing of it under any name that a wrong plaintext quarantined is
     released too, with the copies again they queued, and no record of a wrong plaintext of it is left; a newer finding
     on any of them leaves all of it, this replica included, quarantined with its request. A filing that holds another
-    cause stays: its version is lost or differs, which this download does not answer. Released rows are unchecked, so
-    the scheduled check proves them again.
+    cause stays: its version is lost or differs, which this download does not answer. Only the downloaded version
+    gains a decrypt proof. Other versions become unchecked.
     """
     now = time.time()
     store, name, version = row["store"], replica.object, replica.version
@@ -1792,18 +1801,19 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
             return
         conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
                      (store, row["binary_rel"], RECOPY))
-        # The ciphertext decrypted to the binding, so no copy of it is damage: the filings that a wrong plaintext of it
-        # quarantined, under this version or another, and the copies they queued, go, or each would upload a copy of
-        # bytes just proven good. A record of another cause on such a version stays and only loses the digest, and so
-        # does a record whose version still has a quarantined filing: a row is never left with no record for the gates.
+        # Clear the shared plaintext finding. Each version still needs its own proof of a successful read.
+        # Keep other causes and records that a remaining quarantine depends on.
         digest = replica.ciphertext_sha256
         same = (f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (object, version, store) IN "
                 "(SELECT object, version, store FROM media_damaged_versions "
-                f"WHERE ciphertext_sha256 = ? AND failure = '{PLAINTEXT_MISMATCH}')")
-        conn.execute("DELETE FROM media_replica_queue WHERE kind = ? AND (store, binary_rel) IN "
-                     f"(SELECT store, binary_rel FROM media_replicas {same})", (RECOPY, digest))
-        conn.execute("UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, "
-                     f"check_from = 0, decrypted_at = ?, sample_from = ? {same}", (UPLOAD_VERIFIED, now, now, digest))
+                f"WHERE ciphertext_sha256 = :digest AND failure = '{PLAINTEXT_MISMATCH}')")
+        proved_at = "CASE WHEN (store, object, version) = (:store, :object, :version) THEN :now ELSE 0 END"
+        conn.execute("DELETE FROM media_replica_queue WHERE kind = :recopy AND (store, binary_rel) IN "
+                     f"(SELECT store, binary_rel FROM media_replicas {same})", {"recopy": RECOPY, "digest": digest})
+        conn.execute("UPDATE media_replicas SET state = :healthy, level = NULL, failure = NULL, checked_at = 0, "
+                     f"check_from = 0, decrypted_at = {proved_at}, sample_from = {proved_at} {same}",
+                     {"healthy": UPLOAD_VERIFIED, "store": store, "object": name, "version": version,
+                      "now": now, "digest": digest})
         conn.execute("DELETE FROM media_damaged_versions WHERE ciphertext_sha256 = ? AND failure = ? AND NOT EXISTS ("
                      "SELECT 1 FROM media_replicas AS held WHERE held.object = media_damaged_versions.object "
                      "AND held.version = media_damaged_versions.version AND held.store = media_damaged_versions.store "

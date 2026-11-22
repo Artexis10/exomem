@@ -1494,8 +1494,11 @@ def _head_failure(backend: Store, replica: StoredObject) -> str | None:
 
 
 def check_replica(vault: Path, replica: StoredObject) -> str | None:
-    """Ask the replica's store about its version: None when it matches the entry, else why it does not (`_head_failure`)."""
-    return _head_failure(store_for(vault, replica.store), replica)
+    """Check the stored version. A confirmed absence raises before any ciphertext is charged."""
+    failure = _head_failure(store_for(vault, replica.store), replica)
+    if failure == _ABSENT:
+        raise ReplicaAbsent()
+    return failure
 
 
 class _NullSink:

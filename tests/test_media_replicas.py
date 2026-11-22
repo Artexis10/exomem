@@ -2581,6 +2581,8 @@ def test_a_superseded_rebuild_cannot_publish_counts_over_the_newer_partial_censu
 
     status = media_replicas.status(vault)
     assert (status["state"], status["unread_originals"], status["totals"]["replicas"]) == ("partial", 1, 0)
+    for view in (media_replicas.page(vault), media_replicas.findings(vault)):
+        assert (view["state"], view["unread_originals"], view["as_of"]) == ("partial", 1, status["as_of"])
 
 
 def test_owner_status_work_stays_bounded_as_the_replica_and_copy_ledgers_grow(
@@ -3084,6 +3086,20 @@ def _evicted_with_a_pointer_found_wrong(vault: Path) -> tuple[str, originals.Sto
     return relative, pointer, mirror
 
 
+def test_a_sample_releases_the_plaintext_finding_without_proving_an_unread_version(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    _declare(vault, selected_store, mirrored, sample_bytes_per_month=0)
+    _unproven(vault)
+    _stored_file(mirrored, mirror).unlink()
+
+    assert media_replicas.sample(vault) == 1
+
+    views = {item["store"]: item for item in media_replicas.original_view(vault, relative)["replicas"]}
+    assert views[pointer.store]["last_check"]["level"] == media_replicas.DECRYPTED
+    assert (views[MIRROR]["state"], views[MIRROR]["last_check"]) == (media_replicas.UPLOAD_VERIFIED, None)
+
+
 def test_a_pointer_is_not_copied_back_from_a_replica_that_was_a_copy_of_the_version_found_wrong(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The mirror holds the pointer's ciphertext under another name: its bytes decrypt wrong exactly as the pointer's do."""
@@ -3379,6 +3395,25 @@ def test_a_check_round_takes_every_pick_of_its_share_and_not_only_the_first(
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         assert ledger.execute("SELECT COUNT(*) FROM media_replicas WHERE store = ? AND checked_at > 0",
                               (MIRROR,)).fetchone() == (3,)
+
+
+def test_a_missing_large_version_leaves_the_rounds_byte_share_for_the_next_replica(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    lost = _stored(vault, "a-lost")
+    missing = _offload(vault, lost)
+    intact = _preserved(vault, category="z-intact")
+    _offload(vault, intact)
+    _stored_file(Path(selected_store[0]["root"]), missing).unlink()
+    # Only the binding remains. Give the lost version a size above one content round's share.
+    sidecar = lost.with_name(lost.name + ".md")
+    sidecar.write_text(sidecar.read_text().replace(f"ciphertext_size: {missing.ciphertext_size}",
+                                                f"ciphertext_size: {96 * 1024**2}"))
+    media_replicas.rebuild(vault)
+
+    assert media_replicas.check(vault) == 2
+
+    assert _replica_row_of(vault, lost, missing.store)["failure"] == "absent"
+    assert _replica_row_of(vault, intact, missing.store)["level"] == media_replicas.CONTENT
 
 
 def test_the_round_at_the_default_settings_checks_two_stores_of_the_sizing_target_within_the_cycle(
