@@ -288,6 +288,29 @@ def test_receipt_readers_join_legacy_month_and_numbered_part(vault: Path) -> Non
     assert receipts.verify_chain(vault)["valid"] is True
 
 
+def test_receipt_append_bounds_parts_and_retries_an_empty_new_part(vault: Path, monkeypatch) -> None:
+    def append(second):
+        return receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []},
+            timestamp=f"2000-01-01T00:00:{second:02d}Z",
+        )
+
+    append(0)
+    month = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    original = month.read_bytes()
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", len(original) + 1, raising=False)
+    assert append(1)["seq"] == 2
+    part = month.with_name("2000-01.0000000000000000002.jsonl")
+    assert len(part.read_bytes()) <= len(original) + 1
+    assert month.read_bytes() == original
+
+    interrupted = month.with_name("2000-01.0000000000000000003.jsonl")
+    interrupted.touch()
+    assert append(2)["seq"] == 3
+    assert interrupted.stat().st_size > 0
+    assert receipts.verify_chain(vault)["valid"] is True
+
+
 def test_a_consistent_copy_without_a_local_anchor_reads_as_unanchored_but_valid(
     vault: Path, tmp_path: Path, receipt_state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

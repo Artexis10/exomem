@@ -48,6 +48,8 @@ SCHEMA = "receipt/v1"
 GENESIS_HASH = "0" * 64
 MAX_RECORD_BYTES = 64 * 1024
 _TAIL_READ_BYTES = MAX_RECORD_BYTES
+# Keep a foreground lifecycle recheck to the active part, at most sixteen maximum-size records in bytes.
+_RECEIPT_PART_BYTES = 16 * MAX_RECORD_BYTES
 MAX_OUTCOMES = 128
 _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
@@ -1322,9 +1324,14 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     names, issues = _monthly_evidence_names(instance_dir)
     if issues:
         raise ReceiptError(issues[0]["detail"])
-    if not names:
-        return None
-    name = names[-1]
+    for name in reversed(names):
+        tail = _read_tail_at(instance_dir, name)
+        if tail is not None:
+            return tail
+    return None
+
+
+def _read_tail_at(instance_dir: Path, name: str) -> dict[str, Any] | None:
     path = instance_dir / name
     with _open_month_fd(instance_dir, name) as fd:
         source = os.fdopen(fd, "rb", closefd=False)
@@ -1357,6 +1364,16 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     record["_path"] = str(path)
     record["_offset"] = max(0, size - _TAIL_READ_BYTES) + chunk.rfind(lines[-1])
     return record
+
+
+def _receipt_append_target(path: Path, *, sequence: int, bytes_to_append: int) -> Path:
+    try:
+        size = path.lstat().st_size
+    except FileNotFoundError:
+        return path
+    if size + bytes_to_append <= _RECEIPT_PART_BYTES:
+        return path
+    return path.with_name(f"{path.name[:7]}.{sequence:019}.jsonl")
 
 
 def _fsync_path(path: Path) -> None:
@@ -1590,12 +1607,15 @@ def append_event(
             encoded = _canonical_json(record)
             if len(encoded) + 1 > MAX_RECORD_BYTES:
                 raise ReceiptError("receipt record exceeds the bounded tail window")
+            path = _receipt_append_target(path, sequence=actual_seq + 1, bytes_to_append=len(encoded) + 1)
             if check is not None:
                 check()
             with _open_month_fd(instance_dir, path.name, write=True, create=True) as fd:
                 output = os.fdopen(fd, "ab", closefd=False)
                 try:
                     offset = output.tell()
+                    if offset + len(encoded) + 1 > _RECEIPT_PART_BYTES:
+                        raise ReceiptError("receipt part grew before the append")
                     output.write(encoded + b"\n")
                     _crash_point("after_jsonl_write")
                     output.flush()
