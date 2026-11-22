@@ -20,11 +20,12 @@ the agent calls under that leaf's own authority.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -672,6 +673,31 @@ def _memory_or_path_ref(rel_path: str, exomem_id: str | None) -> str:
 def _date(updated: Any, origin: Any) -> str:
     value = updated or origin
     return str(value)[:10] if value else ""
+
+
+def _stamp(updated: Any, origin: Any) -> str:
+    """A page's date as written, with its time when it has one."""
+    value = updated or origin
+    return str(value) if value else ""
+
+
+def _instant(value: str) -> datetime | None:
+    """A date with a time as one UTC instant; None for a bare date, which names no time of day."""
+    if len(value) <= 10:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment.astimezone(UTC) if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def _after(value: str, since: str) -> bool:
+    """Whether `value` is later than `since`: to the second when both carry a time, otherwise by day."""
+    later, bound = _instant(value), _instant(since)
+    if later is not None and bound is not None:
+        return later > bound
+    return value[:10] > since[:10]
 
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
@@ -2150,11 +2176,13 @@ _CURATION_PROFILES_SQL = (
     "SELECT path FROM graph_nodes WHERE kind = 'file' AND page_type IN ({marks}) ORDER BY path"
 )
 
-#: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated after the
-#: profile, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
+#: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated on or after
+#: the profile's day, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
 _CURATION_UNIT_PAGES_SQL = (
     "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
-    "WHERE f.node_key IN ({keys}) AND f.kind = 'file' AND {newer} "
+    "WHERE f.node_key IN ({keys}) AND f.kind = 'file' "
+    # The profile's own day too: a page saved later that day is newer, which `_after` decides to the second.
+    "AND substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) >= ? "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
 
@@ -2336,13 +2364,13 @@ def _curation_candidates(
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
     for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
         chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
-        sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), newer=_NEWER_THAN, labels=labels)
+        sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), labels=labels)
         keys = [f"file:{path}" for path in chunk]
-        rows = graph.execute(sql, (*keys, since, epistemic_graph.CANDIDATE_KIND, *params))
+        rows = graph.execute(sql, (*keys, since[:10], epistemic_graph.CANDIDATE_KIND, *params))
         yield from sorted(
-            (str(path), _date(updated, origin))
+            (str(path), _stamp(updated, origin))
             for path, updated, origin, status in rows
-            if ctx.live_status(status, str(path))
+            if ctx.live_status(status, str(path)) and _after(_stamp(updated, origin), since)
         )
 
 
@@ -2384,7 +2412,7 @@ def _new_units(
             refs = sorted(
                 ref
                 for ref, category, as_of, until in units
-                if category in categories and (as_of or page_date)[:10] > since and not _past(until, today)
+                if category in categories and _unit_newer(as_of, page_date, since) and not _past(until, today)
             )
             if not refs:
                 continue
@@ -2394,6 +2422,13 @@ def _new_units(
             found[path] = refs
     memo[subject] = (found, partial)
     return memo[subject]
+
+
+def _unit_newer(as_of: str, page_date: str, since: str) -> bool:
+    """A unit's own date decides by day; with no date of its own, or on the profile's own day, its page's time does."""
+    if as_of and as_of[:10] != since[:10]:
+        return as_of[:10] > since[:10]
+    return _after(page_date, since)
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
@@ -2475,9 +2510,12 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     if scope.kind not in (vocabulary_resolution.SCOPE_GLOBAL, vocabulary_resolution.SCOPE_DOMAIN):
         return None
     today = date.fromtimestamp(ctx.now)
-    new, units_partial = _new_units(ctx, subject, scope, taxonomy, _date(node[1], node[2]), today, keep)
+    new, units_partial = _new_units(ctx, subject, scope, taxonomy, _stamp(node[1], node[2]), today, keep)
     stale, counterparts, lines_partial = _stale_lines(ctx, subject, today, keep)
     if not new and not stale:
+        if units_partial and keep is None:
+            # Silence here is a partial read, not an empty one; the log is what shows the design's revisit trigger firing.
+            logging.getLogger(__name__).info("profile curation for %s stopped before it found evidence", subject)
         return None
     roles = {**dict.fromkeys(new, "unit"), **counterparts}
     subject_entry = _member_entry(ctx, subject, "subject")
