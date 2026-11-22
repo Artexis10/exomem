@@ -31,6 +31,7 @@ from exomem import (
     originals,
     preserve,
     private_state,
+    reserved_paths,
     schema,
     server_runtime,
     state_paths,
@@ -497,6 +498,13 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
     def unnecessary_open(*_args, **_kwargs):
         pytest.fail("an unreadable installed preview must not open or hydrate the original")
 
+    inspect_original = reserved_paths.inspect_generic_file
+
+    def inspect_other(root, path, *args, **kwargs):
+        if root == vault and path in (saved.path, vault / saved.path):
+            pytest.fail("an unreadable installed preview must not open the resident original for inspection")
+        return inspect_original(root, path, *args, **kwargs)
+
     monkeypatch.setattr(media_previews, "_decode", unnecessary_codec)
     monkeypatch.setattr(private_state, "write_record", unnecessary_replacement)
     with monkeypatch.context() as blocked:
@@ -504,6 +512,7 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         blocked.setattr(media_previews, "_load", load)
         if fault == "reuse":
             blocked.setattr(media_store, "open_original", unnecessary_open)
+            blocked.setattr(reserved_paths, "inspect_generic_file", inspect_other)
         claim = ledger.claim_next()
         assert claim is not None and claim.id == first.id
         worker._process(claim)
@@ -513,6 +522,7 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         assert ledger.claim_next() is None
 
         blocked.setattr(media_store, "open_original", unnecessary_open)
+        blocked.setattr(reserved_paths, "inspect_generic_file", inspect_other)
         now += media_jobs.RETRY_FIRST_SECONDS * 2 ** (claim.attempts - 1)
         last = ledger.claim_next()
         assert last is not None and last.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
@@ -528,6 +538,7 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         assert waiting.attempts == last.attempts and ledger.claim_next() is None
 
     monkeypatch.setattr(media_store, "open_original", unnecessary_open)
+    monkeypatch.setattr(reserved_paths, "inspect_generic_file", inspect_other)
     now += 2 * media_jobs.RETRY_FIRST_SECONDS
     retry = ledger.claim_next()
     assert retry is not None and retry.id == claim.id
@@ -598,3 +609,47 @@ def test_reconciliation_requires_confirmed_absence_before_rebuilding(vault, monk
 
     assert record.read_bytes() == installed
     assert media_previews.read(vault, saved.path, digest) is not None
+
+
+def test_reconciliation_preserves_a_receipt_published_while_acquiring_the_guard(vault, monkeypatch):
+    original = _photo(922, 640)
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-concurrent-receipt-fixture.jpg",
+            stream=io.BytesIO(original), media_pending=True,
+        )
+    binary, sidecar = vault / saved.path, vault / saved.sidecar_path
+    digest = hashlib.sha256(original).hexdigest()
+    ledger = media_jobs.MediaJobStore(vault)
+    assert ledger.get_by_binary(binary, media_type=media_jobs.PREVIEW_MEDIA_TYPE) is None
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    manager = get_manager()
+    original_guard = manager.consistency_guard
+    published = []
+
+    @contextmanager
+    def guard(*args, **kwargs):
+        if kwargs.get("operation") == "media_preview_recover":
+            assert ledger.get_by_binary(binary, media_type=media_jobs.PREVIEW_MEDIA_TYPE) is None
+            ledger.enqueue_preview(binary, sidecar, digest)
+            claim = ledger.claim_next()
+            assert claim is not None
+            worker._process(claim)
+            receipt = ledger.get(claim.id)
+            assert receipt is not None and receipt.state == media_jobs.COMPLETED and receipt.last_error is None
+            published.append(receipt)
+            record, = media_previews.store_path(vault).glob("*/*.json")
+            record.unlink()  # The private payload can disappear after its receipt is durable.
+        with original_guard(*args, **kwargs) as held:
+            yield held
+
+    with monkeypatch.context() as concurrent:
+        concurrent.setattr(manager, "consistency_guard", guard)
+        media_processing.reconcile_all_media(vault)
+    receipt, = published
+    assert ledger.get(receipt.id) == receipt
+    assert ledger.claim_next() is None
+
+    media_processing.reconcile_all_media(vault)
+    rebuilt = ledger.claim_next()
+    assert rebuilt is not None and rebuilt.id == receipt.id and rebuilt.preview_sha256 == digest

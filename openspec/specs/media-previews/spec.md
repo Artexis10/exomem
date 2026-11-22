@@ -93,6 +93,7 @@ An unmarked historical filing and a marked digest with a terminal failure SHALL 
 
 - **WHEN** a restore keeps a successful preview outcome and omits its record
 - **THEN** reconciliation queues the still-current marked digest to rebuild the record
+- **AND** both checks confirm the absence and the successful receipt still matches
 
 #### Scenario: A successful preview record cannot be inspected during recovery
 
@@ -119,6 +120,11 @@ Where `read_media` is offered, its preview action SHALL accept the canonical ori
 - **WHEN** an applicable path-only organization cap limits a verified session below full release
 - **THEN** the preview request refuses before hydrating the original
 - **AND** another unresolved scope does not defer that known denial
+
+#### Scenario: The connector boundary cannot load with no policy files
+
+- **WHEN** the current policy has no files and the host's connector boundary is unavailable
+- **THEN** the preview request refuses before opening or hydrating the original
 
 #### Scenario: The filing now names another original
 

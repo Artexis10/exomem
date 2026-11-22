@@ -208,7 +208,9 @@ def recover(
         return False
 
     try:
-        missing = store.recoverable_preview_demands(candidates, missing_record=missing_record) if store else candidates
+        missing, observed = (
+            store.recoverable_preview_demands(candidates, missing_record=missing_record) if store else (candidates, {})
+        )
         if not missing:
             return store
         manager = get_manager()
@@ -216,7 +218,7 @@ def recover(
         with manager.consistency_guard(vault, operation="media_preview_recover", holder_kind="background"):
             companions = _canonical_companion_batch(vault, (binary.relative_to(vault).as_posix() for binary, _, _ in missing))
             current = []
-            rebuild = set()
+            rebuild = {}
             for binary, sidecar, digest in missing:
                 relative = binary.relative_to(vault).as_posix()
                 try:
@@ -225,12 +227,12 @@ def recover(
                     continue
                 if intent is not None and intent[0] == sidecar:
                     current.append((binary, sidecar, digest))
-                    if missing_record(relative):
-                        rebuild.add(binary)
+                    if binary in observed and missing_record(relative):
+                        rebuild[binary] = observed[binary]
             if current:
                 if store is None:
                     store = media_jobs.MediaJobStore(vault)
-                store.enqueue_previews(current, rebuild=frozenset(rebuild))
+                store.enqueue_previews(current, rebuild=rebuild)
     except Exception as error:  # noqa: BLE001 - the next discovery rotation retries optional work
         log.warning("media preview recovery deferred (%s)", type(error).__name__)
     return store
@@ -316,10 +318,11 @@ def generate(
         if intent is None or intent[0] != job.sidecar_path or not store.preview_claimed(job):
             return False
         expected = intent[1]
+        # The resident-file check can open the original.
+        jpeg = _read_for_generation(_record_path(store_path(vault), relative), relative, expected.sha256)
         current = originals.original_state(vault, relative)
         if not current.present or current.binary_sha256 != expected.sha256:
             return False
-    jpeg = _read_for_generation(_record_path(store_path(vault), relative), relative, expected.sha256)
     with media_store.open_original(vault, relative, job=job, deadline=deadline) as opened:
         if kind == "image" and opened.version.size > image_view.MAX_ORIGINAL_BYTES:
             return False

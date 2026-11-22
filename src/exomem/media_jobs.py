@@ -16,7 +16,7 @@ import os
 import re
 import sqlite3
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -1301,15 +1301,16 @@ class MediaJobStore:
         self.enqueue_previews(((binary, sidecar, sha256),))
 
     def enqueue_previews(
-        self, candidates: Sequence[tuple[Path, Path, str]], *, rebuild: frozenset[Path] = frozenset(),
+        self, candidates: Sequence[tuple[Path, Path, str]], *, rebuild: Mapping[Path, tuple[int, int]] | None = None,
     ) -> None:
-        """Admit one preview per original. A replacement fences the old claim."""
+        """Admit one preview per original. A rebuild must match the observed receipt."""
+        observed = rebuild or {}
         now = time.time()
         rows = []
         for binary, sidecar, sha256 in candidates:
             relative = self._relative(binary)
             rows.append((self._key(relative, PREVIEW_MEDIA_TYPE), relative, self._relative(sidecar),
-                         PREVIEW_MEDIA_TYPE, sha256, now, now, binary in rebuild))
+                         PREVIEW_MEDIA_TYPE, sha256, now, now, *observed.get(binary, (None, None))))
         with contextlib.closing(self._connect()) as conn, conn:
             conn.executemany(
                 """
@@ -1322,18 +1323,19 @@ class MediaJobStore:
                     pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, last_error = NULL,
                     preview_finish_error = NULL, returns = 0, updated_at = excluded.updated_at
                 WHERE jobs.preview_sha256 IS NOT excluded.preview_sha256 OR jobs.sidecar_rel != excluded.sidecar_rel
-                    OR (? AND jobs.state = 'completed' AND jobs.last_error IS NULL)
+                    OR (jobs.id = ? AND jobs.claim_revision = ?
+                        AND jobs.state = 'completed' AND jobs.last_error IS NULL)
                 """,
                 rows,
             )
 
     def recoverable_preview_demands(
         self, candidates: Sequence[tuple[Path, Path, str]], *, missing_record: Callable[[str], bool],
-    ) -> list[tuple[Path, Path, str]]:
-        """Recover unqueued demand and successful previews whose private record is missing."""
+    ) -> tuple[list[tuple[Path, Path, str]], dict[Path, tuple[int, int]]]:
+        """Select unqueued demand and fence successful receipts whose records are missing."""
         keys = [self._key(self._relative(binary), PREVIEW_MEDIA_TYPE) for binary, _, _ in candidates]
         if not keys:
-            return []
+            return [], {}
         with contextlib.closing(self._connect(readonly=True)) as conn:
             known = {
                 row["job_key"]: row
@@ -1343,13 +1345,16 @@ class MediaJobStore:
                 )
             }
         recoverable = []
+        observed = {}
         for key, item in zip(keys, candidates, strict=True):
-            _, sidecar, digest = item
+            binary, sidecar, digest = item
             row = known.get(key)
-            if (row is None or (row["sidecar_rel"], row["preview_sha256"]) != (self._relative(sidecar), digest)
-                    or (row["state"] == COMPLETED and row["last_error"] is None and missing_record(row["binary_rel"]))):
+            if row is None or (row["sidecar_rel"], row["preview_sha256"]) != (self._relative(sidecar), digest):
                 recoverable.append(item)
-        return recoverable
+            elif row["state"] == COMPLETED and row["last_error"] is None and missing_record(row["binary_rel"]):
+                observed[binary] = row["id"], row["claim_revision"]
+                recoverable.append(item)
+        return recoverable, observed
 
     @staticmethod
     def _current_preview_claim(conn: sqlite3.Connection, job: MediaJob) -> bool:

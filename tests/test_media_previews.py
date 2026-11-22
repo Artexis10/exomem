@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import json
 import os
 
 import pytest
@@ -431,6 +432,43 @@ def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selecte
     result = _call(mcp, {"kind": "preview", "path": path})
     [image] = [item for item in result.content if item.type == "image"]
     assert base64.b64decode(image.data) == jpeg
+
+
+def test_an_empty_policy_keeps_an_unavailable_connector_from_hydrating(
+    vault, served, selected_store, tmp_path, monkeypatch,
+):
+    from test_governance_egress import SCOPE_ID, _external, _gov_dir, _reset_governance_caches, write_scope
+    from test_media_store import _offload
+
+    from exomem import commands, media_store, originals
+    from exomem.governance import connector_boundary, policy
+    from exomem.governance.principal import request_scope
+
+    _mcp, client = served
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    path = _upload(client, "sample.jpg", _photo(900, 600), "image/jpeg")
+    assert _drain(vault)
+    _offload(vault, vault / path)
+    assert media_store.evict(vault, vault / path)
+
+    write_scope(vault, paths=path.removeprefix("Knowledge Base/"))
+    config = tmp_path / "connector.json"
+    config.write_text(json.dumps({
+        "version": 1, "default_denied_scope_ids": [SCOPE_ID], "clients": [],
+    }))
+    monkeypatch.setenv(connector_boundary.CONFIG_ENV, str(config))
+    reader = _external()
+    assert connector_boundary.snapshot(vault).denied_scopes(reader) == {SCOPE_ID}
+    [scope] = (_gov_dir(vault) / "scopes").glob("*.yaml")
+    scope.unlink()
+    _reset_governance_caches()
+    assert policy.load(vault).empty
+    with pytest.raises(connector_boundary.BoundaryUnavailable):
+        connector_boundary.snapshot(vault)
+
+    with request_scope(reader), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        commands.op_read_media(vault, media="preview", path=path)
+    assert originals.evicted(vault, path)
 
 
 def test_an_original_path_that_became_a_folder_never_hydrates_descendants(vault, served, selected_store, monkeypatch):

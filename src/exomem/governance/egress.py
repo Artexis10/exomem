@@ -8755,6 +8755,10 @@ def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) 
     policy = policy_module.load(vault_root)
     if policy.blocked:
         return False
+    try:
+        boundary = connector_boundary.snapshot(vault_root, policy)
+    except connector_boundary.BoundaryUnavailable:
+        return False
     if policy.empty or bound_writer(vault_root) is not None:
         return True
     try:
@@ -8762,7 +8766,6 @@ def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) 
         scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).scope_ids
     except membership_module.MembershipUnresolved:
         return False
-    boundary = connector_boundary.snapshot(vault_root, policy)
     if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
         return False
     decision = decide(
