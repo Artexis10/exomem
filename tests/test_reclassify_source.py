@@ -427,8 +427,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                 nonlocal untampered
                 emit_receipt(*args)
                 if untampered is None:
-                    untampered = receipt.read_bytes()
-                    receipt.write_bytes(b"{}\n" + untampered)
+                    with receipts._receipt_lock(vault):
+                        receipt.write_bytes(b"{}\n" + receipt.read_bytes())
+                        untampered = True
 
             with monkeypatch.context() as damage:
                 damage.setattr(egress, "emit_boundary_receipt", damage_receipt_after_disclosure)
@@ -436,7 +437,10 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                     rejected = await preview(preview_run_id=refreshed["run_id"])
                 finally:
                     if untampered is not None:
-                        receipt.write_bytes(untampered)
+                        with receipts._receipt_lock(vault):
+                            damaged = receipt.read_bytes()
+                            assert damaged.startswith(b"{}\n"), damaged[:120]
+                            receipt.write_bytes(damaged[len(b"{}\n"):])
             assert untampered is not None and rejected.get("is_error"), rejected
             assert "result" not in rejected and "entries" not in rejected
             prepare_epoch = graph_sync.prepare_rename_epoch
