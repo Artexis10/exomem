@@ -226,6 +226,7 @@ def hold(
     max_bytes: int,
     expected_sha256: str | None = None,
     secret: str | None = None,
+    import_key: str | None = None,
 ) -> dict:
     """Hold one upload for the verified session and return its file handle.
 
@@ -286,6 +287,7 @@ def hold(
                 "content_type": kind,
                 "filename": name,
                 "expires": now + HOLD_TTL_SECONDS,
+                **({"import_key": import_key} if import_key is not None else {}),
             }
             _write_record(store, key, record)
         except BaseException:
