@@ -1,4 +1,4 @@
-"""Dense evidence for caller-declared passages, bound to current Source bytes."""
+"""Ranked evidence for caller-declared passages, bound to current Source bytes."""
 
 from __future__ import annotations
 
@@ -38,6 +38,12 @@ _log = logging.getLogger(__name__)
 _KEY_BLOCK_START = "## Passage keys\n\n```json\n"
 _KEY_BLOCK_END = "\n```\n\n"
 MAX_RESULTS = 200
+#: `vector`, also used when the caller names no mode, ranks by dense similarity alone;
+#: `hybrid` fuses lexical matching with it.
+PASSAGE_MODES = ("vector", "hybrid")  # nosemgrep: ep-word-set -- the search protocol's mode tokens
+#: How deep each ranking reaches before fusion: the most passages a request may ask for, so a
+#: passage the other ranking places within any limit is never cut before it can vote.
+FUSION_DEPTH = MAX_RESULTS
 
 
 @dataclass(frozen=True)
@@ -207,10 +213,15 @@ def source_chunks(page: ParsedPage, entry: Any | None) -> Sequence[PassageChunk]
 
 
 def validate_ranking_options(options: Mapping[str, Any]) -> None:
-    """Refuse explicit rankers that dense-only passage recall cannot apply."""
+    """Refuse explicit rankers that passage recall cannot apply."""
+    mode = options.get("mode")
+    if mode is not None and mode not in PASSAGE_MODES:
+        raise ValueError(
+            f"INVALID_PASSAGE_OPTION: set mode to {' or '.join(PASSAGE_MODES)}, or omit it, "
+            "when result_level is passage"
+        )
     # These are closed search protocol fields and their ranking-neutral values, not vocabulary.
     neutral = {
-        "mode": "vector",
         "graph": False,
         "rerank": False,
         "rerank_max_candidates": None,
@@ -224,7 +235,7 @@ def validate_ranking_options(options: Mapping[str, Any]) -> None:
         if name in neutral and value is not None and value != neutral[name]:
             raise ValueError(
                 f"INVALID_PASSAGE_OPTION: remove {name} when result_level is passage; "
-                "passages use dense similarity only"
+                "passages rank by dense similarity and lexical matching only"
             )
 
 
@@ -250,6 +261,7 @@ def search_memory(vault_root: Path, request: Mapping[str, Any]) -> dict:
             result_level="passage",
             limit=request["limit"],
             scope=request["scope"],
+            mode=request["mode"],
             filters=request["filters"],
             relations=request["relations"],
             relation_of=request["relation_of"],
@@ -523,6 +535,7 @@ def find(vault_root: Path, request: Mapping[str, Any]) -> dict:
     query = request["query"]
     if not query or not query.strip():
         raise ValueError("INVALID_PASSAGE_QUERY: supply a nonempty query to rank passages")
+    validate_ranking_options({"mode": request.get("mode")})
     shortcuts = structured_filters.FilterShortcuts(
         **{
             field.name: request[field.name]
@@ -631,10 +644,14 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
         raise
     recall_space.require_same_space(index, identity, query_vector)
     _stop_if_caller_left("selection")
+    fusing = request.get("mode") == "hybrid"
+    lexical = index.select_passage_terms(query, FUSION_DEPTH, allowed_paths=allowed) if fusing else None
     selection = index.select_passage_chunks(
-        query_vector, limit, allowed_paths=allowed, encoded_for=identity
+        query_vector, limit if lexical is None else FUSION_DEPTH,
+        allowed_paths=allowed, encoded_for=identity,
     )
-    selected = selection.hits
+    selected = selection.hits if lexical is None else _fused(selection.hits, lexical, limit)
+    similarity = {(path, number): score for path, number, _ref, score in selection.hits}
     _stop_if_caller_left("verification")
     sources = _verified_sources(vault_root, walk_scope, snapshot, publication, selected)
 
@@ -665,6 +682,8 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
                 "passage_hash": chunk.passage_hash,
                 "span": {"start": chunk.start, "length": chunk.length},
                 "score": score,
+                # Unknown, not zero, for a lexical match beyond the dense ranking's depth.
+                "similarity": similarity.get((path, number)),
             }
         )
     space = identity or recall_space.current_identity(len(query_vector))
@@ -672,11 +691,48 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     summary = f"Found {len(hits)} passage matches."
     if withheld:
         summary += f" Withheld {withheld} chunks that do not match their current Source."
-    return {
+    reply = {
         "user_summary": summary,
         "hits": hits,
         "recall_space": asdict(space),
         "recall_space_id": space.identity_digest,
+        # Fixed protocol tokens: how this reply was ranked, and which backend scored it.
+        "ranking": "dense" if lexical is None else "fused",
         "scoring_mode": selection.scoring_mode,
         "withheld_chunks": withheld,
     }
+    if fusing:
+        # Fixed protocol tokens: whether the lexical stage could take part in this reply.
+        lexical_state = (
+            "ready" if lexical is not None
+            else "failed" if index.passage_terms_failed()
+            else "preparing"
+        )
+        reply["diagnostics"] = {"lexical": lexical_state}
+    return reply
+
+
+def _fused(dense: list[tuple], lexical: list[tuple], limit: int) -> list[tuple]:
+    """The top `limit` of both rankings by RRF, each scored with the dense score at its rank.
+
+    A caller that maps or floors scores then sees the distribution of a dense-only reply,
+    while the order is the fused one. Tied passages share the score of their first rank,
+    and a reply holds no more passages than the dense ranking supplied.
+    """
+    from . import fusion, ranking_config
+
+    stored = {(path, number): ref for path, number, ref, _score in lexical}
+    stored.update({(path, number): ref for path, number, ref, _score in dense})
+    ranked = fusion.reciprocal_rank_fusion_scored(
+        [
+            [((path, number), score) for path, number, _ref, score in hits]
+            for hits in (dense, lexical)
+        ],
+        k=ranking_config._active_ranking().rrf_k,
+    )[: min(limit, len(dense))]
+    selected, value, score = [], None, None
+    for rank, (key, fused) in enumerate(ranked):
+        if rank == 0 or fused != value:
+            value, score = fused, dense[rank][3]
+        selected.append((key[0], key[1], stored[key], score))
+    return selected

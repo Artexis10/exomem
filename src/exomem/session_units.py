@@ -10,11 +10,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import lifecycle_statuses, semantic_contract, vault, working_set, working_set_currency
+from . import (
+    currency_boundary,
+    lifecycle_statuses,
+    semantic_contract,
+    vault,
+    working_set,
+    working_set_currency,
+)
 from .governance import egress
 
 
@@ -72,13 +79,9 @@ def admit(
                 text=working_set.bounded_text(unit.content), lifecycle=page.status or "",
                 # The unit's own authored date, read as the working set's unit lane reads it.
                 updated=unit.as_of or working_set_currency.own_time(unit.context), anchor=path,
-                # The language schema fixes these fields; relation families come from the registry.
-                provenance={
-                    **{key: getattr(unit, key) for key in ("as_of", "until", "check_by") if getattr(unit, key)},
-                    "supersedes_targets": working_set_currency.relation_targets(
-                        [relation.to_dict() for relation in unit.relations], registry=page.definitions.snapshots["relations"].typed if page.definitions is not None else None,
-                    ),
-                },
+                provenance=currency_boundary.unit_provenance(
+                    unit, registry=page.definitions.snapshots["relations"].typed if page.definitions is not None else None,
+                ),
             ))
     wire = [working_set._served_unit(item) for item in candidates]  # noqa: SLF001 - exactly the existing unit admission shape
     verdicts = egress.classify_units(root, wire, purpose=caller.purpose)
@@ -101,13 +104,7 @@ def current(admitted: Iterable[working_set.LaneItem], basis: lifecycle_statuses.
         ordering = basis.ordering(item.lifecycle, path=item.path)
         if ordering is None or ordering.historical:
             continue
-        for name in ("until", "check_by"):  # Closed typed date fields; each changes currency the following day.
-            if value := item.provenance.get(name):
-                authored_date = date.fromisoformat(value)
-                if authored_date < date.max:
-                    boundary = authored_date + timedelta(days=1)
-                    if boundary > today:
-                        now.boundaries.append(boundary)
+        now.boundaries += currency_boundary.boundaries(item.provenance, today=today)
         history, review_due = working_set_currency.state(item, today=today, status_basis=basis)
         if history:
             now.expired += 1

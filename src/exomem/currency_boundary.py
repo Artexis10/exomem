@@ -1,7 +1,4 @@
-"""The days on which a served unit's currency changes, for a cache that keeps the unit until then.
-
-Stance moves onto this after the domain-profiles change merges; until then it keeps its own copies of `boundaries` and `unit_provenance`.
-"""
+"""The days on which a served unit's currency changes, for a cache that keeps it until then."""
 
 from __future__ import annotations
 

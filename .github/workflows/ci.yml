@@ -37,6 +37,7 @@ jobs:
     outputs:
       full: ${{ steps.scope.outputs.full }}
       release: ${{ steps.scope.outputs.release }}
+      reconcile: ${{ steps.scope.outputs.reconcile }}
       docs_only: ${{ steps.docs-scope.outputs.docs_only }}
       pytest_args: ${{ steps.docs-scope.outputs.pytest_args }}
       changed_tests: ${{ steps.docs-scope.outputs.changed_tests }}
@@ -692,281 +693,6 @@ jobs:
         # deliberately unset here — the test lifts it and loads the real model.
         run: uv run --frozen --extra embeddings python -m pytest -m embeddings -v
 
-  retrieval-latency:
-    needs: scope
-    name: retrieval latency (2k synthetic vault, shard ${{ matrix.shard }}/4)
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
-    runs-on: ubuntu-24.04
-    # Green CI took 9m38s; one case allows 15m. Let the remaining suite report
-    # its result after that case while keeping every latency assertion unchanged.
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - *prepare-duration-snapshot
-      - name: Per-lane latency ceiling gate (2000-note synthetic vault, model-free)
-        env:
-          EXOMEM_DURATIONS_PATH: *duration-snapshot-path
-        # The anti-"hidden 14s" gate (tests/test_latency_gate.py): generates a
-        # realistic densely-wikilinked 2000-note vault and asserts NO retrieval
-        # lane exceeds its ceiling (graph rebuild → ~1.9s trips it). This job
-        # OWNS the file: it runs in NEITHER PR tier (the partition check in
-        # tests/test_ci_reliability_contract.py enforces that), so its evidence
-        # comes from nightly/dispatch full runs, next to the golden quality gate.
-        # Each case keeps its whole timing loop and function-scoped vault on an idle runner.
-        run: >-
-          uv run --frozen python -m pytest tests/test_latency_gate.py -q
-          --splits=4 --group=${{ matrix.shard }} --splitting-algorithm=least_duration
-          --durations-path="$EXOMEM_DURATIONS_PATH"
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
-          --durations=20 --junitxml=test-results/retrieval-latency-${{ matrix.shard }}.xml
-      - name: Upload latency timing evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: retrieval-latency-shard-${{ matrix.shard }}-junit
-          path: test-results/retrieval-latency-${{ matrix.shard }}.xml
-          if-no-files-found: warn
-      - name: Upload refreshed test durations
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-durations-latency-shard-${{ matrix.shard }}
-          path: *duration-snapshot-path
-
-  recall-latency-series:
-    needs: scope
-    name: recall latency paired series
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      series: ${{ steps.series.outputs.series }}
-      shards: ${{ steps.series.outputs.shards }}
-      shard_count: ${{ steps.series.outputs.shard_count }}
-      base_tag: ${{ steps.series.outputs.base_tag }}
-      base_commit: ${{ steps.series.outputs.base_commit }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - name: Verify the latency instrument once before fan-out
-        env:
-          UV_PYTHON: /usr/bin/python3
-          UV_PYTHON_DOWNLOADS: never
-        run: uv run --frozen --group recall-benchmark python -m pytest tests/test_recall_latency_gate.py tests/test_recall_timing.py tests/test_frame_stack.py -q
-      - name: Read the series from the reference case file
-        id: series
-        # The case file defines the series; the paired matrix keeps no second list.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(gh release view --json tagName --jq .tagName)
-          commit=$(git rev-parse --verify "refs/tags/$tag^{commit}")
-          echo "base_tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "base_commit=$commit" >> "$GITHUB_OUTPUT"
-          echo "series=$(jq -c '[.[].series] | unique' benchmarks/recall-latency/cases.json)" >> "$GITHUB_OUTPUT"
-          echo "shard_count=$(jq -r .paired_shards benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
-          echo "shards=$(jq -c '.paired_shards as $n | [range(1; $n + 1)]' benchmarks/recall-latency/profile.json)" >> "$GITHUB_OUTPUT"
-
-  recall-latency-paired:
-    name: recall latency samples (${{ matrix.series }}, shard ${{ matrix.shard }})
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    needs: [scope, recall-latency-series]
-    # Keep this benchmark on its calibrated Ubuntu 24.04 runtime.
-    runs-on: ubuntu-24.04
-    # Keep the established budget while measuring the new case-shard timings.
-    timeout-minutes: &recall-paired-timeout 45
-    strategy:
-      fail-fast: false
-      matrix:
-        series: ${{ fromJSON(needs.recall-latency-series.outputs.series) }}
-        shard: ${{ fromJSON(needs.recall-latency-series.outputs.shards) }}
-    steps:
-      - name: Record paired workload start
-        run: date +%s > "$RUNNER_TEMP/recall-latency-job-start"
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - name: Resolve the served encoder digest
-        id: recall-encoder
-        env:
-          UV_PYTHON: /usr/bin/python3
-          UV_PYTHON_DOWNLOADS: never
-        run: uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py --encoder-cache-key >> "$GITHUB_OUTPUT"
-      - name: Cache the served encoder by digest
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: recall-encoder-${{ runner.os }}-${{ steps.recall-encoder.outputs.digest }}
-      - name: Collect raw same-runner case pairs
-        # Stop under the job budget so the elapsed record and evidence upload still run.
-        timeout-minutes: 40
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SERIES: ${{ matrix.series }}
-          SHARD: ${{ matrix.shard }}
-          SHARDS: ${{ needs.recall-latency-series.outputs.shard_count }}
-          BASE_TAG: ${{ needs.recall-latency-series.outputs.base_tag }}
-          BASE_COMMIT: ${{ needs.recall-latency-series.outputs.base_commit }}
-          UV_PYTHON: /usr/bin/python3
-          UV_PYTHON_DOWNLOADS: never
-        run: >-
-          uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
-          --paired --series "$SERIES" --base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"
-          --shard "$SHARD" --shards "$SHARDS"
-          --output "recall-latency-fragment-$SERIES-$SHARD.json"
-      - name: Record elapsed paired workload
-        if: always()
-        env:
-          JOB_TIMEOUT_MINUTES: *recall-paired-timeout
-        run: python3 -c 'import json,os,pathlib,time; start=int((pathlib.Path(os.environ["RUNNER_TEMP"])/"recall-latency-job-start").read_text()); pathlib.Path("recall-latency-job-elapsed.json").write_text(json.dumps({"boundary":"first-step-to-pre-upload-timer","elapsed_seconds":time.time()-start,"job_budget_seconds":60*int(os.environ["JOB_TIMEOUT_MINUTES"])}))'
-      - name: Upload paired recall evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: recall-latency-raw-${{ matrix.series }}-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            recall-latency-fragment-${{ matrix.series }}-${{ matrix.shard }}.json
-            recall-latency-job-elapsed.json
-          if-no-files-found: warn
-
-  recall-latency-aggregate:
-    name: recall latency paired (${{ matrix.series }})
-    if: ${{ !cancelled() && needs.scope.outputs.full == 'true' && needs.recall-latency-series.result == 'success' }}
-    needs: [scope, recall-latency-series, recall-latency-paired]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        series: ${{ fromJSON(needs.recall-latency-series.outputs.series) }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - name: Download raw attempts into separate artifact directories
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: recall-latency-raw-${{ matrix.series }}-*-${{ github.run_id }}-*
-          path: paired-fragments
-          merge-multiple: false
-      - name: Validate complete provenance and compare the series once
-        if: ${{ !cancelled() }}
-        env:
-          SERIES: ${{ matrix.series }}
-          BASE_TAG: ${{ needs.recall-latency-series.outputs.base_tag }}
-          BASE_COMMIT: ${{ needs.recall-latency-series.outputs.base_commit }}
-          PRODUCER_OUTCOME: ${{ needs.recall-latency-paired.result }}
-          UV_PYTHON: /usr/bin/python3
-          UV_PYTHON_DOWNLOADS: never
-        run: >-
-          uv run --frozen --group recall-benchmark python scripts/recall_latency_gate.py
-          --aggregate-paired paired-fragments --series "$SERIES"
-          --base-tag "$BASE_TAG" --base-commit "$BASE_COMMIT"
-          --producer-outcome "$PRODUCER_OUTCOME"
-          --output "recall-latency-paired-$SERIES.json"
-      - name: Retain the complete verdict and its original raw provenance
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: recall-latency-paired-${{ matrix.series }}
-          # The current verdict can change on retry; its raw producer attempts stay immutable.
-          overwrite: true
-          path: |
-            recall-latency-paired-${{ matrix.series }}.json
-            paired-fragments/
-          if-no-files-found: warn
-
-  governance-projection-wire:
-    needs: scope
-    name: governance projected wire characterization (${{ matrix.route }})
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      matrix:
-        route: [keyword, bm25, vector-hard-off, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, hidden-index-missing, pagination]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - name: Verify lockfile is current
-        run: uv lock --check
-      - name: Characterize exact-capacity hidden-corpus actual-wire routes
-        env:
-          EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
-          EXOMEM_DISABLE_EMBEDDINGS: "1"
-          EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
-          EXOMEM_DISABLE_CLIP: "1"
-          EXOMEM_DISABLE_RANKING: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          uv run --frozen --python 3.13 python -m pytest -q
-          tests/test_governance_projection_wire_gate.py
-          --session-timeout=360
-
-  governance-projection-wire-vector-cpu:
-    needs: scope
-    name: governance projected vector CPU wire (${{ matrix.route }})
-    if: ${{ needs.scope.outputs.full == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    strategy:
-      fail-fast: false
-      matrix:
-        route: [keyword, bm25, vector-live, rerank-hard-off, clip-hard-off, graph, graph-rerank-hard-off, max-query, max-limit, max-shape, hidden-index-missing, pagination]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install uv
-        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-        with: *setup-uv-inputs
-      - name: Cache the certified BGE vector model
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-bge-base-en-v1.5-vector-cpu-v1
-      - name: Verify lockfile is current
-        run: uv lock --check
-      - name: Certify exact-capacity hidden-corpus vector CPU routes
-        env:
-          EXOMEM_GOVERNANCE_TIMING_PROFILE: vectors-cpu-torch-v1
-          # The profile certifies the English torch model its timing budget was set on.
-          EXOMEM_RECALL_MODEL: BAAI/bge-base-en-v1.5
-          EXOMEM_GOVERNANCE_TIMING_ROUTE: ${{ matrix.route }}
-          EXOMEM_DISABLE_MEDIA_EXTRACTION: "1"
-          EXOMEM_DISABLE_CLIP: "1"
-          EXOMEM_DISABLE_RANKING: "1"
-          EXOMEM_DEVICE: cpu
-          EXOMEM_EMBED_BACKEND: torch
-          OMP_NUM_THREADS: "1"
-          MKL_NUM_THREADS: "1"
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: >-
-          uv run --frozen --extra embeddings --python 3.13 python -m pytest -q
-          tests/test_governance_projection_wire_gate.py
-          --session-timeout=600
-
   semantic-write-latency:
     needs: scope
     name: semantic write latency (2k and 8k)
@@ -1217,7 +943,13 @@ jobs:
     needs: scope
     name: release evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # A reconciliation check syncs the project and runs the package generators.
+    timeout-minutes: 15
+    # Read-only: the checks read PR files, runs, artifacts and tags, and write nothing.
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     # Release metadata validates its source; every other context succeeds here
     # while the selected ordinary and Full jobs supply their own evidence.
     steps:
@@ -1228,7 +960,7 @@ jobs:
         run: echo "Full source scope is $FULL_CI"
       - name: Check out the release checker at the release base
         # The base revision, so a release PR cannot edit its own check.
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -1239,13 +971,13 @@ jobs:
             release-please-config.json
           sparse-checkout-cone-mode: false
       - name: Install the pinned release metadata updaters
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
       - name: Require that the release PR changes only what release-please writes
         # The release PR runs no test job, which is sound only while its diff
         # is release-please's own work (scripts/check_release_pr_files.py).
         # `shell: bash` adds pipefail; a failed API call must refuse.
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1265,12 +997,47 @@ jobs:
           git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA"
           python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl" --base "$BASE_SHA" --head "$HEAD_SHA"
       - name: Require complete Full evidence for the release source tree
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/release_evidence.py select --source "$BASE_SHA"
+      # A reconciliation PR runs no test job, which is sound only while merging
+      # it gives exactly what the cut controller projects onto main
+      # (release_cuts.py check-reconciliation). The checker runs from the base.
+      - name: Check out the reconciliation checker at the PR base
+        if: needs.scope.outputs.reconcile == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the reconciliation generators
+        if: needs.scope.outputs.reconcile == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          prune-cache: true
+      - name: Install the pinned release metadata updaters for the reconciliation
+        if: needs.scope.outputs.reconcile == 'true'
+        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+      - name: Require that the reconciliation PR is the controller's projection
+        if: needs.scope.outputs.reconcile == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          NODE_PATH: ${{ runner.temp }}/release-please/node_modules
+        run: |
+          if test "$HEAD_REPO" != "$GH_REPO"; then
+            echo "a reconciliation PR must come from $GH_REPO, not $HEAD_REPO" >&2
+            exit 1
+          fi
+          python3 scripts/release_cuts.py check-reconciliation --head "$HEAD_SHA" --trusted-main "$BASE_SHA" --source "${HEAD_REF#release-reconcile/}"
 
   # A dispatched or scheduled full run is a superset of the push run at the
   # same revision: the same jobs plus the full tier and py3.13. The push run is
@@ -1338,12 +1105,6 @@ jobs:
       - frozen-verifier
       - cloud-cellctl
       - retrieval-quality
-      - retrieval-latency
-      - recall-latency-series
-      - recall-latency-paired
-      - recall-latency-aggregate
-      - governance-projection-wire
-      - governance-projection-wire-vector-cpu
       - semantic-write-latency
       - graph-convergence
       - onboarding
@@ -1388,9 +1149,9 @@ jobs:
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
   # run signals its own evidence: after its gate passes it dispatches that
   # workflow, which waits for this run's recorded completion and then re-runs
-  # the waiting release PR's failed checks. Known bound: a release PR run still
-  # in progress then has nothing to re-run; the PR tier normally finishes well
-  # inside the full tier's duration.
+  # the waiting release PR's failed checks; on a cut branch it also resumes the
+  # cut. Known bound: a release PR run still in progress then has nothing to
+  # re-run; the PR tier normally finishes well inside the full tier's duration.
   release-evidence-landed:
     name: signal release evidence landed
     needs: gate
@@ -1407,3 +1168,13 @@ jobs:
           EVIDENCE_RUN: ${{ github.run_id }}
           EVIDENCE_ATTEMPT: ${{ github.run_attempt }}
         run: gh workflow run release-evidence-automation.yml --ref main -f evidence_run="$EVIDENCE_RUN" -f evidence_attempt="$EVIDENCE_ATTEMPT"
+      # A cut gives up polling before a Full run that queued behind other work
+      # finishes. Resuming the same source is the cut's own retry path, and an
+      # already finished cut re-checks its accepted origin and publishes nothing new.
+      - name: Resume the release cut this Full run qualifies
+        if: startsWith(github.ref, 'refs/heads/release-cuts/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CUT_BRANCH: ${{ github.ref_name }}
+        run: gh workflow run release-evidence-automation.yml --ref main -f source="${CUT_BRANCH#release-cuts/}"
