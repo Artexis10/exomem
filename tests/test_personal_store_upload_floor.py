@@ -322,3 +322,68 @@ def test_original_reserves_resolved_graph_records_before_writing_them(
         growth = (writer.connection.execute("PRAGMA page_count").fetchone()[0] - original_pages) * page_size
         assert growth + wal.stat().st_size - wal_size > 4 * floor
         assert read.owned_bytes(served, source) == original
+
+
+def test_a_small_note_needs_room_for_itself_not_for_the_whole_store(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a graph reservation that grows with the store database instead of with the note."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # A large store database: only its page count matters to the reservation.
+    writer.connection.execute("CREATE TABLE padding(x BLOB)")
+    for _ in range(4):
+        writer.connection.execute("INSERT INTO padding VALUES (zeroblob(16 * 1024 * 1024))")
+    writer.connection.commit()
+    assert writer.handle.checkpoint()
+    free = [floor + 32 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    note = "# Field notes\n\n" + "".join(f"- [rule] Confirm valve {index} before the shift.\n" for index in range(100))
+    target = "Knowledge Base/Evidence/Tests/Minutes/valves.md"
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note",
+                                           puts=(write.PagePut(target, note.encode(), media_allocation=True),)))
+
+    assert read.owned_bytes(served, target) == note.encode()
+
+
+def test_a_move_needs_room_for_the_leaves_its_source_records_leave(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a move that reserves the source's overflow pages but not the leaves its deleted rows rewrite."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    note = ("# Field notes\n\n" + "".join(f"- [rule] Confirm valve {index} before the shift.\n"
+                                           for index in range(3000))).encode()
+    first, second = "Knowledge Base/Evidence/Tests/Minutes/first.md", "Knowledge Base/Evidence/Tests/Minutes/second.md"
+    for path in (first, second):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note",
+                                               puts=(write.PagePut(path, note, media_allocation=True),)))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both moves in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        pages, = reader.execute("PRAGMA page_count").fetchone()
+        wal_size = wal.stat().st_size
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive first",
+                                               moves=(write.PageMove(first, "Knowledge Base/_archive/first.md"),)))
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        revision = read.current_revision(served)
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive second",
+                                                   moves=(write.PageMove(second, "Knowledge Base/_archive/second.md"),)))
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and read.page_exists(served, second)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from sqlite3 import Connection
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .. import epistemic_graph, find, lexstore, vault
 from ..cli_ops import OpError
@@ -471,9 +472,51 @@ def _catalogue_record_size(columns: tuple[str, ...]) -> str:
     return " + ".join(sizes)
 
 
-def _source_derived_scrub_pages(tx: Connection, sources: tuple[str, ...], usable: int) -> int:
-    """Count overflow pages secure delete can clear for these stored source records."""
-    pages = 0
+def _tree_limits(usable: int) -> tuple[int, int]:
+    """The largest local payload of a table cell and of an index cell (SQLite file format)."""
+    # `usable` already excludes the four-byte overflow pointer. Subtract the maximum
+    # reserved bytes for both limits.
+    return usable + 4 - 35, (usable + 4 - 12) * 64 // 255 - 23
+
+
+@dataclass(slots=True)
+class _CellPages:
+    """What writing or deleting a set of B-tree cells can allocate and rewrite."""
+
+    overflow: int = 0  # overflow pages of the cells' records
+    local_bytes: int = 0  # inline bytes, with cell pointers, varints and child pointers
+    positions: int = 0  # existing leaves the cells land in or leave, before any balance
+    trees: int = 0
+
+    def add(self, size: int, limit: int, usable: int) -> None:
+        self.local_bytes += min(size, limit) + 32
+        if size > limit:
+            self.overflow += (size + usable - 1) // usable
+
+    def leaves(self, usable: int) -> int:
+        """Leaf pages that hold the inline bytes when balancing leaves them half full."""
+        return (2 * self.local_bytes + usable - 1) // usable
+
+    def rewritten(self, usable: int) -> int:
+        """Existing pages these cells can dirty.
+
+        Each position dirties its leaf. SQLite's balance_nonroot then rewrites at most three
+        siblings and their parent, once per leaf that the cells fill or empty. The bound follows
+        the cells, never the size of the database.
+        """
+        return self.positions + 4 * (self.leaves(usable) + 2 * self.trees)
+
+
+def _rowid_runs(rowids: list[int]) -> int:
+    """Count the runs of consecutive rowids, which sit together in a rowid table."""
+    rowids.sort()
+    return sum(1 for index, rowid in enumerate(rowids) if index == 0 or rowid != rowids[index - 1] + 1)
+
+
+def _source_derived_pages(tx: Connection, sources: tuple[str, ...], usable: int) -> _CellPages:
+    """Size the stored records that the writers delete for these source paths."""
+    cells = _CellPages()
+    table_limit, index_limit = _tree_limits(usable)
     # These are the tables the lexical and graph writers delete by source path.
     # The file's graph node stores its own copy of the structural summary.
     for table, key in (
@@ -485,9 +528,8 @@ def _source_derived_scrub_pages(tx: Connection, sources: tuple[str, ...], usable
             "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
         ))
         sizes = [_catalogue_record_size(columns)]
-        # SQLite file format, B-tree payload fractions. `usable` already excludes the
-        # four-byte overflow pointer. Subtract the maximum reserved bytes for both limits.
-        limits = [usable + 4 - 35]
+        limits = [table_limit]
+        keys: list[str] = []
         for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table,)):
             indexed = []
             for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
@@ -495,42 +537,60 @@ def _source_derived_scrub_pages(tx: Connection, sources: tuple[str, ...], usable
                     raise ValueError("cannot size an expression index in the source catalogue")
                 indexed.append("rowid" if cid == -1 else name)
             sizes.append(_catalogue_record_size(tuple(indexed)))
-            limits.append((usable + 4 - 12) * 64 // 255 - 23)
+            limits.append(index_limit)
+            # A key without its trailing rowid places the cell among other rows.
+            keys.append("json_array(" + ", ".join('"' + name.replace('"', '""') + '"'
+                                                   for name in indexed if name != "rowid") + ")")
         # Count each existing row's record separately. A partial index can only omit
         # some of these rows, so including its key gives a safe upper bound.
-        fields = ", ".join(sizes)
+        fields = ", ".join(["rowid", *sizes, *keys])
+        rowids: list[int] = []
+        prefixes: list[set[str]] = [set() for _ in keys]
         for start in range(0, len(sources), read.KEYS_PER_QUERY):
             batch = sources[start : start + read.KEYS_PER_QUERY]
             within = ", ".join("?" * len(batch))
-            for record in tx.execute(f"SELECT {fields} FROM {table} WHERE {key} IN ({within})", batch):
-                pages += sum((size + usable - 1) // usable
-                             for size, limit in zip(record, limits, strict=True) if size > limit)
-    return pages
+            for row in tx.execute(f"SELECT {fields} FROM {table} WHERE {key} IN ({within})", batch):
+                rowids.append(row[0])
+                for size, limit in zip(row[1 : 1 + len(sizes)], limits, strict=True):
+                    cells.add(size, limit, usable)
+                for seen, prefix in zip(prefixes, row[1 + len(sizes) :], strict=True):
+                    seen.add(prefix)
+        if not rowids:
+            continue
+        runs = _rowid_runs(rowids)
+        cells.trees += len(limits)
+        # Rows of one key prefix and one rowid run are adjacent in an index.
+        cells.positions += runs + sum(min(len(rowids), len(seen) * runs) for seen in prefixes)
+    return cells
 
 
 def _incoming_graph_pages(
     tx: Connection, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
     *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]],
-) -> tuple[int, int]:
-    """Return the graph bindings' new page allowance and number of tree entries."""
-    overflow_pages = local_bytes = trees = entries = 0
+) -> _CellPages:
+    """Size the graph rows that a page's derivation inserts."""
+    cells = _CellPages()
+    table_limit, index_limit = _tree_limits(usable)
     for table in records:
         if not table.values:
             continue
         shapes = layouts.get(table.table)
         if shapes is None:
             positions = {column: ordinal for ordinal, column in enumerate(table.columns)}
-            shapes = [(tuple(positions.values()), usable + 4 - 35)]
+            shapes = [(tuple(positions.values()), table_limit)]
             for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table.table,)):
                 indexed = []
                 for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
                     if cid != -1 and name not in positions:
                         raise ValueError("cannot size an unbound graph index column")
                     indexed.append(len(positions) if cid == -1 else positions[name])
-                shapes.append((tuple(indexed), (usable + 4 - 12) * 64 // 255 - 23))
+                shapes.append((tuple(indexed), index_limit))
             layouts[table.table] = shapes
-        trees += len(shapes)
-        entries += len(table.values) * len(shapes)
+        cells.trees += len(shapes)
+        # New rows take the largest rowids: they append to the table tree, and within an
+        # index they gather at one position per distinct key ahead of the rowid.
+        cells.positions += 1
+        prefixes: list[set[tuple[Any, ...]]] = [set() for _ in shapes[1:]]
         for record in table.values:
             sizes = tuple(
                 len(value) if isinstance(value, str) and encoding == "UTF-8" and value.isascii()
@@ -540,15 +600,11 @@ def _incoming_graph_pages(
                 for value in record
             ) + (8,)  # SQLite appends the integer rowid to ordinary secondary indexes.
             for columns, limit in shapes:
-                size = 9 * (len(columns) + 1) + sum(sizes[column] for column in columns)
-                # The inline portion also needs its cell pointer, varints and child/overflow pointers.
-                local_bytes += min(size, limit) + 32
-                if size > limit:
-                    overflow_pages += (size + usable - 1) // usable
-    # Leave room for uneven packing and internal pages. All existing pages that
-    # balancing can redistribute are budgeted separately from these new cells.
-    local_pages = (4 * local_bytes + usable - 1) // usable + 2 * trees
-    return overflow_pages + local_pages, entries
+                cells.add(9 * (len(columns) + 1) + sum(sizes[column] for column in columns), limit, usable)
+            for seen, (columns, _limit) in zip(prefixes, shapes[1:], strict=True):
+                seen.add(tuple(record[column] for column in columns if column < len(record)))
+        cells.positions += sum(len(seen) for seen in prefixes)
+    return cells
 
 
 @contextmanager
@@ -579,7 +635,8 @@ def _reserve_payload_pages(
         trees = len(tables) + sum(conn.execute("SELECT count(*) FROM pragma_index_list(?)", (table,)).fetchone()[0]
                                   for table in tables)
         touched = len(originals) + 2 * len(moves)
-        levels = max(1, (before + touched).bit_length())
+        # An interior page holds at least four cells, so a tree of these pages has at most this depth.
+        depth = 1 + max(1, math.ceil(math.log(before + touched + 1, 4)))
         basis = epistemic_graph.producer_type_basis(writer.root)
         prepared = {}
         overflow_pages = 0
@@ -600,36 +657,39 @@ def _reserve_payload_pages(
             overflow_pages += (record_size + usable - 1) // usable
         removed_postings, removed_content = _source_fts_delete_bytes(conn, moves, scrub=scrub)
         overflow_pages += (removed_postings + usable - 1) // usable
-        btree_paths = touched * levels * trees
+        btree_paths = touched * depth * trees
         # A split can add two siblings. The WAL also rewrites the existing siblings and parent.
         database_pages = overflow_pages + 2 * btree_paths
         # Secure deletion can write the old overflow pages to WAL while freeing them in the DB.
         scrub_pages = (scrub_bytes + removed_content + usable - 1) // usable
+        # Deleting the source's derived records rewrites the leaves that hold them, with or
+        # without secure delete, and can rebalance their trees.
+        source = _source_derived_pages(conn, tuple(moves), usable) if moves else _CellPages()
         if scrub:
-            scrub_pages += _source_derived_scrub_pages(conn, tuple(moves), usable)
-        wal_pages = overflow_pages + scrub_pages + 6 * btree_paths + 1  # Includes the revision row.
-        graph_pages = graph_entries = 0
+            scrub_pages += source.overflow
+        wal_pages = (overflow_pages + scrub_pages + min(before, source.rewritten(usable))
+                     + 6 * btree_paths + 1)  # Includes the revision row.
+        graph = _CellPages()
         graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
         encoding, = conn.execute("PRAGMA encoding").fetchone()
 
         def reserve() -> None:
-            # WAL writes each dirty page once per transaction. The real starting
-            # page count bounds the existing pages that any number of splits can
-            # rewrite, while the paths bound the cost for small graph writes.
-            redistributed = min(before, 6 * levels * graph_entries)
+            # WAL writes each dirty page once per transaction, so the starting page count also
+            # bounds the existing pages it rewrites. New graph pages also grow the database.
+            graph_pages = graph.overflow + graph.leaves(usable) + 2 * graph.trees
+            redistributed = min(before, graph.rewritten(usable))
             room.reserve_store_pages(
-                database, target_bytes=(before + database_pages + graph_pages + redistributed) * page_size,
-                wal_bytes=32 + (wal_pages + graph_pages + 2 * redistributed) * (page_size + 24),
+                database, target_bytes=(before + database_pages + graph_pages) * page_size,
+                wal_bytes=32 + (wal_pages + graph_pages + redistributed) * (page_size + 24),
                 upload_size=upload_size,
             )
 
         def reserve_graph(records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
-            nonlocal graph_pages, graph_entries
-            pages, entries = _incoming_graph_pages(
-                conn, records, usable, encoding=encoding, layouts=graph_layouts,
-            )
-            graph_pages += pages
-            graph_entries += entries
+            cells = _incoming_graph_pages(conn, records, usable, encoding=encoding, layouts=graph_layouts)
+            graph.overflow += cells.overflow
+            graph.local_bytes += cells.local_bytes
+            graph.positions += cells.positions
+            graph.trees += cells.trees
             reserve()
 
         reserve()

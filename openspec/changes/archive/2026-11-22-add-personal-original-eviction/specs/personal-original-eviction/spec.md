@@ -67,6 +67,12 @@ The floor SHALL cover the database, search and graph writes derived directly fro
 - **THEN** the allocation is refused with `MEDIA_SPACE_BUSY` and a retry hint
 - **AND** the listener retains any bytes it acknowledged on prior resumable requests
 
+#### Scenario: A small original in a large store
+
+- **WHEN** a stored Markdown original is small and the store database is large
+- **THEN** the floor reserves room in proportion to the original's own records and the trees they touch
+- **AND** the size of the store database does not refuse the original
+
 #### Scenario: Another write needs space reserved for a completed upload
 
 - **WHEN** a final part has reserved space for its ordinary or pooled commit stages
