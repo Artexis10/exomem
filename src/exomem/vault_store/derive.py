@@ -19,7 +19,7 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
@@ -44,6 +44,39 @@ if TYPE_CHECKING:
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
+_LexicalPage = tuple[ParsedPage | None, lexstore.PageRows | None]
+
+
+def prepare_lexical_page(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _LexicalPage:
+    """Prepare exactly the lexical rows the commit writes for an original."""
+    in_kb, in_vault = lexstore.page_membership(rel)
+    if not (in_kb or in_vault):
+        return None, None
+    page, state = _parse(root, rel, raw, mtime_ns, type_basis)
+    rows = lexstore.page_rows(
+        root, rel, raw, page=page, state=state, mtime_ns=mtime_ns, in_kb=in_kb, in_vault=in_vault,
+    )
+    return page, rows
+
+
+def _parse(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _Parsed:
+    page = find_corpus.parse_page(
+        root / rel, mtime_ns / 1e9, root, content=raw, resolved_relative=rel,
+    )
+    if page is None:
+        return None, None
+    try:
+        state = semantic_index.current_parent_index_state(
+            root, rel, source=raw.decode("utf-8"), owner_type_basis=type_basis,
+        )
+    except (OSError, UnicodeError, ValueError):
+        # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
+        state = None
+    return page, state
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +110,7 @@ def apply(
     existing: frozenset[str],
     *,
     before: tuple | None = None,
+    prepared_lexical: Mapping[str, _LexicalPage] | None = None,
 ) -> ResolverDelta:
     """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
 
@@ -96,6 +130,7 @@ def apply(
         refreshed=list(change.refresh),
         existing=existing,
         before=before,
+        prepared_lexical=prepared_lexical,
     ).run()
 
 
@@ -122,9 +157,11 @@ class _Derivation:
         refreshed: list[str],
         existing: frozenset[str],
         before: tuple | None = None,
+        prepared_lexical: Mapping[str, _LexicalPage] | None = None,
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.before_triple = before
+        self.prepared_lexical = prepared_lexical or {}
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
@@ -265,13 +302,11 @@ class _Derivation:
                 continue
             raw, mtime_ns = found
             in_kb, in_vault = lexstore.page_membership(rel)
-            rows = None
-            page = None
-            if in_kb or in_vault:
-                page, state = self.parse(rel, raw, mtime_ns)
-                rows = lexstore.page_rows(
-                    self.root, rel, raw, page=page, state=state, mtime_ns=mtime_ns,
-                    in_kb=in_kb, in_vault=in_vault,
+            if rel in self.prepared_lexical:
+                page, rows = self.prepared_lexical[rel]
+            else:
+                page, rows = prepare_lexical_page(
+                    self.root, rel, raw, mtime_ns, self.type_basis,
                 )
             if rows is not None:
                 lexstore.write_page_rows(self.tx, rows)
@@ -304,19 +339,7 @@ class _Derivation:
 
     def parse(self, rel: str, raw: bytes, mtime_ns: int) -> _Parsed:
         """The parsed page and its parent state, as file mode derives them from the same bytes."""
-        page = find_corpus.parse_page(
-            self.root / rel, mtime_ns / 1e9, self.root, content=raw, resolved_relative=rel
-        )
-        if page is None:
-            return None, None
-        try:
-            state = semantic_index.current_parent_index_state(
-                self.root, rel, source=raw.decode("utf-8"), owner_type_basis=self.type_basis
-            )
-        except (OSError, UnicodeError, ValueError):
-            # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
-            state = None
-        return page, state
+        return _parse(self.root, rel, raw, mtime_ns, self.type_basis)
 
     # ------------------------------------------------------------------ graph rows
 

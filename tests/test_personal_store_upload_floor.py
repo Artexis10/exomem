@@ -1,7 +1,9 @@
 """A stored Evidence original must leave capacity for its canonical and projected copies."""
 
 import json
+import string
 from contextlib import closing
+from itertools import islice, product
 from types import SimpleNamespace
 
 import pytest
@@ -10,11 +12,11 @@ from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_projector import projecting  # noqa: F401
 from test_vault_store_write_path import served, stored, writer  # noqa: F401
 
-from exomem import media_capacity, preserve, writer_lease
+from exomem import lexstore, media_capacity, preserve, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance.principal import library_scope
-from exomem.vault_store import read
+from exomem.vault_store import read, write
 
 
 def test_store_original_and_later_projection_each_obey_the_vault_floor(
@@ -68,6 +70,73 @@ def test_store_original_and_later_projection_each_obey_the_vault_floor(
         assert not (served / target).exists()
         assert read.owned_bytes(served, target) == data.encode()
 
+        renamed = "Knowledge Base/Evidence/Tests/Minutes/archived.md"
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "rename evidence",
+                                               moves=(write.PageMove(target, renamed),)))
+        assert not read.page_exists(served, target) and not (served / target).exists()
+        assert read.owned_bytes(served, renamed) == data.encode()
+        assert projecting.run_pass().deferred[renamed] == media_capacity.UPLOAD_SPACE_BUSY
+        assert not (served / renamed).exists()
+
     free[0] = floor + 16 * floor
-    assert target not in projecting.run_pass().deferred
-    assert (served / target).read_bytes() == data.encode()
+    with media_capacity.commit_credit("other-original"):
+        with media_capacity.upload_room(served, device=served.stat().st_dev, reserve=True) as room:
+            assert room is not None
+            room.reserve_commit(floor, 2, incoming=0, offset=0)
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": 0}}}))
+    free[0] = 2 * floor + len(data.encode())
+    assert projecting.run_pass().deferred[renamed] == media_capacity.UPLOAD_SPACE_BUSY
+    assert not (served / renamed).exists()
+    media_capacity.release_commit_credit(served, "other-original")
+    free[0] = 16 * floor
+    assert renamed not in projecting.run_pass().deferred
+    assert (served / renamed).read_bytes() == data.encode()
+
+
+def test_indexable_original_needs_room_for_its_search_rows(
+    served, tmp_path, monkeypatch,  # noqa: F811
+):
+    if not lexstore.fts5_available():
+        pytest.skip("this SQLite build omits the full-text catalogue")
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 6 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=128 * floor, free=free[0]))
+
+    # The header is stored in both the page and its covering index. The body has
+    # a large set of distinct trigrams and words for the two real FTS indexes.
+    alphabet = string.ascii_lowercase + string.digits
+    words = " ".join("".join(chars) for chars in islice(product(alphabet, repeat=4), 90_000))
+    data = f"---\ntitle: Catalogue sample\nx-note: {words}\n---\n\n{words}\n"
+    target = "Knowledge Base/Evidence/Tests/Minutes/catalogue.md"
+
+    def file_original():
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            return preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md", content=data)
+
+    revision = read.current_revision(served)
+    with pytest.raises(OpError) as busy:
+        file_original()
+    assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+
+    free[0] = 96 * floor
+    with media_capacity.commit_credit("other-catalogue-original"):
+        with media_capacity.upload_room(served, device=served.stat().st_dev, reserve=True) as room:
+            assert room is not None
+            room.reserve_commit(90 * floor, 1, incoming=0, offset=0)
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": 0}}}))
+    with pytest.raises(OpError) as reserved:
+        file_original()
+    assert reserved.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+
+    media_capacity.release_commit_credit(served, "other-catalogue-original")
+    assert file_original().path == target
+    assert read.owned_bytes(served, target) == data.encode()
+    with closing(connection.open_reader(connection.store_path(served))) as reader:
+        assert reader.execute("SELECT pages.path FROM tri JOIN pages ON pages.rowid = tri.rowid "
+                              "WHERE tri MATCH ? AND pages.path = ?", ("a123", target)).fetchone() == (target,)

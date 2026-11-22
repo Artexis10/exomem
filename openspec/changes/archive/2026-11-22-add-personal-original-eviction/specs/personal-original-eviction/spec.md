@@ -32,6 +32,8 @@ A filesystem store declared for personal eviction SHALL reside on a different de
 
 On a personal install, eviction SHALL NOT drop an original's local bytes unless the owner has confirmed an export of the decryption identity of its pointer's key version. Eviction SHALL require a settled publication and verify the size and SHA-256 of the whole ciphertext. It SHALL retain the verified store and version through the unlink and confirm that they remain reachable at the configured path. A pointer without a recorded publication time SHALL keep its original. A configuration without `eviction_settle_seconds` SHALL read as 0.
 
+Before a filesystem version authorizes eviction, the service SHALL flush its containing directory and the retained store root.
+
 #### Scenario: The key is not exported
 
 - **WHEN** an idle original's confirmed copy is in the eviction store and the owner has not confirmed the export of its key version
@@ -92,3 +94,8 @@ The owner status SHALL report the count and plaintext bytes of local and evicted
 
 - **WHEN** an import requests extra space below the personal eviction target
 - **THEN** the worker waits for the vault to reach its configured eviction target
+
+#### Scenario: Pressure changes during a personal eviction pass
+
+- **WHEN** the disk reaches the low-water target or the owner changes the admitted policy before unlink
+- **THEN** the worker keeps the original and evaluates the current policy on its next pass

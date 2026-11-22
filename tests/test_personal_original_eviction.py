@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import shutil
 import time
 from contextlib import closing
@@ -14,7 +15,7 @@ from test_original_fixity import _stored
 from test_upload_sessions import _client
 
 from exomem import (
-    artifact_lifecycle, media_bindings, media_jobs, media_replicas, media_store, original_pool, originals,
+    artifact_lifecycle, held_fs, media_bindings, media_jobs, media_replicas, media_store, original_pool, originals,
     personal_eviction, preserve, state_paths, upload_sessions, upload_stage, vault as vault_files,
 )
 from exomem.__main__ import _media_replicas_main
@@ -84,6 +85,66 @@ def test_offload_carries_the_admitted_filesystem_route_through_publication(vault
     head = open_store(vault).head(reference.object, reference.version)
     assert head is not None and head.sha256 == reference.ciphertext_sha256
     assert list(replacement.iterdir()) == [replacement / marker]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="inject a POSIX directory flush failure")
+def test_original_stays_local_until_the_store_root_can_make_the_path_durable(vault, selected_store, monkeypatch):
+    from exomem._held_fs_posix import PosixHeldFilesystem
+
+    values, _ = selected_store
+    folder = Path(values["root"]).stat()
+    flush = PosixHeldFilesystem.flush_directory
+
+    def reject_store_root(filesystem, directory):
+        if (directory.identity.device, directory.identity.inode) == (folder.st_dev, folder.st_ino):
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "store root flush refused"))
+        return flush(filesystem, directory)
+
+    original = _stored(vault, "a recording with a durable store path")
+    with monkeypatch.context() as pressure:
+        pressure.setattr(PosixHeldFilesystem, "flush_directory", reject_store_root)
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+            media_store.offload(vault, original)
+    assert original.is_file() and originals.original_state(vault, original).reference is None
+
+    assert media_store.offload(vault, original) is not None
+    media_replicas.confirm_key_export(vault)
+    with monkeypatch.context() as pressure:
+        pressure.setattr(PosixHeldFilesystem, "flush_directory", reject_store_root)
+        assert not media_store.evict(vault, original)
+    assert original.is_file()
+    assert media_store.evict(vault, original)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="inject a POSIX directory flush failure")
+def test_declaration_flushes_an_existing_marker_before_adopting_it(vault, selected_store, tmp_path, monkeypatch):
+    from exomem._held_fs_posix import PosixHeldFilesystem
+
+    values, _ = selected_store
+    name = values["store"]
+    folder = tmp_path / "second-volume"
+    folder.mkdir()
+    _configure(selected_store, vault, root=str(folder))
+    marker = folder / media_store.STORE_MARKER
+    marker_id = "a" * 32
+    marker.write_bytes(media_store._store_marker(name, marker_id))
+    monkeypatch.setattr(media_store, "_require_distinct_device", lambda *_: None)
+    original_flush = PosixHeldFilesystem.flush_directory
+    identity = folder.stat()
+
+    def reject_marker_root(filesystem, directory):
+        if (directory.identity.device, directory.identity.inode) == (identity.st_dev, identity.st_ino):
+            return held_fs.HeldResult(error=held_fs.HeldFsError("IO_REFUSED", "store root flush refused"))
+        return original_flush(filesystem, directory)
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(PosixHeldFilesystem, "flush_directory", reject_marker_root)
+        with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+            media_store.declare_store(vault, name)
+    assert media_replicas.declared_store_id(vault, name) is None
+    assert media_store.declare_store(vault, name) == folder
+    assert media_replicas.declared_store_id(vault, name) == marker_id
+    assert marker.read_bytes() == media_store._store_marker(name, marker_id)
 
 
 def test_eviction_keeps_the_original_until_its_key_and_publication_are_ready(vault, selected_store):
@@ -320,7 +381,8 @@ def test_resumable_commit_retries_space_pressure_without_another_upload_request(
     assert (vault / observed["receipt"]["path"]).read_bytes() == data
 
 
-def test_an_expired_parked_commit_releases_space_without_another_upload(vault, selected_store, monkeypatch):
+@pytest.mark.parametrize("code", ["MEDIA_SPACE_BUSY", "SOURCE_DESTINATION_CHANGED"])
+def test_an_expired_parked_commit_releases_space_without_another_upload(vault, selected_store, monkeypatch, code):
     from exomem import media_capacity
 
     _configure(selected_store, vault, upload_floor_bytes=1_000)
@@ -341,7 +403,7 @@ def test_an_expired_parked_commit_releases_space_without_another_upload(vault, s
         assert room.reserved >= unit
 
     def busy(_part, _record):
-        raise upload_sessions.CommitFailed("MEDIA_SPACE_BUSY", "vault storage is busy", retryable=True)
+        raise upload_sessions.CommitFailed(code, "the original remains held", retryable=True)
 
     upload_sessions.start_commit(session, busy)
     record = session.store / f"{session.id}.json"

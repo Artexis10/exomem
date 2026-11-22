@@ -650,14 +650,14 @@ def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock, 
 
 
 def _schedule_reattempt(store: Path, session_id: str, committer: Committer, vault_root: Path | None) -> None:
-    """After a commit that a busy vault left retryable, start it again later, with no client.
+    """Retry an eligible park and retire any parked session at its expiry.
 
     A client that sent every byte has nothing more to send, and the vault's contention is the
-    server's to wait out. One timer waits per session, so a client that also reads the session
-    and starts a commit does not add a second one; the session's expiry ends the attempts.
+    server's to wait out. One timer owns the next retry or expiry. A park that needs a new
+    client decision still releases its bytes and reserved room when its session expires.
     """
     record = _read_record(store, session_id)
-    if record is None or record.get("state") != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if record is None or record.get("state") != RETRYABLE:
         return
     with _RUNNING_LOCK:
         running = _RUNNING.get(session_id)
@@ -670,7 +670,7 @@ def _schedule_reattempt(store: Path, session_id: str, committer: Committer, vaul
         except (KeyError, TypeError, ValueError):
             remaining = 0
         if remaining > 0:
-            wait = min(wait, remaining)
+            wait = min(wait, remaining) if record.get("code") in _REATTEMPT_CODES else remaining
         timer = threading.Timer(wait, _reattempt, args=(store, session_id, committer, vault_root))
         timer.name = f"upload-session-reattempt-{session_id[:8]}"
         timer.daemon = True
@@ -699,7 +699,10 @@ def _reattempt(store: Path, session_id: str, committer: Committer, vault_root: P
             log.warning("expired upload session cleanup will retry", exc_info=True)
         _schedule_reattempt(store, session_id, committer, vault_root)
         return
-    if record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if record["state"] != RETRYABLE:
+        return
+    if record.get("code") not in _REATTEMPT_CODES:
+        _schedule_reattempt(store, session_id, committer, vault_root)
         return
     # An empty context: nothing of the request that began the session, its principal included,
     # reaches the commit, which binds the transfer principal itself.

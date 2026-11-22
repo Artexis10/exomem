@@ -5060,6 +5060,7 @@ def _remove_owner_file(
     missing_ok: bool = False,
     expected_version: held_fs.FileVersion | None = None,
     expected_identity: held_fs.StableIdentity | None = None,
+    before_unlink: Callable[[], None] | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -5133,6 +5134,12 @@ def _remove_owner_file(
                             raise OSError("private remove target changed")
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private remove parent changed")
+                    if before_unlink is not None:
+                        before_unlink()
+                        if expected_version is not None and file.version() != expected_version:
+                            raise OSError("private remove target changed")
+                        if not _owner_directory_is_current(filesystem, parent):
+                            raise OSError("private remove parent changed")
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")

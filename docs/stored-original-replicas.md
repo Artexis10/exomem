@@ -31,6 +31,7 @@ The final part of a resumable upload reserves space for its commit stages. The s
 Hydration, signed-container extraction and each final storage copy use the same vault-volume budget.
 
 After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
+The service flushes the version directory and store root before relying on that copy for eviction.
 Eviction confirms the configured path still reaches that same copy immediately before removal.
 On personal installs, eviction follows the vault's free-space target. A bounded walk continues across passes.
 Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.

@@ -1378,7 +1378,7 @@ def _publish(
                         media_capacity.upload_room(allocation_root, device=parent.identity.device))
             try:
                 with capacity as room:
-                    if room is not None and room.floor:
+                    if room is not None:
                         room.require(len(body))
                     result = held_fs.publish_bytes(
                         filesystem,

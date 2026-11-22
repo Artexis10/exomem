@@ -371,16 +371,19 @@ class FilesystemStore:
             raise ValueError("invalid upload declaration")
         if self.max_object_bytes is not None and size > self.max_object_bytes:
             raise ObjectTooLarge(size, self.max_object_bytes)
-        with self._held() as filesystem:
-            with filesystem.parent(name, create=True, access="mutate").require() as parent:
-                held_fs.publish_bytes(filesystem, parent, version,
-                                      held_fs.Chunks(lambda: _declared_chunks(stream, size, sha256))).require()
-                filesystem.flush_directory(parent).require()
+        with (self._held() as filesystem,
+              filesystem.parent(".", access="flush").require() as root,
+              filesystem.parent(name, create=True, access="mutate").require() as parent):
+            held_fs.publish_bytes(filesystem, parent, version,
+                                  held_fs.Chunks(lambda: _declared_chunks(stream, size, sha256))).require()
+            filesystem.flush_directory(parent).require()
+            # The version belongs to the object directory, whose name belongs to the store root.
+            filesystem.flush_directory(root).require()
         return version
 
     @contextmanager
-    def _open_version(self, filesystem: held_fs.HeldFilesystem, name: str, version: str):
-        parent_result = filesystem.parent(name)
+    def _open_version(self, filesystem: held_fs.HeldFilesystem, name: str, version: str, *, durable: bool = False):
+        parent_result = filesystem.parent(name, access="flush" if durable else "read")
         if parent_result.error is not None and parent_result.error.code == "MISSING":
             raise ReplicaAbsent() from parent_result.error
         with parent_result.require() as parent:
@@ -388,12 +391,16 @@ class FilesystemStore:
             if found.error is not None and found.error.code == "MISSING":
                 raise ReplicaAbsent() from found.error
             with found.require() as file:
+                if durable:
+                    with filesystem.parent(".", access="flush").require() as root:
+                        filesystem.flush_directory(parent).require()
+                        filesystem.flush_directory(root).require()
                 yield file
 
     @contextmanager
-    def _held_version(self, name: str, version: str):
+    def _held_version(self, name: str, version: str, *, durable: bool = False):
         self._validate_locator(name, version)
-        with self._held() as filesystem, self._open_version(filesystem, name, version) as file:
+        with self._held() as filesystem, self._open_version(filesystem, name, version, durable=durable) as file:
             yield filesystem, file
 
     @contextmanager
@@ -439,7 +446,8 @@ class FilesystemStore:
     def hold_verified(self, reference: StoredObject) -> Iterator[_StoredVersionWitness]:
         """Keep the checked version open and yield its immutable identity."""
         name, version = reference.object, reference.version
-        with self._held_version(name, version) as (filesystem, file), filesystem.parent(".").require() as root:
+        with (self._held_version(name, version, durable=True) as (filesystem, file),
+              filesystem.parent(".").require() as root):
             before = file.version()
             proof = self._head_held(file, before, name, version, expected_size=reference.ciphertext_size)
             if proof.condemned:
@@ -608,16 +616,16 @@ def _declare_held_store(
                 or media_bindings.source_checkpoint(vault) != checkpoint or _settings(vault) != config
                 or media_replicas.declared_store_id(vault, name) != recorded or _marker_in(filesystem) != marker):
             raise MediaStoreError(STORE_BUSY_CODE, "the vault or store changed while declaring it; retry")
-        if marker is None:
-            store_id = uuid.uuid4().hex
-            data = _store_marker(name, store_id)
-            with filesystem.parent(".", access="flush").require() as parent:
+        with filesystem.parent(".", access="flush").require() as parent:
+            if marker is None:
+                store_id = uuid.uuid4().hex
+                data = _store_marker(name, store_id)
                 held_fs.publish_bytes(filesystem, parent, STORE_MARKER, data).require()
-                filesystem.flush_directory(parent).require()
-            marker = _marker_in(filesystem)
-            if marker is None or marker.get("id") != store_id:
-                raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the declared marker could not be confirmed")
-        with _hold_store_root(folder) as named:
+                marker = _marker_in(filesystem)
+                if marker is None or marker.get("id") != store_id:
+                    raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the declared marker could not be confirmed")
+            filesystem.flush_directory(parent).require()
+        with held_fs._backend().acquire(folder, capability=filesystem.capabilities).require() as named:
             if (reserved_paths._identity_key(named.root_identity) != reserved_paths._identity_key(filesystem.root_identity)
                     or _marker_in(named) != marker):
                 raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the named store changed during declaration")
@@ -3598,10 +3606,43 @@ def _eviction_store_wait(
     return None
 
 
-def _evict_one(vault: Path, path: Path) -> str:
+@dataclass(frozen=True, slots=True)
+class _DailyEviction:
+    config: dict[str, object]
+    low_water: float
+
+    def below_target(self, vault: Path) -> bool:
+        usage = shutil.disk_usage(vault)
+        return usage.used <= usage.total * self.low_water
+
+
+class _EvictionRefused(Exception):
+    def __init__(self, outcome: str) -> None:
+        self.outcome = outcome
+        super().__init__(outcome)
+
+
+def _personal_unlink_fence(
+    vault: Path, conn: sqlite3.Connection, config: dict[str, object],
+    witnesses: Sequence[_StoredVersionWitness], *, daily: _DailyEviction | None,
+) -> None:
+    if (waiting := _eviction_store_wait(vault, conn, witnesses)) is not None:
+        raise _EvictionRefused(waiting)
+    if originals.configuration(vault) != config:
+        raise _EvictionRefused(POLICY_CHANGED)
+    if daily is not None and daily.below_target(vault):
+        raise _EvictionRefused(BELOW_TARGET)
+
+
+def _evict_one(vault: Path, path: Path, *, daily: _DailyEviction | None = None) -> str:
     from . import media_replicas
 
-    config = _settings(vault)
+    if daily is not None:
+        if originals.configuration(vault) != daily.config:
+            return POLICY_CHANGED
+        if daily.below_target(vault):
+            return BELOW_TARGET
+    config = daily.config if daily is not None else _settings(vault)
     if not _may_evict(config):
         return KEPT
     ledger = MediaJobStore(vault)
@@ -3610,7 +3651,7 @@ def _evict_one(vault: Path, path: Path) -> str:
         return snapshot
     personal = _personal_install()
     if snapshot.local_path is not None:
-        return _evict_shared(vault, snapshot, ledger, config, personal=personal)
+        return _evict_shared(vault, snapshot, ledger, config, personal=personal, daily=daily)
     bounds = media_capacity.bounds_for(config, vault)
     assert snapshot.binary_size is not None and snapshot.reference is not None
     if bounds is None or not bounds.hydration_fits(snapshot.binary_size):
@@ -3634,7 +3675,7 @@ def _evict_one(vault: Path, path: Path) -> str:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 if personal and originals.configuration(vault) != config:
-                    return KEPT
+                    return POLICY_CHANGED
                 relative = ledger._relative(path)
                 _clear_dead_access(conn, ledger, conn.execute(
                     "SELECT * FROM media_access WHERE binary_rel = ?", (relative,)).fetchall())
@@ -3664,10 +3705,16 @@ def _evict_one(vault: Path, path: Path) -> str:
                     with filesystem.parent(target.parent.as_posix(), access="mutate").require() as parent:
                         with filesystem.file(parent, target.name, access="mutate").require() as file:
                             if _identity(vault, path) != identity:
-                                conn.rollback()
                                 return KEPT
-                            if witness is not None and (waiting := _eviction_store_wait(vault, conn, (witness,))) is not None:
-                                return waiting
+                            if witness is not None:
+                                if _version_identity(file.version()) != identity:
+                                    return KEPT
+                                try:
+                                    _personal_unlink_fence(vault, conn, config, (witness,), daily=daily)
+                                except _EvictionRefused as error:
+                                    return error.outcome
+                                if _version_identity(file.version()) != identity or _identity(vault, path) != identity:
+                                    return KEPT
                             filesystem.unlink(file).require()
                             filesystem.flush_directory(parent).require()
                 conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (relative,))
@@ -3678,7 +3725,7 @@ def _evict_one(vault: Path, path: Path) -> str:
 
 
 def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore, config: dict[str, object], *,
-                  personal: bool) -> str:
+                  personal: bool, daily: _DailyEviction | None) -> str:
     """Confirm distinct own recovery versions outside the guard; unlink once under physical pin exclusion."""
     from . import media_bindings, original_pool
 
@@ -3721,7 +3768,7 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
         with _guard(vault, "media_store_evict_shared"), closing(ledger._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             if personal and originals.configuration(vault) != config:
-                return KEPT
+                return POLICY_CHANGED
             _clear_dead_access(conn, ledger, conn.execute(
                 "SELECT * FROM media_access WHERE object_key = ?", (key,)).fetchall())
             try:
@@ -3737,9 +3784,14 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
                 return KEPT
             if personal and (waiting := _custody_wait(conn, config, latest.references)) is not None:
                 return waiting
-            if (waiting := _eviction_store_wait(vault, conn, tuple(witnesses))) is not None:
-                return waiting
-            original_pool.evict_object(vault, facts.sha256, expected_version=version)
+            def before_unlink() -> None:
+                _personal_unlink_fence(vault, conn, config, tuple(witnesses), daily=daily)
+
+            try:
+                original_pool.evict_object(vault, facts.sha256, expected_version=version,
+                                           before_unlink=before_unlink if personal else None)
+            except _EvictionRefused as error:
+                return error.outcome
             conn.execute("UPDATE media_cache SET evicted = 1 WHERE binary_rel = ?", (key,))
             conn.commit()
             return EVICTED
@@ -3749,6 +3801,7 @@ def _evict_shared(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobStore
 DEMAND_LEASE_SECONDS = 15 * 60
 # The personal worker can continue after one physical object's proof exceeds its handle budget.
 EVICTION_PROOF_LIMIT = "binding_proof_limit"
+POLICY_CHANGED, BELOW_TARGET = "policy_changed", "below_target"
 # Each read takes at most this many candidates, so a pass never loads the whole cache at once.
 _EVICTION_BATCH = 64
 # Unread originals first, those with no pending job before those with one, each largest first;
@@ -4157,6 +4210,8 @@ def _personal_eviction_pass(
     high_water: float, low_water: float,
 ) -> tuple[int, str | None]:
     from . import media_replicas
+    from .cli_ops import OpError
+    from .writer_lease import get_manager
 
     with closing(ledger._connect(readonly=True)) as conn:
         recorded = _eviction_status_record(conn, _PERSONAL_CURSOR, config) or {}
@@ -4166,26 +4221,33 @@ def _personal_eviction_pass(
     except TypeError:
         progress = _PersonalEvictionProgress()
     starting = vars(progress).copy()
-    used = shutil.disk_usage(vault).used
-    progress.pressure = used > (low_water if progress.pressure else high_water)
+    usage = shutil.disk_usage(vault)
+    progress.pressure = usage.used > usage.total * (low_water if progress.pressure else high_water)
+    daily = _DailyEviction(config, low_water)
     deadline = time.monotonic() + _PERSONAL_EVICTION_SECONDS
     count = 0
     waiting = None
     try:
         if not progress.pressure:
-            return 0, "below_target"
+            waiting = BELOW_TARGET
+            return 0, waiting
         page = _personal_candidate_page(ledger, parameters, progress.after)
         for index, row in enumerate(page[:_EVICTION_BATCH]):
             if index and time.monotonic() >= deadline:
                 return count, waiting
             if row["logical_rel"] is not None:
-                if shutil.disk_usage(vault).used <= low_water:
-                    return count, "below_target"
-                outcome = _evict_one(vault, vault / row["logical_rel"])
+                outcome = _evict_one(vault, vault / row["logical_rel"], daily=daily)
+                if outcome == POLICY_CHANGED:
+                    return count, None
+                if outcome == BELOW_TARGET:
+                    waiting = BELOW_TARGET
+                    return count, waiting
                 if outcome == UNAVAILABLE:
-                    return count, "store_unavailable"
+                    waiting = "store_unavailable"
+                    return count, waiting
                 if outcome == BUSY:
-                    return count, "store_busy"
+                    waiting = "store_busy"
+                    return count, waiting
                 if outcome == media_replicas.KEY_NOT_EXPORTED or (
                     outcome in (media_replicas.SETTLING, EVICTION_PROOF_LIMIT) and waiting is None
                 ):
@@ -4193,18 +4255,26 @@ def _personal_eviction_pass(
                     progress.saw_wait = True
                 count += outcome == EVICTED
             progress.after = row["physical_rel"]
-        if shutil.disk_usage(vault).used <= low_water:
-            return count, "below_target"
+        if daily.below_target(vault):
+            waiting = BELOW_TARGET
+            return count, waiting
         if len(page) <= _EVICTION_BATCH:
             if not progress.saw_wait:
                 waiting = "nothing_idle"
             progress.restart_scan()
         return count, waiting
     finally:
-        progress.pressure = progress.pressure and shutil.disk_usage(vault).used > low_water
-        if starting != vars(progress):
-            with closing(ledger._connect()) as conn, conn:
-                _save_eviction_status(conn, _PERSONAL_CURSOR, config, **vars(progress))
+        # The owner commands use the same boundary. These local ledger rows do not advance the canonical generation.
+        with (suppress(*_LEDGER_UNREADABLE, ValueError, OpError),
+              get_manager().projection_guard(vault, operation="media_personal_eviction_status"),
+              closing(ledger._connect()) as conn, conn):
+            conn.execute("BEGIN IMMEDIATE")
+            if originals.configuration(vault) == config:
+                progress.pressure = progress.pressure and not daily.below_target(vault)
+                if starting != vars(progress):
+                    _save_eviction_status(conn, _PERSONAL_CURSOR, config, **vars(progress))
+                _save_eviction_status(conn, _PERSONAL_WAIT, config, reason=waiting,
+                                      observed_at=datetime.now(UTC).isoformat())
 
 
 def personal_eviction_status(conn: sqlite3.Connection, config: dict[str, object]) -> dict[str, object] | None:
@@ -4242,15 +4312,8 @@ def evict_to_target(vault: Path) -> int:
     config = originals.configuration(vault)
     if config is None or not _may_evict(config):
         return 0
-    personal = _personal_install()
-    waiting = None
-    try:
-        count, waiting = _eviction_pass(vault, config, personal=personal)
-        return count
-    finally:
-        if personal:
-            with suppress(*_LEDGER_UNREADABLE), closing(MediaJobStore(vault)._connect()) as conn, conn:
-                _save_eviction_status(conn, _PERSONAL_WAIT, config, reason=waiting, observed_at=datetime.now(UTC).isoformat())
+    count, _ = _eviction_pass(vault, config, personal=_personal_install())
+    return count
 
 
 def _eviction_pass(vault: Path, config: dict[str, object], *, personal: bool) -> tuple[int, str | None]:
@@ -4280,7 +4343,7 @@ def _eviction_pass(vault: Path, config: dict[str, object], *, personal: bool) ->
     if personal:
         return _personal_eviction_pass(
             vault, ledger, config, parameters,
-            high_water=usage.total * target, low_water=usage.total * (target - margin),
+            high_water=target, low_water=target - margin,
         )
     demand = _live_demand(ledger)
 

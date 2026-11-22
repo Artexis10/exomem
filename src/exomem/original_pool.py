@@ -373,8 +373,11 @@ def remove_stage(vault: Path, object_key: str, name: str, identity: held_fs.Stab
         reserved_paths._remove_owner_stage(vault, (vault / object_key).with_name(name), DESCRIPTOR_ID, identity)
 
 
-def evict_object(vault: Path, digest: str, *, expected_version: held_fs.FileVersion) -> None:
+def evict_object(
+    vault: Path, digest: str, *, expected_version: held_fs.FileVersion,
+    before_unlink: Callable[[], None] | None = None,
+) -> None:
     """Remove one verified physical version after the ledger proves every binding recoverable."""
     with reserved_paths._subsystem_authority_scope(OWNER):
         reserved_paths._remove_owner_file(vault, object_path(vault, digest), DESCRIPTOR_ID,
-                                         expected_version=expected_version)
+                                         expected_version=expected_version, before_unlink=before_unlink)
