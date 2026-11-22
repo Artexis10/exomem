@@ -251,6 +251,7 @@
         "b2Endpoint": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
         "cataloguePrewarm": {"type": "boolean", "default": false},
+        "resticVerificationCellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}, "default": []},
         "catalogueBuildTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 1800},
         "catalogueBuildResources": {
           "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
