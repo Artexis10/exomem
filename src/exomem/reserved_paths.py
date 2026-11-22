@@ -4637,6 +4637,7 @@ def _stage_owner_chunks(
     vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
     *, expected_sha256: str, expected_size: int, temporary_name: str | None = None,
     on_created: Callable[[held_fs.StableIdentity], None] | None = None,
+    meter_allocation: bool = False,
 ) -> Iterator[StagedOwnerFile]:
     """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
     root = Path(os.path.abspath(vault_root))
@@ -4680,7 +4681,17 @@ def _stage_owner_chunks(
                     digest.update(part)
                     yield part
 
-            filesystem.write(writable, held_fs.Chunks(chunks)).require()
+            parts = chunks()
+            if meter_allocation:
+                from . import media_capacity
+
+                parts = media_capacity.metered_chunks(
+                    root, os.fstat(writable.descriptor).st_dev, parts, upload_size=expected_size,
+                )
+            try:
+                filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
+            finally:
+                parts.close()
             if size != expected_size or digest.hexdigest() != expected_sha256:
                 raise ValueError("private original differs from its declared bytes")
             version = writable.version()

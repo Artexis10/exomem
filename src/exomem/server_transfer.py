@@ -18,7 +18,7 @@ from urllib.parse import quote
 import anyio
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import FormData, MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
@@ -36,7 +36,9 @@ from . import (
     cf_access,
     download_links,
     local_ingress,
+    media_capacity,
     media_store,
+    multipart_upload,
     originals,
     reserved_paths,
     upload_handoff,
@@ -347,7 +349,19 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     """
     # A lane token carries no caller identity. Every commit runs under the same transfer floor:
     # the first attempt, a re-attempt by the server's own timer and startup recovery alike.
-    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
+    from .cli_ops import OpError
+
+    with (principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")),
+          media_capacity.commit_credit(record["id"])):
+        try:
+            if media_capacity.upload_floor(vault_root) is not None:
+                copies = upload_sessions.commit_copy_count(vault_root, record["target"])
+                if copies:
+                    with media_capacity.upload_room(vault_root, reserve=True) as room:
+                        if room is not None:
+                            room.reserve_commit(record["length"], copies, incoming=0, offset=0)
+        except OpError as error:
+            raise upload_sessions.CommitFailed(error.code, error.message, retryable=True) from error
         return _commit_session(vault_root, part, record)
 
 
@@ -369,10 +383,10 @@ def _commit_session(vault_root: Path, part: Path, record: dict) -> dict:
             receipt = _commit_evidence_session(vault_root, part, record, manager, preserve_module)
     except archive_members.ArchiveError as exc:
         raise upload_sessions.CommitFailed(
-            exc.code, exc.reason, retryable=exc.code == archive_members.NO_SPACE
+            exc.code, exc.reason, retryable=exc.code in (archive_members.NO_SPACE, media_capacity.UPLOAD_SPACE_BUSY),
         ) from exc
     except preserve_module.PreserveError as exc:
-        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+        raise upload_sessions.CommitFailed(exc.code, exc.reason, retryable=exc.code == media_capacity.UPLOAD_SPACE_BUSY) from exc
     except OpError as exc:
         error = error_dict(exc)
         raise upload_sessions.CommitFailed(error["code"], error["message"], retryable=True) from exc
@@ -424,7 +438,7 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
             else:
                 receipt = result.as_dict()
     except preserve_module.PreserveError as exc:
-        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+        raise upload_sessions.CommitFailed(exc.code, exc.reason, retryable=exc.code == media_capacity.UPLOAD_SPACE_BUSY) from exc
     return receipt
 
 
@@ -748,6 +762,7 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
 async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> tuple[int, dict]:
     """The status and body of one claimed ticket's send: 201 with the held upload, or a refusal."""
     from . import held_uploads
+    from .cli_ops import OpError, http_status_for
 
     maximum = ticket["max_bytes"]
     received = 0
@@ -775,7 +790,9 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         if refused is not None:
             return 413, refused
     try:
-        async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
+        async with multipart_upload.form(
+            bounded, vault_root, max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES,
+        ) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
             if (str(form.get("lane") or "") != ticket["lane"]
                     or _flag(str(form.get("hold") or "")) is not True
@@ -807,9 +824,11 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         return 201, held
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
+    except OpError as exc:
+        if exc.code != media_capacity.UPLOAD_SPACE_BUSY:
+            raise
+        return http_status_for(exc.code), {"code": exc.code, "reason": exc.message}
     except held_uploads.HeldUploadError as exc:
-        from .cli_ops import http_status_for
-
         return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)), {
             "code": exc.code, "reason": exc.reason,
         }
@@ -1042,8 +1061,7 @@ def register_transfer_routes(
                 {"code": "UNAUTHORIZED", "reason": "missing or invalid upload credential"},
                 status_code=401,
             )
-        from .cli_ops import OpError, error_dict, http_status_for
-        from .writer_lease import get_manager, record_caller_refusal
+        from .cli_ops import OpError, http_status_for
 
         max_bytes = (
             config.local_upload_max_bytes
@@ -1059,7 +1077,8 @@ def register_transfer_routes(
             )
         try:
             # `max_part_size` bounds form fields only; the copy loops bound the file.
-            form = await request.form(max_part_size=config.upload_max_bytes)
+            async with multipart_upload.form(request, vault_root, max_part_size=config.upload_max_bytes) as form:
+                return await _accept_upload(request, form, max_bytes)
         except MultiPartException as exc:
             return JSONResponse(
                 {
@@ -1069,6 +1088,15 @@ def register_transfer_routes(
                 },
                 status_code=413,
             )
+        except OpError as exc:
+            if exc.code != media_capacity.UPLOAD_SPACE_BUSY:
+                raise
+            return JSONResponse({"code": exc.code, "reason": exc.message}, status_code=http_status_for(exc.code))
+
+    async def _accept_upload(request: Request, form: FormData, max_bytes: int) -> JSONResponse:
+        from .cli_ops import OpError, error_dict, http_status_for
+        from .writer_lease import get_manager, record_caller_refusal
+
         upload = form.get("file")
         if not hasattr(upload, "read"):
             return JSONResponse(

@@ -1560,13 +1560,13 @@ def test_eviction_of_a_shared_original_whose_pointer_is_absent_or_condemned_quar
     if failure == "absent":
         (Path(values["root"]) / reference.object / reference.version).unlink()
     else:
-        head = media_store.FilesystemStore.head
+        head = media_store.FilesystemStore._head_held
 
-        def condemned(self, name: str, version: str, **options):
-            found = head(self, name, version, **options)
-            return found if found is None else dataclasses.replace(found, condemned=True)
+        def condemned(self, file, before, name: str, version: str, **options):
+            found = head(self, file, before, name, version, **options)
+            return dataclasses.replace(found, condemned=True)
 
-        monkeypatch.setattr(media_store.FilesystemStore, "head", condemned)
+        monkeypatch.setattr(media_store.FilesystemStore, "_head_held", condemned)
 
     assert not media_store.evict(vault, path)
 
@@ -1610,13 +1610,13 @@ def test_eviction_of_a_shared_original_needs_proof_for_the_other_filings_version
 def _quarantined_while_the_store_answers(vault: Path, relative: str, reference: originals.StoredObject,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """A check finds the pointer damaged at the moment eviction asks the store about it: the finding lands during the HEAD."""
-    head = media_store.FilesystemStore.head
+    head = media_store.FilesystemStore._head_held
 
-    def answering_after_a_finding(store, name, version, **options):
+    def answering_after_a_finding(store, file, before, name, version, **options):
         media_replicas.quarantine(vault, relative, reference, level=media_replicas.CONTENT, failure="digest_mismatch")
-        return head(store, name, version, **options)
+        return head(store, file, before, name, version, **options)
 
-    monkeypatch.setattr(media_store.FilesystemStore, "head", answering_after_a_finding)
+    monkeypatch.setattr(media_store.FilesystemStore, "_head_held", answering_after_a_finding)
 
 
 def test_eviction_keeps_the_local_bytes_when_the_pointer_is_quarantined_while_the_store_answers(

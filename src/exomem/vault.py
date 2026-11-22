@@ -30,7 +30,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -2903,7 +2903,7 @@ class _BatchWorkspace:
                 iterator.close()
 
     def create_artifact(
-        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None,
+        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None, allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         self.recheck()
         if custody is not None:
@@ -2959,7 +2959,13 @@ class _BatchWorkspace:
             if custody is not None:
                 assert held_file is not None
                 custody.temporary.bind(name, held_file)
-            _write_all(descriptor, content)
+            from . import media_capacity
+
+            with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                  if allocation_vault is not None else nullcontext()) as room:
+                if room is not None:
+                    room.require(len(content))
+                _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.content_bound = True
@@ -2984,6 +2990,7 @@ class _BatchWorkspace:
         expected_size: int,
         expected_hash: str,
         custody: _ArtifactCustody | None = None,
+        allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         """Copy a reviewed seekable stream into one held private stage."""
 
@@ -3066,6 +3073,9 @@ class _BatchWorkspace:
             written = 0
             os.lseek(descriptor, 0, os.SEEK_SET)
             os.ftruncate(descriptor, 0)
+            from . import media_capacity
+
+            meter = allocation_vault is not None and media_capacity.upload_floor(allocation_vault) is not None
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -3080,7 +3090,11 @@ class _BatchWorkspace:
                         "PATH_GUARD_CONTENT", "binary batch size changed"
                     )
                 digest.update(chunk)
-                _append_all(descriptor, chunk)
+                with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                      if meter and allocation_vault is not None else nullcontext()) as room:
+                    if room is not None:
+                        room.require(len(chunk), offset=written - len(chunk), upload_size=expected_size)
+                    _append_all(descriptor, chunk)
             if written != expected_size or digest.hexdigest() != expected_hash:
                 raise PathGuardError(
                     "PATH_GUARD_CONTENT", "binary batch content changed"
@@ -5327,6 +5341,7 @@ class PlannedWrite:
     guard: PathGuard | None = None
     expected_hash: str | None = None
     ensure_directories: tuple[Path, ...] = ()
+    media_allocation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -6374,6 +6389,7 @@ def _stage_binary_artifact(
     *,
     adoptable: bool,
     custody: _ArtifactCustody | None = None,
+    allocation_vault: Path | None = None,
 ) -> _WorkspaceArtifact:
     """Adopt a staged upload into the workspace by rename, or copy the stream when the stage cannot be adopted."""
     if content.staged is not None:
@@ -6394,6 +6410,7 @@ def _stage_binary_artifact(
         content.stream,
         expected_size=content.size,
         expected_hash=content.sha256,
+        allocation_vault=content.staged.vault_root if content.staged is not None else allocation_vault,
         **({"custody": custody} if custody is not None else {}),
     )
 
@@ -6677,9 +6694,11 @@ def _batch_atomic_write_locked(
             rollback_ancestry.append((ancestry_root, ancestry_guard))
             custody = _payload_custody.stage(write, workspace, False) if _payload_custody is not None else None
             custody_options = {"custody": custody} if custody is not None else {}
+            allocation_vault = vault_root if write.media_allocation else None
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
-                    f"stage-{index}.tmp", write.content.encode("utf-8"), **custody_options,
+                    f"stage-{index}.tmp", write.content.encode("utf-8"),
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             elif isinstance(write.content, PreparedBinaryContent):
                 if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
@@ -6689,7 +6708,7 @@ def _batch_atomic_write_locked(
                     )
                 artifact = _stage_binary_artifact(
                     workspace, f"stage-{index}.tmp", write.content, adoptable=_payload_custody is None,
-                    **custody_options,
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
                 raise PathGuardError(

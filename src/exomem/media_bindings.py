@@ -512,29 +512,44 @@ def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = Fals
                         yield rel, entry.markdown
 
 
-def store_role_conflict(vault: Path, selected: str, target: str) -> str | None:
-    """Read the canonical pointer roles, including companions in Trash or away from their original."""
+def _store_bindings(vault: Path) -> Iterator[tuple[str | None, tuple[str, ...]]]:
+    """Read canonical stored-object and replica names, including retired and moved companions."""
     from .vault import parse_frontmatter
 
     with closing(_pages(vault, headers_only=True)) as pages:
         for _path, data in pages:
             fields = parse_frontmatter(data.decode("utf-8"), custody=True)[0]
-            if target != selected and "stored_object" in fields:
+            primary = None
+            if "stored_object" in fields:
                 pointer = originals.stored_reference(fields["stored_object"])
                 if pointer is None:
                     raise ValueError("a stored original reference cannot be read")
-                if pointer.store == selected:
-                    return "the selected store still serves a stored original"
+                primary = pointer.store
             replicas = fields.get("replicas", [])
             if not isinstance(replicas, list):
                 raise ValueError("a replica list cannot be read")
+            stores = []
             for raw in replicas:
                 replica = originals.stored_reference(raw)
                 if replica is None:
                     raise ValueError("a replica reference cannot be read")
-                if replica.store == target:
-                    return "the requested store already holds a replica"
+                stores.append(replica.store)
+            yield primary, tuple(stores)
+
+
+def store_role_conflict(vault: Path, selected: str, target: str) -> str | None:
+    with closing(_store_bindings(vault)) as bindings:
+        for primary, replicas in bindings:
+            if target != selected and primary == selected:
+                return "the selected store still serves a stored original"
+            if target in replicas:
+                return "the requested store already holds a replica"
     return None
+
+
+def store_is_bound(vault: Path, name: str) -> bool:
+    with closing(_store_bindings(vault)) as bindings:
+        return any(name == primary or name in replicas for primary, replicas in bindings)
 
 
 def source_checkpoint(vault: Path) -> tuple[int | None, int | None]:

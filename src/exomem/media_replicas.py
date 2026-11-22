@@ -1155,9 +1155,16 @@ def declared_store_ids(vault: Path, stores: Iterable[str]) -> dict[str, str]:
 
 
 def record_store_id(vault: Path, store: str, store_id: str) -> None:
+    from .media_store import MediaStoreError
+
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("INSERT INTO media_store_ids(store, store_id) VALUES (?, ?) "
-                     "ON CONFLICT(store) DO UPDATE SET store_id = excluded.store_id", (store, store_id))
+        same = conn.execute(
+            "INSERT INTO media_store_ids(store, store_id) VALUES (?, ?) "
+            "ON CONFLICT(store) DO UPDATE SET store_id = excluded.store_id "
+            "WHERE media_store_ids.store_id = excluded.store_id RETURNING store_id", (store, store_id),
+        ).fetchone()
+        if same is None:
+            raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the declared store identity changed")
 
 
 # --- status -----------------------------------------------------------------------------------------

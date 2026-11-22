@@ -287,7 +287,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
 
     from test_media_store import _offload
 
-    from exomem import add, indexes, media_store
+    from exomem import add, indexes, media_replicas, media_store
 
     root = _served_vault(tmp_path / "served", monkeypatch)
     shutil.copytree(vault / "Knowledge Base/_Schema", root / "Knowledge Base/_Schema", dirs_exist_ok=True)
@@ -309,6 +309,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
                     source_identity={"system": "archive", "record_id": "observation", "revision": "one"})
             path = root / saved.artifact_path
             _offload(root, path)
+            media_replicas.confirm_key_export(root)
             assert media_store.evict(root, path)
             yield started, saved.ref, path, expected, saved.path
         finally:

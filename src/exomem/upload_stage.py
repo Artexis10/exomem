@@ -176,21 +176,19 @@ def stage(
     lock = FileLock(lock_path, timeout=_LOCK_WAIT_SECONDS, thread_local=False)
     try:
         lock.acquire()
-        with media_capacity.upload_room(vault_root) as room:
+        with media_capacity.upload_room(vault_root, device=root.stat().st_dev) as room:
             staged = _copy(vault_root, part, stream, limit=limit, too_large=too_large, room=room)
         with contextlib.ExitStack() as held:
             if pooled:
-                with media_capacity.upload_room(vault_root) as room:
-                    def chunks() -> Iterator[bytes]:
-                        if room is not None:
-                            room.require(staged.size)
-                        with part.open("rb") as source:
-                            while chunk := source.read(_CHUNK):
-                                yield chunk
+                def chunks() -> Iterator[bytes]:
+                    with part.open("rb") as source:
+                        while chunk := source.read(_CHUNK):
+                            yield chunk
 
-                    staged.pool = held.enter_context(
-                        original_pool.prepare(vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks))
-                    )
+                staged.pool = held.enter_context(original_pool.prepare(
+                    vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks),
+                    meter_allocation=media_capacity.upload_floor(vault_root) is not None,
+                ))
             yield staged
     finally:
         try:

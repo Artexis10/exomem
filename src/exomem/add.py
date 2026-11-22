@@ -364,7 +364,7 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
     winner under the canonical boundary. A `prepared` stage that the caller made before the
     boundary (`upload_stage.stage(pooled=True)`, which also owns its pin) is published as it is.
     """
-    from . import held_fs, original_pool
+    from . import held_fs, media_capacity, original_pool
 
     def chunks():
         stream.seek(0)
@@ -372,7 +372,10 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
             yield chunk
 
     if prepared is None:
-        prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
+        prepared = stack.enter_context(original_pool.prepare(
+            vault_root, digest, size, held_fs.Chunks(chunks),
+            meter_allocation=media_capacity.upload_floor(vault_root) is not None,
+        ))
 
     def publish() -> None:
         try:

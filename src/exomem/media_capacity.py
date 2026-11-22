@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import shutil
+import sqlite3
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 log = logging.getLogger(__name__)
 
@@ -30,53 +34,193 @@ AGE_HEADER_BYTES = 1024
 # The store policy's default volume fraction (D12, choice 3); cellctl may render another.
 DEFAULT_VOLUME_FRACTION = 0.25
 UPLOAD_SPACE_BUSY = "MEDIA_SPACE_BUSY"
+_COMMIT_CREDIT: ContextVar[str | None] = ContextVar("upload_commit_credit", default=None)
 
 
 @dataclass(frozen=True, slots=True)
 class UploadRoom:
     free: int
     floor: int
+    allocation_unit: int
+    credits: sqlite3.Connection | None = None
+    reserved: int = 0
 
-    def require(self, needed: int, *, upload_size: int | None = None) -> None:
+    def allocated(self, size: int) -> int:
+        return -(-size // self.allocation_unit) * self.allocation_unit
+
+    def require(self, needed: int, *, upload_size: int | None = None, offset: int = 0) -> None:
         """Fence the bytes still to allocate on the vault's volume."""
-        if self.free - needed < self.floor:
+        physical = self.allocated(offset + needed) - self.allocated(offset)
+        self._require_physical(physical, needed if upload_size is None else upload_size)
+
+    def reserve_commit(self, length: int, copies: int, *, incoming: int, offset: int) -> None:
+        """Reserve this session's known simultaneous commit copies before its last part grows."""
+        session = _COMMIT_CREDIT.get()
+        assert self.credits is not None and session is not None
+        peak = self.allocated(length) * copies
+        growth = self.allocated(offset + incoming) - self.allocated(offset)
+        self._require_physical(peak + growth, length)
+        _set_credit(self.credits, session, peak)
+
+    def _require_physical(self, physical: int, size: int) -> None:
+        if physical > 0 and self.free - self.reserved - physical < self.floor:
             from .cli_ops import OpError
 
-            size = needed if upload_size is None else upload_size
+            held = f" Other uploads have reserved {self.reserved:,} bytes." if self.reserved else ""
             raise OpError(UPLOAD_SPACE_BUSY,
-                          f"The vault has {self.free:,} free bytes and a {self.floor:,}-byte floor. "
-                          f"The {size:,}-byte upload needs {needed:,} bytes of room. Retry after eviction frees space.",
+                          f"The vault has {self.free:,} free bytes and a {self.floor:,}-byte floor.{held} "
+                          f"The {size:,}-byte original needs {physical:,} bytes of allocation. Retry after eviction frees space.",
                           "Retry after eviction frees space.")
 
 
-@contextmanager
-def upload_room(vault: Path) -> Iterator[UploadRoom | None]:
-    """Serialize configured vault-volume allocations while checking the actual free space."""
+def upload_floor(vault: Path) -> int | None:
+    """The configured physical vault-volume floor, if the owner set one."""
     from . import originals
 
     config = originals.configuration(vault)
     floor = config.get("upload_floor_bytes") if config is not None else None
-    if floor is None:
+    if floor is not None and (type(floor) is not int or floor < 0):
+        raise ValueError("upload_floor_bytes must be a nonnegative integer")
+    return floor
+
+
+@contextmanager
+def upload_room(vault: Path, *, device: int | None = None, reserve: bool = False) -> Iterator[UploadRoom | None]:
+    """Serialize configured vault-volume allocations while checking the actual free space."""
+    floor = upload_floor(vault)
+    if floor is None or device is not None and device != vault.stat().st_dev:
         yield None
         return
-    if type(floor) is not int or floor < 0:
-        raise ValueError("upload_floor_bytes must be a nonnegative integer")
 
+    from .state_paths import ensure_vault_state_dir
+
+    directory = ensure_vault_state_dir(vault)
+    credits_path = directory / "upload-commit-credit.sqlite"
+    with _allocation_lock(directory):
+        store = closing(_open_credits(credits_path, create=reserve)) if reserve or credits_path.exists() else nullcontext()
+        with store as credits:
+            reserved = 0
+            if credits is not None:
+                reserved = credits.execute("SELECT peak FROM credit_total").fetchone()[0]
+                own = _credit_for(credits, _COMMIT_CREDIT.get())
+                reserved -= own
+            yield UploadRoom(shutil.disk_usage(vault).free, floor, _allocation_unit(vault), credits, reserved)
+
+
+@contextmanager
+def _allocation_lock(directory: Path) -> Iterator[None]:
     from filelock import FileLock, Timeout
 
     from .cli_ops import OpError
-    from .state_paths import ensure_vault_state_dir
 
-    lock = FileLock(ensure_vault_state_dir(vault) / "upload-space.lock", timeout=5)
     try:
-        lock.acquire()
+        with FileLock(directory / "upload-space.lock", timeout=5):
+            yield
     except Timeout as error:
-        raise OpError(UPLOAD_SPACE_BUSY, "Another upload is using the vault's disk allocation. Retry shortly.",
-                      "Retry shortly.") from error
+        raise OpError(UPLOAD_SPACE_BUSY, "Another write is allocating vault space. Retry shortly.", "Retry shortly.") from error
+
+
+def _open_credits(path: Path, *, create: bool = False) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=5)
+    if create or path.stat().st_size == 0:
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("CREATE TABLE IF NOT EXISTS credits (session TEXT PRIMARY KEY, peak INTEGER NOT NULL)")
+                conn.execute("CREATE TABLE IF NOT EXISTS credit_total (id INTEGER PRIMARY KEY CHECK(id=1), peak INTEGER NOT NULL)")
+                conn.execute("INSERT OR IGNORE INTO credit_total VALUES (1, 0)")
+        except BaseException:
+            conn.close()
+            raise
+    return conn
+
+
+def _credit_for(conn: sqlite3.Connection, session: str | None) -> int:
+    row = conn.execute("SELECT peak FROM credits WHERE session = ?", (session,)).fetchone()
+    return 0 if row is None else row[0]
+
+
+def _set_credit(conn: sqlite3.Connection, session: str, peak: int) -> None:
+    previous = _credit_for(conn, session)
+    if peak == previous:
+        return
+    with conn:
+        if peak:
+            conn.execute("INSERT INTO credits VALUES (?, ?) ON CONFLICT(session) DO UPDATE SET peak=excluded.peak",
+                         (session, peak))
+        else:
+            conn.execute("DELETE FROM credits WHERE session = ?", (session,))
+        conn.execute("UPDATE credit_total SET peak = peak + ? WHERE id=1", (peak - previous,))
+
+
+@contextmanager
+def commit_credit(session: str) -> Iterator[None]:
+    token = _COMMIT_CREDIT.set(session)
     try:
-        yield UploadRoom(shutil.disk_usage(vault).free, floor)
+        yield
     finally:
-        lock.release()
+        _COMMIT_CREDIT.reset(token)
+
+
+def release_commit_credit(vault: Path, session: str) -> None:
+    """Retire the reservation after the session's held bytes are gone."""
+    from .state_paths import vault_state_dir
+
+    directory = vault_state_dir(vault)
+    path = directory / "upload-commit-credit.sqlite"
+    if path.exists():
+        with _allocation_lock(directory), closing(_open_credits(path)) as conn:
+            _set_credit(conn, session, 0)
+
+
+def _allocation_unit(vault: Path) -> int:
+    if hasattr(os, "statvfs"):
+        geometry = os.statvfs(vault)
+        return geometry.f_frsize or geometry.f_bsize
+    from ctypes import WinDLL, WinError, byref, create_unicode_buffer, c_wchar_p
+    from ctypes.wintypes import DWORD
+
+    kernel = WinDLL("kernel32", use_last_error=True)
+    root = create_unicode_buffer(32768)
+    if not kernel.GetVolumePathNameW(c_wchar_p(str(vault.resolve())), root, len(root)):
+        raise WinError()
+    sectors, bytes_per_sector, free, total = (DWORD() for _ in range(4))
+    if not kernel.GetDiskFreeSpaceW(root, byref(sectors), byref(bytes_per_sector), byref(free), byref(total)):
+        raise WinError()
+    return sectors.value * bytes_per_sector.value
+
+
+def metered_chunks(vault: Path, device: int, chunks: Iterator[bytes], *, upload_size: int | None = None) -> Iterator[bytes]:
+    """Keep the allocation lock through one synchronous write, with no read or network wait under it."""
+    offset = 0
+    for chunk in chunks:
+        with upload_room(vault, device=device) as room:
+            if room is not None:
+                room.require(len(chunk), offset=offset, upload_size=upload_size)
+            yield chunk
+        offset += len(chunk)
+
+
+class MeteredSink:
+    def __init__(self, vault: Path, sink: BinaryIO, *, device: int, size: int) -> None:
+        self.vault = vault
+        self.sink = sink
+        self.device = device
+        self.size = size
+        self.offset = 0
+
+    def write(self, chunk: bytes) -> int:
+        with upload_room(self.vault, device=self.device) as room:
+            if room is not None:
+                room.require(len(chunk), offset=self.offset, upload_size=self.size)
+            count = self.sink.write(chunk)
+            if room is not None:
+                self.sink.flush()
+        self.offset += count
+        return count
+
+    def flush(self) -> None:
+        self.sink.flush()
 
 
 def age_ciphertext_size(plaintext_bytes: int) -> int:

@@ -1,8 +1,10 @@
+import hashlib
 import io
 import json
 import shutil
 import time
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +15,7 @@ from test_upload_sessions import _client
 
 from exomem import (
     artifact_lifecycle, media_bindings, media_jobs, media_replicas, media_store, original_pool, originals,
-    personal_eviction, preserve, state_paths, upload_sessions, upload_stage,
+    personal_eviction, preserve, state_paths, upload_sessions, upload_stage, vault as vault_files,
 )
 from exomem.__main__ import _media_replicas_main
 from exomem.cli_ops import OpError
@@ -121,7 +123,7 @@ def test_owner_can_disable_eviction_while_a_verified_removal_is_in_flight(vault,
     assert _offload(vault, original) is not None
     if pooled:
         assert media_bindings.rebuild(vault)
-    head = media_store.FilesystemStore.head
+    head = media_store.FilesystemStore._head_held
     disabled = []
 
     def during_head(backend, *args, **kwargs):
@@ -129,12 +131,49 @@ def test_owner_can_disable_eviction_while_a_verified_removal_is_in_flight(vault,
         disabled.append(_media_replicas_main(["disable-eviction", "--vault", str(vault)]))
         return proof
 
-    monkeypatch.setattr(media_store.FilesystemStore, "head", during_head)
+    monkeypatch.setattr(media_store.FilesystemStore, "_head_held", during_head)
     assert not media_store.evict(vault, original)
     assert disabled == [0]
     assert originals.original_state(vault, original).state == "cached"
     policy = originals.configuration(vault)
     assert policy["enabled"] is False and policy["eviction_enabled"] is False
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_replacing_the_named_volume_before_unlink_keeps_the_original(
+    vault, local_store, monkeypatch, pooled,
+):
+    store, _ = local_store
+    if pooled:
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+        original_pool.enable(vault)
+    personal_eviction.enable(vault, store, free_bytes=2**30, minimum_idle_seconds=0, eviction_settle_seconds=0)
+    with library_scope():
+        filed = preserve.preserve_stream(vault, scope="field", category="samples", filename="recording.txt",
+                                         stream=io.BytesIO(b"exact retained original"))
+    original = vault / filed.path
+    pointer = _offload(vault, original)
+    assert pointer is not None
+    if pooled:
+        assert media_bindings.rebuild(vault)
+    snapshot = originals.original_state(vault, original)
+    head = media_store.FilesystemStore._head_held
+    root = Path(originals.configuration(vault)["root"])
+    displaced = root.with_name("displaced")
+
+    def exchange_after_hash(backend, *args, **kwargs):
+        proof = head(backend, *args, **kwargs)
+        root.rename(displaced)
+        root.mkdir()
+        shutil.copy2(displaced / media_store.STORE_MARKER, root / media_store.STORE_MARKER)
+        return proof
+
+    monkeypatch.setattr(media_store.FilesystemStore, "_head_held", exchange_after_hash)
+    assert not media_store.evict(vault, original)
+    assert displaced.is_dir()
+    assert (snapshot.local_path or original).read_bytes() == b"exact retained original"
+    assert originals.original_state(vault, original).state == "cached"
+    assert not media_replicas.has_quarantined(vault, [pointer])
 
 
 def test_personal_drain_restores_an_original_that_fits_before_the_rest_can_fit(vault, local_store, monkeypatch):
@@ -196,14 +235,21 @@ def test_single_request_upload_reports_vault_pressure(vault, selected_store, mon
 
 
 def test_a_resumable_floor_refusal_keeps_the_earlier_accepted_bytes(vault, selected_store, monkeypatch):
+    from exomem import media_capacity
+
     _configure(selected_store, vault, upload_floor_bytes=1_000)
-    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=4_000, used=2_000, free=2_000))
-    session, secret = upload_sessions.create(vault, binding="owner", length=10, sha256="a" * 64, target={}, max_bytes=100)
+    block = media_capacity._allocation_unit(vault)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=10 * block, free=5 * block))
+    session, secret = upload_sessions.create(
+        vault, binding="owner", length=10, sha256="a" * 64,
+        target={"lane": "evidence", "filename": "recording.bin"}, max_bytes=100,
+    )
     first = upload_sessions.Patch(session, 0, 5)
     first.write(b"first")
     assert first.close() == (5, False)
 
-    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=4_000, used=2_997, free=1_003))
+    # The append fits the allocated block. The stage that filing needs does not.
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=10 * block, free=1_003))
     reopened = upload_sessions.open_session(vault, session.id, secret)
     next_part = upload_sessions.Patch(reopened, 5, 5)
     try:
@@ -213,6 +259,83 @@ def test_a_resumable_floor_refusal_keeps_the_earlier_accepted_bytes(vault, selec
     finally:
         assert next_part.close() == (5, False)
     assert reopened.part.read_bytes() == b"first"
+
+
+def test_resumable_commit_retries_space_pressure_without_another_upload_request(vault, selected_store, monkeypatch):
+    from exomem import media_capacity, server_transfer
+
+    _configure(selected_store, vault, upload_floor_bytes=1_000)
+    unit = media_capacity._allocation_unit(vault)
+    free = [8 * unit]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=16 * unit, free=free[0]))
+    data = b"A complete original that must stay held until commit can allocate."
+    target = {"lane": "evidence", "scope": "field", "category": "samples", "filename": "recording.bin"}
+    session, secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=hashlib.sha256(data).hexdigest(), target=target, max_bytes=1024,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    assert part.close() == (len(data), True)
+    free[0] = 1_000
+    upload_sessions.start_commit(session, partial(server_transfer.commit_session, vault))
+
+    limit = time.monotonic() + 15
+    while (observed := upload_sessions.open_session(vault, session.id, secret).view())["state"] != upload_sessions.RETRYABLE:
+        assert time.monotonic() < limit, observed
+        time.sleep(0.02)
+    assert observed["code"] == "MEDIA_SPACE_BUSY"
+    assert session.part.read_bytes() == data
+    free[0] = 8 * unit
+
+    while (observed := upload_sessions.open_session(vault, session.id, secret).view())["state"] != upload_sessions.COMMITTED:
+        assert time.monotonic() < limit, observed
+        time.sleep(0.02)
+    assert (vault / observed["receipt"]["path"]).read_bytes() == data
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+def test_a_complete_upload_keeps_its_commit_room_when_an_original_hydrates(vault, selected_store, monkeypatch, pooled):
+    from exomem import media_capacity, server_transfer
+
+    if pooled:
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+        original_pool.enable(vault)
+    with library_scope():
+        filed = preserve.preserve_stream(vault, scope="field", category="samples", filename="stored.bin",
+                                         stream=io.BytesIO(b"encrypted and recoverable"))
+    original = vault / filed.path
+    assert _offload(vault, original) is not None
+    if pooled:
+        assert media_bindings.rebuild(vault)
+    media_replicas.confirm_key_export(vault)
+    assert media_store.evict(vault, original)
+
+    _configure(selected_store, vault, upload_floor_bytes=1_000)
+    unit = media_capacity._allocation_unit(vault)
+    free = [8 * unit]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=16 * unit, free=free[0]))
+    data = b"The pending upload owns space for its stages."
+    target = {"lane": "evidence", "scope": "field", "category": "samples", "filename": "pending.bin"}
+    session, secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=hashlib.sha256(data).hexdigest(), target=target, max_bytes=1024,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    assert part.close() == (len(data), True)
+    free[0] = 1_000 + unit * upload_sessions.commit_copy_count(vault, target)
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_BUSY"):
+        with media_store.open_original(vault, original):
+            pytest.fail("hydration spent the upload's commit credit")
+
+    assert originals.original_state(vault, original).state == "evicted"
+    upload_sessions.start_commit(session, partial(server_transfer.commit_session, vault))
+    limit = time.monotonic() + 15
+    while (session.part.exists()
+           or upload_sessions.open_session(vault, session.id, secret).view()["state"] != upload_sessions.COMMITTED):
+        assert time.monotonic() < limit
+        time.sleep(0.02)
+    with media_store.open_original(vault, original, physical=True) as reopened:
+        assert reopened.stream.read() == b"encrypted and recoverable"
 
 
 @pytest.mark.parametrize("has_replica", [False, True])
@@ -282,3 +405,42 @@ def test_owner_status_counts_bound_objects_and_reports_the_actual_wait(vault, lo
     assert status["evicted"] == {"count": 0, "bytes": 0}
     assert status["observed_at"] is not None
     assert status["waiting"] == "key_not_exported"
+
+
+def test_inventory_keeps_its_last_complete_count_when_a_shared_filing_loses_recovery(
+    vault, local_store, monkeypatch,
+):
+    store, _ = local_store
+    personal_eviction.enable(vault, store, free_bytes=2**30, eviction_settle_seconds=0)
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    content = b"two bindings to one recoverable physical original"
+    with library_scope():
+        first = preserve.preserve_stream(vault, scope="field", category="samples", filename="first.txt",
+                                         stream=io.BytesIO(content))
+        second = preserve.preserve_stream(vault, scope="field", category="samples", filename="second.txt",
+                                          stream=io.BytesIO(content))
+    for filed in (first, second):
+        assert media_store.offload(vault, vault / filed.path) is not None
+    assert media_bindings.rebuild(vault)
+    media_replicas.confirm_key_export(vault, "1")
+    assert media_store.evict(vault, vault / first.path)
+    media_replicas.rebuild(vault)
+    assert media_store.drain_census(vault, inventory_only=True) == (1, len(content))
+    complete = media_replicas.status(vault)["eviction"]
+
+    companion = vault / second.sidecar_path
+    fields, body, _ = vault_files.parse_frontmatter(companion.read_text(encoding="utf-8"), custody=True)
+    del fields["stored_object"]
+    companion.write_text(
+        vault_files.render_frontmatter_document(vault_files.serialize_frontmatter(fields), body), encoding="utf-8",
+    )
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault, inventory_only=True)
+
+    failed = media_replicas.status(vault)["eviction"]
+    assert failed["inventory_state"] == "failed"
+    assert failed["inventory_attempted_at"] > complete["inventory_attempted_at"]
+    assert failed["observed_at"] == complete["observed_at"]
+    assert failed["local"] == complete["local"] == {"count": 0, "bytes": 0}
+    assert failed["evicted"] == complete["evicted"] == {"count": 1, "bytes": len(content)}

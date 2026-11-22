@@ -707,27 +707,32 @@ def preserve(
         )
     )
     try:
+        spool_device = os.stat(tempfile.gettempdir()).st_dev if staged is None else None
         if staged is not None:
             artifact_size, artifact_hash = staged.size, staged.sha256
         elif content_stream is not None:
             # Stream into a process-private spool first. It spills to disk above
             # 8 MiB, so large uploads stay bounded in RAM while no canonical path
             # becomes visible before governance preflight succeeds.
-            with media_capacity.upload_room(vault_root) as room:
+            with media_capacity.upload_room(vault_root, device=spool_device) as room:
                 artifact_size, artifact_hash = _copy_stream(
                     content_stream, artifact_stage, limit=max_stream_bytes, room=room,
                 )
         elif artifact_bytes is not None:
             artifact_size = len(artifact_bytes)
-            with media_capacity.upload_room(vault_root) as room:
+            with media_capacity.upload_room(vault_root, device=spool_device) as room:
                 if room is not None:
                     room.require(artifact_size)
                 artifact_stage.write(artifact_bytes)
             artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
         else:
             artifact_text_bytes = (artifact_text or "").encode("utf-8")
-            artifact_stage.write(artifact_text_bytes)
             artifact_size = len(artifact_text_bytes)
+            with media_capacity.upload_room(vault_root, device=spool_device) as room:
+                if room is not None and artifact_size > min(max(max_decoded_bytes, 1), 8 * 1024 * 1024):
+                    room.require(artifact_size)
+                artifact_stage.write(artifact_text_bytes)
+                artifact_stage.flush()
             artifact_hash = hashlib.sha256(artifact_text_bytes).hexdigest()
         artifact_stage.seek(0)
 
@@ -748,6 +753,7 @@ def preserve(
                 content=staged_content,
                 create_only=True,
                 expected_hash=MISSING_CONTENT_HASH,
+                media_allocation=True,
             )
         ]
 
@@ -1008,10 +1014,6 @@ def preserve(
 
         curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
         with contextlib.ExitStack() as pooled_stack:
-            if staged is None and artifact_text is None:
-                room = pooled_stack.enter_context(media_capacity.upload_room(vault_root))
-                if room is not None:
-                    room.require(artifact_size)
             publish_original = None
             pooled_guards: tuple[PathGuard, ...] = ()
             if pooled_artifact:
