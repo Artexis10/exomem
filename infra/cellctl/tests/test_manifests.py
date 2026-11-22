@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+from cellctl import manifests
 from cellctl.imports import PHASES, ImportRow
 from cellctl.manifests import (
     CELL_HEALTH_PORT,
@@ -60,6 +61,39 @@ def test_namespace_carries_restricted_pod_security_labels() -> None:
     labels = ns["metadata"]["labels"]
     for mode in ("enforce", "audit", "warn"):
         assert labels[f"pod-security.kubernetes.io/{mode}"] == "restricted"
+
+
+def test_restic_verification_uses_existing_repository_access_without_the_cell_volume() -> None:
+    spec = _spec(dedicated_node=True, media_collector_url="http://10.43.0.8:8769",
+                 media_collector_credential="fixture-collector")
+    job = manifests.render_restic_verify_job(
+        spec, bucket_name="backups", endpoint="https://s3.example", attempt_id="an-attempt",
+        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300,
+    )
+
+    assert job["metadata"]["name"] == manifests.restic_verification_job_name("an-attempt")
+    assert job["spec"]["activeDeadlineSeconds"] == 300 and job["spec"]["backoffLimit"] == 0
+    # The controller owns terminal cleanup after it records the result.
+    assert "ttlSecondsAfterFinished" not in job["spec"]
+    template = job["spec"]["template"]
+    pod = template["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["nodeSelector"] == {"exomem.io/dedicated-cell": spec.cell_id}
+    assert pod["terminationGracePeriodSeconds"] > 0
+    assert all("emptyDir" in volume for volume in pod["volumes"])
+    container, = pod["containers"]
+    assert container["image"] == spec.image
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["command"][-4:] == ["restic", "check", "--read-data-subset=3/24", "--limit-download=8192"]
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["RESTIC_REPOSITORY"]["value"] == f"s3:https://s3.example/backups/cells/{spec.cell_id}"
+    assert {entry["valueFrom"]["secretKeyRef"]["key"] for entry in env.values() if "valueFrom" in entry} == {
+        "backup-password", "b2-key-id", "b2-key-secret",
+    }
+
+    job_kind = template["metadata"]["labels"][manifests.JOB_KIND_LABEL]
+    policy = _find(render_network_policies(spec), "NetworkPolicy", manifests.JOB_EGRESS_POLICY)
+    assert all(job_kind not in rule.get("values", ()) for rule in policy["spec"]["podSelector"]["matchExpressions"])
 
 
 # A local cell's hourly backup runs beside its runtime too, with its own clone claim.

@@ -91,6 +91,7 @@ from .manifests import (
     JOB_EGRESS_POLICY,
     RENDER_VERSION,
     RETENTION_ARGS,
+    SNAPSHOT_ID_RE,
     SNAPSHOT_NAME,
     STORAGE_CLASS,
     UPGRADE_WINDOW_ANNOTATION,
@@ -116,8 +117,10 @@ from .manifests import (
     render_export_verification_secret,
     render_import_job,
     render_prepare_job,
+    render_restic_verify_job,
     render_restore_job,
     render_volume_snapshot,
+    restic_verification_repository,
     snapshot_backup_name,
     upgrade_start_annotations,
 )
@@ -136,6 +139,12 @@ from .media_edge import (
     wrap_bundle,
 )
 from .media_meter import UNKNOWN, PhysicalFigure, meter_prefix, over_allowance
+from .restic_verification import (
+    VerificationConfig,
+    VerificationReceipt,
+    VerificationTarget,
+    sync_verifications,
+)
 from .rollout import (
     current_image,
     initial_image,
@@ -531,6 +540,7 @@ class ClusterConfig:
     key_retention_sources: tuple[object, ...] = ()
     access_record_enabled: bool = False
     catalogue_prewarm: BuildConfig | None = None
+    restic_verification: VerificationConfig = VerificationConfig()
     resources: ResourceSettings = ResourceSettings()
     model_env: dict[str, str] | None = None
     capacity: CapacityConfig = CapacityConfig()
@@ -716,6 +726,8 @@ class ClusterGateway:
     def delete_family_secret(self, local: LocalStorage, *, cell_id: str, request: FamilyRequest) -> bool: ...  # pragma: no cover
     def observe_catalogue_builds(self) -> dict: ...  # pragma: no cover
     def delete_catalogue_build_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
+    def observe_restic_verifications(self) -> dict: ...  # pragma: no cover
+    def delete_restic_verification_job(self, namespace: str, name: str, *, uid: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_import_jobs(self, namespace: str, import_id: str): ...  # pragma: no cover
     def observe_export_job(self, namespace: str, export_id: str, *, step: str): ...  # pragma: no cover
@@ -743,7 +755,7 @@ class ClusterGateway:
     def read_cell_readiness(self, addresses: dict[str, str]) -> dict[str, bytes]: ...  # pragma: no cover
     def read_cell_traffic_history(self, addresses: dict[str, str]) -> dict[str, bytes]: ...  # pragma: no cover
     def patch_statefulset_annotations(
-        self, namespace: str, annotations: dict[str, str | None]
+        self, namespace: str, annotations: dict[str, str | None], *, uid: str | None = None
     ) -> None: ...  # pragma: no cover
     # Only called when ClusterConfig.media_edge is set.
     def read_media_edge_active_set(self) -> dict[str, str] | None: ...  # pragma: no cover
@@ -2109,10 +2121,24 @@ async def reconcile_once(
         for row in rows
     }
 
+    content_starts = set()
+    verification_cells = frozenset(cluster_config.restic_verification.cell_ids)
+    verification_starts_known = True
+    if cluster_config.catalogue_prewarm is not None:
+        content_starts = await db.read_content_start_cells(connection, [row.cell_id for row in rows])
+    elif verification_cells:
+        try:
+            content_starts = await db.read_content_start_cells(
+                connection, [row.cell_id for row in rows if row.cell_id in verification_cells],
+            )
+        except asyncpg.PostgresError as error:
+            verification_starts_known = False
+            logger.warning("cellctl: content activity for restic verification is unknown: %s", _describe_error(error))
+
     pending_starts = set()
     pending_stops = set()
     if cluster_config.catalogue_prewarm is not None:
-        pending_stops = await db.read_content_start_cells(connection, [row.cell_id for row in rows])
+        pending_stops = content_starts.copy()
         pending_stops.update(row.cell_id for row in rows if (
             row.is_dirty()
             or observations[row.cell_id].statefulset_render_digest != render_digests[row.cell_id]
@@ -2238,6 +2264,13 @@ async def reconcile_once(
     if not fleet_unobserved:
         await _rollout_alerts(cluster, cluster_config, non_deleted_rows, observations, rollout, now, memory)
 
+    verification_blocked, verification_fast = await _sync_restic_work(
+        cluster, cluster_config, rows, observations, now,
+        conflicts=(content_starts | backup_candidates | upgrade_candidates | relocation_candidates
+                   | ({render_digest_candidate} if render_digest_candidate else set())),
+        allow_start=not fleet_unobserved and verification_starts_known,
+    )
+
     # D4 amendment: a hold, a dirty row or a maintenance start keeps the fast
     # cadence. A settled failure (identity conflict, init deadline) does not:
     # it changes only when its pod or its row does, and one broken tenant must
@@ -2245,6 +2278,7 @@ async def reconcile_once(
     fast = (
         fleet_unobserved
         or media_unsettled
+        or verification_fast
         or bool(upgrade_candidates)
         or bool(relocation_candidates)
         or bool(backup_candidates)
@@ -2286,6 +2320,7 @@ async def reconcile_once(
                 backup_listing=backup_listing,
                 export_slots=export_slots,
                 fleet_observations=observations,
+                restic_verification_blocked=row.cell_id in verification_blocked,
             )
         except Exception as error:  # noqa: BLE001 - one bad row must not take the pass down
             if isinstance(error, _ROW_SESSION_ERRORS) or connection.is_closed():
@@ -2998,11 +3033,14 @@ async def _reconcile_row(
     export_slots: ExportSlots | None = None,
     crossing: bool = False,
     canary: bool = False,
+    restic_verification_blocked: bool = False,
 ) -> bool:
     """Returns whether the row's observation changed (and was written)."""
 
     from .imports import ImportLimits, ImportStorage, decide_import, job_name
 
+    if restic_verification_blocked and row.desired_state == "deleted":
+        return True  # Drain the verifier before removing the Secret or namespace it uses.
     if row.desired_state == "deleted" and not _identity_conflict(row, observation, cluster_config.storage):
         try:
             cluster.delete_cell_secrets(namespace_name(row.cell_id), cell_id=row.cell_id)
@@ -3239,6 +3277,14 @@ async def _reconcile_row(
         crossing=crossing,
         canary=canary,
     )
+    if restic_verification_blocked and (
+        decision.run_backup_job or decision.run_restore_job_snapshot or decision.run_clone_restore_job
+        or decision.create_snapshot or decision.create_clone or decision.relocation_volume is not None
+        or decision.delete_claim or decision.delete_namespace
+        or decision.hold_kind in ("backup", SNAPSHOT_BACKUP, "restore", MOVE, "upgrade")
+        or observation.statefulset_backup_family_request is not None
+    ):
+        return True
     # Only an apply that stops or replaces the serving pod needs the builder's claim released.
     replaces_serving = decision.apply_manifests and (
         decision.replicas == 0 or decision.image != observation.statefulset_image
@@ -3710,7 +3756,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_backup_job(
                         spec,
-                        **_backup_store(cluster_config, spec),
+                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         **_backup_source(decision, spec),
                     ),
                     job_refused,
@@ -3721,7 +3767,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_restore_job(
                         spec,
-                        **_backup_store(cluster_config, spec),
+                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         snapshot_id=decision.run_restore_job_snapshot,
                     ),
                     job_refused,
@@ -3805,15 +3851,70 @@ def _staged_objects(cluster_config: ClusterConfig, secrets_config: SecretsConfig
     return StagedObjects(_staging_client(cluster_config, secrets_config), cluster_config.cell_data_staging_bucket)
 
 
-def _backup_store(cluster_config: ClusterConfig, spec: CellManifestSpec) -> dict[str, str]:
+def _backup_store(cluster_config: ClusterConfig, *, stored_key: bool) -> dict[str, str]:
     """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
     founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
     which only the locked cell-data bucket accepts (D9)."""
 
-    if spec.b2_key_id:
+    if stored_key:
         return {"bucket_name": cluster_config.object_storage_bucket,
                 "endpoint": cluster_config.object_storage_endpoint}
     return {"bucket_name": cluster_config.cell_data_backup_bucket, "endpoint": cluster_config.cell_data_endpoint}
+
+
+async def _sync_restic_work(
+    cluster: ClusterGateway, config: ClusterConfig, rows: list[CellRow], observations: dict[str, ClusterObservation],
+    now: datetime, *, conflicts: set[str], allow_start: bool,
+) -> tuple[frozenset[str], bool]:
+    settings = config.restic_verification
+    selected = frozenset(settings.cell_ids)
+    targets = {}
+    inputs = {}
+    for row in rows:
+        observation = observations[row.cell_id]
+        annotation = observation.statefulset_restic_verification
+        if row.cell_id not in selected and annotation is None:
+            continue
+        namespace = namespace_name(row.cell_id)
+        location = _backup_store(config, stored_key=bool(row.b2_key_id and row.has_stored_object_store_key))
+        repository = restic_verification_repository(row.cell_id, **location)
+        eligible = bool(
+            row.cell_id in selected and row.cell_id not in conflicts and all(location.values())
+            and row.desired_state in ("running", "read_only") and row.observed_state == row.desired_state
+            and not row.is_dirty()
+            and row.last_backup_at is not None and SNAPSHOT_ID_RE.fullmatch(row.last_backup_snapshot or "")
+            and observation.namespace_cell_label == row.cell_id and observation.pod_ready
+            and observation.statefulset_exists and observation.statefulset_replicas == 1
+            and observation.statefulset_image and observation.statefulset_image == row.observed_image
+            and _active_hold(row, observation) is None
+            and observation.statefulset_backup_family_request is None
+            and not observation.backup_job_running and not observation.restore_job_running
+            and not observation.snapshot_exists and not observation.clone_exists
+            and planned_move_volume(row, observation, config.storage) is None
+            and relocation_volume(row, observation, config.storage) is None
+        )
+        targets[namespace] = VerificationTarget(repository, eligible, annotation, observation.statefulset_uid)
+        if eligible:
+            inputs[namespace] = row, observation, location
+
+    def start(namespace: str, receipt: VerificationReceipt) -> None:
+        row, observation, location = inputs[namespace]
+        resources, placement = config.workload_for_cell(row.cell_id)
+        # This Job refers to the same existing Secrets as backup. It does not resolve or render them.
+        spec = CellManifestSpec(
+            cell_id=row.cell_id, image=observation.statefulset_image, replicas=1,
+            read_only=row.desired_state == "read_only", bearer_current="", backup_password="",
+            b2_key_id=row.b2_key_id if row.has_stored_object_store_key else "", resources=resources, placement=placement,
+        )
+        cluster.run_job(render_restic_verify_job(
+            spec, **location, attempt_id=receipt.attempt_id, part=receipt.part, total=receipt.total,
+            download_kib_per_second=settings.download_kib_per_second, deadline_seconds=settings.deadline_seconds,
+        ))
+
+    blocked, fast = await sync_verifications(
+        cluster, settings, targets=targets, now=now, allow_start=allow_start, start=start,
+    )
+    return frozenset(row.cell_id for row in rows if namespace_name(row.cell_id) in blocked), fast
 
 
 async def _remove_export(

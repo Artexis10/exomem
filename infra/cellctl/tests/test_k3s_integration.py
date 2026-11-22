@@ -66,7 +66,8 @@ import time
 import uuid
 import zipfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from contextlib import closing
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -93,10 +94,12 @@ from cellctl.manifests import (
     JOB_KIND_BACKUP,
     JOB_KIND_LABEL,
     JOB_KIND_RESTORE,
+    JOB_KIND_RESTIC_VERIFY,
     OBJECT_STORE_KEY_ID_FIELD,
     OBJECT_STORE_KEY_SECRET,
     OBJECT_STORE_KEY_SECRET_FIELD,
     ROW_GENERATION_ANNOTATION,
+    RESTIC_VERIFICATION_ANNOTATION,
     hold_job_name,
     namespace_name,
 )
@@ -167,6 +170,19 @@ def _cell_id() -> str:
 def _build_standin_image(image_dir: Path) -> str:
     tag = f"cellctl-standin/exomem-cell:{uuid.uuid4().hex[:12]}"
     _run(["docker", "build", "--tag", tag, str(image_dir)])
+    return tag
+
+
+def _build_verification_image() -> str:
+    """Use the production build stage's checked restic with the small test runtime."""
+    fetch_tag = f"cellctl-standin/restic-fetch:{uuid.uuid4().hex[:12]}"
+    _run(["docker", "build", "--target", "restic-fetch", "--tag", fetch_tag, str(REPO_ROOT)])
+    standin = (IMAGE_DIR / "Dockerfile").read_text(encoding="utf-8")
+    standin = standin.replace("RUN apk add --no-cache restic",
+                             f"COPY --from={fetch_tag} /usr/local/bin/restic /usr/local/bin/restic")
+    tag = f"cellctl-standin/exomem-cell:{uuid.uuid4().hex[:12]}"
+    _run(["docker", "build", "--file", "-", "--tag", tag, str(IMAGE_DIR)], input_text=standin)
+    _run(["docker", "run", "--rm", "--read-only", tag, "python3", "-c", "from exomem.vault import _is_vault"])
     return tag
 
 
@@ -270,6 +286,7 @@ class K3sCluster:
     network: str
     minio_name: str
     minio_ip: str
+    minio_loopback: str
 
 
 def _bootstrap_backup_bucket(network: str, minio_ip: str) -> None:
@@ -353,6 +370,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
                 "docker", "run", "--detach", "--name", minio_name,
                 "--network", network,
                 "--user", "0:0",
+                "--publish", "127.0.0.1::443",
                 "--mount", f"type=volume,src={minio_volume},dst=/data",
                 "-e", f"MINIO_ROOT_USER={MINIO_ACCESS_KEY}",
                 "-e", f"MINIO_ROOT_PASSWORD={MINIO_SECRET_KEY}",
@@ -375,6 +393,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
 
             published = _run(["docker", "port", name, "6443/tcp"]).stdout.strip()
             host_port = published.split(":")[-1]
+            minio_loopback = _run(["docker", "port", minio_name, "443/tcp"]).stdout.strip()
             raw_kubeconfig = _run(["docker", "exec", name, "cat", "/etc/rancher/k3s/k3s.yaml"]).stdout
             raw_kubeconfig = raw_kubeconfig.replace("https://127.0.0.1:6443", f"https://127.0.0.1:{host_port}")
             kubeconfig_path = work / "kubeconfig.yaml"
@@ -393,6 +412,7 @@ def k3s(tmp_path_factory: pytest.TempPathFactory) -> Iterator[K3sCluster]:
                 network=network,
                 minio_name=minio_name,
                 minio_ip=minio_ip,
+                minio_loopback=minio_loopback,
             )
         finally:
             logs = _run(["docker", "logs", name], check=False)
@@ -1017,14 +1037,16 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
         (tmp_path / "export.zip").unlink(missing_ok=True)
 
 
-def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDatabase) -> None:
+@pytest.mark.parametrize("verification", [False, True], ids=["lifecycle", "restic_verification"])
+def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDatabase, verification: bool) -> None:
     # === setup: images, RBAC/VAP/StorageClass, the real cellctl identity ===
 
     print("[3.10] building and importing the stand-in cell images (good + never-ready)")
-    good_tag = _build_standin_image(IMAGE_DIR)
-    broken_tag = _build_standin_image(BROKEN_IMAGE_DIR)
+    good_tag = _build_verification_image() if verification else _build_standin_image(IMAGE_DIR)
     good_image = _import_image(k3s.name, good_tag, repository=STANDIN_REPOSITORY)
-    broken_image = _import_image(k3s.name, broken_tag, repository=STANDIN_REPOSITORY)
+    broken_image = None if verification else _import_image(
+        k3s.name, _build_standin_image(BROKEN_IMAGE_DIR), repository=STANDIN_REPOSITORY,
+    )
     repository, _, digest = good_image.partition("@")
     assert digest
 
@@ -1056,7 +1078,8 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         "D4 amendment: namespaces rule must be exactly get/list/watch/create/patch/delete"
     )
 
-    non_storage_docs = [doc for doc in documents if doc["kind"] != "StorageClass"]
+    excluded = {"StorageClass", "Deployment"} if verification else {"StorageClass"}
+    non_storage_docs = [doc for doc in documents if doc["kind"] not in excluded]
     storage_doc = next(doc for doc in documents if doc["kind"] == "StorageClass")
     _kubectl(k3s.name, ["apply", "--filename=-"], documents=non_storage_docs)
     # exomem-cloud is default-deny (cellctl.yaml), so the gateway-labelled
@@ -1197,11 +1220,13 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     # D9: the cell's backup key is the Secret the key custodian's identity creates below, holding
     # MinIO's one root credential.
     fake_hetzner = FakeHetznerVolumeProvider()
+    clock_offset = timedelta()
 
     async def _pass() -> None:
         connection = await asyncpg.connect(app_dsn)
         try:
-            await reconcile_once(connection, cluster, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG)
+            await reconcile_once(connection, cluster, fake_hetzner, secrets_config, cluster_config, config=LIVE_CONFIG,
+                                 now=datetime.now(UTC) + clock_offset)
         finally:
             await connection.close()
 
@@ -1258,7 +1283,14 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         row = asyncio.run(_row())
         return row["observed_state"] == "running" and row["ready"]
 
-    _wait_for(_converged, timeout=180, interval=3, description="cell to converge to observed_state=running, ready=true")
+    try:
+        _wait_for(_converged, timeout=180, interval=3, description="cell to converge to observed_state=running, ready=true")
+    except AssertionError:
+        if verification:
+            print(_kubectl(k3s.name, ["describe", "pod", "cell-0", "--namespace", namespace], check=False).stdout)
+            print(_kubectl(k3s.name, ["logs", "cell-0", "--namespace", namespace, "-c", "cell-init", "--previous"],
+                           check=False).stdout)
+        raise
 
     # D9: the key custodian, never cellctl, writes a cell's object-store key. This is the Secret the
     # custodian's identity writes for a new cell, in the one shape admission allows; its stringData
@@ -1309,6 +1341,10 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
     assert read_result == "k3s-integration-canary", read_result
     print("[3.10] scenario: owner-only modes (0700/0600) under /data/host after pod replacement")
     _assert_owner_only_modes_intact(recreated_pod_name)
+    if verification:
+        _exec_py(k3s.name, namespace, recreated_pod_name,
+                 "import random; from pathlib import Path; "
+                 "Path('/data/host/verification.bin').write_bytes(random.Random(42).randbytes(4 * 1024 * 1024))")
 
     # === scenario: a nightly backup under a real backup hold, with a real
     # restic snapshot id recorded, and a desired-state flip to read_only
@@ -1346,6 +1382,101 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         lambda: _reconciled_to("running"),
         timeout=60, interval=2, description="cell to resume running before the upgrade scenarios",
     )
+
+    if verification:
+        from cellctl.restic_verification import VerificationConfig, VerificationReceipt
+
+        config = VerificationConfig(cell_ids=(cell_id,), parts=2, deadline_seconds=60,
+                                    interval=timedelta(minutes=10), retry=timedelta(minutes=1))
+        cluster_config = replace(cluster_config, restic_verification=config)
+        observed_backup = (row["last_backup_at"], snapshot_id)
+
+        def assert_serving() -> None:
+            current = asyncio.run(_row())
+            assert (current["last_backup_at"], current["last_backup_snapshot"]) == observed_backup
+            assert current["last_error_code"] is None
+            assert current["observed_state"] == "running" and current["ready"]
+
+        def observe_slice(part: int, outcome: str):
+            started = time.monotonic()
+            observed = None
+
+            def read_receipt() -> bool:
+                nonlocal observed
+                asyncio.run(_pass())
+                raw = cluster.observe(cell_id, namespace).statefulset_restic_verification
+                observed = VerificationReceipt.parse(raw)
+                assert_serving()
+                return bool(observed and observed.part == part and observed.outcome == outcome)
+
+            try:
+                _wait_for(read_receipt, timeout=150, interval=1,
+                          description=f"restic verification {part}/2 -> {outcome}")
+            except AssertionError:
+                _print_job_diagnostics(k3s.name, namespace, JOB_KIND_RESTIC_VERIFY)
+                raise
+            print(f"[restic verification] part {part}/2 {outcome}, "
+                  f"observed after {time.monotonic() - started:.2f}s")
+            return observed
+
+        assert _run(["docker", "run", "--rm", good_tag, "restic", "version"]).stdout.startswith("restic 0.19.1 ")
+        first = observe_slice(1, "success")
+        assert first.next_part == 2 and first.job_uid
+
+        secret = json.loads(_kubectl(k3s.name, ["get", "secret", "cell-credentials", "--namespace", namespace,
+                                               "--output=json"]).stdout)
+        password = base64.b64decode(secret["data"]["backup-password"]).decode()
+        repo = f"s3:http://{k3s.minio_ip}:443/{BUCKET_NAME}/cells/{cell_id}"
+
+        def inspect_restic(*args: str) -> str:
+            return _run(["docker", "run", "--rm", "--network", k3s.network,
+                         "--env", f"AWS_ACCESS_KEY_ID={MINIO_ACCESS_KEY}",
+                         "--env", f"AWS_SECRET_ACCESS_KEY={MINIO_SECRET_KEY}",
+                         "--env", f"RESTIC_PASSWORD={password}",
+                         "--env", f"RESTIC_REPOSITORY={repo}",
+                         good_tag, "restic", "--no-cache", *args]).stdout
+
+        packs = []
+        for index_id in inspect_restic("list", "index").split():
+            index = json.loads(inspect_restic("cat", "index", index_id))
+            packs.extend(pack["id"] for pack in index["packs"]
+                         if pack["blobs"] and all(blob["type"] == "data" for blob in pack["blobs"]))
+        assert packs, "the synthetic backup must publish a data pack"
+        data_pack = next((pack for pack in packs if int(pack[:2], 16) % 2 == 1), packs[0])
+        failed_part = 1 + int(data_pack[:2], 16) % 2
+        if failed_part == 1:
+            clock_offset += config.interval + timedelta(seconds=1)
+            assert observe_slice(2, "success").next_part == 1
+
+        from botocore.config import Config
+
+        storage = boto3.client("s3", endpoint_url=f"http://{k3s.minio_loopback}", region_name="us-east-1",
+                               aws_access_key_id=MINIO_ACCESS_KEY, aws_secret_access_key=MINIO_SECRET_KEY,
+                               config=Config(connect_timeout=5, read_timeout=15,
+                                             retries={"total_max_attempts": 1}, s3={"addressing_style": "path"}))
+        key = f"cells/{cell_id}/data/{data_pack[:2]}/{data_pack}"
+        with closing(storage.get_object(Bucket=BUCKET_NAME, Key=key)["Body"]) as downloaded:
+            exact = downloaded.read()
+        assert hashlib.sha256(exact).hexdigest() == data_pack
+        corrupted = bytes([exact[0] ^ 1]) + exact[1:]
+        storage.put_object(Bucket=BUCKET_NAME, Key=key, Body=corrupted)
+        try:
+            clock_offset += config.interval + timedelta(seconds=1)
+            failed = observe_slice(failed_part, "failed")
+            assert failed.next_part == failed_part and failed.last_success_part != failed_part
+        finally:
+            storage.put_object(Bucket=BUCKET_NAME, Key=key, Body=exact)
+
+        # Reconstruct the controller client and retry using only Kubernetes receipt state.
+        cluster = ClusterClient(_sa_api_client(k3s, token=token))
+        clock_offset += config.retry + timedelta(seconds=1)
+        repaired = observe_slice(failed_part, "success")
+        assert repaired.last_success_part == failed_part and repaired.next_part == 3 - failed_part
+        assert repaired.job_uid != failed.job_uid
+        assert cluster.observe(cell_id, namespace).statefulset_restic_verification
+        print(f"[restic verification] retried the repaired {len(exact):,}-byte data pack; "
+              f"receipt annotation {RESTIC_VERIFICATION_ANNOTATION}")
+        return
 
     print("[3.10] scenario: explicit stop and resume preserve the volume and stored data")
     pvc_before = json.loads(

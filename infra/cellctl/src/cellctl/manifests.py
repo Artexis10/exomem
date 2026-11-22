@@ -1290,8 +1290,15 @@ def render_cell_manifests(spec: CellManifestSpec) -> list[dict]:
 
 JOB_KIND_BACKUP = "backup"
 JOB_KIND_RESTORE = "restore"
+JOB_KIND_RESTIC_VERIFY = "restic-verify"
 BACKUP_JOB_NAME = "cell-backup"
 RESTORE_JOB_NAME = "cell-restore"
+# The closed Job attempt name and annotations shared by the renderer and observer.
+RESTIC_VERIFICATION_JOB_NAME_RE = re.compile(re.escape(JOB_KIND_RESTIC_VERIFY) + r"-[0-9a-f]{32}")
+RESTIC_VERIFICATION_ANNOTATION = "exomem.io/restic-verification"
+RESTIC_VERIFICATION_REPOSITORY_ANNOTATION = "exomem.io/restic-verification-repository"
+RESTIC_VERIFICATION_SLICE_ANNOTATION = "exomem.io/restic-verification-slice"
+RESTIC_VERIFICATION_MAX_PARTS = 256  # restic 0.19.1 bounds n/N by the first pack-ID byte.
 # D3: an hourly hold's VolumeSnapshot and the read-only clone claim made from it.
 SNAPSHOT_NAME = "cell-snapshot"
 CLONE_CLAIM_NAME = "cell-clone"
@@ -1370,11 +1377,20 @@ def _job_name_for_hold(spec: CellManifestSpec, base: str) -> str:
     return hold_job_name(base, spec.hold_started_at)
 
 
-def _restic_repo(spec: CellManifestSpec, bucket_name: str, endpoint: str) -> str:
+def _restic_repo(cell_id: str, bucket_name: str, endpoint: str) -> str:
     # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
     # its native "b2:" backend, so a local S3 server (MinIO in 3.10) is a
     # faithful test double for the real thing.
-    return f"s3:{endpoint}/{bucket_name}/cells/{spec.cell_id}"
+    return f"s3:{endpoint}/{bucket_name}/cells/{cell_id}"
+
+
+def restic_verification_repository(cell_id: str, *, bucket_name: str, endpoint: str) -> str:
+    """Identify the checked repository without copying its URL into the receipt."""
+    return hashlib.sha256(_restic_repo(cell_id, bucket_name, endpoint).encode()).hexdigest()
+
+
+def restic_verification_job_name(attempt_id: str) -> str:
+    return JOB_KIND_RESTIC_VERIFY + "-" + hashlib.sha256(attempt_id.encode()).hexdigest()[:32]
 
 
 def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
@@ -1598,7 +1614,7 @@ def render_backup_job(
     the snapshot, and its pruning backup then collects (collect-released-media D5)."""
 
     job_name = _job_name_for_hold(spec, BACKUP_JOB_NAME)
-    repo = _restic_repo(spec, bucket_name, endpoint)
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     # D8 amendment: the Job has no ServiceAccount token and cannot call back
     # to the API to report the snapshot id it produced, so it writes the id
     # restic's own `--json` summary line reports to its termination message
@@ -1675,6 +1691,49 @@ def render_backup_job(
     }
 
 
+def render_restic_verify_job(
+    spec: CellManifestSpec, *, bucket_name: str, endpoint: str, attempt_id: str, part: int, total: int,
+    download_kib_per_second: int, deadline_seconds: int,
+) -> dict:
+    """Check the repository in a bounded Job that needs no cell volume."""
+    if not 1 <= part <= total <= RESTIC_VERIFICATION_MAX_PARTS:
+        raise ValueError("invalid restic verification slice")
+    if download_kib_per_second <= 0 or deadline_seconds <= 0:
+        raise ValueError("restic verification needs positive rate and time limits")
+
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
+    pod = _job_pod_spec(spec, job_kind=JOB_KIND_RESTIC_VERIFY, command=[], data_read_only=True, repo=repo)
+    container = pod["containers"][0]
+    # Restic receives SIGTERM directly and can release its exclusive repository lock.
+    container["command"] = _cell_command([
+        "restic", "check", f"--read-data-subset={part}/{total}", f"--limit-download={download_kib_per_second}",
+    ], scratch=False)
+    container["volumeMounts"] = [{"name": "cache", "mountPath": "/cache"}, {"name": "tmp", "mountPath": "/tmp"}]
+    pod["volumes"] = [{"name": mount["name"], "emptyDir": {"sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB)}}
+                      for mount in container["volumeMounts"]]
+    pod["terminationGracePeriodSeconds"] = 30
+    labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY}
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": restic_verification_job_name(attempt_id), "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY},
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": deadline_seconds,
+            # The controller deletes the Job only after recording its terminal result.
+            "template": {"metadata": {"labels": labels, "annotations": {
+                RESTIC_VERIFICATION_REPOSITORY_ANNOTATION: restic_verification_repository(
+                    spec.cell_id, bucket_name=bucket_name, endpoint=endpoint,
+                ),
+                RESTIC_VERIFICATION_SLICE_ANNOTATION: f"{part}/{total}",
+            }}, "spec": pod},
+        },
+    }
+
+
 def render_restore_job(
     spec: CellManifestSpec,
     *,
@@ -1689,7 +1748,7 @@ def render_restore_job(
         # caller bug must not get the chance to build an injectable command.
         raise ValueError(f"not a restic snapshot id: {snapshot_id!r}")
     job_name = _job_name_for_hold(spec, RESTORE_JOB_NAME)
-    repo = _restic_repo(spec, bucket_name, endpoint)
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     # restic (0.17+) rejects `--delete` without a scoping filter -- "must be
     # combined with an include or exclude filter" -- since without one it
     # would consider deleting anything under the target root. The filter is

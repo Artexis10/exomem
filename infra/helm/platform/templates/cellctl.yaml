@@ -377,6 +377,8 @@ spec:
               value: {{ .Values.cells.backupWindow | quote }}
             - name: CELLCTL_BACKUP_CONCURRENCY
               value: {{ .Values.cells.backupConcurrency | quote }}
+            - name: CELLCTL_RESTIC_VERIFICATION_CELL_IDS
+              value: {{ .Values.cellctl.resticVerificationCellIds | toJson | quote }}
             # Task 2.8: the backup-age alert goes to the platform's existing
             # alert receiver; the Role below lets cellctl read this one Secret.
             - name: CELLCTL_ALERT_DELIVERY_SECRET

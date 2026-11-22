@@ -6,11 +6,15 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
-from unittest.mock import Mock
+from unittest.mock import Mock, call
+from urllib.parse import urlsplit
 
 import pytest
+from kubernetes import client as k8s
 from kubernetes.client.rest import ApiException
+from urllib3.response import HTTPResponse
 
+from cellctl import manifests
 from cellctl.export_layout import PACK, PAUSE, UPLOAD, job_name, legacy_job_name
 from cellctl.k8s_client import CELL_LABEL, ClusterClient
 from cellctl.manifests import (
@@ -46,6 +50,33 @@ def test_apply_uses_the_cellctl_field_manager_for_server_side_apply() -> None:
         content_type="application/apply-patch+yaml",
         force_conflicts=True,
     )
+
+
+def test_a_stale_statefulset_uid_cannot_patch_the_replacement() -> None:
+    live = {"uid": "original-uid", "annotations": {HOLD_ANNOTATION: "backup"}}
+    observed_uid = live["uid"]
+    live = {"uid": "replacement-uid", "annotations": {HOLD_ANNOTATION: "upgrade"}}
+
+    def request(method, url, *, body, headers, **_):
+        assert method == "PATCH" and urlsplit(url).path.endswith(f"/namespaces/{NAMESPACE}/statefulsets/cell")
+        assert headers["Content-Type"] == "application/strategic-merge-patch+json"
+        metadata = json.loads(body)["metadata"]
+        # The API server merges the patch, then rejects a change to the immutable UID.
+        if metadata.get("uid", live["uid"]) != live["uid"]:
+            return HTTPResponse(body=b'{"message":"metadata.uid: field is immutable"}', status=422)
+        live["annotations"].update(metadata["annotations"])
+        return HTTPResponse(body=json.dumps({"metadata": live}).encode(), status=200)
+
+    with k8s.ApiClient(k8s.Configuration(host="https://cluster.invalid")) as transport:
+        transport.rest_client.pool_manager.request = request
+        client = ClusterClient.__new__(ClusterClient)
+        client._apps = k8s.AppsV1Api(transport)
+        receipt_key = manifests.RESTIC_VERIFICATION_ANNOTATION
+        with pytest.raises(ApiException, match="422"):
+            client.patch_statefulset_annotations(NAMESPACE, {receipt_key: "old receipt"}, uid=observed_uid)
+        assert live["annotations"] == {HOLD_ANNOTATION: "upgrade"}
+        client.patch_statefulset_annotations(NAMESPACE, {receipt_key: "new receipt"}, uid=live["uid"])
+        assert live["annotations"] == {HOLD_ANNOTATION: "upgrade", receipt_key: "new receipt"}
 
 
 def _matches(labels: dict[str, str], selector: str | None) -> bool:
@@ -86,6 +117,107 @@ def _job_pod(job_name: str, *, snapshot_id: str, running_since: datetime | None 
 def _named(objects: list, field_selector: str) -> list:
     name = field_selector.removeprefix("metadata.name=")
     return [obj for obj in objects if obj.metadata.name == name]
+
+
+def _verification_job(namespace: str, uid: str, *, condition: str):
+    return NS(
+        metadata=NS(namespace=namespace, name=manifests.restic_verification_job_name(uid), uid=uid,
+                    deletion_timestamp=None),
+        spec=NS(template=NS(metadata=NS(annotations={
+            manifests.RESTIC_VERIFICATION_REPOSITORY_ANNOTATION: "a" * 64,
+            manifests.RESTIC_VERIFICATION_SLICE_ANNOTATION: "1/2",
+        }))),
+        status=NS(conditions=[NS(type=condition, status="True", last_transition_time=CURRENT_HOLD)]),
+    )
+
+
+def _verification_pod(job, *, owner_uid=None, phase="Succeeded", exit_code=0, terminating=False):
+    labels = {"batch.kubernetes.io/job-name": job.metadata.name}
+    state = NS(terminated=NS(exit_code=exit_code, finished_at=CURRENT_HOLD))
+    return NS(
+        metadata=NS(namespace=job.metadata.namespace, labels=labels,
+                    deletion_timestamp=CURRENT_HOLD if terminating else None,
+                    owner_references=[NS(kind="Job", controller=True, name=job.metadata.name,
+                                         uid=job.metadata.uid if owner_uid is None else owner_uid)]),
+        status=NS(phase=phase, container_statuses=[NS(name=manifests.JOB_KIND_RESTIC_VERIFY, state=state)]),
+    )
+
+
+def _paged(items, continuation=None):
+    return NS(items=items, metadata=NS(_continue=continuation))
+
+
+def test_verification_observes_both_fleet_pages_and_needs_the_exact_job_uid() -> None:
+    current = _verification_job(NAMESPACE, "current", condition="Complete")
+    other_namespace = "exo-cell-bbbbbbbbbbbbbbbb"
+    missing = _verification_job(other_namespace, "missing-pod", condition="Complete")
+    unrelated = _verification_pod(missing, owner_uid="previous-attempt")
+    client = ClusterClient.__new__(ClusterClient)
+    jobs = Mock(side_effect=[_paged([current], "jobs-2"), _paged([missing])])
+    pods = Mock(side_effect=[_paged([unrelated], "pods-2"), _paged([_verification_pod(current)])])
+    client._batch = NS(list_job_for_all_namespaces=jobs)
+    client._core = NS(list_pod_for_all_namespaces=pods)
+
+    observed = client.observe_restic_verifications()
+
+    complete, = observed[NAMESPACE]
+    assert (complete.outcome, complete.uid, complete.part, complete.total, complete.repository) == (
+        "success", "current", 1, 2, "a" * 64,
+    )
+    assert complete.finished_at == datetime.fromisoformat(CURRENT_HOLD)
+    assert not complete.active
+    unknown, = observed[other_namespace]
+    assert unknown.outcome == "unknown" and not unknown.active
+    selector = f"{JOB_KIND_LABEL}={manifests.JOB_KIND_RESTIC_VERIFY}"
+    assert (jobs.call_args_list, pods.call_args_list) == (
+        [call(label_selector=selector, limit=500, _continue=None),
+         call(label_selector=selector, limit=500, _continue="jobs-2")],
+        [call(label_selector=selector, limit=500, _continue=None),
+         call(label_selector=selector, limit=500, _continue="pods-2")],
+    )
+
+
+@pytest.mark.parametrize(("phase", "terminating"), [("Pending", False), ("Succeeded", True)])
+def test_orphaned_verification_pod_keeps_the_repository_slot(phase, terminating) -> None:
+    gone = _verification_job(NAMESPACE, "deleted-job", condition="Complete")
+    client = ClusterClient.__new__(ClusterClient)
+    client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([])))
+    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([
+        _verification_pod(gone, phase=phase, terminating=terminating),
+    ])))
+
+    orphan, = client.observe_restic_verifications()[NAMESPACE]
+
+    assert orphan.name == gone.metadata.name and orphan.uid is None
+    assert orphan.active and orphan.outcome is None
+
+
+def test_verification_observes_a_restic_lock_refusal_as_busy() -> None:
+    job = _verification_job(NAMESPACE, "busy-job", condition="Failed")
+    client = ClusterClient.__new__(ClusterClient)
+    client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([job])))
+    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([
+        _verification_pod(job, phase="Failed", exit_code=11),
+    ])))
+
+    busy, = client.observe_restic_verifications()[NAMESPACE]
+
+    assert busy.outcome == "busy" and not busy.active
+    assert busy.finished_at == datetime.fromisoformat(CURRENT_HOLD)
+
+
+def test_verification_foreground_delete_fences_same_name_replacement() -> None:
+    client = ClusterClient.__new__(ClusterClient)
+    delete = Mock(side_effect=ApiException(status=409))
+    client._batch = NS(delete_namespaced_job=delete)
+    name = manifests.restic_verification_job_name("attempt")
+
+    with pytest.raises(ApiException, match="409"):
+        client.delete_restic_verification_job(NAMESPACE, name, uid="previous-uid")
+
+    assert delete.call_args.args == (name, NAMESPACE)
+    assert delete.call_args.kwargs["body"].propagation_policy == "Foreground"
+    assert delete.call_args.kwargs["body"].preconditions.uid == "previous-uid"
 
 
 class _Core:
