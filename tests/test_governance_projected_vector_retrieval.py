@@ -23,6 +23,7 @@ def _variant(
     *,
     level: int,
     text: str,
+    timed: bool = False,
 ) -> projections.ProjectionVariant:
     option_key = {1: "notice", 2: "constraint", 3: "abstract"}.get(level)
     variant = projections.build_projection_variant(
@@ -33,7 +34,10 @@ def _variant(
             options={} if option_key is None else {option_key: text},
         ),
         projector_schema_version=1,
-        full_search_fields={"body": text, "title": item_identity},
+        full_search_fields={
+            "body": text, "title": item_identity,
+            **({projected_retrieval.TIMED_SOURCE_FIELD: "true"} if timed else {}),
+        },
     )
     assert variant is not None
     return variant
@@ -246,3 +250,79 @@ def test_vector_dimension_and_finiteness_are_closed() -> None:
         match="finite",
     ):
         _measurement(variant, (float("nan"), 0.0))
+
+
+def test_only_the_admitted_transcript_variant_contributes_passage_vectors(tmp_path) -> None:
+    from dataclasses import replace
+
+    from exomem.governance import transcript_banks
+
+    path = "Knowledge Base/Sources/Session/gate-log.md"
+    text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
+    text_start = text.index("[0:09]")
+    low = _variant(path, "1" * 64, level=2, text="A permitted constraint")
+    full = replace(
+        _variant(path, "1" * 64, level=6, text=text, timed=True),
+        head=projections.ProjectionHead(0, len(text)),
+    )
+    public = _variant("summary", "2" * 64, level=6, text="Gate summary")
+    source = _item(path, "1" * 64, low, full)
+    summary = _item("summary", "2" * 64, public)
+    samples, _ = projected_retrieval.transcript_samples(full)
+    bank = transcript_banks.publish(
+        tmp_path, _namespace(source, summary).namespace_key,
+        samples, ((0.0, 1.0), (1.0, 0.0)),
+    )
+    index = projected_retrieval.ProjectedVectorIndex(
+        _namespace(source, summary),
+        (_measurement(low, (0.0, 1.0)), _measurement(public, (0.5, 0.5)),
+         replace(_measurement(full, (0.0, 1.0)), transcript_bank=bank)),
+        extractor_version="projected-text-v1",
+        model_version="test-model-v1",
+    )
+
+    admitted, partial = index.match_transcript(tmp_path, full, (1.0, 0.0), score=0)
+    assert admitted is not None and not partial
+    part, passage = admitted.transcript
+    assert part == 1
+    assert passage.start == text_start
+    assert passage.text == "[0:09] The ranger shut it."
+    assert index.match_transcript(tmp_path, low, (1.0, 0.0), score=0) == (None, False)
+    restricted = index.search_vector(_map((source, low), (summary, public)), (1.0, 0.0), k=1)
+    withheld = index.search_vector(_map((source, None), (summary, public)), (1.0, 0.0), k=1)
+    assert restricted == withheld
+
+
+def test_collection_removes_one_bank_link_and_exact_republication_repairs_corruption(tmp_path) -> None:
+    from dataclasses import replace
+
+    import pytest
+
+    from exomem import state_paths
+    from exomem.governance import transcript_banks
+
+    text = "[0:03] The gate opened.\n[0:09] The ranger shut it."
+    source = replace(
+        _variant("Knowledge Base/Sources/Session/gate-log.md", "1" * 64, level=6, text=text, timed=True),
+        head=projections.ProjectionHead(0, len(text)),
+    )
+    before = _key()
+    after = replace(before, catalog_generation=before.catalog_generation + 1)
+    samples, _ = projected_retrieval.transcript_samples(source)
+    vectors = ((0.0, 1.0), (1.0, 0.0))
+    bank = transcript_banks.publish(tmp_path, before, samples, vectors)
+    assert transcript_banks.carry(tmp_path, before, after, bank)
+
+    first = state_paths.vault_state_dir(tmp_path) / ".authorization-projections" / before.namespace_id
+    second = state_paths.vault_state_dir(tmp_path) / ".authorization-projections" / after.namespace_id
+    assert projection_store.collect_projection_namespaces(
+        tmp_path, eligible_namespace_ids=[before.namespace_id],
+    ) == (before.namespace_id,)
+    assert not first.exists()
+    assert transcript_banks.load(tmp_path, after, bank, samples, 2).tolist() == [[0.0, 1.0], [1.0, 0.0]]
+
+    (second / transcript_banks.DIRECTORY / f"{bank}.json").write_text("invalid")
+    with pytest.raises(transcript_banks.TranscriptBankUnavailable):
+        transcript_banks.load(tmp_path, after, bank, samples, 2)
+    assert transcript_banks.publish(tmp_path, after, samples, vectors) == bank
+    assert transcript_banks.load(tmp_path, after, bank, samples, 2).tolist() == [[0.0, 1.0], [1.0, 0.0]]

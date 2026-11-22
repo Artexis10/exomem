@@ -226,3 +226,53 @@ def test_a_store_commit_moves_the_published_declarations_by_the_pages_it_names(
     assert not (served / later["source"]["path"]).exists()
     after_capture = call(query="wick", result_level="passage")
     assert "second" in [hit["passage_key"] for hit in after_capture.get("hits", [])], after_capture
+
+
+def test_import_retry_binds_the_original_that_preceded_the_store_commit(served, tmp_path, monkeypatch):
+    import hashlib
+
+    from exomem import client_artifacts
+
+    original = b"Complete record\x00\xff"
+    digest = hashlib.sha256(original).hexdigest()
+    installed = []
+
+    class Interrupted(BaseException):
+        pass
+
+    def stop_at_original(path):
+        if path.suffix == ".txt" and path.is_relative_to(served) and (
+            vault_module.in_append_only_tree(path.relative_to(served).as_posix()) == "Sources"
+        ):
+            installed.append(path)
+            raise Interrupted()
+
+    def invoke():
+        staged = tmp_path / "staged"
+        staged.write_bytes(original)
+        with request_scope(owner_principal()):
+            return client_artifacts._commit_staged_sources(
+                served, source_schema=schema.load_source_schema(served), title="Survey record",
+                staged={0: client_artifacts.StagedArtifact("transfer", staged, len(original), digest,
+                                                           "text/plain", "survey.txt")},
+                outcomes=[None], source_fields={"source_type": "session"}, import_key="a" * 64,
+            )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, "_after_batch_destination_published", stop_at_original)
+        with pytest.raises(Interrupted):
+            invoke()
+    [target] = installed
+    version = target.stat().st_ino
+    assert target.read_bytes() == original
+    with read.snapshot(served) as snapshot:
+        assert snapshot.page(f"{target.relative_to(served).as_posix()}.md") is None
+
+    [stored] = invoke()["files"]
+    assert stored["outcome"] == "stored"
+    assert stored["hash"] == digest
+    assert target.read_bytes() == original and target.stat().st_ino == version
+    with read.snapshot(served) as snapshot:
+        assert snapshot.page(stored["page"]) is not None
+    [replay] = invoke()["files"]
+    assert replay["state"] == "already_stored" and replay["ref"] == stored["ref"]

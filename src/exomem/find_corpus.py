@@ -22,7 +22,7 @@ from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
 from .kbdir import managed_root, managed_split
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
-from .vault import CORPUS_EXCLUDED_DIR_NAMES, relative_posix
+from .vault import CORPUS_EXCLUDED_DIR_NAMES, markdown_lf, relative_posix
 
 if TYPE_CHECKING:
     from .vault_store.read import PageMeta, StoredPage
@@ -1015,7 +1015,7 @@ def _parse_page_after_checkpoint(
     # Markdown has a logical LF grammar even when editors persist CRLF on
     # Windows. Normalize for parsing while callers that need exact bytes keep
     # using the original `content`/PathGuard.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = markdown_lf(text)
 
     fm_match = FRONTMATTER_PATTERN.match(text)
     frontmatter_valid = True
