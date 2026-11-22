@@ -436,6 +436,61 @@ def test_a_turn_whose_graph_snapshot_was_refused_after_the_availability_check_re
     assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
 
 
+def test_a_turn_whose_graph_could_not_interpret_an_authoring_page_reports_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph dropped an edge whose authoring page's selected interpretation it could not read, and the lookup
+    read that as "no such link": the linked page that holds the position was never read and the block read as
+    complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def uninterpretable(self, stored):
+        # As a missing summary or a parser-version mismatch does: the page is marked unavailable and its edge dropped.
+        self.parents.unavailable.add(str(stored.get("source_path") or "authoring-page.md"))
+        return None
+
+    monkeypatch.setattr(epistemic_graph.GraphView, "edge", uninterpretable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_dense_reading_over_a_matrix_that_lags_a_visible_rewrite_reports_the_lane_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed matrix lagging a rewrite drops the rewritten page's rows and still said `ready`, so discovery read
+    as complete while the page the person had just rewritten went unread by meaning."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from exomem import embeddings, readiness
+
+    resident = SimpleNamespace(
+        matrix=np.eye(2, dtype=np.float32), metadata=[("fresh.md", 0), ("rewritten.md", 0)],
+        stale_paths=frozenset({"rewritten.md"}),
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    monkeypatch.setattr(readiness, "should_defer", lambda _name: False)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: "encoder")
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda _text: [1.0, 0.0])
+    monkeypatch.setattr(embeddings, "peek_embedding_index", lambda _root: SimpleNamespace(
+        identity=SimpleNamespace(fingerprint="encoder"), resident_matrix=lambda: resident,
+    ))
+
+    _hits, lagging = working_set._resident_vector_paths(tmp_path, "kiln schedule", {"fresh.md", "rewritten.md"}, 5)
+    _hits, unaffected = working_set._resident_vector_paths(tmp_path, "kiln schedule", {"fresh.md"}, 5)
+
+    assert lagging == "lane_failed"
+    # A stale page the caller may not see leaves the caller's reading whole.
+    assert unaffected == "ready"
+
+
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A page its author retired for a newer one was served as a ready position, presenting a withdrawn view as current."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
