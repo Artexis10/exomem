@@ -332,13 +332,13 @@ Image OCR, including OCR of video scene frames, SHALL keep in `## Extracted text
 #### Scenario: Misread words leave the search fields
 
 - **WHEN** an image is OCR'd and some words score under the floor
-- **THEN** `## Extracted text` holds only the words at or above the floor, in reading order
+- **THEN** `## Extracted text` holds the OCR words at or above the floor, in reading order
 - **AND** the other words are in `## Low-confidence OCR`
 - **AND** a search for a word that is only in `## Low-confidence OCR` does not match the sidecar
 
 #### Scenario: A photo with no legible text is not indexed by noise
 
-- **WHEN** every word Tesseract reads from a photo scores under the floor
+- **WHEN** every word Tesseract reads from a photo scores under the floor and no caption or tags are available
 - **THEN** `## Extracted text` is empty, with no placeholder text, and the sidecar records its `ocr_confidence`
 - **AND** the sidecar counts as extracted and is not queued again
 - **AND** the sidecar stays findable by its title, path and CLIP image vector
@@ -358,3 +358,29 @@ Image OCR, including OCR of video scene frames, SHALL keep in `## Extracted text
 
 - **WHEN** a sidecar extracted before this change has no `ocr_confidence`
 - **THEN** its extracted text stays searchable
+
+### Requirement: Image Sidecars Report Retained OCR Text Availability
+
+After image OCR completes, the page read SHALL derive `ocr_text_available` from the released extraction provenance. It SHALL be true when the retained OCR text contains a non-whitespace character before captions or tags, and false otherwise. The page read SHALL omit the field when availability is unknown. The raw content and content hash SHALL still describe the stored page.
+
+#### Scenario: An image supplies OCR text
+
+- **WHEN** image OCR retains text before enrichment
+- **THEN** the sidecar page read reports `ocr_text_available: true`
+
+#### Scenario: Tags or a caption are the only extracted text
+
+- **WHEN** image OCR retains no text and the extractor adds tags or a caption
+- **THEN** the sidecar page read reports `ocr_text_available: false` and `processing_state: completed`
+- **AND** the enrichment stays searchable and any withheld OCR words stay out of search
+
+#### Scenario: OCR text availability is unknown
+
+- **WHEN** a sidecar or pending extraction result predates the measurement, or the measurement would exceed the engine label's byte limit
+- **THEN** the page read omits `ocr_text_available`
+
+#### Scenario: Reprocessing supersedes an extraction
+
+- **WHEN** reprocessing replaces a completed image extraction
+- **THEN** the earlier extraction keeps its recorded `ocr_text_available` on the prior extraction page
+- **AND** the current sidecar reports only the new extraction's availability, omitting the field if the new result does not measure it
