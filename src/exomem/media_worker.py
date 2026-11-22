@@ -691,6 +691,8 @@ class MediaWorker:
             elif media_engines.preview_generation_enabled():
                 try:
                     installed = media_previews.generate(self._vault_root, job, store, deadline=deadline)
+                except media_previews.InitialRecordUnavailable:
+                    store.return_for_retry(job, "preview record unavailable")
                 except Exception as error:  # noqa: BLE001 - a preview failure ends only this claim
                     if (isinstance(error, media_store.MediaStoreError)
                             and error.code in media_store.RETRYABLE_HYDRATION_CODES):

@@ -82,7 +82,11 @@ def _read_record(path: Path, relative: str, digest: str) -> bytes | None:
     return None
 
 
-def _read_for_generation(path: Path, relative: str, digest: str) -> bytes | None:
+class InitialRecordUnavailable(OSError):
+    """Preview storage could not be read before processing the original."""
+
+
+def _read_for_publication(path: Path, relative: str, digest: str) -> bytes | None:
     try:
         return _read_record(path, relative, digest)
     except OSError as error:
@@ -319,7 +323,11 @@ def generate(
             return False
         expected = intent[1]
         # The resident-file check can open the original.
-        jpeg = _read_for_generation(_record_path(store_path(vault), relative), relative, expected.sha256)
+        path = _record_path(store_path(vault), relative)
+        try:
+            jpeg = _read_record(path, relative, expected.sha256)
+        except OSError as error:
+            raise InitialRecordUnavailable from error
         current = originals.original_state(vault, relative)
         if not current.present or current.binary_sha256 != expected.sha256:
             return False
@@ -348,7 +356,7 @@ def generate(
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if not stat.S_ISDIR(path.parent.lstat().st_mode):
                 return False
-            existing = _read_for_generation(path, relative, held.sha256) is not None
+            existing = _read_for_publication(path, relative, held.sha256) is not None
             if not existing:
                 private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
             _sync_record(path, existing=existing)

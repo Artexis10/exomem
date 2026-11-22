@@ -66,6 +66,7 @@ When the install enables previews, the existing media worker SHALL queue a previ
 
 - **WHEN** private storage cannot determine whether a current record exists
 - **THEN** generation waits for a definite read before decoding or replacing the record
+- **AND** an initial storage refusal spends no codec attempt
 
 #### Scenario: Processing is replayed
 
@@ -89,6 +90,7 @@ An unmarked historical filing and a marked digest with a terminal failure SHALL 
 - **WHEN** startup or periodic discovery writes the first exact companion binding of an eligible image or video
 - **THEN** that write records preview demand for the digest of the original
 - **AND** the same rule applies when the companion already contains unbound prose
+- **AND** a discovery pass collects newly recorded demand into its bounded admission batch
 
 #### Scenario: A restore omits the preview record
 

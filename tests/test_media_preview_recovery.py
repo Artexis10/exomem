@@ -475,9 +475,12 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
 
     @contextmanager
     def guard(*args, **kwargs):
-        nonlocal publishing
+        nonlocal publishing, unavailable
         with original_guard(*args, **kwargs) as held:
-            publishing = kwargs.get("operation") == "media_preview_publish"
+            operation = kwargs.get("operation")
+            if operation == "media_preview_claim":
+                unavailable = False
+            publishing = operation == "media_preview_publish"
             try:
                 yield held
             finally:
@@ -522,31 +525,34 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         assert pending is not None and pending.state == media_jobs.PENDING
         assert ledger.claim_next() is None
 
-        blocked.setattr(media_store, "open_original", unnecessary_open)
-        blocked.setattr(reserved_paths, "inspect_generic_file", inspect_other)
-        now += media_jobs.RETRY_FIRST_SECONDS * 2 ** (claim.attempts - 1)
-        last = ledger.claim_next()
-        assert last is not None and last.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
-        worker._process(last)
-        assert ledger.claim_next() is None
+        if fault == "reuse":
+            assert pending.attempts == first.attempts
+            now += media_jobs.RETRY_FIRST_SECONDS
+        else:
+            now += media_jobs.RETRY_FIRST_SECONDS * 2 ** (claim.attempts - 1)
+            last = ledger.claim_next()
+            assert last is not None and last.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+            worker._process(last)
+            assert ledger.claim_next() is None
 
-        now += media_jobs.RETRY_FIRST_SECONDS
-        acknowledgement = ledger.claim_next()
-        assert acknowledgement is not None and acknowledgement.attempts == last.attempts
-        worker._process(acknowledgement)
-        waiting = ledger.get(claim.id)
-        assert waiting is not None and waiting.state == media_jobs.PENDING
-        assert waiting.attempts == last.attempts and ledger.claim_next() is None
+            monkeypatch.setattr(media_store, "open_original", unnecessary_open)
+            monkeypatch.setattr(reserved_paths, "inspect_generic_file", inspect_other)
+            now += media_jobs.RETRY_FIRST_SECONDS
+            acknowledgement = ledger.claim_next()
+            assert acknowledgement is not None and acknowledgement.attempts == last.attempts
+            worker._process(acknowledgement)
+            waiting = ledger.get(claim.id)
+            assert waiting is not None and waiting.state == media_jobs.PENDING
+            assert waiting.attempts == last.attempts and ledger.claim_next() is None
+            now += 2 * media_jobs.RETRY_FIRST_SECONDS
 
-    monkeypatch.setattr(media_store, "open_original", unnecessary_open)
-    monkeypatch.setattr(reserved_paths, "inspect_generic_file", inspect_other)
-    now += 2 * media_jobs.RETRY_FIRST_SECONDS
     retry = ledger.claim_next()
     assert retry is not None and retry.id == claim.id
     worker._process(retry)
     settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
-    assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    expected_attempts = claim.attempts if fault == "reuse" else media_jobs.MAX_PREVIEW_ATTEMPTS
+    assert settled.attempts == expected_attempts
     assert media_previews.read(vault, saved.path, first.preview_sha256) is not None
     assert (record.read_bytes(), record.stat().st_ino) == installed
 
@@ -654,3 +660,91 @@ def test_reconciliation_preserves_a_receipt_published_while_acquiring_the_guard(
     media_processing.reconcile_all_media(vault)
     rebuilt = ledger.claim_next()
     assert rebuilt is not None and rebuilt.id == receipt.id and rebuilt.preview_sha256 == digest
+
+
+def test_initial_preview_read_faults_leave_generation_eligible_after_storage_recovers(vault, monkeypatch):
+    original = _photo(923, 640)
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-initial-read-retry-fixture.jpg",
+            stream=io.BytesIO(original),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    now = time.time()
+    monkeypatch.setattr(media_jobs, "time", SimpleNamespace(time=lambda: now))
+    probes = []
+
+    def unavailable(path):
+        probes.append(path)
+        raise OSError(errno.EIO, "preview storage temporarily unreadable")
+
+    def unexpected_codec(*_args, **_kwargs):
+        pytest.fail("an uncertain record check must defer before decoding")
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(media_previews, "_load", unavailable)
+        blocked.setattr(media_previews, "_decode", unexpected_codec)
+        for _ in range(media_jobs.MAX_PREVIEW_ATTEMPTS):
+            claim = ledger.claim_next()
+            assert claim is not None
+            worker._process(claim)
+            pending = ledger.get(claim.id)
+            assert pending is not None and pending.state == media_jobs.PENDING
+            assert ledger.claim_next() is None
+            now += media_jobs.RETRY_LIMIT_SECONDS
+
+    assert probes and all(not path.exists() for path in probes)
+    retry = ledger.claim_next()
+    assert retry is not None and retry.id == claim.id
+    worker._process(retry)
+    settled = ledger.get(retry.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+    assert settled.attempts == 1
+    assert media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None
+
+
+def test_discovery_batches_new_preview_demands_within_its_limit(vault, monkeypatch):
+    binaries = [vault / NOTES / f"preview-discovery-batch-{index}.jpg" for index in range(3)]
+    for index, binary in enumerate(binaries):
+        binary.write_bytes(_photo(900 + index, 630))
+    lookups = []
+    admissions = []
+    guards = []
+
+    ledger_type = media_jobs.MediaJobStore
+    manager = get_manager()
+    original_lookup = ledger_type.recoverable_preview_demands
+    original_enqueue = ledger_type.enqueue_previews
+    original_guard = manager.consistency_guard
+
+    def lookup(store, candidates, **kwargs):
+        lookups.append(tuple(binary for binary, _, _ in candidates))
+        return original_lookup(store, candidates, **kwargs)
+
+    def enqueue(store, candidates, **kwargs):
+        admissions.append(tuple(binary for binary, _, _ in candidates))
+        return original_enqueue(store, candidates, **kwargs)
+
+    def guard(*args, **kwargs):
+        operation = kwargs.get("operation")
+        if operation in {"media_preview_admit", "media_preview_recover"}:
+            guards.append(operation)
+        return original_guard(*args, **kwargs)
+
+    monkeypatch.setattr(ledger_type, "recoverable_preview_demands", lookup)
+    monkeypatch.setattr(ledger_type, "enqueue_previews", enqueue)
+    monkeypatch.setattr(manager, "consistency_guard", guard)
+
+    assert media_processing.reconcile_all_media(vault, limit=2) == 2
+    selected = tuple(binaries[:2])
+    assert lookups == [selected]
+    assert admissions == [selected]
+    assert guards == ["media_preview_recover"]
+
+    ledger = ledger_type(vault, create=False)
+    for binary in selected:
+        claim = ledger.claim_next()
+        assert claim is not None and claim.binary_path == binary
+        assert claim.preview_sha256 == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert ledger.claim_next() is None

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import media_jobs
+from exomem import media_engines, media_jobs
 from exomem import vault as vault_module
 from exomem.media_worker_child import _VaultLock
 
@@ -76,7 +76,7 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
 
 def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(vault, monkeypatch):
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
-    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setattr(media_engines, "preview_worker_available", lambda: True)
     store = media_jobs.MediaJobStore(vault)
     original = _job(vault)
     store.enqueue_preview(original.binary_path, original.sidecar_path, "a" * 64)

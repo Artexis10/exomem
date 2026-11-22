@@ -171,13 +171,17 @@ def test_a_grant_to_download_raw_bytes_does_not_release_derived_pixels(vault, se
     assert str(refused.value) == str(missing.value)
 
 
-def test_a_raw_preview_denial_with_an_unverified_session_keeps_the_original_evicted(
-    vault, served, selected_store, monkeypatch,
+@pytest.mark.parametrize("session", ["unverified-external", "expired-owner"])
+def test_a_raw_preview_denial_keeps_the_original_evicted(
+    vault, served, selected_store, monkeypatch, session,
 ):
+    from dataclasses import replace
+
+    from test_governance_egress import _verified_external_session
     from test_media_store import _offload
 
     from exomem import commands, media_store, originals, preserve
-    from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+    from exomem.governance.principal import RequestPrincipal, library_scope, owner_principal, request_scope
 
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
     original = _photo(900, 600)
@@ -196,6 +200,12 @@ def test_a_raw_preview_denial_with_an_unverified_session_keeps_the_original_evic
 
     reader = RequestPrincipal("external", surface="mcp", issuer_family="test-issuer",
                               authorization_session_id="unverified-session")
+    if session == "expired-owner":
+        _, context = _verified_external_session()
+        owner = owner_principal(surface="mcp")
+        reader = replace(owner, issuer_family=context.issuer_family, verified_authorization_session=replace(
+            context, principal_id=owner.audience_id, expires_at=1,
+        ))
     with request_scope(reader), pytest.raises(artifact_recovery.RecoveryUnavailable):
         commands.op_read_media(vault, media="preview", path=captured.path)
 

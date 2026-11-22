@@ -133,6 +133,7 @@ class ReconcileResult:
     requeued: int = 0
     attached: bool = False  # the job row carries the request that reconcile_media was given
     document_container: dict | None = None
+    preview_intent_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -780,8 +781,11 @@ def reconcile_media(
             vault, binary, explicit=explicit, commit_guard=commit_guard,
             defer_fanout_to_terminal=defer_fanout_to_terminal, request=request, enqueue_preview=enqueue_preview,
         )
-    if result is not None and (enqueue_preview or preview_intent_written):
-        media_previews.enqueue(vault, binary, expected_sha256=provenance.sha256)
+    if result is not None:
+        if enqueue_preview:
+            media_previews.enqueue(vault, binary, expected_sha256=provenance.sha256)
+        elif preview_intent_written:
+            result = replace(result, preview_intent_sha256=provenance.sha256)
     if early:
         return result
 
@@ -834,7 +838,7 @@ def reconcile_all_media(
     attempted = 0
     last_examined: Path | None = None
     held = False
-    preview_intents: list[tuple[Path, Path, str]] | None = [] if media_engines.preview_generation_enabled() else None
+    preview_intents: dict[Path, tuple[Path, str]] | None = {} if media_engines.preview_generation_enabled() else None
     for binary in _iter_rotating_governed_media(
         vault,
         kb,
@@ -852,7 +856,10 @@ def reconcile_all_media(
         if needs_reconcile:
             attempted += 1
             try:
-                reconcile_one(binary)
+                result = reconcile_one(binary)
+                if (preview_intents is not None and isinstance(result, ReconcileResult)
+                        and result.preview_intent_sha256 is not None):
+                    preview_intents[binary] = result.sidecar_path, result.preview_intent_sha256
             except BoundaryBusy as busy:
                 # Ordinary contention in a store-mode vault: the cursor stops before this file.
                 if propagate_transient_errors:
@@ -878,7 +885,9 @@ def reconcile_all_media(
         if not held:
             last_examined = binary
     if preview_intents:
-        store = media_previews.recover(vault, store, preview_intents)
+        store = media_previews.recover(
+            vault, store, [(binary, sidecar, digest) for binary, (sidecar, digest) in preview_intents.items()],
+        )
     if last_examined is not None and store is not None:
         store.set_discovery_cursor(last_examined)
     return attempted
@@ -992,7 +1001,7 @@ def _needs_reconciliation(
     binary: Path,
     store: media_jobs.MediaJobStore | None,
     *,
-    preview_intents: list[tuple[Path, Path, str]] | None = None,
+    preview_intents: dict[Path, tuple[Path, str]] | None = None,
 ) -> bool:
     try:
         sidecar = originals.original_state(vault, binary).sidecar_path
@@ -1016,7 +1025,7 @@ def _needs_reconciliation(
 
         digest = media_previews.requested_digest(frontmatter, binary.relative_to(vault).as_posix())
         if digest is not None:
-            preview_intents.append((binary, sidecar, digest))
+            preview_intents[binary] = sidecar, digest
     if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
         return store is not None and store.has_pending_ocr(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
