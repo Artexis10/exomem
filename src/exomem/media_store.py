@@ -2111,7 +2111,6 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
         if listed is not None:
             head = _verified_head(backend, listed)
             if head is not None and not head.condemned:
-                _note_replica(vault, path, listed, None)
                 return listed
             # Only a definitive absence replaces the entry; an unknown answer raised above and keeps it.
         source = None
@@ -2286,7 +2285,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
         damaged = _entry_in(snapshot, store_name)
-        if damaged is None or not media_replicas.is_quarantined(vault, relative, damaged):
+        if damaged is None or not media_replicas.has_quarantined(vault, (damaged,)):
             # A publication that stopped after the binding changed but before its cache row followed (`_repoint_cache`)
             # is retried as a stale finding: the one recovery that eviction waits for records the cache row now.
             if entry.serves_eviction and snapshot.state == "cached" and not cache_matches(vault, path, snapshot=snapshot):

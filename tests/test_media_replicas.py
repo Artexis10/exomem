@@ -1482,7 +1482,12 @@ def test_a_lost_queue_resumes_its_scan_and_repairs_after_an_older_process_recrea
                     [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_replica_queue'").fetchone()
                     conn.execute("DROP TABLE media_replica_queue")
                     conn.execute(schema)
-                media_replicas.progress(vault, MIRROR)  # Recover while the older scan still holds its snapshot.
+                assert media_replicas.progress(vault, MIRROR) == {
+                    "store": MIRROR, "queued": None, "copied": None, "refused": None, "remaining": None, "scan": "unknown",
+                }
+                with closing(sqlite3.connect(path)) as conn:
+                    assert conn.execute("SELECT COUNT(*) FROM media_replica_queue").fetchone()[0] == 0
+                media_jobs.MediaJobStore(vault)  # Recover while the older scan still holds its snapshot.
 
     with monkeypatch.context() as lost:
         lost.setattr(media_store, "bound_originals", lose_the_queue_mid_scan)
@@ -1503,7 +1508,7 @@ def test_a_lost_queue_resumes_its_scan_and_repairs_after_an_older_process_recrea
 
 @pytest.mark.parametrize("false_alarm", [False, True], ids=["new-copy", "sample-releases"])
 def test_a_finding_after_the_first_copy_lands_keeps_its_active_request_until_the_repair_settles(
-        vault: Path, selected_store, mirrored: Path, false_alarm: bool) -> None:
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, false_alarm: bool) -> None:
     original = _preserved(vault)
     relative = original.relative_to(vault).as_posix()
     media_replicas.rebuild(vault)
@@ -1522,7 +1527,13 @@ def test_a_finding_after_the_first_copy_lands_keeps_its_active_request_until_the
     assert _mirror_stats(vault)["copy"]["remaining"] == 1
     if false_alarm:
         _unproven(vault)
-        assert media_replicas.sample(vault) == 1
+
+        def refuse_after_the_sample(*_args):
+            assert media_replicas.sample(vault) == 1
+            raise media_store.MediaStoreError(media_store.NO_VERIFIED_SOURCE, "this copy did not find a source")
+
+        monkeypatch.setattr(media_store, "recopy", refuse_after_the_sample)
+        _recopy_all(vault)
         assert _entry(vault, relative, MIRROR) == published
     else:
         _recopy_all(vault)
@@ -1556,9 +1567,19 @@ def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
     assert replacement != damaged and _replica_row(vault)["version"] == damaged.version
     assert _queued(vault)[0][1:3] == (media_replicas.RECOPY, media_replicas.PENDING)
     versions = _objects(mirrored)
+    if interrupted:
+        with closing(sqlite3.connect(path)) as conn, conn:
+            assert conn.execute("SELECT COUNT(*) FROM media_protections WHERE object = ? AND uploadable = 0",
+                                (replacement.object,)).fetchone()[0] == 1
+            conn.execute("INSERT INTO media_protections(token, binary_rel, object, created_at, uploadable, store) "
+                         "VALUES ('next-upload', ?, ?, ?, 1, ?)", (relative, "f" * 64, time.time(), MIRROR))
 
     assert media_replicas.drain(vault) == 1
 
+    if interrupted:
+        with closing(sqlite3.connect(path)) as conn:
+            assert conn.execute("SELECT object FROM media_protections WHERE binary_rel = ? AND store = ?",
+                                (relative, MIRROR)).fetchall() == [("f" * 64,)]
     assert _entry(vault, relative, MIRROR) == replacement
     assert _objects(mirrored) == versions
     row = _replica_row(vault)
@@ -1566,6 +1587,102 @@ def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
         replacement.object, replacement.version, media_replicas.UPLOAD_VERIFIED, None,
     )
     assert not _queued(vault)
+
+
+def test_a_first_copy_keeps_its_job_when_the_published_replica_cannot_record_its_quarantine(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    assert media_store.evict(vault, original)
+    relative = original.relative_to(vault).as_posix()
+    media_replicas.request(vault, MIRROR)
+    media_replicas.scan(vault, MIRROR)
+    path = media_jobs.MediaJobStore(vault).path
+    note = media_store._note_replica
+
+    def fail_the_row_after_publication(root, original_path, replica, verified_at):
+        media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
+                                  failure=media_replicas.PLAINTEXT_MISMATCH)
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("CREATE TRIGGER test_projection_down BEFORE INSERT ON media_replicas "
+                         "BEGIN SELECT RAISE(ABORT, 'simulated projection failure'); END")
+        note(root, original_path, replica, verified_at)
+
+    monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
+    with monkeypatch.context() as failed:
+        failed.setattr(media_store, "_note_replica", fail_the_row_after_publication)
+        assert media_replicas.drain(vault) == 0
+    published = _entry(vault, relative, MIRROR)
+    assert published.ciphertext_sha256 == pointer.ciphertext_sha256
+    [mirror] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
+    assert (mirror["state"], mirror["recoverable"]) == (media_replicas.QUARANTINED, False)
+    assert mirror["finding"]["failure"] == media_replicas.PLAINTEXT_MISMATCH
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 1
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DROP TRIGGER test_projection_down")
+
+    media_replicas.drain(vault)
+
+    assert _entry(vault, relative, MIRROR) == published
+    assert _replica_row(vault)["state"] == media_replicas.QUARANTINED
+    assert (MIRROR, media_replicas.RECOPY, media_replicas.PENDING, None) in _queued(vault)
+    assert media_replicas.progress(vault, MIRROR)["remaining"] == 1
+
+
+@pytest.mark.parametrize("receipt_lost", [False, True], ids=["recorded-replacement", "lost-replacement-receipt"])
+def test_a_scheduled_refresh_cannot_overwrite_a_newer_published_binding(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, receipt_lost: bool) -> None:
+    relative, first = _replicated(vault)
+    picked = _replica_row(vault)
+    if receipt_lost:
+        monkeypatch.setattr(media_store, "_note_replica", lambda *_args, **_kwargs: None)
+    media_replicas.quarantine(vault, relative, first, level=media_replicas.CONTENT, failure="digest_mismatch")
+    second = media_store.recopy(vault, vault / relative, MIRROR)
+    read = originals.original_state
+    successor = None
+
+    def publish_while_the_check_holds_its_snapshot(root, path):
+        nonlocal successor
+        captured = read(root, path)
+        if successor is None:
+            media_replicas.quarantine(vault, relative, second, level=media_replicas.CONTENT, failure="digest_mismatch")
+            successor = media_store.recopy(vault, vault / relative, MIRROR)
+        return captured
+
+    with monkeypatch.context() as race:
+        race.setattr(originals, "original_state", publish_while_the_check_holds_its_snapshot)
+        media_replicas._bound(vault, picked)
+
+    row = _replica_row(vault)
+    assert successor is not None and _entry(vault, relative, MIRROR) == successor
+    previously_recorded = first if receipt_lost else successor
+    assert (row["object"], row["version"]) == (previously_recorded.object, previously_recorded.version)
+    assert row["verified_at"] is not None
+
+
+def test_exact_and_paged_status_use_surviving_authority_without_certifying_a_recreated_projection(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.CONTENT, failure="absent")
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_replicas'").fetchone()
+        conn.execute("DROP TABLE media_replicas")
+        conn.execute(schema)
+
+    view = media_replicas.original_view(vault, relative)
+    [mirror] = [item for item in view["replicas"] if item["store"] == MIRROR]
+    assert view["state"] == "partial"
+    assert (mirror["state"], mirror["recoverable"], mirror["finding"]["failure"]) == (
+        media_replicas.QUARANTINED, False, "absent",
+    )
+    assert media_replicas.page(vault)["state"] == "unknown"
+    assert media_replicas.findings(vault)["state"] == "unknown"
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DROP TABLE media_damaged_versions")
+    [mirror] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
+    assert (mirror["state"], mirror["recoverable"]) == ("unknown", None)
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -3248,6 +3365,34 @@ def test_recovered_damage_keeps_a_confirmed_absence_when_a_shared_plaintext_find
     assert [(store, kind) for store, kind, _state, _code in _queued(vault)] == [(MIRROR, media_replicas.RECOPY)]
 
 
+@pytest.mark.parametrize("legacy_finding", [False, True], ids=["new-finding", "recovered-link"])
+def test_a_plaintext_finding_on_a_legacy_filing_can_be_recovered_and_cleared(
+        vault: Path, selected_store, mirrored: Path, legacy_finding: bool) -> None:
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    relative = original.relative_to(vault).as_posix()
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("UPDATE media_replicas SET ciphertext_sha256 = NULL")
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    if not legacy_finding:
+        assert _replica_row(vault, pointer.store)["ciphertext_sha256"] == pointer.ciphertext_sha256
+    with closing(sqlite3.connect(path)) as conn, conn:
+        if legacy_finding:
+            conn.execute("UPDATE media_replicas SET ciphertext_sha256 = NULL")  # A finding from the older writer.
+        conn.execute("DROP TABLE media_damaged_versions")
+    if legacy_finding:
+        media_jobs.MediaJobStore(vault)  # Recover the exact version while its old digest link is still missing.
+    media_replicas.rebuild(vault)
+    _unproven(vault)
+
+    assert media_replicas.sample(vault) == 1
+
+    assert not media_replicas.has_quarantined(vault, (pointer,))
+    assert _queued(vault) == []
+
+
 def test_a_pointer_is_not_copied_back_from_a_replica_that_was_a_copy_of_the_version_found_wrong(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The mirror holds the pointer's ciphertext under another name: its bytes decrypt wrong exactly as the pointer's do."""
@@ -3353,35 +3498,20 @@ def test_a_finding_of_another_cause_moves_the_filings_of_a_wrong_plaintext_to_th
     assert media_replicas.has_quarantined(vault, (pointer,))
 
 
-def test_a_finding_that_changes_the_cause_of_a_version_moves_every_quarantined_filing_of_it_so_no_release_strands_one(
+def test_a_delayed_plaintext_finding_does_not_replace_confirmed_version_damage(
         vault: Path, selected_store, mirrored: Path) -> None:
-    """The version's record names one cause, the newest: a filing that kept an older one would outlive the record's release.
-
-    Two filings share a version that a check found damaged. A later finding of a wrong plaintext changes the record's
-    cause, and the filing of the other name that stayed quarantined as damaged would be left with no record when a sample
-    proves the ciphertext and releases it: no gate would see that row, and eviction would drop the bytes that it must copy.
-    """
-    first = _preserved(vault, category="first")
-    pointer = _offload(vault, first)
-    second = _preserved(vault, category="second")
-    assert _offload(vault, second) == pointer
-    held = {original: original.relative_to(vault).as_posix() for original in (first, second)}
-    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.CONTENT, failure="digest_mismatch")
-    assert _replica_row_of(vault, second, pointer.store)["failure"] == "digest_mismatch"
-
-    media_replicas.quarantine(vault, held[first], pointer, level=media_replicas.DECRYPTED,
+    relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.CONTENT, failure="absent")
+    media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
                               failure=media_replicas.PLAINTEXT_MISMATCH)
-
-    for original in (first, second):  # the record names a wrong plaintext now, so each filing says the same
-        assert _replica_row_of(vault, original, pointer.store)["failure"] == media_replicas.PLAINTEXT_MISMATCH
+    assert media_replicas.original_view(vault, relative)["replicas"][0]["finding"]["failure"] == "absent"
     _unproven(vault)
 
-    media_replicas.sample(vault)  # the ciphertext decrypts to the binding: a false alarm for the whole version
+    assert media_replicas.sample(vault) == 1  # Only the mirror is eligible to clear the shared plaintext finding.
 
-    for original in (first, second):
-        assert _replica_row_of(vault, original, pointer.store)["state"] == media_replicas.UPLOAD_VERIFIED
-    assert not media_replicas.has_quarantined(vault, (pointer,))
-    assert _requests(vault) == []
+    assert media_replicas.has_quarantined(vault, (pointer,))
+    assert not media_replicas.has_quarantined(vault, (mirror,))
+    assert _queued(vault) == [(pointer.store, media_replicas.RECOPY, media_replicas.PENDING, None)]
 
 
 def test_a_sample_that_decrypts_a_copy_of_a_version_found_wrong_leaves_the_filing_whose_version_was_found_lost_since(
