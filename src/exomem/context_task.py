@@ -213,6 +213,22 @@ def _deadline_check() -> None:
         raise TaskDeadline("task source preparation is unavailable")
 
 
+#: Every request-budget stage of task discovery is named under this prefix, from the whole lane down to its links.
+DISCOVERY_STAGE_PREFIX = "working_set.task_context"
+
+
+def discovery_cut_short() -> bool:
+    """Whether this request's deadline skipped or stopped a stage of task discovery.
+
+    Then the pages the task context served are not all the turn would reach. The block's `budget` reason cannot say
+    this: it also names a lead that did not fit the character allowance, which is a bound by design.
+    """
+    budget = request_budget.current()
+    return budget is not None and any(
+        stage.startswith(DISCOVERY_STAGE_PREFIX) for stage in (*budget.skipped, *budget.truncated)
+    )
+
+
 def _serve_without_deadline() -> None:
     """The final guard re-reads only leads already served, so a deadline that has passed must not drop them."""
 

@@ -17,6 +17,7 @@ from exomem import (
     commands,
     lexstore,
     positions,
+    request_budget,
     semantic_language_registry,
     served_context,
     working_set,
@@ -266,6 +267,60 @@ def test_a_turn_without_leads_reports_an_empty_block_not_an_unavailable_one(
     assert record["positions"] == {"state": "empty", "refs": [], "overflow_refs": []}
 
 
+def _starve(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
+    """The request deadline arrives at `stage` of task discovery, and at no other stage."""
+    real = working_set.budget_exhausted
+
+    def exhausted(name: str, **kwargs) -> bool:
+        if name == stage:
+            request_budget.current().note_skipped(name)
+            return True
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(working_set, "budget_exhausted", exhausted)
+
+
+def test_a_turn_whose_task_discovery_ran_out_of_time_reports_the_block_unavailable_not_empty(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the installed service a recall spent its request budget before task discovery ran, so the block had no
+    pages to read and said `empty`: the agent read "no recorded position" where none had been looked for."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    _starve(monkeypatch, "working_set.task_context")
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        packet = _activate(vault, turn=TURN, max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+
+    assert packet["task_context"]["candidates"] == []
+    assert packet["positions"] == {"state": "unavailable", "items": [], "overflow_refs": [], "omitted": 0, "reason": "budget"}
+
+
+def test_a_turn_whose_task_discovery_stopped_early_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline cut the leads' links, so the linked page that holds the position was never read; the block
+    said `empty`, as if the pages the turn reaches held no position."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    _starve(monkeypatch, "working_set.task_context_links")
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        packet = _activate(vault, turn=TURN, max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+
+    # Other leads were served, so the block read some pages: what it found is partial, not none.
+    assert packet["task_context"]["candidates"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "budget"}
+
+
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A page its author retired for a newer one was served as a ready position, presenting a withdrawn view as current."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
@@ -407,7 +462,9 @@ def test_a_page_the_caller_may_read_no_text_of_lists_no_unit_line_or_ref(vault: 
     guest = _activate(vault, _external(), turn=TURN, max_chars=8000)
 
     assert reads
-    assert guest["positions"] == {"state": "empty", "items": [], "overflow_refs": [], "omitted": 0}
+    # The guest's task discovery is unavailable in this fixture, so the one page read is only part of the reach.
+    assert guest["task_context"]["state"] == "unavailable"
+    assert guest["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
 
 
 def test_a_policy_that_tightens_before_terminal_egress_does_not_serve_more_than_the_new_excerpt_bound(

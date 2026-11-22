@@ -8130,11 +8130,12 @@ def _op_activate_context_body(
                 reach=reach,
             )
 
-        def recorded_positions(caller):
+        def recorded_positions(caller, discovery_gap):
             from . import positions
 
             return positions.compile_block(
                 vault_root, caller, reach=reach, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
+                discovery_gap=discovery_gap,
             )
 
         try:
