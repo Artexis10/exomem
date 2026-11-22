@@ -17,6 +17,7 @@ from exomem import (
     activation_conventions,
     commands,
     context_task,
+    epistemic_graph,
     lexstore,
     positions,
     request_budget,
@@ -414,6 +415,24 @@ def test_a_turn_whose_lead_could_not_be_projected_reports_its_positions_as_not_t
 
     assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
     # Other leads were served, so the block read some pages: what it found is partial, not none.
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_graph_snapshot_was_refused_after_the_availability_check_reports_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph reported itself available, then refused the snapshot the link lookup opened, and the lookup read
+    that as "no edges": the linked page that holds the position was never read and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    # The availability check passed; every snapshot opened after it is refused.
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", lambda self: True)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", lambda self, *args, **kwargs: None)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
     assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
 
 

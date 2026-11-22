@@ -2563,6 +2563,10 @@ def dependent_paths(
     return found - changed
 
 
+class GraphSnapshotUnavailable(RuntimeError):
+    """The graph's read snapshot could not be opened after the index reported itself available."""
+
+
 class EpistemicGraphIndex:
     #: Set by `_rebuild_all_locked` when its pass returns `behind`.
     _behind_build: _BehindBuild | None = None
@@ -8773,6 +8777,7 @@ class EpistemicGraphIndex:
         *,
         keep: Callable[[str], bool] | None = None,
         resolver: vault_module.WikilinkResolver | None = None,
+        refuse_unavailable: bool = False,
     ) -> list[GraphNeighbor]:
         """Typed edges touching `seeds` in both directions, batched over SQL.
 
@@ -8800,6 +8805,8 @@ class EpistemicGraphIndex:
         sharing a stem or title could drop or redirect a visible page's edge;
         those links re-resolve in the reader's view (`_neighbor_rows`).
         `resolver` is the request's recall resolver for that re-resolution.
+        `refuse_unavailable` raises `GraphSnapshotUnavailable` when the read snapshot cannot be opened, for a caller
+        that must tell an unreadable graph from a seed with no edges; otherwise that case returns no neighbours.
         """
         if not seeds:
             return []
@@ -8822,6 +8829,8 @@ class EpistemicGraphIndex:
         seed_paths = list(seed_order)
         conn = self._open_read_snapshot()
         if conn is None:
+            if refuse_unavailable:
+                raise GraphSnapshotUnavailable("the graph read snapshot is unavailable")
             return []
         rows: list[tuple[int, tuple[str, int], GraphNeighbor]] = []
         try:

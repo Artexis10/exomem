@@ -2036,7 +2036,12 @@ def read_connections(
 
     # Per seed, one entry per target keeps its best-ranked edge.
     ranked: dict[str, dict[str, tuple[int, int, int, Connection]]] = {}
-    for position, neighbor in enumerate(index.neighbors_for(list(seeds), keep=visible)):
+    try:
+        neighbors = index.neighbors_for(list(seeds), keep=visible, refuse_unavailable=True)
+    except epistemic_graph.GraphSnapshotUnavailable:
+        # The availability check passed, then the snapshot refused: the graph cannot answer, as when it is unavailable.
+        return None
+    for position, neighbor in enumerate(neighbors):
         target = str(neighbor.other_rel)
         if target == neighbor.seed_rel or target not in by_path:
             continue
