@@ -1,0 +1,409 @@
+{
+  "arms": {
+    "dense": "no request mode; exact dense ranking",
+    "hybrid": "options.mode is hybrid; fused ranking"
+  },
+  "artifacts": {
+    "paired-report.json": "53ccbdbdeb135f06ca3dc12fc06c243154bb9b8b76b460bc904b45a0d93b3f25",
+    "samples.jsonl": "28d8e01cec58df8dc9d2da227ca54fb6cf8d9225a872d5c881765b544346d96a"
+  },
+  "boundary": "mcp-worker-socket-v1",
+  "comparison": [
+    {
+      "callers": 1,
+      "cases_in_interval": 40,
+      "confidence": 0.95,
+      "difference": "hybrid minus dense",
+      "interpretation": "no change",
+      "lower_ms": -6.3646056777967415,
+      "mean_delta_ms": -2.85762844432611,
+      "scope": "query differences conditional on the captured rounds; no independent host experiments",
+      "state": "measured",
+      "upper_ms": 0.5994492958658741
+    },
+    {
+      "callers": 4,
+      "cases_in_interval": 40,
+      "confidence": 0.95,
+      "difference": "hybrid minus dense",
+      "interpretation": "higher latency",
+      "lower_ms": 0.12044129346881256,
+      "mean_delta_ms": 10.473760737537912,
+      "scope": "query differences conditional on the captured rounds; no independent host experiments",
+      "state": "measured",
+      "upper_ms": 20.50895932082009
+    }
+  ],
+  "conditions": [
+    {
+      "attempts": 120,
+      "busy_refusals": 0,
+      "callers": 1,
+      "failures": 0,
+      "latency_within_bar": true,
+      "mode": "dense",
+      "native_overlap_verified": true,
+      "p50_ms": 153.297,
+      "p95_ms": 195.063,
+      "rankings": {
+        "dense": 120
+      },
+      "strict_ceiling_ms": 200.0,
+      "terminals": 120
+    },
+    {
+      "attempts": 480,
+      "busy_refusals": 0,
+      "callers": 4,
+      "failures": 0,
+      "latency_within_bar": true,
+      "mode": "dense",
+      "native_overlap_verified": true,
+      "p50_ms": 319.893,
+      "p95_ms": 496.876,
+      "rankings": {
+        "dense": 480
+      },
+      "strict_ceiling_ms": 500.0,
+      "terminals": 480
+    },
+    {
+      "attempts": 120,
+      "busy_refusals": 0,
+      "callers": 1,
+      "failures": 0,
+      "latency_within_bar": true,
+      "mode": "hybrid",
+      "native_overlap_verified": true,
+      "p50_ms": 155.848,
+      "p95_ms": 186.565,
+      "rankings": {
+        "fused": 120
+      },
+      "strict_ceiling_ms": 200.0,
+      "terminals": 120
+    },
+    {
+      "attempts": 480,
+      "busy_refusals": 0,
+      "callers": 4,
+      "failures": 0,
+      "latency_within_bar": false,
+      "mode": "hybrid",
+      "native_overlap_verified": true,
+      "p50_ms": 329.06,
+      "p95_ms": 524.911,
+      "rankings": {
+        "fused": 480
+      },
+      "strict_ceiling_ms": 500.0,
+      "terminals": 480
+    }
+  ],
+  "conditions_by_repeat": [
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 159.864,
+      "mode": "dense",
+      "p50_ms": 156.335,
+      "p95_ms": 195.12,
+      "repeat": 0
+    },
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 147.909,
+      "mode": "dense",
+      "p50_ms": 144.867,
+      "p95_ms": 198.314,
+      "repeat": 1
+    },
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 154.694,
+      "mode": "dense",
+      "p50_ms": 153.159,
+      "p95_ms": 179.354,
+      "repeat": 2
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 329.731,
+      "mode": "dense",
+      "p50_ms": 331.29,
+      "p95_ms": 507.355,
+      "repeat": 0
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 315.774,
+      "mode": "dense",
+      "p50_ms": 323.586,
+      "p95_ms": 481.245,
+      "repeat": 1
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 300.81,
+      "mode": "dense",
+      "p50_ms": 308.418,
+      "p95_ms": 467.566,
+      "repeat": 2
+    },
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 169.627,
+      "mode": "hybrid",
+      "p50_ms": 167.825,
+      "p95_ms": 201.914,
+      "repeat": 0
+    },
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 127.405,
+      "mode": "hybrid",
+      "p50_ms": 122.414,
+      "p95_ms": 163.692,
+      "repeat": 1
+    },
+    {
+      "callers": 1,
+      "calls": 40,
+      "mean_ms": 156.862,
+      "mode": "hybrid",
+      "p50_ms": 154.983,
+      "p95_ms": 178.857,
+      "repeat": 2
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 328.064,
+      "mode": "hybrid",
+      "p50_ms": 330.63,
+      "p95_ms": 495.796,
+      "repeat": 0
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 313.489,
+      "mode": "hybrid",
+      "p50_ms": 319.924,
+      "p95_ms": 502.791,
+      "repeat": 1
+    },
+    {
+      "callers": 4,
+      "calls": 160,
+      "mean_ms": 336.183,
+      "mode": "hybrid",
+      "p50_ms": 338.353,
+      "p95_ms": 548.266,
+      "repeat": 2
+    }
+  ],
+  "coverage": {
+    "dense_replies": 600,
+    "four_client_batches": 240,
+    "frozen_source_files": 981,
+    "fused_replies": 600,
+    "hits_verified": 36000,
+    "initial_warmup_mismatch_note": "warm-up replies that did not match the arm's declared reply: dense replies scored from disk while the resident matrix was loading; they were not timed samples",
+    "initial_warmup_mismatches": 4,
+    "measured_calls": 1200,
+    "native_join_scope": "batch request sets, not individual concurrent client-to-native assignment",
+    "warmup_calls": 28
+  },
+  "limitations": [
+    "Intervals are conditional on the captured rounds, not independent host experiments.",
+    "Synthetic corpus vectors do not measure retrieval quality.",
+    "Both arms ran in one container on a shared host; the pair is comparable, but absolute values are not comparable with the 14 November run.",
+    "Production load, store-mode runtime and installed rollout remain unverified.",
+    "One run on a shared host: host CPU pressure (PSI some) was 5.8 to 7.5% of each segment's wall time, and the dense four-caller p95 was within 4 ms of its bar."
+  ],
+  "matrix_byte_ceilings": {
+    "dense": 536870912,
+    "hybrid": 536870912
+  },
+  "measured_source": {
+    "base_commit": "cfb27c96d0797d64f60e16032160ab407c41c5b7",
+    "driver_sha256": "6c51af7cf78a3cd5111415dccc86c7c30dd298da24078b72ab4e2e3aca917ee7",
+    "scope": "the source of this change on the base commit; the manifest covers src, scripts, profiles and the lock",
+    "source_manifest_sha256": "c3181b199acdec02fb3bd70d328bf5ff9f0fd1b4c253d38a587791e44eff269a"
+  },
+  "profile_sha256": {
+    "profile.json": "3603ca07eadc2801972bd999967ce0a7645cf0b8687381cfe22d6222d6fd01b8",
+    "ranking-profile.json": "7f9904c78cd5975144c9a953a0dfde544753df6cd89b47816d09d525594910e3"
+  },
+  "qualifications": {
+    "dense": true,
+    "hybrid": false
+  },
+  "reference": {
+    "canonical_sources": 1500,
+    "cloud_resource_policy": "service-v1",
+    "corpus_vectors": "deterministic normalized synthetic",
+    "cpu_affinity_cpus": 2,
+    "cpu_threads": 2,
+    "cpus": 2,
+    "declared_passage_chunks": 40500,
+    "memory_bytes": 3221225472,
+    "network": "none",
+    "query_encoder": "real warm served encoder",
+    "storage_mode": "file",
+    "swap_bytes": 0,
+    "sync_workers": 8
+  },
+  "reference_preparation": {
+    "encoder_artifact_digest": "7b9a0b3b0b292643",
+    "encoder_fingerprint": "BAAI/bge-m3|cls|l2|74068c180d6514e8",
+    "note": "the 14 November fixture's embeddings sidecar was no longer retained, so the reference was prepared again from the same generator",
+    "query_bytes_sha256": "5de32c0621488d1ef26aa1528767bb36e243d974be30068746d5803c725db0cd",
+    "route": "prepare",
+    "source_bytes_equal_to_2026-11-14_preparation": true,
+    "source_bytes_sha256": "0389c81e26a5657252f84b23b2b431c84f2fb74a58cc1455e9609d94e8a97e6a"
+  },
+  "resources": {
+    "scope": "segment startup, warm-up and measured calls; peak is cumulative for the container; host pressure is the PSI share of wall time in which some host task waited, over the segment's observations",
+    "segments": [
+      {
+        "container_cumulative_memory_peak_bytes": 1983815680,
+        "cpu_periods": 818,
+        "cpu_throttled_periods": 53,
+        "host_cpu_pressure_some_percent": 6.51,
+        "host_memory_pressure_some_percent": 1.64,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "dense",
+        "observations": 84,
+        "repeat": 0,
+        "sampled_memory_current_max_bytes": 1940246528,
+        "unavailable_resource_reads": 0
+      },
+      {
+        "container_cumulative_memory_peak_bytes": 2604494848,
+        "cpu_periods": 796,
+        "cpu_throttled_periods": 61,
+        "host_cpu_pressure_some_percent": 5.81,
+        "host_memory_pressure_some_percent": 1.9,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "hybrid",
+        "observations": 82,
+        "repeat": 0,
+        "sampled_memory_current_max_bytes": 2588934144,
+        "unavailable_resource_reads": 0
+      },
+      {
+        "container_cumulative_memory_peak_bytes": 3036065792,
+        "cpu_periods": 745,
+        "cpu_throttled_periods": 51,
+        "host_cpu_pressure_some_percent": 7.01,
+        "host_memory_pressure_some_percent": 0.97,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "hybrid",
+        "observations": 77,
+        "repeat": 1,
+        "sampled_memory_current_max_bytes": 3005300736,
+        "unavailable_resource_reads": 0
+      },
+      {
+        "container_cumulative_memory_peak_bytes": 3221225472,
+        "cpu_periods": 596,
+        "cpu_throttled_periods": 54,
+        "host_cpu_pressure_some_percent": 7.49,
+        "host_memory_pressure_some_percent": 0.71,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 2683,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "dense",
+        "observations": 63,
+        "repeat": 1,
+        "sampled_memory_current_max_bytes": 3221209088,
+        "unavailable_resource_reads": 0
+      },
+      {
+        "container_cumulative_memory_peak_bytes": 3221225472,
+        "cpu_periods": 711,
+        "cpu_throttled_periods": 52,
+        "host_cpu_pressure_some_percent": 7.55,
+        "host_memory_pressure_some_percent": 1.16,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 1462,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "dense",
+        "observations": 74,
+        "repeat": 2,
+        "sampled_memory_current_max_bytes": 3188228096,
+        "unavailable_resource_reads": 0
+      },
+      {
+        "container_cumulative_memory_peak_bytes": 3221225472,
+        "cpu_periods": 701,
+        "cpu_throttled_periods": 63,
+        "host_cpu_pressure_some_percent": 6.94,
+        "host_memory_pressure_some_percent": 0.77,
+        "memory_event_deltas": {
+          "high": 0,
+          "low": 0,
+          "max": 3226,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "mode": "hybrid",
+        "observations": 74,
+        "repeat": 2,
+        "sampled_memory_current_max_bytes": 3221180416,
+        "unavailable_resource_reads": 0
+      }
+    ]
+  },
+  "runtime": {
+    "dependencies": "seven packages that the image carries at newer versions were replaced by their uv.lock versions from hash-pinned wheels; the driver's lock check passed",
+    "image": "Exomem Cloud image built from main at 25c9f1e95, which includes the fused passage ranking",
+    "image_id": "sha256:7abc4d696bcdf47ad389000d2f9d287a1f2a9f7f9c335b228f99f36fb9a4ee3f"
+  },
+  "sample_window_utc": {
+    "first": "2026-11-22T19:20:39.154561+00:00",
+    "last": "2026-11-22T19:28:12.100511+00:00"
+  },
+  "schema_version": 1
+}
