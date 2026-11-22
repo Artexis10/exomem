@@ -63,7 +63,7 @@ The budget was chosen by measurement on 49 real chat questions over 33,454 chunk
 
 The chosen budget keeps the top-15 gain and most of the top-5 gain. It gives up 2 cases at top 30. Keeping the rarest common units when no other unit remained cost a p95 of 14.3 ms under 2%, because 5 of the 40 reference queries have no unit under that share. The previous budget measured on the same code, so its cost is the cost of the rows it reads.
 
-Fusion of two 200-entry rankings costs under a millisecond, and the dense partial sort to 200 entries costs no more than one to `limit`. The passage latency bars at the MCP boundary stay unchanged, and the reference qualification must pass with fusion on.
+Fusion of two 200-entry rankings costs under a millisecond, and the dense partial sort to 200 entries costs no more than one to `limit`. The passage latency bars at the MCP boundary stay unchanged, and the reference qualification must pass with fusion on. In process on the reference, a `hybrid` search cost 6 to 7 ms more than a dense one, of which the lexical stage took 3.5 ms. The 22 November qualification met the single-caller bar with fusion on and missed the four-caller bar by 24.9 ms; task 3.2 records the numbers.
 
 ## Risks and Trade-offs
 

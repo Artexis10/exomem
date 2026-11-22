@@ -200,17 +200,29 @@ A retained baseline must keep its embeddings sidecar in rollback-journal mode, s
 Run `PRAGMA journal_mode=DELETE` on that sidecar once after `prepare`.
 
 The [22 November qualification](qualification-hybrid-2026-11-22.json) ran both arms with three repeats and 1,200 calls.
+It measured the lexical stage that ranks candidates from the terms index alone.
 The 14 November sidecar was no longer retained, so `prepare` generated the reference again.
 Its Source bytes hash, encoder artifact and query bytes equal the earlier preparation.
 
 | Request mode | Single-caller p50 / p95 | Four-caller p50 / p95 | Replies by ranking |
 | --- | ---: | ---: | --- |
-| Dense default | 146.391 / 173.184 ms | 298.912 / 480.120 ms | 600 dense |
-| `mode: "hybrid"` | 161.952 / 234.578 ms | 352.247 / 572.763 ms | 600 fused |
+| Dense default | 153.297 / 195.063 ms | 319.893 / 496.876 ms | 600 dense |
+| `mode: "hybrid"` | 155.848 / 186.565 ms | 329.060 / 524.911 ms | 600 fused |
+
+The p95 of each repeat, from 40 single-caller and 160 four-caller calls per arm:
+
+| Request mode | Callers | Repeat 1 | Repeat 2 | Repeat 3 |
+| --- | ---: | ---: | ---: | ---: |
+| Dense default | 1 | 195.120 ms | 198.314 ms | 179.354 ms |
+| `mode: "hybrid"` | 1 | 201.914 ms | 163.692 ms | 178.857 ms |
+| Dense default | 4 | 507.355 ms | 481.245 ms | 467.566 ms |
+| `mode: "hybrid"` | 4 | 495.796 ms | 502.791 ms | 548.266 ms |
 
 All 1,200 calls completed with 30 hits, zero withheld chunks and zero busy refusals.
-The dense default meets both bars. Hybrid misses both: its p95 is 34.578 ms over the 200 ms bar and 72.763 ms over the 500 ms bar.
-The mean hybrid-minus-dense differences are +25.912 ms and +57.418 ms for one and four callers.
-The 95% intervals are [20.818, 31.430] ms and [46.488, 69.963] ms, conditional on the captured rounds.
-The first hybrid segment received four dense replies in warm-up while the lexical terms were preparing; no timed call did.
+The dense default meets both bars.
+Hybrid meets the single-caller bar and misses the four-caller bar by 24.911 ms.
+The mean hybrid-minus-dense difference is −2.858 ms with one caller, 95% interval [−6.365, 0.599], which is no change.
+With four callers it is +10.474 ms, 95% interval [0.120, 20.509]. Both intervals are conditional on the captured rounds.
+The dense four-caller p95 was 3.124 ms under its bar, so this shared host left the bar almost no room.
+In warm-up, the second dense segment received four replies scored from disk while its resident matrix was loading. No timed call did.
 Both arms shared one container and one shared host, so compare the arms with each other, not with the 14 November values.
