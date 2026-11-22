@@ -1297,6 +1297,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1366,6 +1370,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [

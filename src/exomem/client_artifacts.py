@@ -33,6 +33,8 @@ from .preserve import (
     DuplicateArtifact,
     PreserveError,
     destination_segment_refusal,
+    diarize_pin,
+    disclose_retained_speaker_choice,
     preserve_stream,
     validate_raw_capture,
 )
@@ -170,6 +172,7 @@ class StagedArtifact:
     #: The claimed hold behind a local client's held upload, so a command that
     #: stores nothing can put it back.
     held: object | None = None
+    diarize: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -492,19 +495,23 @@ def stage_artifact(
     A local client's held upload (`exomem-held:`) is claimed from machine-local
     state instead; it never reaches the network code below.
     """
+    from .cloud_cell import cloud_mode_enabled
     from .held_uploads import is_held_reference
 
+    diarize = file.get("diarize")
+    if diarize is not None and not isinstance(diarize, bool):
+        raise SafeFetchError("INVALID_FILE", "diarize must be true or false")
     if is_held_reference(file.get("download_url")):
-        return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
-    from .cloud_cell import cloud_mode_enabled
-
-    if cloud_mode_enabled():
+        artifact = _redeem_held(file, budget, vault_root=vault_root, lane=lane)
+    elif cloud_mode_enabled():
         from .cloud_artifact_transport import stage_cloud_artifact
 
-        return stage_cloud_artifact(
+        artifact = stage_cloud_artifact(
             file, budget, index=index, lane=lane, batch_deadline=batch_deadline
         )
-    return stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    else:
+        artifact = stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    return artifact if diarize is None else replace(artifact, diarize=diarize)
 
 
 def stage_direct_artifact(
@@ -1270,6 +1277,7 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
+    disclose_retained_speaker_choice(out, artifact.diarize)
     return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
@@ -1322,7 +1330,7 @@ def _assert_replay_identity(
 
 
 def _replayed_outcome(
-    receipt: Mapping[str, object], *, source_refs: tuple[str, ...] | None = None,
+    receipt: Mapping[str, object], *, diarize: bool | None, source_refs: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     out = {
         "file_id": receipt["selected_file_id"],
@@ -1338,6 +1346,7 @@ def _replayed_outcome(
         "warnings": [],
         "adoption": dict(receipt),
     }
+    disclose_retained_speaker_choice(out, diarize)
     return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
@@ -1460,7 +1469,9 @@ def _capture_source_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt, source_refs=(receipt.source_ref,))
+            outcomes[selected_index] = _replayed_outcome(
+                receipt.receipt, diarize=artifact.diarize, source_refs=(receipt.source_ref,)
+            )
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1495,6 +1506,7 @@ def _capture_source_adoption(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=artifact.diarize,
                             ),
                             adoption_seed=envelope.seed(
                                 lane="source", destination=destination
@@ -1503,7 +1515,9 @@ def _capture_source_adoption(
                         )
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt, source_refs=(raced.source_ref,))
+                outcomes[selected_index] = _replayed_outcome(
+                    raced.receipt, diarize=artifact.diarize, source_refs=(raced.source_ref,)
+                )
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
@@ -1607,7 +1621,7 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1650,10 +1664,11 @@ def _preserve_evidence_adoption(
                                 ),
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize)
                 return _finish_adoption(outcomes)
 
             if _wrote(duplicate):
@@ -1834,7 +1849,7 @@ def _commit_staged_sources(
                             )
                             outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
                             if repaired:
-                                warnings: list[str] = []
+                                warnings = list(outcomes[index].get("warnings", []))
                                 _schedule_media(
                                     manager, vault_root, duplicate.path, warnings,
                                     kept="the original", operation="capture_source_media",
@@ -1861,6 +1876,7 @@ def _commit_staged_sources(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=artifact.diarize,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
                             import_capture=import_capture,
@@ -2032,6 +2048,7 @@ def capture_source_correction(
     staged = StagedArtifact(
         "stored-original", staged_path, size, digest.hexdigest(),
         str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
+        diarize=diarize_pin(plan.old_source),
     )
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
@@ -2124,6 +2141,8 @@ def preserve_artifacts(
             if archive is not None:
                 from .held_uploads import is_held_reference
 
+                if file.get("diarize") is not None:
+                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice")
                 if not is_held_reference(file["download_url"]):
                     # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
                     # a fetched attachment had neither, so only a held upload can be kept as members.
@@ -2198,6 +2217,7 @@ def preserve_artifacts(
                                 max_bytes=budget.max_file_bytes,
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -2215,6 +2235,7 @@ def preserve_artifacts(
                         "file_id": artifact.file_id,
                         **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
+                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize)
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",

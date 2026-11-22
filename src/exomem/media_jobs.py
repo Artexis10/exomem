@@ -516,6 +516,7 @@ class MediaJob:
     reprocess: bool = False
     language: str | None = None
     language_mode: str | None = None
+    diarize: bool | None = None
     preview_sha256: str | None = None
     preview_receipt_id: str | None = None
     # The failure to retain if a receipt-only claim proves there is no matching record.
@@ -919,7 +920,7 @@ class MediaJobStore:
                 self._migrate_claim_revision(conn)
                 self._migrate_blocked_reasons(conn)
                 self._migrate_reprocess(conn)
-                self._migrate_language_mode(conn)
+                self._migrate_extraction_preferences(conn)
                 conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS media_job_results (
@@ -1154,10 +1155,12 @@ class MediaJobStore:
             conn.execute("ALTER TABLE jobs ADD COLUMN language TEXT")
 
     @staticmethod
-    def _migrate_language_mode(conn: sqlite3.Connection) -> None:
+    def _migrate_extraction_preferences(conn: sqlite3.Connection) -> None:
         columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         if "language_mode" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN language_mode TEXT")
+        if "diarize" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN diarize INTEGER")
 
     @staticmethod
     def _migrate_result_schema(conn: sqlite3.Connection) -> None:
@@ -1507,7 +1510,7 @@ class MediaJobStore:
     def request_extraction(
         self, job: MediaJob, language: str | None, language_mode: str | None, *, reprocess: bool
     ) -> int | None:
-        """Queue a speech extraction that carries the language or mode a caller declared.
+        """Queue an extraction with the request's language and speaker-label preferences.
 
         Returns the id of the row that now carries the request, or None when the row refuses it.
 
@@ -1536,8 +1539,9 @@ class MediaJobStore:
                     """
                     INSERT INTO jobs (
                         job_key, binary_rel, sidecar_rel, media_type, do_ocr, state, attempts,
-                        ocr_generation, reprocess, language, language_mode, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?)
+                        ocr_generation, reprocess, language, language_mode, diarize,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 1, 'pending', 0, 1, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
@@ -1547,6 +1551,7 @@ class MediaJobStore:
                         int(reprocess),
                         language,
                         language_mode,
+                        job.diarize,
                         now,
                         now,
                     ),
@@ -1556,12 +1561,13 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = 1, reprocess = ?, language = ?, language_mode = ?,
+                        diarize = COALESCE(?, diarize),
                         state = 'pending', ocr_generation = ocr_generation + 1, last_error = NULL,
                         blocked_reason = NULL, blocked_context = NULL, memory_stops = 0,
                         memory_soft_stops = 0, timeout_stops = 0, updated_at = ?
                     WHERE id = ?
                     """,
-                    (int(reprocess), language, language_mode, now, row_id),
+                    (int(reprocess), language, language_mode, job.diarize, now, row_id),
                 )
             conn.commit()
             return row_id
@@ -1666,7 +1672,7 @@ class MediaJobStore:
                 conn.execute(
                     """
                     UPDATE jobs SET do_ocr = ?, do_clip = ?, do_reembed = ?,
-                        reprocess = 0, language = NULL, language_mode = NULL,
+                        reprocess = 0, language = NULL, language_mode = NULL, diarize = NULL,
                         state = 'pending', pinned = 0, returns = 0, retry_at = NULL,
                         updated_at = ?, last_error = NULL
                     WHERE id = ? AND state = 'running' AND claim_revision = ?
@@ -2338,6 +2344,8 @@ class MediaJobStore:
                 state_placeholders = ",".join("?" for _ in allowed_states)
                 if remaining_ocr or row["do_clip"] or row["do_reembed"] or row["do_offload"]:
                     delete_job = False
+                    # A published extraction consumes its request. Pending extraction keeps it.
+                    keep_request = bool(remaining_ocr) and result.kind != "extraction"
                     changed = conn.execute(
                         """
                         UPDATE jobs SET do_ocr = ?, state = 'pending', pinned = 0, returns = 0,
@@ -2345,16 +2353,16 @@ class MediaJobStore:
                             reprocess = CASE WHEN ? THEN reprocess ELSE 0 END,
                             language = CASE WHEN ? THEN language ELSE NULL END,
                             language_mode = CASE WHEN ? THEN language_mode ELSE NULL END,
+                            diarize = CASE WHEN ? THEN diarize ELSE NULL END,
                             updated_at = ? WHERE id = ? AND state IN (""" + state_placeholders + """)
                             AND claim_revision = ?
                         """,
                         (
                             remaining_ocr,
-                            # A published extraction consumes a reprocess request; only a
-                            # result that leaves the stage queued leaves the request with it.
-                            int(bool(remaining_ocr) and result.kind != "extraction"),
-                            int(bool(remaining_ocr) and result.kind != "extraction"),
-                            int(bool(remaining_ocr) and result.kind != "extraction"),
+                            keep_request,
+                            keep_request,
+                            keep_request,
+                            keep_request,
                             time.time(),
                             result.job_id,
                             *allowed_states,
@@ -2458,6 +2466,26 @@ class MediaJobStore:
             ).fetchone() is not None
         finally:
             conn.close()
+
+    def explicit_speech_requests(self, binary_paths: Collection[Path]) -> set[Path]:
+        """Find files in a backfill batch whose extraction choice belongs to the queue."""
+        paths = []
+        for path in binary_paths:
+            try:
+                paths.append(self._relative(path))
+            except (OSError, ValueError):
+                continue
+        if not paths:
+            return set()
+        slots = ",".join("?" for _ in paths)
+        with contextlib.closing(self._connect(readonly=True)) as conn:
+            if not any(row["name"] == "diarize" for row in conn.execute("PRAGMA table_info(jobs)")):
+                return set()  # An earlier ledger has no explicit speaker requests.
+            rows = conn.execute(
+                f"SELECT binary_rel FROM jobs WHERE binary_rel IN ({slots}) AND do_ocr = 1 AND diarize IS NOT NULL",
+                paths,
+            )
+            return {self.vault_root / row["binary_rel"] for row in rows}
 
     def discovery_cursor(self) -> str | None:
         """Return the last vault-relative binary examined by bounded discovery."""
@@ -3037,6 +3065,7 @@ class MediaJobStore:
             conn.close()
 
     def _row_to_job(self, row: Any) -> MediaJob:
+        diarize = row["diarize"] if "diarize" in row.keys() else None
         return MediaJob(
             id=int(row["id"]),
             binary_path=self.vault_root / str(row["binary_rel"]),
@@ -3057,6 +3086,7 @@ class MediaJobStore:
             reprocess=bool(row["reprocess"]) if "reprocess" in row.keys() else False,
             language=row["language"] if "language" in row.keys() else None,
             language_mode=row["language_mode"] if "language_mode" in row.keys() else None,
+            diarize=None if diarize is None else bool(diarize),
             preview_sha256=row["preview_sha256"] if "preview_sha256" in row.keys() else None,
             preview_receipt_id=row["preview_receipt_id"] if "preview_receipt_id" in row.keys() else None,
             preview_finish_error=row["preview_finish_error"] if "preview_finish_error" in row.keys() else None,

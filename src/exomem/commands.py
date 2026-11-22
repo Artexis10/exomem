@@ -531,6 +531,7 @@ class ClientArtifactFile(TypedDict):
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
     file_name: NotRequired[str]
+    diarize: NotRequired[Annotated[bool, Field(strict=True, description="Request or skip speaker labels for this audio or video file.")]]
 
 
 _OptionalArtifactAdoption = Annotated[
@@ -10108,6 +10109,7 @@ def op_process_media(
     language: str | None = None,
     multilingual: bool = False,
     store: str | None = None,
+    diarize: bool | None = None,
 ) -> dict:
     """Check governed media; retry after remediation; extract again; replicate originals.
 
@@ -10122,6 +10124,7 @@ def op_process_media(
         language: Speech language code; omit to detect.
         multilingual: Detect language per window (slower).
         store: Replicate only: the name of a store the vault declares.
+        diarize: Request or skip speaker labels on selected audio or video. Omit to keep the item's preference.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -10131,6 +10134,11 @@ def op_process_media(
     validate_process_media_operation(operation)
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    if diarize is not None:
+        if operation not in {"process", "reprocess"}:
+            raise OpError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to process and reprocess only")
+        if path is None and paths is None:
+            raise OpError("MEDIA_PATH_REQUIRED", "a speaker-label choice requires a media path")
     if operation == "replicate":
         return _replicate_media(vault_root, path=path, paths=paths, store=store)
     if store is not None:
@@ -10163,6 +10171,7 @@ def op_process_media(
             operation=operation,
             language=language,
             multilingual=multilingual,
+            diarize=diarize,
         )
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
@@ -10200,6 +10209,7 @@ def _process_media(
     operation: str,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
@@ -10312,7 +10322,7 @@ def _process_media(
             try:
                 result = _run_media_operation(
                     vault_root, binary, operation, language, multilingual, _commit_guard,
-                    queue_guard=_queue_guard,
+                    queue_guard=_queue_guard, diarize=diarize,
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
@@ -10415,7 +10425,7 @@ def _process_media(
 
     try:
         result = _run_media_operation(
-            vault_root, binary, operation, language, multilingual, _commit_guard
+            vault_root, binary, operation, language, multilingual, _commit_guard, diarize=diarize,
         )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
@@ -10441,7 +10451,7 @@ def _process_media(
 
 def _run_media_operation(
     vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard,
-    *, queue_guard=None,
+    *, queue_guard=None, diarize: bool | None = None,
 ):
     """Run one explicit media operation on one governed binary.
 
@@ -10450,12 +10460,15 @@ def _run_media_operation(
     from . import document_containers, media_processing
 
     if document_containers.is_container(binary):
+        if diarize is not None:
+            raise media_processing.MediaProcessingError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to audio and video only")
         if language is not None or multilingual or operation == "reprocess":
             raise media_processing.MediaProcessingError("UNSUPPORTED_MEDIA", "process or retry the container; reprocess individual document payloads without a language option")
         return media_processing.process_container(vault_root, binary, retry=operation == "retry", commit_guard=commit_guard)
-    if operation == "process" and (language is not None or multilingual):
+    if operation == "process" and (language is not None or multilingual or diarize is not None):
         return media_processing.process_declared_media(
-            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+            vault_root, binary, language=language, multilingual=multilingual,
+            commit_guard=commit_guard, diarize=diarize,
         )
     if operation == "process":
         return media_processing.reconcile_media(
@@ -10464,7 +10477,7 @@ def _run_media_operation(
     if operation == "reprocess":
         return media_processing.reprocess_media(
             vault_root, binary, language=language, multilingual=multilingual,
-            commit_guard=commit_guard, queue_guard=queue_guard,
+            commit_guard=commit_guard, queue_guard=queue_guard, diarize=diarize,
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 
@@ -10524,8 +10537,10 @@ def _media_remediation(code: str) -> str:
         return "Give the language as the short alphabetic code the speech model uses, or omit it."
     if code == "LANGUAGE_NOT_APPLICABLE":
         return "Omit the language and the multilingual mode, or select audio or video media."
+    if code == "DIARIZE_NOT_APPLICABLE":
+        return "Select audio or video with process or reprocess, or omit the speaker-label choice."
     if code == "TRANSCRIPT_COMPLETE":
-        return "Use the reprocess operation to extract the recording again with the declared language."
+        return "Use reprocess to extract the recording again with the declared preferences."
     if code == "MEDIA_ENGINE_DISABLED":
         return "Enable the extraction engine for this media type, then ask again."
     if code == "MEDIA_BUSY":

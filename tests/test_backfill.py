@@ -224,6 +224,88 @@ def test_rediarize_guard_when_diarize_disabled(vault, monkeypatch: pytest.Monkey
     assert any("EXOMEM_DIARIZE" in m for m in messages)
 
 
+@pytest.mark.parametrize("queued", [False, True])
+def test_backfill_respects_a_skipped_speaker_choice(vault, monkeypatch, queued) -> None:
+    from exomem import media_jobs
+
+    binary = vault / "Knowledge Base/Evidence/Audio/recording.wav"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"RIFF")
+    sidecar, _ = preserve.ensure_media_sidecar(vault, binary)
+    if queued:
+        store = media_jobs.MediaJobStore(vault)
+        store.request_extraction(
+            media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio", diarize=False),
+            None, None, reprocess=False,
+        )
+    else:
+        sidecar.write_text(preserve.set_diarize_pin(sidecar.read_text(), False))
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    choices = []
+
+    def transcribe(_, *, media_type, diarize, **_options):
+        choices.append(diarize)
+        return extract.ExtractResult(text="[0:00] recorded speech", engine="test+timed", media_type=media_type)
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=_quiet)
+
+    if queued:
+        assert choices == []
+        assert store.get_by_binary(binary).diarize is False
+    else:
+        assert choices == [False]
+        assert "speaker_verification: not-requested" in sidecar.read_text()
+
+
+def test_a_choice_queued_during_backfill_wins_at_publication(vault, monkeypatch) -> None:
+    from exomem import commands, media_jobs
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    binary = vault / "Knowledge Base/Evidence/Audio/recording.wav"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"RIFF")
+    sidecar, _ = preserve.ensure_media_sidecar(vault, binary)
+
+    def transcribe(_, *, media_type, **_options):
+        commands.op_process_media(vault, path=binary.relative_to(vault).as_posix(), diarize=False)
+        return extract.ExtractResult(text="[Speaker A]: speech", engine="test+diarized", media_type=media_type)
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    outcome = backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)
+
+    request = media_jobs.MediaJobStore(vault).get_by_binary(binary)
+    assert request is not None and request.diarize is False
+    assert outcome.extracted == 0 and outcome.extract_failed == 0
+    assert "[Speaker A]: speech" not in sidecar.read_text()
+
+
+def test_speech_backfill_releases_writer_authority_before_indexing(vault, monkeypatch) -> None:
+    from exomem import mutation_lock
+
+    binary = vault / "Knowledge Base/Evidence/Audio/recording.wav"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_bytes(b"RIFF")
+    sidecar, _ = preserve.ensure_media_sidecar(vault, binary)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda _, **kwargs: extract.ExtractResult(text="[0:00] speech", engine="test+timed", media_type="audio"),
+    )
+    real_fanout = backfill.post_commit_batch_fanout
+    checked = []
+
+    def fanout(*args, **kwargs):
+        checked.append(not mutation_lock.current_thread_holds_boundary())
+        return real_fanout(*args, **kwargs)
+
+    monkeypatch.setattr(backfill, "post_commit_batch_fanout", fanout)
+    outcome = backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)
+
+    assert checked == [True]
+    assert outcome.extracted == 1 and "[0:00] speech" in sidecar.read_text()
+
+
 def test_rediarize_soft_fail_leaves_sidecar_and_stops(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # extract_text soft-fails diarization by contract: the result comes back WITHOUT
     # +diarized. The sidecar must keep its exact bytes and the pass must circuit-break.

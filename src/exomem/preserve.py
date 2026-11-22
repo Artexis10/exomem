@@ -555,6 +555,7 @@ def preserve(
     text_origin: str = "upload",
     raw_protection: bool = False,
     media_pending: bool = False,
+    diarize: bool | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -568,6 +569,8 @@ def preserve(
     `media_pending` stores a media stub in the pending state `media_processing.reconcile_media`
     would give it. A caller that reconciles the original straight after sets it, so that
     reconcile only queues the job instead of committing the page a second time.
+
+    `diarize` records an explicit speaker-label choice on an audio or video sidecar.
 
     `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
     (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
@@ -610,6 +613,18 @@ def preserve(
 
     if missing:
         return _raise("INVALID_PRESERVE", missing, "; ".join(reasons))
+
+    media_type = _extract_module().media_type_for(filename_safe)
+    if diarize is not None:
+        from . import media_engines
+
+        if media_engines.engine_for(media_type) != media_engines.SPEECH:
+            return _raise("DIARIZE_NOT_APPLICABLE", ["diarize"], "speaker labels apply to audio and video only")
+        if diarize and text and text.strip():
+            return _raise(
+                "DIARIZE_NOT_APPLICABLE", ["diarize", "text"],
+                "submit the recording without supplied text to request speaker labels",
+            )
 
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
@@ -773,8 +788,6 @@ def preserve(
         # first-class find() result immediately and the extraction worker fills the
         # text later. The actionable stub is independent of worker availability:
         # a disabled/unavailable worker can be remediated and retried later.
-        extract = _extract_module()
-        media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and artifact_text is None and not text_clean
         # Unconditional, because an artifact with no page is not addressable at
         # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
@@ -861,6 +874,7 @@ def preserve(
                     sha256=artifact_hash,
                     size=artifact_size,
                 )
+            sidecar_md = set_diarize_pin(sidecar_md, diarize)
             sidecar_md = media_previews.stamp_intent(sidecar_md, rel_artifact, artifact_hash)
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
@@ -1083,6 +1097,7 @@ def preserve_stream(
     text_origin: str = "upload",
     raw_protection: bool = False,
     media_pending: bool = False,
+    diarize: bool | None = None,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -1114,6 +1129,7 @@ def preserve_stream(
         text_origin=text_origin,
         raw_protection=raw_protection,
         media_pending=media_pending,
+        diarize=diarize,
     )
 
 
@@ -1790,6 +1806,7 @@ def update_sidecar_extraction(
     binary_hints: tuple[int, int] | None = None,
     defer_index_fanout: bool = False,
     defer_graph_completion: bool = False,
+    commit_batch: Callable[[Path, tuple[PlannedWrite, ...]], list[Path]] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
@@ -1804,6 +1821,9 @@ def update_sidecar_extraction(
     frontmatter list so the transcript's `[Speaker A]: …` turns are also queryable
     structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
     existing call site is unaffected.
+
+    A supplied `commit_batch` publishes the prepared writes and owns their index
+    fan-out. The caller can keep a short guarded commit without holding it for indexing.
     """
     before, guard = read_guarded_text(vault_root, sidecar_path)
     plan, write = sidecar_extraction_writes(
@@ -1819,12 +1839,14 @@ def update_sidecar_extraction(
         ocr=ocr,
         binary_hints=binary_hints,
     )
-    result = commit_media_sidecar_writes(
-        vault_root,
-        (write, *plan.writes),
-        post_commit_fanout=not defer_index_fanout,
-        defer_graph_completion=defer_graph_completion,
-    )
+    writes = (write, *plan.writes)
+    if commit_batch is None:
+        result = commit_media_sidecar_writes(
+            vault_root, writes,
+            post_commit_fanout=not defer_index_fanout, defer_graph_completion=defer_graph_completion,
+        )
+    else:
+        result = commit_batch(vault_root, writes)
     parts = _parts_module()
     kept = parts.retire(vault_root, plan.surplus)
     if kept:
@@ -1887,15 +1909,38 @@ def _part_field_lines(parts: Layout | None) -> list[str]:
 #: with the old text. They are the sidecar schema's own field names, a closed set.
 _SPEAKER_FIELDS = ("speakers", "speaker_verification")
 _ASR_FIELD_PREFIX = "asr_"
+_DIARIZE_REQUESTED_FIELD = "diarize_requested"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
-    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
+    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD,
+    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS,
 })
 
 
 def is_extraction_field(key: str) -> bool:
     """Whether a sidecar frontmatter key describes the extraction held under `## Extracted text`."""
     return key in _EXTRACTION_FIELDS or key.startswith(_ASR_FIELD_PREFIX)
+
+
+def diarize_pin(content: str) -> bool | None:
+    """Read the item's explicit speaker-label preference from its sidecar."""
+    value = parse_frontmatter(content)[0].get(_DIARIZE_REQUESTED_FIELD)
+    return value if isinstance(value, bool) else None
+
+
+def set_diarize_pin(content: str, diarize: bool | None) -> str:
+    """Save an explicit preference and keep an existing preference when omitted."""
+    if diarize is None:
+        return content
+    return _set_frontmatter_field(content, _DIARIZE_REQUESTED_FIELD, "true" if diarize else "false")
+
+
+def disclose_retained_speaker_choice(receipt: dict, requested: bool | None) -> None:
+    """Tell a caller that reuse of stored bytes kept the existing choice."""
+    if requested is not None:
+        receipt.setdefault("warnings", []).append(
+            "The stored recording keeps its speaker-label choice. To change it, use process_media with reprocess."
+        )
 
 
 def render_sidecar_extraction(
@@ -1905,6 +1950,7 @@ def render_sidecar_extraction(
     engine: str,
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
+    diarize: bool | None = None,
     attempts: int | None = None,
     asr: AsrFacts | None = None,
     ocr: OcrFacts | None = None,
@@ -1942,6 +1988,9 @@ def render_sidecar_extraction(
     content = before
     if reset_speakers:
         content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
+    content = set_diarize_pin(content, diarize)
+    if diarize is False or (diarize is None and diarize_pin(before) is False):
+        speaker_verification = "not-requested"
     content = _set_frontmatter_field(content, "extracted_by", engine_with_ocr_text(engine, ocr))
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
