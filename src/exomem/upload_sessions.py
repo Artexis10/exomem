@@ -42,13 +42,14 @@ import shutil
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from filelock import FileLock, Timeout
 
-from . import private_state
+from . import media_capacity, private_state
 
 log = logging.getLogger(__name__)
 
@@ -283,6 +284,7 @@ class Session:
 
     store: Path
     record: dict
+    vault_root: Path | None = None
 
     @property
     def id(self) -> str:
@@ -386,6 +388,10 @@ def _create_locked(
             f"at most {MAX_LIVE_PER_BINDING} upload sessions may be open at once; finish or cancel one",
             429,
         )
+    with _vault_upload_room(vault_root) as room:
+        if room is not None:
+            same_volume = store.stat().st_dev == vault_root.stat().st_dev
+            room.require(length + (reserved if same_volume else 0), upload_size=length)
     if reserved + length > shutil.disk_usage(store).free:
         raise SessionError("UPLOAD_SESSION_NO_SPACE", "not enough free disk space for this upload", 507)
     secret = secrets.token_urlsafe(32)
@@ -416,7 +422,7 @@ def _create_locked(
         raise
     running = _running(session_id)
     running.size, running.digest = 0, hashlib.sha256()
-    return Session(store, record), secret
+    return Session(store, record, vault_root), secret
 
 
 def open_session(vault_root: Path, session_id: str, secret: str | None) -> Session:
@@ -429,7 +435,7 @@ def open_session(vault_root: Path, session_id: str, secret: str | None) -> Sessi
         str(record.get("secret_sha256")).encode(), _secret_hash(str(secret)).encode()
     ):
         raise _not_found()
-    session = Session(store, record)
+    session = Session(store, record, vault_root)
     try:
         expired = session.expires <= _now()
     except (KeyError, TypeError, ValueError):
@@ -469,6 +475,17 @@ def delete(session: Session) -> None:
         raise committing from exc
     finally:
         running.lock.release()
+
+
+@contextmanager
+def _vault_upload_room(vault_root: Path):
+    from .cli_ops import OpError
+
+    try:
+        with media_capacity.upload_room(vault_root) as room:
+            yield room
+    except OpError as error:
+        raise SessionError(error.code, error.message, 503) from error
 
 
 class Patch:
@@ -513,7 +530,16 @@ class Patch:
             raise SessionError("TOO_LARGE", f"one request carries at most {MAX_PATCH_BYTES:,} bytes", 413)
         if self.offset + self.written + len(chunk) > self.session.length:
             raise SessionError("INVALID_UPLOAD", "the part runs past `Upload-Length`", 400)
-        self._sink.write(chunk)
+        vault = self.session.vault_root
+        allocation = _vault_upload_room(vault) if vault is not None else nullcontext(None)
+        with allocation as room:
+            if room is not None and vault is not None and self.session.store.stat().st_dev == vault.stat().st_dev:
+                room.require(len(chunk), upload_size=self.session.length)
+                self._sink.write(chunk)
+                # The next allocator must see these bytes in the volume's free-space accounting.
+                self._sink.flush()
+            else:
+                self._sink.write(chunk)
         self._running.digest.update(chunk)
         self.written += len(chunk)
         self._running.size = self.offset + self.written

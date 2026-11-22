@@ -44,6 +44,7 @@ from . import (
     capture_metadata,
     document_identity,
     indexes,
+    media_capacity,
     memory_refs,
     originals,
     privacy_log,
@@ -712,12 +713,16 @@ def preserve(
             # Stream into a process-private spool first. It spills to disk above
             # 8 MiB, so large uploads stay bounded in RAM while no canonical path
             # becomes visible before governance preflight succeeds.
-            artifact_size, artifact_hash = _copy_stream(
-                content_stream, artifact_stage, limit=max_stream_bytes
-            )
+            with media_capacity.upload_room(vault_root) as room:
+                artifact_size, artifact_hash = _copy_stream(
+                    content_stream, artifact_stage, limit=max_stream_bytes, room=room,
+                )
         elif artifact_bytes is not None:
-            artifact_stage.write(artifact_bytes)
             artifact_size = len(artifact_bytes)
+            with media_capacity.upload_room(vault_root) as room:
+                if room is not None:
+                    room.require(artifact_size)
+                artifact_stage.write(artifact_bytes)
             artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
         else:
             artifact_text_bytes = (artifact_text or "").encode("utf-8")
@@ -1003,6 +1008,10 @@ def preserve(
 
         curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
         with contextlib.ExitStack() as pooled_stack:
+            if staged is None and artifact_text is None:
+                room = pooled_stack.enter_context(media_capacity.upload_room(vault_root))
+                if room is not None:
+                    room.require(artifact_size)
             publish_original = None
             pooled_guards: tuple[PathGuard, ...] = ()
             if pooled_artifact:
@@ -1165,6 +1174,7 @@ def _copy_stream(
     destination: IO[bytes],
     *,
     limit: int,
+    room: media_capacity.UploadRoom | None = None,
 ) -> tuple[int, str]:
     """Copy a binary stream into a private destination under an exact cap."""
 
@@ -1181,6 +1191,8 @@ def _copy_stream(
         written += len(buf)
         if written > limit:
             raise too_large(limit)
+        if room is not None:
+            room.require(written)
         digest.update(buf)
         destination.write(buf)
     return written, digest.hexdigest()

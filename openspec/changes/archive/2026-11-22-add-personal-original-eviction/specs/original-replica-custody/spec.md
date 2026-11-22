@@ -34,4 +34,3 @@ The adapter SHALL need only descriptor-relative operations, create-only publicat
 - **WHEN** the owner declares a store whose root is on a mount that refuses an atomic no-replace rename but supports hard links
 - **THEN** the declaration succeeds, and uploads, reads and `head` work
 - **AND** opening the vault or the state root on that mount is still refused
-

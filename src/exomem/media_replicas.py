@@ -203,6 +203,7 @@ _HEALTH_FIELDS = ("object", "version", "store", "key_version", "size", "cipherte
 _HEALTH_COLUMNS = ", ".join(_HEALTH_FIELDS)
 _HEALTH_PARAMETERS = "?, ?, ?, ?, ?, ?"
 _EXACT_UPLOAD_INDEX = "media_replicas_exact_upload"
+_PUBLICATION_TIME_INDEX = "media_replicas_publication_time"
 _KNOWN_EXACT_UPLOAD = (f"SELECT 1 FROM media_replicas INDEXED BY {_EXACT_UPLOAD_INDEX} "
                        f"WHERE state <> '{QUARANTINED}' AND ciphertext_sha256 IS NOT NULL AND {_upload_proof()} = 1")
 
@@ -214,6 +215,33 @@ def _health_columns(row: str) -> str:
 def _health_key(replica: originals.StoredObject) -> tuple[str, str, str, str, int, str]:
     return (replica.object, replica.version, replica.store, replica.key_version,
             replica.ciphertext_size, replica.ciphertext_sha256)
+
+
+# A reused version need not have a timestamp on every filing. Read the latest exact time in index order.
+_HEALTH_JSON_COLUMNS = tuple(f"json_extract(wanted.value, '$[{index}]')" for index in range(len(_HEALTH_FIELDS)))
+_EVICTION_EVIDENCE = (
+    "SELECT MAX(exports.key_version IS NULL), "
+    f"MAX(((SELECT verified_at FROM media_replicas INDEXED BY {_PUBLICATION_TIME_INDEX} "
+    f"WHERE ({_HEALTH_COLUMNS}) = ({', '.join(_HEALTH_JSON_COLUMNS)}) AND verified_at IS NOT NULL "
+    "AND verified_at > 0 ORDER BY verified_at DESC LIMIT 1) <= :settled_before) IS NOT TRUE) "
+    "FROM json_each(:replicas) AS wanted LEFT JOIN media_key_exports AS exports "
+    f"ON exports.key_version = {_HEALTH_JSON_COLUMNS[_HEALTH_FIELDS.index('key_version')]}"
+)
+KEY_NOT_EXPORTED = "key_not_exported"
+SETTLING = "settling"
+
+
+def eviction_custody_wait(
+    conn: sqlite3.Connection, references: Iterable[originals.StoredObject], *, settled_before: float,
+) -> str | None:
+    """Return the wait reason if any recovery version lacks its key export or settled publication."""
+    missing_key, settling = conn.execute(_EVICTION_EVIDENCE, {
+        "replicas": json.dumps([_health_key(reference) for reference in references]),
+        "settled_before": settled_before,
+    }).fetchone()
+    if missing_key:
+        return KEY_NOT_EXPORTED
+    return SETTLING if settling else None
 
 
 _PROVED_EXACT_UPLOAD = _KNOWN_EXACT_UPLOAD + f" AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS}) LIMIT 1"
@@ -472,6 +500,9 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("DROP INDEX IF EXISTS media_replicas_exact_health")
     conn.execute(f"CREATE INDEX IF NOT EXISTS {_EXACT_UPLOAD_INDEX} ON media_replicas({_HEALTH_COLUMNS}) "
                  f"WHERE state <> '{QUARANTINED}' AND ciphertext_sha256 IS NOT NULL AND {_upload_proof()} = 1")
+    # One seek to a timed witness, even when many aliases record the same version with no publication time.
+    conn.execute(f"CREATE INDEX IF NOT EXISTS {_PUBLICATION_TIME_INDEX} "
+                 f"ON media_replicas({_HEALTH_COLUMNS}, verified_at) WHERE verified_at IS NOT NULL")
     # The filings of one ciphertext, under any name, that are not quarantined: the ones a wrong plaintext of it
     # quarantines together (`_inherit`, `_quarantine_listing`). A finding that repeats reads none that it handled before,
     # however many filings hold the ciphertext. A release finds the quarantined ones through the records (`_released`).
@@ -1326,6 +1357,7 @@ def status(vault: Path) -> dict[str, object]:
                 return _unknown("the replica table is being rebuilt from the bindings")
             rows = {row["name"]: row for row in conn.execute(_STATUS, {"stores": json.dumps(list(entries)),
                                                                       "key": key, "month": month})}
+            eviction = media_store.personal_eviction_status(conn, config)
     except (sqlite3.Error, OSError) as error:
         return _unknown(f"the replica state cannot be read: {type(error).__name__}")
     names = (*entries, *(name for name in rows if name not in entries))
@@ -1385,10 +1417,13 @@ def status(vault: Path) -> dict[str, object]:
         stats["oldest_verified_at"] = _iso(stats["oldest_verified_at"])
         for proof in stats["checks"].values():
             proof["oldest_at"] = _iso(proof["oldest_at"])
-    return {**_coverage(census, exports_complete=exports_complete,
-                        damage_complete=not any(row["unproved"] for row in rows.values())),
-            "source": "media ledger table, rebuilt from the bindings",
-            "stores": list(stores.values()), "totals": totals}
+    result = {**_coverage(census, exports_complete=exports_complete,
+                          damage_complete=not any(row["unproved"] for row in rows.values())),
+              "source": "media ledger table, rebuilt from the bindings",
+              "stores": list(stores.values()), "totals": totals}
+    if eviction is not None:
+        result["eviction"] = eviction
+    return result
 
 
 def _coverage(census: sqlite3.Row, *, exports_complete: bool = True, damage_complete: bool = True) -> dict[str, object]:

@@ -6,6 +6,38 @@ A replica is a second encrypted copy of an original file in a store that you dec
 Exomem checks each replica on a cycle, reports a damaged one as a finding and copies it again when it can.
 This page says what each check proves, how to set the sample budget and how to read a finding.
 
+## Free space on a personal vault disk
+
+A personal install can put encrypted originals on a separate filesystem store.
+The store supports WSL-mounted Windows drives that provide hard links and directory flushes.
+Eviction removes plaintext from the vault and its current mirrors. Keep the store and the exported key for recovery.
+
+Place the vault's media store configuration in `media-store.json` in its state directory.
+Keep the existing `vaults` object and store descriptors. Remove `EXOMEM_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
+
+The following commands use the example vault `/srv/archive` and a configured store named `disk`.
+
+1. Run `exomem media-replicas declare-store disk --vault /srv/archive`. The store gets an identity marker.
+2. Export the decryption key outside the machine. You can then record that export.
+3. Run `exomem media-replicas confirm-key-export --vault /srv/archive`. The ledger records the current key version.
+4. Run `exomem media-replicas enable-eviction disk --vault /srv/archive --free-bytes 10737418240`. Eviction targets 10 GiB of free space.
+
+The store must have no replica entries. A switch also requires the previous store to have no remaining pointers, including pointers in Trash.
+The default margin frees an extra tenth of the requested space. The upload floor reserves half of the requested space.
+Use `--margin-bytes` and `--upload-floor-bytes` to set those values. An upload at the floor returns `MEDIA_SPACE_BUSY` with a retry hint.
+
+After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
+Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
+Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
+
+Run `exomem media-replicas disable-eviction --vault /srv/archive` to stop eviction.
+The worker restores originals that fit. You can still read the remaining originals from the store.
+
+The owner’s `process_media` status has a `replicas.eviction` section. It reports bound physical originals and plaintext bytes from the last complete inventory.
+The inventory counts a shared object once. Its `observed_at` field gives the time of the count.
+The `waiting` field gives the last eviction pass's reason and `waiting_observed_at` gives its time.
+Unknown inventory counts and wait reasons appear as null.
+
 ## What each check proves
 
 A check proves one of three levels. The status names the level that each replica last passed.

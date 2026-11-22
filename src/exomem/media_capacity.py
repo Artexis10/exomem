@@ -9,6 +9,8 @@ from __future__ import annotations
 import functools
 import logging
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,54 @@ AGE_TAG_BYTES = 16
 AGE_HEADER_BYTES = 1024
 # The store policy's default volume fraction (D12, choice 3); cellctl may render another.
 DEFAULT_VOLUME_FRACTION = 0.25
+UPLOAD_SPACE_BUSY = "MEDIA_SPACE_BUSY"
+
+
+@dataclass(frozen=True, slots=True)
+class UploadRoom:
+    free: int
+    floor: int
+
+    def require(self, needed: int, *, upload_size: int | None = None) -> None:
+        """Fence the bytes still to allocate on the vault's volume."""
+        if self.free - needed < self.floor:
+            from .cli_ops import OpError
+
+            size = needed if upload_size is None else upload_size
+            raise OpError(UPLOAD_SPACE_BUSY,
+                          f"The vault has {self.free:,} free bytes and a {self.floor:,}-byte floor. "
+                          f"The {size:,}-byte upload needs {needed:,} bytes of room. Retry after eviction frees space.",
+                          "Retry after eviction frees space.")
+
+
+@contextmanager
+def upload_room(vault: Path) -> Iterator[UploadRoom | None]:
+    """Serialize configured vault-volume allocations while checking the actual free space."""
+    from . import originals
+
+    config = originals.configuration(vault)
+    floor = config.get("upload_floor_bytes") if config is not None else None
+    if floor is None:
+        yield None
+        return
+    if type(floor) is not int or floor < 0:
+        raise ValueError("upload_floor_bytes must be a nonnegative integer")
+
+    from filelock import FileLock, Timeout
+
+    from .cli_ops import OpError
+    from .state_paths import ensure_vault_state_dir
+
+    lock = FileLock(ensure_vault_state_dir(vault) / "upload-space.lock", timeout=5)
+    try:
+        lock.acquire()
+    except Timeout as error:
+        raise OpError(UPLOAD_SPACE_BUSY, "Another upload is using the vault's disk allocation. Retry shortly.",
+                      "Retry shortly.") from error
+    try:
+        yield UploadRoom(shutil.disk_usage(vault).free, floor)
+    finally:
+        lock.release()
 
 
 def age_ciphertext_size(plaintext_bytes: int) -> int:

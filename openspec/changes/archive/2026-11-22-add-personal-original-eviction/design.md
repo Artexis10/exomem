@@ -61,15 +61,15 @@ Reason: a flush through the bridge has no proof that the data reached the disk. 
 
 Alternative: read the copy back right after the flush. A read through the bridge can be served from the Windows cache, so it proves nothing about the disk.
 
-The publication time comes from the pointer's offload record. If the record has none, eviction keeps the original. Task 2.3 confirms where the time is recorded.
+The media ledger records publication time for each uploaded version. A reused version can use the exact version's publication time from another filing. If no filing records that time, eviction keeps the original.
 
 ### D6. An upload floor protects the vault disk
 
-The owner command also sets `upload_floor_bytes`. An upload of an original is refused with `MEDIA_SPACE_BUSY` and a retry hint when the vault volume's free space after the upload would fall below the floor. The check sits at the one admission seam that the one-shot upload, resumable sessions and preserve share. The floor is below the eviction floor, so eviction normally frees space before an upload reaches it. A refusal is visible and retryable; it never drops bytes that were already admitted.
+The owner command also sets `upload_floor_bytes`. The shared allocation check refuses an original that would lower the vault's free space below the floor. One-shot upload, held upload, resumable sessions and preserve use the same check before they allocate bytes. The floor is below the eviction target so the worker has time to free space. A refusal returns `MEDIA_SPACE_BUSY` and a retry hint. Bytes that a resumable session already accepted stay held.
 
 ### D7. Status says why eviction waits
 
-The owner status adds counts of local and evicted originals and the bytes they hold. It adds one wait reason for the eviction pass: `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. Each count comes from the existing ledger tables. A value that cannot be read shows as unknown, never as 0.
+The owner status reports local and evicted bound physical originals and their plaintext sizes. The worker reuses the drain's physical inventory and records its observation time. Two filings of a shared object contribute one physical original. The worker records one wait reason for a pass. The reason is `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. Unreadable values remain unknown.
 
 ## Risks / Trade-offs
 

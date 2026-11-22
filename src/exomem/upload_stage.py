@@ -30,7 +30,7 @@ from typing import BinaryIO
 
 from filelock import FileLock, Timeout
 
-from . import reserved_paths
+from . import media_capacity, reserved_paths
 from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
@@ -113,7 +113,8 @@ def _remove(path: Path) -> None:
 
 
 def _copy(
-    vault_root: Path, part: Path, stream: BinaryIO, *, limit: int, too_large: Callable[[], BaseException]
+    vault_root: Path, part: Path, stream: BinaryIO, *, limit: int, too_large: Callable[[], BaseException],
+    room: media_capacity.UploadRoom | None = None,
 ) -> StagedUpload:
     """Copy `stream` into `part` once, hashing as it goes, and fsync it."""
     try:
@@ -129,6 +130,8 @@ def _copy(
             written += len(chunk)
             if written > limit:
                 raise too_large()
+            if room is not None:
+                room.require(written)
             digest.update(chunk)
             view = memoryview(chunk)
             while view:
@@ -173,17 +176,21 @@ def stage(
     lock = FileLock(lock_path, timeout=_LOCK_WAIT_SECONDS, thread_local=False)
     try:
         lock.acquire()
-        staged = _copy(vault_root, part, stream, limit=limit, too_large=too_large)
+        with media_capacity.upload_room(vault_root) as room:
+            staged = _copy(vault_root, part, stream, limit=limit, too_large=too_large, room=room)
         with contextlib.ExitStack() as held:
             if pooled:
-                def chunks() -> Iterator[bytes]:
-                    with part.open("rb") as source:
-                        while chunk := source.read(_CHUNK):
-                            yield chunk
+                with media_capacity.upload_room(vault_root) as room:
+                    def chunks() -> Iterator[bytes]:
+                        if room is not None:
+                            room.require(staged.size)
+                        with part.open("rb") as source:
+                            while chunk := source.read(_CHUNK):
+                                yield chunk
 
-                staged.pool = held.enter_context(
-                    original_pool.prepare(vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks))
-                )
+                    staged.pool = held.enter_context(
+                        original_pool.prepare(vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks))
+                    )
             yield staged
     finally:
         try:

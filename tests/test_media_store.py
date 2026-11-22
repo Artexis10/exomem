@@ -22,7 +22,8 @@ from exomem.governance.principal import library_scope
 
 
 @pytest.fixture
-def selected_store(vault: Path, tmp_path: Path, monkeypatch):
+def selected_store(vault: Path, tmp_path: Path, monkeypatch, request):
+    """A configured test store with its key export confirmed by default."""
     if shutil.which("age") is None or shutil.which("age-keygen") is None:
         pytest.skip("the real age integration requires age and age-keygen")
     identity = tmp_path / "identity"
@@ -31,7 +32,7 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     assert generated.returncode == 0
     name_key = tmp_path / "name-key"
     name_key.write_bytes(b"k" * 32)
-    from exomem import media_store
+    from exomem import media_replicas, media_store
 
     (tmp_path / "objects").mkdir()
     media_store.write_store_marker(tmp_path / "objects", "test-store")
@@ -44,6 +45,8 @@ def selected_store(vault: Path, tmp_path: Path, monkeypatch):
     config = tmp_path / "media.json"
     config.write_text(json.dumps({"vaults": {str(vault): values}}))
     monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    if getattr(request, "param", True):
+        media_replicas.confirm_key_export(vault)
     # Ordinary workflows run below the eviction target; pressure cases set their own volume.
     monkeypatch.setattr(shutil, "disk_usage", _volume(1 << 40, 1 << 38))
     return values, config

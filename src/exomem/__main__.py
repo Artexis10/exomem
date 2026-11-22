@@ -5186,7 +5186,7 @@ def _cell_export_main(argv: list[str]) -> int:
 
 
 def _media_replicas_main(argv: list[str]) -> int:
-    """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
+    """The owner's commands for replica stores and personal eviction."""
     parser = argparse.ArgumentParser(
         prog="exomem media-replicas",
         description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
@@ -5202,6 +5202,16 @@ def _media_replicas_main(argv: list[str]) -> int:
     confirm = actions.add_parser("confirm-key-export", parents=[common],
                                  help="record that you exported the key outside this machine")
     confirm.add_argument("--key-version", help="the key version; default is the vault's current one")
+    enable = actions.add_parser("enable-eviction", parents=[common], help="evict idle originals to a declared store")
+    enable.add_argument("store", help="the name of a declared filesystem store")
+    enable.add_argument("--free-bytes", required=True, type=int, help="vault bytes to keep free before eviction starts")
+    enable.add_argument("--margin-bytes", type=int, help="extra vault bytes to free in each pass")
+    enable.add_argument("--upload-floor-bytes", type=int, help="minimum free bytes to keep after an upload")
+    enable.add_argument("--minimum-idle-seconds", type=int, default=600)
+    enable.add_argument("--eviction-settle-seconds", type=int, default=600)
+    enable.add_argument("--max-temporary-bytes", type=int)
+    enable.add_argument("--max-hydrations", type=int)
+    actions.add_parser("disable-eviction", parents=[common], help="stop evicting and restore originals as space allows")
     listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
     listing.add_argument("--after", help="the path that the previous page ended on")
     listing.add_argument("--limit", type=int, default=100)
@@ -5213,7 +5223,7 @@ def _media_replicas_main(argv: list[str]) -> int:
     if not args.vault:
         print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
-    from . import media_replicas, media_store, state_migration
+    from . import held_fs, media_replicas, media_store, personal_eviction, state_migration
     from .vault_store import cli_fence
 
     vault = Path(args.vault).expanduser()
@@ -5224,12 +5234,24 @@ def _media_replicas_main(argv: list[str]) -> int:
             print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
         elif args.action == "confirm-key-export":
             print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "enable-eviction":
+            personal_eviction.enable(
+                vault, args.store, free_bytes=args.free_bytes, margin_bytes=args.margin_bytes,
+                upload_floor_bytes=args.upload_floor_bytes, minimum_idle_seconds=args.minimum_idle_seconds,
+                eviction_settle_seconds=args.eviction_settle_seconds, max_temporary_bytes=args.max_temporary_bytes,
+                max_hydrations=args.max_hydrations,
+            )
+            print(f"Eviction is enabled for {args.store}.")
+            print("Eviction removes plaintext from the vault and its current mirrors. "
+                  "Recover an evicted original from the store with its exported decryption key.")
+        elif args.action == "disable-eviction":
+            print(f"Eviction is disabled for {personal_eviction.disable(vault)}. Originals return as space allows.")
         elif args.action == "findings":
             cursor = None if args.after_path is None else (args.after_path, args.after_store)
             print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
         else:
             print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
-    except (media_store.MediaStoreError, ValueError) as error:
+    except (held_fs.HeldFsError, media_store.MediaStoreError, ValueError) as error:
         print(f"Error [{getattr(error, 'code', 'INVALID')}]: {error}", file=sys.stderr)
         return 1
     return 0

@@ -1261,7 +1261,7 @@ def _probe(root: Path) -> Capabilities:
     if descriptor is None:
         return Capabilities.disabled("root cannot be opened with stable identity")
 
-    provisional = Capabilities(True, True, True, True, True)
+    provisional = Capabilities(True, True, True, True, True, True)
     filesystem = WindowsHeldFilesystem(descriptor, provisional)
     token = secrets.token_hex(16)
     source_name = f"{PROBE_ENTRY_PREFIX}{token}"
@@ -1337,7 +1337,7 @@ def _probe(root: Path) -> Capabilities:
             with filesystem.file(parent, replacement_target_name).require() as installed:
                 if filesystem.read(installed).value != b"replacement":
                     return Capabilities.disabled("relative replacement identity is unavailable")
-        return Capabilities(True, True, True, True, hard_link)
+        return Capabilities(True, True, True, True, hard_link, True)
     except (HeldFsError, OSError):
         return Capabilities.disabled("actual-filesystem capability probe failed")
     finally:

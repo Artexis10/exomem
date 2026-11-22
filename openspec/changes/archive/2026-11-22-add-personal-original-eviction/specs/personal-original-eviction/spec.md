@@ -1,3 +1,7 @@
+## Purpose
+
+Keep space available on a personal vault disk while preserving the owner’s ability to recover every evicted original from a declared store.
+
 ## ADDED Requirements
 
 ### Requirement: An owner command makes a declared store serve eviction
@@ -52,7 +56,7 @@ An upload of an original SHALL be refused with `MEDIA_SPACE_BUSY` and a retry hi
 
 ### Requirement: The owner status shows what eviction keeps and why
 
-The owner status SHALL report the count and bytes of local and of evicted originals, and one wait reason for the eviction pass: `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. A value that cannot be read SHALL show as unknown, never as 0.
+The owner status SHALL report the count and plaintext bytes of local and evicted bound physical originals as of its last complete inventory. Filings of one shared object SHALL contribute one physical original. The status SHALL show the time of that inventory and one wait reason for the last eviction pass. The reason SHALL be `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. An unreadable value SHALL show as unknown.
 
 #### Scenario: Eviction waits for the key export
 

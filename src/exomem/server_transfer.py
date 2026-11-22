@@ -808,7 +808,11 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
     except held_uploads.HeldUploadError as exc:
-        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400), {"code": exc.code, "reason": exc.reason}
+        from .cli_ops import http_status_for
+
+        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)), {
+            "code": exc.code, "reason": exc.reason,
+        }
 
 
 def _handoff_unavailable() -> JSONResponse:
@@ -1124,7 +1128,7 @@ def register_transfer_routes(
             except held_uploads.HeldUploadError as exc:
                 return JSONResponse(
                     {"code": exc.code, "reason": exc.reason},
-                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400),
+                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)),
                 )
             return JSONResponse(held, status_code=201)
         from . import archive_members

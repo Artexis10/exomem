@@ -478,11 +478,12 @@ def follow_store(vault: Path, *, batch: int = 256) -> bool:
             return applied and reached == head
 
 
-def _pages(vault: Path, *, join_request: bool = False):
+def _pages(vault: Path, *, join_request: bool = False, headers_only: bool = False):
     """Every canonical page under the managed root. A census reads a fresh snapshot; a request may join its own."""
     from contextlib import nullcontext
 
     from .kbdir import managed_join, managed_root_rel
+    from .runtime_resources import SEMANTIC_SOURCE_MAX_BYTES
     from .vault_store import mode, read
 
     with (read.snapshot(vault, join_request=join_request) if mode.store_mode_for_reads(vault)
@@ -498,11 +499,42 @@ def _pages(vault: Path, *, join_request: bool = False):
         with reserved_paths.open_generic_tree(
             vault, managed_root_rel(), require_complete=True,
             select=lambda candidates: (rel for rel, kind in candidates if kind == "file" and rel.lower().endswith(".md")),
+            markdown_header_limit=SEMANTIC_SOURCE_MAX_BYTES if headers_only else None,
         ) as entries:
             for entry in entries:
                 rel = managed_join(entry.relative_path)
                 if not read.serves(vault, rel):
-                    yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+                    if not headers_only:
+                        yield rel, reserved_paths.read_generic_bytes(vault, rel).data
+                    elif entry.markdown is None:
+                        raise ValueError("a companion header cannot be read")
+                    else:
+                        yield rel, entry.markdown
+
+
+def store_role_conflict(vault: Path, selected: str, target: str) -> str | None:
+    """Read the canonical pointer roles, including companions in Trash or away from their original."""
+    from .vault import parse_frontmatter
+
+    with closing(_pages(vault, headers_only=True)) as pages:
+        for _path, data in pages:
+            fields = parse_frontmatter(data.decode("utf-8"), custody=True)[0]
+            if target != selected and "stored_object" in fields:
+                pointer = originals.stored_reference(fields["stored_object"])
+                if pointer is None:
+                    raise ValueError("a stored original reference cannot be read")
+                if pointer.store == selected:
+                    return "the selected store still serves a stored original"
+            replicas = fields.get("replicas", [])
+            if not isinstance(replicas, list):
+                raise ValueError("a replica list cannot be read")
+            for raw in replicas:
+                replica = originals.stored_reference(raw)
+                if replica is None:
+                    raise ValueError("a replica reference cannot be read")
+                if replica.store == target:
+                    return "the requested store already holds a replica"
+    return None
 
 
 def source_checkpoint(vault: Path) -> tuple[int | None, int | None]:
