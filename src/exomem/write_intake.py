@@ -290,11 +290,13 @@ def _login_state(principal: Any) -> Any:
     from . import auth_sessions, cloud_cell
     from .governance import principal as principal_module
 
-    login = auth_sessions.origin_login_state_sync(principal)
+    login = auth_sessions.OriginLogin.VALID
+    if principal.origin_session is not None:
+        login = auth_sessions.origin_login_state_sync(principal)
     issuer = principal.issuer_family
     if login is not auth_sessions.OriginLogin.NOT_VALID and cloud_cell.is_cloud_issuer_family(issuer):
-        cell_id = issuer[len(cloud_cell.issuer_family("")):]
-        if not principal_module.cloud_owner_binding_matches(cell_id):
+        # A Cloud owner's authority holds only while this process serves the cell that granted it.
+        if not principal_module.cloud_owner_binding_matches(issuer.removeprefix(cloud_cell.issuer_family(""))):
             return auth_sessions.OriginLogin.NOT_VALID
     return login
 
