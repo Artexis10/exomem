@@ -468,6 +468,16 @@ def register_rest_facade(
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
+                    def boundary_view() -> tuple[tuple, bool]:
+                        with request_budget.checking(check) if check is not None else nullcontext():
+                            request_budget.checkpoint()
+                            view = (
+                                connector_boundary.cache_identity(vault_root, bound_principal),
+                                connector_boundary.unrestricted(vault_root, bound_principal),
+                            )
+                            request_budget.checkpoint()
+                            return view
+
                     def invoke_bound() -> Any:
                         # Canonical audience at the REST boundary (design D5): a
                         # `None` scope is the vault's own shared key (owner); a
@@ -504,11 +514,15 @@ def register_rest_facade(
                                     )
                                 if stop is None:
                                     check = None
-                        boundary_revision = connector_boundary.cache_identity(vault_root, bound_principal)
-                        unrestricted = connector_boundary.unrestricted(vault_root, bound_principal)
+                        boundary_revision, unrestricted = (
+                            await run_in_threadpool(boundary_view) if check is not None else boundary_view()
+                        )
                         result = await run_in_threadpool(invoke_bound)
-                        changed = connector_boundary.cache_identity(vault_root, bound_principal) != boundary_revision
-                        limited = not unrestricted or not connector_boundary.unrestricted(vault_root, bound_principal)
+                        final_revision, final_unrestricted = (
+                            await run_in_threadpool(boundary_view) if check is not None else boundary_view()
+                        )
+                        changed = final_revision != boundary_revision
+                        limited = not unrestricted or not final_unrestricted
                         if not await auth_sessions.origin_session_active(bound_principal) or changed and limited:
                             raise authorization_request.AuthorizationContextUnavailable
                         preview_response = None

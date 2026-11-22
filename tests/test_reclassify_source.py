@@ -189,7 +189,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
-@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning"])
+@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning", "policy-release"])
 def test_rest_preview_retries_while_verified_session_authority_is_busy(
     vault, source_schema, monkeypatch, hold_at,
 ):
@@ -205,6 +205,7 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
         authorization_custody,
         authorization_request,
         authorization_session_lifecycle,
+        egress,
         principal,
         store,
     )
@@ -239,27 +240,38 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
 
     if hold_at == "after-verification":
         target, name = authorization_request, "verify_authorization_context"
+    elif hold_at == "policy-release":
+        target, name = egress, "_postfilter"
     else:
         target, name = rc, "_propose"
     operation = getattr(target, name)
 
-    def complete_then_hold(*args, **kwargs):
-        result = operation(*args, **kwargs)
+    def start_holder():
         if holder.ident is None:
             holder.start()
             assert locked.wait(3)
+
+    def interleave_hold(*args, **kwargs):
+        if hold_at == "policy-release":
+            start_holder()
+        result = operation(*args, **kwargs)
+        if hold_at != "policy-release":
+            start_holder()
         return result
 
     # Hold the actual governance identity domain across the authority recheck and response.
-    monkeypatch.setattr(target, name, complete_then_hold)
+    monkeypatch.setattr(target, name, interleave_hold)
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
     body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
     headers = _headers(credential.bearer)
     try:
+        started = time.monotonic()
         terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
         assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
         assert "references" not in terminal and "preview_digest" not in terminal
         assert locked.is_set() and holder.is_alive()
+        # Allow wire and scheduler overhead without accepting the default identity-lock wait.
+        assert time.monotonic() - started < 3.5
     finally:
         release.set()
         if holder.ident is not None:

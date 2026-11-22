@@ -19,13 +19,15 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .. import index_paths, reserved_paths, sidecar_store
+from .. import index_paths, request_budget, reserved_paths, sidecar_store
+from ..cli_ops import OpError
 
 if TYPE_CHECKING:
     from .authorization_custody import AuthorizationCustody
@@ -214,6 +216,25 @@ def open_active_governance_read_connection(
     return initial.connection
 
 
+def open_authorization_session_read_connection(vault_root: Path) -> sqlite3.Connection:
+    """Pin the existing v4 session store when the authority read has a deadline."""
+    deadline = _read_deadline()
+    if deadline is None:
+        return open_authorization_session_connection(vault_root)
+    connection = open_active_governance_read_connection(vault_root, deadline=deadline)
+    try:
+        connection.execute("BEGIN")
+        # Take the read snapshot before a lifecycle check can translate a busy read into a refusal.
+        connection.execute("PRAGMA user_version").fetchone()
+        request_budget.checkpoint()
+        return connection
+    except BaseException as error:
+        connection.close()
+        if isinstance(error, Exception):
+            _stop_contended_read(error, deadline)
+        raise
+
+
 @dataclass(frozen=True)
 class _InitialPolicyRead:
     connection: sqlite3.Connection | None = None
@@ -224,7 +245,31 @@ def _initial_policy_read(vault_root: Path) -> _InitialPolicyRead:
     """Discriminate v4, legacy, or absence in one non-creating acquisition."""
     if not sidecar_path(vault_root).exists():
         return _InitialPolicyRead()
-    return _acquire_policy_read(vault_root, observe_legacy=True)
+    return _acquire_policy_read(vault_root, observe_legacy=True, deadline=_read_deadline())
+
+
+def _read_deadline() -> float | None:
+    check = request_budget.current_checkpoint()
+    if check is None:
+        return None
+    check()
+    return check.budget.deadline
+
+
+def _stop_contended_read(error: BaseException, deadline: float | None) -> None:
+    if deadline is None:
+        return
+    code = (getattr(error, "sqlite_errorcode", 0) & 0xFF) if isinstance(error, sqlite3.Error) else 0
+    if (time.monotonic() >= deadline or code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            or isinstance(error, reserved_paths.SqliteIdentityBusyError)
+            or isinstance(error, OpError) and error.code == "MUTATION_BUSY"):
+        raise request_budget.ReadBudgetExhausted() from None
+
+
+def _interrupt_at_deadline(connection: sqlite3.Connection, deadline: float | None) -> None:
+    if deadline is not None:
+        # SQLite does not call the progress handler during a busy wait. Open with timeout=0 too.
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1_000)
 
 
 def _acquire_policy_read(
@@ -254,6 +299,7 @@ def _acquire_policy_read(
                         uri=True,
                         timeout=0 if deadline is not None else 5,
                     )
+                    _interrupt_at_deadline(connection, deadline)
                     from . import schema_v4
 
                     version = int(
@@ -280,6 +326,8 @@ def _acquire_policy_read(
     except BaseException as exc:
         if connection is not None:
             connection.close()
+        if isinstance(exc, Exception):
+            _stop_contended_read(exc, deadline)
         if (
             observe_legacy
             and version is not None
@@ -1178,12 +1226,14 @@ def guard_generation_probe(vault_root: Path) -> dict[str, object]:
     path = sidecar_path(vault_root)
     if not path.exists():
         return {"state": "clear", "generation": "absent", "event_ids": ()}
+    deadline = _read_deadline()
     try:
         with reserved_paths._subsystem_authority_scope("governance.store"):
             with reserved_paths._identity_coordination_scope(
                 vault_root,
                 descriptor_ids=("governance-store",),
                 identity_may_change=False,
+                deadline=deadline,
             ):
                 with reserved_paths._sqlite_owner_target_scope(
                     vault_root,
@@ -1195,8 +1245,13 @@ def guard_generation_probe(vault_root: Path) -> dict[str, object]:
                         vault_root,
                         path,
                         retained_path,
+                        deadline=deadline,
                     )
+    except OpError as exc:
+        _stop_contended_read(exc, deadline)
+        raise
     except (RuntimeError, sqlite3.Error, OSError) as exc:
+        _stop_contended_read(exc, deadline)
         return {
             "state": "blocked",
             "generation": f"unreadable:{type(exc).__name__}",
@@ -1208,13 +1263,16 @@ def _guard_generation_probe_retained(
     vault_root: Path,
     path: Path,
     retained_path: Path,
+    *,
+    deadline: float | None = None,
 ) -> dict[str, object]:
     conn = sqlite3.connect(
         f"{retained_path.as_uri()}?mode=ro",
         uri=True,
-        timeout=0.05,
+        timeout=0 if deadline is not None else 0.05,
     )
     try:
+        _interrupt_at_deadline(conn, deadline)
         reserved_paths._publish_sqlite_owner_family(
             vault_root,
             path,

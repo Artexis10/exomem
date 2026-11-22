@@ -1800,7 +1800,7 @@ def _declared_purpose(
     if isinstance(context, authorization_session_lifecycle.AuthorizationSessionContext):
         connection: sqlite3.Connection | None = None
         try:
-            connection = store.open_authorization_session_connection(vault_root)
+            connection = store.open_authorization_session_read_connection(vault_root)
             return authorization_session_authority.active_session_purpose(
                 connection,
                 context=context,
@@ -1986,7 +1986,7 @@ def _active_grants_for_snapshot(
 
     connection: sqlite3.Connection | None = None
     try:
-        connection = store.open_authorization_session_connection(vault_root)
+        connection = store.open_authorization_session_read_connection(vault_root)
         session_grants, session_identity = authorization_session_authority.active_session_grants(
                 connection=connection,
                 context=authorization_context,
@@ -2753,7 +2753,7 @@ def pending_identity_candidates(
             return None
 
         try:
-            connection = store.open_authorization_session_connection(root)
+            connection = store.open_authorization_session_read_connection(root)
             # The authority validates session, purpose and policy before asking
             # for reviewed paths. None activates no grant and reads no bytes.
             authorization_session_authority.active_session_grants_for_projection_resolver(

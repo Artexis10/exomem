@@ -14,7 +14,6 @@ from urllib.parse import unquote
 import yaml
 
 from .. import memory_refs, request_budget, reserved_paths, vault
-from ..cli_ops import OpError
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -138,18 +137,7 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
         try:
             if context.issuer_family != who.issuer_family:
                 return False, None
-            if checkpoint is None:
-                connection = store.open_authorization_session_connection(root)
-            else:
-                checkpoint()
-                connection = store.open_active_governance_read_connection(
-                    root, deadline=checkpoint.budget.deadline,
-                )
-                connection.set_progress_handler(lambda: int(checkpoint.remaining() <= 0), 1_000)
-                connection.execute("BEGIN")
-                # Acquire the read snapshot before lifecycle code can translate a busy read
-                # into an unavailable credential. All authority checks then share the same pin.
-                connection.execute("PRAGMA user_version").fetchone()
+            connection = store.open_authorization_session_read_connection(root)
             now = int(time.time())
             custody = authorization_custody.load_authorization_custody(root, now=now)
             authorization_session_lifecycle.status_verified_session(
@@ -158,12 +146,6 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
             trusted_purpose = authorization_session_authority.active_session_purpose(
                 connection, context=context, audience=who.audience_id, now=now,
             )
-        except (OpError, reserved_paths.SqliteIdentityBusyError) as error:
-            if checkpoint is not None and (
-                isinstance(error, reserved_paths.SqliteIdentityBusyError) or error.code == "MUTATION_BUSY"
-            ):
-                raise request_budget.ReadBudgetExhausted() from None
-            raise
         except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
                 authorization_custody.AuthorizationCustodyUnavailable,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
