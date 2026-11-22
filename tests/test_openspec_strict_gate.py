@@ -102,8 +102,8 @@ def test_baseline_roundtrip_and_key_derivation(tmp_path: Path) -> None:
 
     keys = json.loads((tmp_path / "openspec" / "strict-baseline.json").read_text())["keys"]
     assert sorted(keys) == [
-        "too-long cap-x :: Delta Long",
-        "too-long demo :: Long One",
+        "too-long change/add-things/cap-x :: Delta Long",
+        "too-long spec/demo :: Long One",
     ]
 
     check = _run_gate(tmp_path, stub)
@@ -209,7 +209,7 @@ def test_requirement_names_follow_the_validators_indexing(tmp_path: Path) -> Non
     keys = json.loads((tmp_path / "openspec" / "strict-baseline.json").read_text())["keys"]
     # requirements[0] is the non-Requirement `### Rationale` header, matching
     # the parser; the fenced and outside-section headers are not counted.
-    assert keys == ["too-long demo :: Rationale", "too-long demo :: Real Long"]
+    assert keys == ["too-long spec/demo :: Rationale", "too-long spec/demo :: Real Long"]
     assert _run_gate(tmp_path, stub).returncode == 0
 
     grown = _write_stub(
@@ -218,7 +218,7 @@ def test_requirement_names_follow_the_validators_indexing(tmp_path: Path) -> Non
     )
     result = _run_gate(tmp_path, grown)
     assert result.returncode == 1
-    assert "too-long demo :: #2" in result.stderr
+    assert "too-long spec/demo :: #2" in result.stderr
 
 
 def test_missing_git_is_an_internal_error(tmp_path: Path) -> None:
@@ -261,3 +261,173 @@ def test_node_below_the_engines_floor_exits_2(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "needs Node >= 22.20.0; this is v20.19.0" in result.stderr
+
+
+FOO_SPEC_WARNING = {
+    "level": "WARNING",
+    "path": "requirements[0]",
+    "message": "Requirement text is very long (>500 characters). Move examples and edge cases into scenarios.",
+}
+
+
+def _cap_x_spec(root: Path) -> None:
+    spec = root / "openspec" / "specs" / "cap-x"
+    spec.mkdir(parents=True, exist_ok=True)
+    (spec / "spec.md").write_text(
+        "# cap-x\n\n## Requirements\n\n### Requirement: Foo\nbody\n", encoding="utf-8"
+    )
+
+
+def _baseline(root: Path, keys: list[str]) -> None:
+    (root / "openspec" / "strict-baseline.json").write_text(
+        json.dumps({"openspec_version": "2.1.1", "comment": "", "keys": keys}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_archived_change_carries_into_its_spec_key(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _cap_x_spec(tmp_path)
+    _baseline(tmp_path, ["too-long change/add-foo/cap-x :: Foo"])
+    # add-foo is archived -- absent from this run's items -- so its delta key
+    # carries the same-named spec warning.
+    stub = _write_stub(
+        tmp_path,
+        {"items": [{"id": "cap-x", "type": "spec", "valid": False, "issues": [FOO_SPEC_WARNING]}]},
+    )
+    result = _run_gate(tmp_path, stub)
+    assert result.returncode == 0
+    assert "carried" in result.stdout
+
+
+def test_modified_growth_from_a_new_change_fails(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _baseline(tmp_path, ["too-long spec/cap-x :: Foo"])
+    stub = _write_stub(
+        tmp_path,
+        {
+            "items": [
+                {
+                    "id": "grow-foo",
+                    "type": "change",
+                    "valid": False,
+                    "issues": [
+                        {
+                            "level": "WARNING",
+                            "path": "cap-x/spec.md",
+                            "message": 'MODIFIED "Foo": Requirement text is very long (>500 characters). Move examples.',
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    result = _run_gate(tmp_path, stub)
+    assert result.returncode == 1
+    assert "too-long change/grow-foo/cap-x :: Foo" in result.stderr
+
+
+def test_same_name_added_from_a_different_change_fails(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _baseline(tmp_path, ["too-long change/old-change/cap-x :: Foo"])
+    stub = _write_stub(
+        tmp_path,
+        {
+            "items": [
+                {
+                    "id": "other",
+                    "type": "change",
+                    "valid": False,
+                    "issues": [
+                        {
+                            "level": "WARNING",
+                            "path": "cap-x/spec.md",
+                            "message": 'ADDED "Foo": Requirement text is very long (>500 characters). Move examples.',
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    result = _run_gate(tmp_path, stub)
+    assert result.returncode == 1
+    assert "too-long change/other/cap-x :: Foo" in result.stderr
+
+
+def test_no_carry_while_the_baselined_change_is_active(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _cap_x_spec(tmp_path)
+    _baseline(tmp_path, ["too-long change/adding/cap-x :: Foo"])
+    stub = _write_stub(
+        tmp_path,
+        {
+            "items": [
+                {"id": "cap-x", "type": "spec", "valid": False, "issues": [FOO_SPEC_WARNING]},
+                {"id": "adding", "type": "change", "valid": False, "issues": []},
+            ]
+        },
+    )
+    result = _run_gate(tmp_path, stub)
+    assert result.returncode == 1
+    assert "too-long spec/cap-x :: Foo" in result.stderr
+
+
+def test_a_status_envelope_that_is_not_a_report_exits_2(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    script = tmp_path / "fake-openspec.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "2.1.1"; exit 0; fi\n'
+        "echo '{\"status\":[\"no openspec root\"]}'\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    result = _run_gate(tmp_path, script)
+    assert result.returncode == 2
+    assert "no items array" in result.stderr
+
+
+def test_a_failed_validate_with_no_issues_exits_2(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    stub = _write_stub(tmp_path, {"items": []})
+    result = _run_gate(tmp_path, stub)
+    assert result.returncode == 2
+    assert "no issues in its report" in result.stderr
+
+
+def test_write_baseline_after_the_separator_is_not_honoured(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    stub = _write_stub(tmp_path, _report())
+    result = subprocess.run(
+        ["node", str(GATE), "--", str(stub), "--write-baseline"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # The flag reached the CLI, not the gate: check mode ran and reported the
+    # missing baseline instead of writing one.
+    assert result.returncode == 2
+    assert "missing or unparsable baseline" in result.stderr
+
+
+def test_node_entry_runs_on_the_gates_own_interpreter(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    _baseline(tmp_path, [])
+    entry = tmp_path / "entry.js"
+    entry.write_text(
+        'const a=process.argv.slice(2);'
+        'if(a[0]==="--version"){console.log("2.1.1");process.exit(0)}'
+        'console.log(JSON.stringify({items:[]}));process.exit(0);',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(GATE), "--", "node", str(entry)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "all baselined" in result.stdout
