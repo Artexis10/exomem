@@ -1771,11 +1771,13 @@ def _move_file_local(
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     raise
+                rename_attempted = False
                 try:
                     if _stage is not None:
                         _stage("before-rename")
                     if recheck_referrers is not None:
                         recheck_referrers()
+                    rename_attempted = True
                     _held_rename(vault_root, old_rel, new_rel)
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
@@ -1799,8 +1801,10 @@ def _move_file_local(
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     if move_epoch is not None:
-                        # A held rename can fail after mutation; retain its floor and repair custody.
-                        graph_sync.provision_rename_recovery(move_epoch)
+                        if rename_attempted:
+                            graph_sync.provision_rename_recovery(move_epoch)
+                        else:
+                            graph_sync.restore_deletion_epoch(move_epoch)
                     raise
                 child_started = False
                 try:

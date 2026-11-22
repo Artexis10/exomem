@@ -656,6 +656,7 @@ class AuthorizationSessionMiddleware(Middleware):
         post_started = None
         entered = monotonic()
         check = None
+        retained_identity = None
         # These phases name fixed middleware stages, not authorization policy states.
         phase = "entry"
         with mcp_request_correlation() as request_id, ExitStack() as scopes:
@@ -689,6 +690,14 @@ class AuthorizationSessionMiddleware(Middleware):
                             if stop is None:
                                 check = None
                     scopes.enter_context(request_budget.checking(check))
+                    if check is not None and arguments.get("preview_run_id") is not None:
+                        from ..reclassification_preview import retained_report_identity
+
+                        retained_identity = await anyio.to_thread.run_sync(
+                            retained_report_identity, self.vault_root, bound,
+                        )
+                        if retained_identity is None:
+                            raise AuthorizationContextUnavailable
 
                     def boundary_view() -> tuple[tuple, bool]:
                         request_budget.checkpoint()
@@ -731,6 +740,10 @@ class AuthorizationSessionMiddleware(Middleware):
                     if check is not None and await anyio.to_thread.run_sync(
                         managed_preview_stop, self.vault_root, bound,
                     ) is None:
+                        raise AuthorizationContextUnavailable
+                    if retained_identity is not None and await anyio.to_thread.run_sync(
+                        retained_report_identity, self.vault_root, bound,
+                    ) != retained_identity:
                         raise AuthorizationContextUnavailable
                     request_budget.checkpoint()
                 except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):

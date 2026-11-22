@@ -398,6 +398,9 @@ def test_purpose_lookup_and_revoke_are_exact_for_same_principal_sessions() -> No
         )
         == "audit"
     )
+    assert authority.session_release_stamp(
+        connection, context=session_a.context, audience="principal:person-1", now=NOW + 4,
+    ) == ("support", (grant_a.grant_id,))
 
     assert (
         authority.revoke_session_grants(
@@ -411,6 +414,12 @@ def test_purpose_lookup_and_revoke_are_exact_for_same_principal_sessions() -> No
     assert connection.execute(
         "SELECT grant_id, status FROM governance_session_grants ORDER BY grant_id"
     ).fetchall() == sorted([(grant_a.grant_id, "revoked"), (grant_b.grant_id, "active")])
+    assert authority.session_release_stamp(
+        connection, context=session_a.context, audience="principal:person-1", now=NOW + 5,
+    ) == ("support", ())
+    assert authority.session_release_stamp(
+        connection, context=session_b.context, audience="principal:person-1", now=NOW + 5,
+    ) == ("audit", (grant_b.grant_id,))
     assert (
         authority.revoke_session_grants(
             connection,

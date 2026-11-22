@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Iterator, Mapping
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from contextvars import ContextVar
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -23,7 +24,8 @@ from . import (
     request_budget,
 )
 from .cli_ops import OpError
-from .governance import connector_boundary
+from .governance import authorization_session_authority, connector_boundary, egress, policy, store
+from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -51,12 +53,52 @@ def _not_found() -> OpError:
     )
 
 
-def _authority_binding(root: Path, who: RequestPrincipal) -> str:
+def _stale_report() -> OpError:
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_STALE", "The complete report cannot be released from this snapshot.",
+        "Request a new preview without a run identifier.",
+    )
+
+
+class RetainedReport(dict):
+    """Refuse a whole receipt page if the terminal filter changes any reviewed value."""
+
+    def __init__(self, result: Mapping[str, Any]) -> None:
+        super().__init__(result)
+        self._proof = _digest(result)
+
+    def require_complete_projection(self, result: Any) -> None:
+        if _digest(result) != self._proof:
+            raise _stale_report()
+
+
+@dataclass(frozen=True)
+class _Authority:
+    key: str
+    depends_on_membership: bool
+
+
+def _authority_binding(root: Path, who: RequestPrincipal) -> _Authority:
     if reclassify_source.managed_preview_stop(root, who) is None:
         raise _not_found()
-    policy = recall_policy.recall_policy_identity(root)
-    # Page delivery follows the same caller and current authority across corpus changes.
-    return _digest((policy, connector_boundary.cache_identity(root, who)[-1], asdict(who)))
+    compiled = policy.load(root)
+    if compiled.blocked or compiled.conflicted:
+        raise _not_found()
+    session = who.verified_authorization_session
+    session_stamp = None
+    if session is not None and any(rule.audience == who.audience_id for rule in compiled.rules):
+        try:
+            with closing(store.open_authorization_session_read_connection(root)) as connection:
+                session_stamp = authorization_session_authority.session_release_stamp(
+                    connection, context=session, audience=who.audience_id, now=int(time.time()),
+                )
+        except AuthorizationSessionUnavailable:
+            raise _not_found() from None
+    key = _digest((
+        compiled.fingerprint, recall_policy.recall_policy_identity(root),
+        connector_boundary.cache_identity(root, who)[-1], asdict(who), session_stamp,
+    ))
+    return _Authority(key, bool(compiled.scopes) or not egress._access_config_absent(root))
 
 
 def _snapshot_key(root: Path) -> str | None:
@@ -64,6 +106,18 @@ def _snapshot_key(root: Path) -> str | None:
     if generation is None or generation[1] is None or generation[3] is not None:
         return None
     return _digest(generation)
+
+
+def retained_report_identity(root: Path, who: RequestPrincipal) -> tuple[str, str | None] | None:
+    """Recheck exactly the release inputs that a retained summary or page can depend on."""
+    try:
+        authority = _authority_binding(root, who)
+    except OpError:
+        return None
+    snapshot = _snapshot_key(root) if authority.depends_on_membership else None
+    if authority.depends_on_membership and snapshot is None:
+        raise request_budget.ReadBudgetExhausted()
+    return authority.key, snapshot
 
 
 def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]:
@@ -80,7 +134,7 @@ def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]
 
 def _build(
     root: Path, args: Mapping[str, Any], who: RequestPrincipal,
-    surface: capabilities.ActiveSurfaceDescriptor | None, binding: str, snapshot_key: str, stop: Event,
+    surface: capabilities.ActiveSurfaceDescriptor | None, authority: _Authority, snapshot_key: str, stop: Event,
 ) -> tuple[dict[str, Any], Iterator[tuple[str, str, str | None]]]:
     from .command_surface import resolve_command
     from .commands import PRODUCT_COMMANDS
@@ -103,13 +157,13 @@ def _build(
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
-            if stop.is_set() or _authority_binding(root, who) != binding:
+            if stop.is_set() or _authority_binding(root, who) != authority:
                 raise _not_found()
             if _snapshot_key(root) != snapshot_key:
                 raise reclassify_source.preview_warming()
             result = invoke_command(command, root, operation="propose-reclassification", **args)
             if (not original or _digest({key: result.get(key) for key in original["keys"]}) != original["digest"]
-                    or stop.is_set() or _authority_binding(root, who) != binding):
+                    or stop.is_set() or _authority_binding(root, who) != authority):
                 raise _not_found()
             if _snapshot_key(root) != snapshot_key:
                 raise reclassify_source.preview_warming()
@@ -152,7 +206,7 @@ def report(
     if not managed:
         raise _not_found()
     who = effective_principal()
-    binding = _authority_binding(root, who)
+    authority = _authority_binding(root, who)
     snapshot_key = _snapshot_key(root)
     args = {"path": path, "source_kind": source_kind, "domain": domain}
     request_key = _digest(args)
@@ -160,9 +214,12 @@ def report(
               **{key: value for key, value in args.items() if value is not None}}
     if preview_run_id is not None:
         result = maintenance_jobs.source_preview_status(
-            root, binding=binding, request_key=request_key, snapshot_key=snapshot_key,
+            root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,
         )
+        if (authority.depends_on_membership and result.get("state") == maintenance_jobs.COMPLETED
+                and result.get("snapshot_current") is not True):
+            raise _stale_report()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":
             raise reclassify_source.preview_unavailable()
         if result.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING":
@@ -173,14 +230,16 @@ def report(
             raise reclassify_source.preview_warming()
         surface = capabilities.current_active_surface()
         result = maintenance_jobs.start_source_preview(
-            root, binding=binding, request_key=request_key, snapshot_key=snapshot_key,
-            build=lambda stop: _build(root, args, who, surface, binding, snapshot_key, stop),
+            root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
+            build=lambda stop: _build(root, args, who, surface, authority, snapshot_key, stop),
         )
-    if _authority_binding(root, who) != binding:
+    if _authority_binding(root, who) != authority:
         raise _not_found()
+    if authority.depends_on_membership and _snapshot_key(root) != snapshot_key:
+        raise _stale_report()
     if preview_run_id is None or result.get("state") == maintenance_jobs.RUNNING or result.get("next_cursor") is not None:
         follow["preview_run_id"] = result["run_id"]
         if result.get("next_cursor") is not None:
             follow["cursor"] = result["next_cursor"]
         result["next"] = capabilities.active_call_route("manage_memory_file", follow)
-    return result
+    return RetainedReport(result) if result.get("state") == maintenance_jobs.COMPLETED else result

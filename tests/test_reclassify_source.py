@@ -200,12 +200,13 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     from exomem import (
         file_watcher,
         freshness,
+        graph_sync,
         maintenance_jobs,
         reclassification_preview,
-        semantic_writes,
         server,
     )
     from exomem import vault as vault_module
+    from exomem.governance import egress
 
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
@@ -272,6 +273,20 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             terminal = await ready(run_id)
             digest = terminal["result"]["preview_digest"]
             cursor = terminal["next_cursor"]
+            postfilter = egress._postfilter
+
+            def withhold_one_entry(*args, **kwargs):
+                result = postfilter(*args, **kwargs)
+                if isinstance(result, dict) and result.get("entries"):
+                    return {**result, "entries": result["entries"][1:]}
+                return result
+
+            with monkeypatch.context() as release:
+                release.setattr(egress, "_postfilter", withhold_one_entry)
+                withheld = await preview(preview_run_id=run_id, cursor=cursor)
+            assert withheld["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", withheld
+            assert "entries" not in withheld and "next_cursor" not in withheld
+
             seen = set()
             while cursor is not None:
                 page = await preview(preview_run_id=run_id, cursor=cursor)
@@ -290,6 +305,26 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert {("rewritten", path) for path in paths}.issubset(seen)
             assert ("pointer_repointed", evidence) in seen
 
+            governance = vault / KB / "_Governance"
+            scope = governance / "scopes" / "field-log.yaml"
+            rule = governance / "rules" / "field-log.yaml"
+            scope.parent.mkdir(parents=True, exist_ok=True)
+            rule.parent.mkdir(parents=True, exist_ok=True)
+            scope.write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Evidence/field-log.md"]\n',
+                encoding="utf-8",
+            )
+            rule.write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+                'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\nceiling: 0\n',
+                encoding="utf-8",
+            )
+            policy_changed = await preview(preview_run_id=run_id)
+            assert policy_changed["error"]["code"] == "NOT_FOUND", policy_changed
+            assert "result" not in policy_changed and "next_cursor" not in policy_changed
+            rule.unlink()
+            scope.unlink()
+
             changed = sorted(paths)[-1]
             changed_path = vault / changed
             changed_path.write_text(f"See [[{source}]] and [[{source}]].\n", encoding="utf-8")
@@ -304,21 +339,24 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
             refreshed = await ready((await preview())["run_id"])
-            preflight = semantic_writes.preflight_move
+            prepare_epoch = graph_sync.prepare_rename_epoch
+            prior_graph = graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)
             late = vault / KB / "Notes" / "late-referrer.md"
 
-            def add_a_referrer_during_preflight(*args, **kwargs):
-                result = preflight(*args, **kwargs)
+            def add_a_referrer_after_the_graph_floor(*args, **kwargs):
+                epoch = prepare_epoch(*args, **kwargs)
+                assert epoch is not None
                 late.write_text(f"See `{source}`.\n", encoding="utf-8")
                 freshness.on_files_changed(vault, changed=[late])
-                return result
+                return epoch
 
             with monkeypatch.context() as edit:
-                edit.setattr(semantic_writes, "preflight_move", add_a_referrer_during_preflight)
+                edit.setattr(graph_sync, "prepare_rename_epoch", add_a_referrer_after_the_graph_floor)
                 refused = await call("manage_memory_file", operation="reclassify", **args, reason="Correct Source kind",
                                      preview_digest=refreshed["result"]["preview_digest"])
             assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
             assert (vault / source).is_file() and source in (vault / evidence).read_text()
+            assert (graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)) == prior_graph
 
             vault_module.on_inbound_files_changed(vault, changed_rels=[late.relative_to(vault).as_posix()], deleted_rels=[])
             lexstore.ensure_fresh(vault)

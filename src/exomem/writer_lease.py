@@ -9321,11 +9321,19 @@ def invoke_command(
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                retained_report = None
+                if preview_checkpoint is not None:
+                    from .reclassification_preview import RetainedReport
+
+                    if isinstance(result, RetainedReport):
+                        retained_report = result
                 # The terminal filter asks the store live rather than replaying the body's verdict.
                 with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
                     result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
                                         checkpoint=checkpoint, reprove_aggregate=audit_checkpoint is not None)
                     result = store_preview.note_withheld_pages(command.name, result, injected[0])
+                    if retained_report is not None:
+                        retained_report.require_complete_projection(result)
                 finish_ownership(checkpoint)
             except BaseException as error:
                 # This exact internal terminal contains no content to scan or prove again.

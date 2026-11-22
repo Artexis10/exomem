@@ -465,6 +465,7 @@ def register_rest_facade(
                         _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                     )
                     check = None
+                    retained_identity = None
                     injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
                     from .writer_lease import invoke_command
 
@@ -514,6 +515,15 @@ def register_rest_facade(
                                     )
                                 if stop is None:
                                     check = None
+                                elif kwargs.get("preview_run_id") is not None:
+                                    from .reclassification_preview import retained_report_identity
+
+                                    with request_budget.checking(check):
+                                        retained_identity = await run_in_threadpool(
+                                            retained_report_identity, vault_root, bound_principal,
+                                        )
+                                    if retained_identity is None:
+                                        raise authorization_request.AuthorizationContextUnavailable
                         boundary_revision, unrestricted = (
                             await run_in_threadpool(boundary_view) if check is not None else boundary_view()
                         )
@@ -529,6 +539,10 @@ def register_rest_facade(
                         if check is not None:
                             with request_budget.checking(check):
                                 if await run_in_threadpool(managed_preview_stop, vault_root, bound_principal) is None:
+                                    raise authorization_request.AuthorizationContextUnavailable
+                                if retained_identity is not None and await run_in_threadpool(
+                                    retained_report_identity, vault_root, bound_principal,
+                                ) != retained_identity:
                                     raise authorization_request.AuthorizationContextUnavailable
                             check()
                             preview_response = RestJSONResponse(cli_ops.envelope(True, data=result))
