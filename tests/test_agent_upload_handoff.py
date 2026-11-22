@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import time
+from contextlib import contextmanager
 from dataclasses import replace
 from io import BytesIO
 
@@ -114,6 +117,153 @@ def test_cli_handoff_holds_exact_bytes_for_only_the_issuing_session(upload_env, 
         retried = held_uploads.redeem(vault, receipt["file"]["download_url"], lane="source")
         retried.path.unlink()
     assert _post(upload_env, descriptor, original).status_code == 401
+
+
+def test_upload_files_selects_a_resumable_handoff_for_a_large_source(upload_env):
+    from exomem import commands, public_tools, upload_handoff, upload_sessions
+
+    vault, who, *_ = upload_env
+    size = upload_handoff.MAX_BYTES + 1
+    digest = hashlib.sha256(b"sample original").hexdigest()
+    wire = public_tools.UploadFiles(lane="source", expected_sha256=digest, size_bytes=size)
+    leaf, arguments = public_tools._upload_files(wire.model_dump(exclude_none=True), None)
+
+    with principal.request_scope(who):
+        assert leaf == "transfer_artifact"
+        handoff = commands.op_transfer_artifact(vault, **arguments)
+
+    assert handoff["committed"] is False and handoff["expected_sha256"] == digest
+    assert handoff["size_bytes"] == size
+    assert handoff["resumable"]["create_url"] == "https://capture.example" + upload_sessions.SESSIONS_PATH
+
+
+def test_large_source_respects_the_session_limit_and_an_explicit_hold(upload_env, monkeypatch):
+    from exomem import upload_handoff, upload_sessions
+
+    limit = upload_handoff.MAX_BYTES + 1
+    monkeypatch.setenv(upload_sessions.MAX_BYTES_ENV, str(limit))
+    with pytest.raises(ValueError, match=f"TOO_LARGE: a Source session holds at most {limit:,} bytes"):
+        _prepare(upload_env, size_bytes=limit + 1)
+    with pytest.raises(ValueError, match=f"TOO_LARGE: this handoff holds at most {upload_handoff.MAX_BYTES:,} bytes"):
+        _prepare(upload_env, size_bytes=limit, held_only=True)
+    assert _prepare(upload_env)["hold"] is True
+
+
+def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
+    upload_env, tmp_path, monkeypatch, capsys,
+):
+    from exomem import upload_handoff, upload_sessions
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    monkeypatch.setattr(upload_sessions, "MAX_PATCH_BYTES", 16)
+    data = b"A complete recording arrives in many parts."
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(descriptor))
+    original = tmp_path / "recording.bin"
+    original.write_bytes(data)
+
+    class InterruptedPart(_ASGISyncTransport):
+        interrupted = False
+        resumed = False
+
+        def handle_request(self, request):
+            if request.method != "POST":
+                assert "authorization" not in request.headers
+            response = super().handle_request(request)
+            if request.method == "PATCH" and response.status_code == 204 and not self.interrupted:
+                self.interrupted = True
+                raise httpx.ReadError("the part acknowledgement was lost", request=request)
+            if request.method == "HEAD":
+                assert response.headers["upload-offset"] == "8"
+                self.resumed = True
+            return response
+
+    transport = InterruptedPart(upload_env[-1])
+    assert _attach_main(["--handoff-file", str(handoff), "--root", str(tmp_path), str(original)],
+                        transport=transport) == 0
+    assert transport.interrupted and transport.resumed
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["hash"] == hashlib.sha256(data).hexdigest()
+    assert receipt["size"] == len(data)
+    assert (upload_env[0] / receipt["artifact_path"]).read_bytes() == data
+    assert len(list((upload_env[0] / receipt["artifact_path"]).parent.glob("*.bin"))) == 1
+
+
+@pytest.mark.parametrize("revoke_at", [None, "restart", "staging"])
+def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, monkeypatch, revoke_at):
+    from exomem import upload_handoff, upload_sessions, upload_stage
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"Durable bytes before the state can change."
+    digest = hashlib.sha256(data).hexdigest()
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    vault, _, authority, bearer, app = upload_env
+    client = httpx.Client(transport=_ASGISyncTransport(app), base_url="https://capture.example")
+    content = {"filename": "recording.bin", "title": "Resumed recording", "sha256": digest}
+    open_headers = {
+        "Tus-Resumable": "1.0.0",
+        "Authorization": "Bearer " + descriptor["token"],
+        "Upload-Length": str(len(data)),
+        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}"
+                                    for key, value in content.items()),
+    }
+    wrong_size = {**open_headers, "Upload-Length": str(len(data) + 1)}
+    assert client.post(upload_sessions.SESSIONS_PATH, headers=wrong_size).status_code == 401
+    assert _post(upload_env, descriptor, data).status_code != 201
+    created = client.post(upload_sessions.SESSIONS_PATH, headers=open_headers)
+    assert created.status_code == 201, created.text
+    assert client.post(upload_sessions.SESSIONS_PATH, headers=open_headers).status_code == 401
+    location = created.headers["location"]
+    session_id = location.rsplit("/", 1)[1]
+    secret = created.headers[upload_sessions.SECRET_HEADER]
+    headers = {"Tus-Resumable": "1.0.0", upload_sessions.SECRET_HEADER: secret}
+
+    write_record = upload_sessions._write_record
+
+    def stop_after_part(store, record):
+        if record["state"] == upload_sessions.VERIFYING:
+            raise OSError("listener stopped before writing the verifying record")
+        return write_record(store, record)
+
+    with monkeypatch.context() as stopped:
+        stopped.setattr(upload_sessions, "_write_record", stop_after_part)
+        with pytest.raises(OSError, match="listener stopped"):
+            client.patch(location, headers={**headers, "Upload-Offset": "0",
+                         "Content-Type": "application/offset+octet-stream"}, content=data)
+    # A fresh serving runtime owns the durable part and record, without the old digest or request context.
+    monkeypatch.setattr(upload_sessions, "_RUNNING", {})
+    if revoke_at == "restart":
+        asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+    if revoke_at == "staging":
+        stage = upload_stage.stage
+
+        @contextmanager
+        def revoke_after_staging(*args, **kwargs):
+            with stage(*args, **kwargs) as staged:
+                asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+                yield staged
+
+        monkeypatch.setattr(upload_stage, "stage", revoke_after_staging)
+    server_transfer.resume_upload_sessions(vault)
+    deadline = time.monotonic() + 20
+    while True:
+        state = upload_sessions.open_session(vault, session_id, secret).view()
+        if state["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED):
+            break
+        assert time.monotonic() < deadline, state
+        time.sleep(0.03)
+    response = client.get(location, headers=headers)
+    if revoke_at is not None:
+        assert response.status_code == 404
+        assert state["state"] == upload_sessions.FAILED
+        assert not list(vault.rglob("*.bin"))
+    else:
+        assert response.status_code == 200
+        assert state["state"] == upload_sessions.COMMITTED
+        assert response.json()["receipt"]["hash"] == digest
+        assert (vault / response.json()["receipt"]["artifact_path"]).read_bytes() == data
+        assert len(list(vault.rglob("*.bin"))) == 1
 
 
 def test_cli_accepts_the_result_of_a_handoff_issued_after_a_write(upload_env, tmp_path):

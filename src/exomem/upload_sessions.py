@@ -41,7 +41,7 @@ import secrets
 import shutil
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,9 @@ from . import private_state
 log = logging.getLogger(__name__)
 
 STORE_DIRNAME = "upload-sessions"
+# Older session readers do not open this namespace or accept this ID prefix.
+SOURCE_STORE_DIRNAME = "source-upload-sessions"
+SOURCE_ID_PREFIX = "source-"
 #: A session lives this long after its last accepted part.
 TTL_SECONDS = 24 * 3600
 #: Bytes one request may carry: under the proxy edge's 100 MB body cap.
@@ -100,11 +103,10 @@ _LOCK_WAIT_SECONDS = 30.0
 # `REATTEMPT_INITIAL_SECONDS`, then after twice the previous wait, to `REATTEMPT_MAX_SECONDS`.
 REATTEMPT_INITIAL_SECONDS = 2.0
 REATTEMPT_MAX_SECONDS = 60.0
-# The codes a busy or still-warming vault gives; they are `OpError` codes that the vault's own
-# lock, store and warm-up fix, so this set is closed by them. Other retryable codes (a full
+# The server retries these documented codes for write contention, warm-up, and unreadable upload authorization. Other retryable codes (a full
 # disk, an unknown outcome) need the client or an operator, so the server leaves them alone.
 # nosemgrep: ep-word-set -- these are the vault's documented transient error codes.
-_REATTEMPT_CODES = frozenset({"MUTATION_BUSY", "COLLECTION_STORE_BUSY", "MUTATION_WARMING"})
+_REATTEMPT_CODES = frozenset({"MUTATION_BUSY", "COLLECTION_STORE_BUSY", "MUTATION_WARMING", "UPLOAD_ORIGIN_BUSY"})
 _now = time.time
 
 
@@ -210,8 +212,29 @@ def _forget(session_id: str) -> None:
         running.reattempt.cancel()
 
 
-def _store(vault_root: Path) -> Path:
-    return private_state.store(vault_root, STORE_DIRNAME)
+def _store(vault_root: Path, *, delegated: bool = False) -> Path:
+    return private_state.store(vault_root, SOURCE_STORE_DIRNAME if delegated else STORE_DIRNAME)
+
+
+def _existing_stores(vault_root: Path) -> Iterator[Path]:
+    from .state_paths import vault_state_dir
+
+    root = vault_state_dir(vault_root)
+    for delegated in (False, True):
+        if (root / (SOURCE_STORE_DIRNAME if delegated else STORE_DIRNAME)).exists():
+            yield _store(vault_root, delegated=delegated)
+
+
+def delegated_source(session_id: str) -> bool:
+    return session_id.startswith(SOURCE_ID_PREFIX)
+
+
+def valid_session_id(session_id: str) -> bool:
+    return _SESSION_ID.fullmatch(session_id.removeprefix(SOURCE_ID_PREFIX)) is not None
+
+
+def valid_session_secret(secret: str) -> bool:
+    return _SECRET.fullmatch(secret) is not None
 
 
 def _secret_hash(secret: str) -> str:
@@ -223,7 +246,10 @@ _remove = private_state.remove
 
 def _write_record(store: Path, record: dict) -> None:
     # `sweep` owns the `.tmp` temp; `.part` here is a session's bytes.
-    private_state.write_record(store, record["id"], record, temp_suffix=".tmp")
+    delegated = store.name == SOURCE_STORE_DIRNAME
+    private_state.write_record(store, record["id"], record, temp_suffix=".tmp", durable=delegated)
+    if delegated:
+        private_state.sync_directory(store)
 
 
 def _commit_lock(store: Path, session_id: str) -> FileLock:
@@ -237,7 +263,11 @@ def _read_record(store: Path, session_id: str) -> dict | None:
         record = json.loads((store / f"{session_id}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return record if isinstance(record, dict) else None
+    if not isinstance(record, dict) or record.get("id") != session_id:
+        return None
+    if store.name == SOURCE_STORE_DIRNAME and not isinstance(record.get("source_handoff"), dict):
+        return None
+    return record
 
 
 def _part_size(part: Path) -> int:
@@ -255,8 +285,12 @@ def _drop(store: Path, session_id: str) -> None:
 
 def sweep(vault_root: Path) -> None:
     """Remove expired sessions with their bytes, and anything a crash left behind."""
-    store = _store(vault_root)
     now = _now()
+    for store in _existing_stores(vault_root):
+        _sweep(store, now)
+
+
+def _sweep(store: Path, now: float) -> None:
     for meta in store.glob("*.json"):
         record = _read_record(store, meta.stem)
         try:
@@ -322,17 +356,13 @@ class Session:
 
 def startup_sweep(vault_root: Path) -> list[Session]:
     """At the serving runtime's start: sweep an existing store; return the commits to resume."""
-    from .state_paths import vault_state_dir
-
-    if not (vault_state_dir(vault_root) / STORE_DIRNAME).is_dir():
-        return []
     sweep(vault_root)
-    store = _store(vault_root)
     pending = []
-    for meta in store.glob("*.json"):
-        record = _read_record(store, meta.stem)
-        if record and record.get("state") in _COMMITTABLE:
-            pending.append(Session(store, record))
+    for store in _existing_stores(vault_root):
+        for meta in store.glob("*.json"):
+            record = _read_record(store, meta.stem)
+            if record and _can_start(store, record):
+                pending.append(Session(store, record))
     return pending
 
 
@@ -344,6 +374,7 @@ def create(
     sha256: str,
     target: dict[str, Any],
     max_bytes: int,
+    source_handoff: dict[str, Any] | None = None,
 ) -> tuple[Session, str]:
     """Open a session for `length` bytes; return it with the secret only the client keeps.
 
@@ -361,25 +392,31 @@ def create(
     # serialised: two creates between the count and the write would both pass.
     try:
         with FileLock(store / ".create.lock", timeout=_LOCK_WAIT_SECONDS):
-            return _create_locked(vault_root, store, binding, length, sha256, target)
+            if source_handoff is not None:
+                store = _store(vault_root, delegated=True)
+                private_state.sync_directory(store.parent)
+            return _create_locked(vault_root, store, binding, length, sha256, target, source_handoff)
     except Timeout as exc:
         raise SessionError("UPLOAD_SESSION_BUSY", "another upload session is being opened", 409) from exc
 
 
 def _create_locked(
-    vault_root: Path, store: Path, binding: str, length: int, sha256: str, target: dict[str, Any]
+    vault_root: Path, store: Path, binding: str, length: int, sha256: str, target: dict[str, Any],
+    source_handoff: dict[str, Any] | None,
 ) -> tuple[Session, str]:
     sweep(vault_root)
     live = 0
     reserved = 0
-    for meta in store.glob("*.json"):
-        record = _read_record(store, meta.stem)
-        if not record or record.get("state") not in _LIVE:
-            continue
-        if record.get("binding") == binding:
-            live += 1
-        if record.get("state") == RECEIVING:
-            reserved += max(int(record.get("length") or 0) - _part_size(store / f"{meta.stem}.part"), 0)
+    for existing_store in _existing_stores(vault_root):
+        for meta in existing_store.glob("*.json"):
+            record = _read_record(existing_store, meta.stem)
+            if not record or record.get("state") not in _LIVE:
+                continue
+            if record.get("binding") == binding:
+                live += 1
+            if record.get("state") == RECEIVING:
+                size = _part_size(existing_store / f"{meta.stem}.part")
+                reserved += max(int(record.get("length") or 0) - size, 0)
     if live >= MAX_LIVE_PER_BINDING:
         raise SessionError(
             "UPLOAD_SESSION_QUOTA",
@@ -389,7 +426,8 @@ def _create_locked(
     if reserved + length > shutil.disk_usage(store).free:
         raise SessionError("UPLOAD_SESSION_NO_SPACE", "not enough free disk space for this upload", 507)
     secret = secrets.token_urlsafe(32)
-    session_id = secrets.token_hex(16)
+    prefix = SOURCE_ID_PREFIX if source_handoff is not None else ""
+    session_id = prefix + secrets.token_hex(16)
     now = _now()
     record = {
         "id": session_id,
@@ -402,6 +440,7 @@ def _create_locked(
         "state": RECEIVING if length else VERIFYING,
         "created": now,
         "expires": now + TTL_SECONDS,
+        **({"source_handoff": source_handoff} if source_handoff is not None else {}),
     }
     descriptor = os.open(
         store / f"{session_id}.part",
@@ -421,9 +460,10 @@ def _create_locked(
 
 def open_session(vault_root: Path, session_id: str, secret: str | None) -> Session:
     """The session this id and secret name; anything else is one `NOT_FOUND`."""
-    if not _SESSION_ID.fullmatch(session_id or "") or not _SECRET.fullmatch(secret or ""):
+    delegated = delegated_source(session_id)
+    if not valid_session_id(session_id) or not valid_session_secret(secret or ""):
         raise _not_found()
-    store = _store(vault_root)
+    store = _store(vault_root, delegated=delegated)
     record = _read_record(store, session_id)
     if record is None or not hmac.compare_digest(
         str(record.get("secret_sha256")).encode(), _secret_hash(str(secret)).encode()
@@ -647,6 +687,15 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     _write_record(store, {**record, "state": RETRYABLE, "code": code, "reason": reason})
 
 
+def _can_start(store: Path, record: dict) -> bool:
+    if record.get("state") in _COMMITTABLE:
+        return True
+    if record.get("state") != RECEIVING or type(record.get("length")) is not int:
+        return False
+    part = store / f"{record['id']}.part"
+    return _part_size(part) == record["length"]
+
+
 def start_commit(session: Session, committer: Committer) -> None:
     """Admit one background commit after publishing its pending state.
 
@@ -654,7 +703,7 @@ def start_commit(session: Session, committer: Committer) -> None:
     preserve. It is a daemon: a commit that a shutdown interrupts restarts the
     next time the session is read.
     """
-    if session.record["state"] not in _COMMITTABLE:
+    if not _can_start(session.store, session.record):
         return
     lock = _commit_lock(session.store, session.id)
     try:
@@ -670,9 +719,25 @@ def start_commit(session: Session, committer: Committer) -> None:
         return
     try:
         record = _read_record(session.store, session.id)
-        if record is None or record.get("state") not in _COMMITTABLE:
+        if record is None or not _can_start(session.store, record):
             lock.release()
             return
+        if record["state"] == RECEIVING:
+            # The final part can reach the disk before the verifying record. Exclude a live part writer.
+            running = _running(session.id)
+            if not running.lock.acquire(blocking=False):
+                lock.release()
+                return
+            try:
+                record = _read_record(session.store, session.id)
+                if record is None or not _can_start(session.store, record):
+                    lock.release()
+                    return
+                record = {**record, "state": VERIFYING}
+                _write_record(session.store, record)
+                session.record = record
+            finally:
+                running.lock.release()
         # Report a failure found under the lock even when GET captured the preceding attempt.
         if record["state"] == RETRYABLE:
             session.record = record

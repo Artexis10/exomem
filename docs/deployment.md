@@ -1904,6 +1904,18 @@ Source page. It does not accept `archive=members`. Evidence also accepts
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
+For a large original on the personal HTTP listener, call `upload_files` with
+`lane="source"`, the file's `expected_sha256` and its exact `size_bytes`.
+Above the one-shot limit, the reply describes a resumable Source upload.
+Save that reply privately as a handoff file and run `exomem attach --handoff-file handoff.json original.bin`.
+The same command resumes from the server's offset after a dropped request.
+It returns a Source receipt after the full hash matches and the Source commits.
+The issuing MCP login must remain active.
+
+Requests within the one-shot limit still produce a held file for `save_source`.
+An explicit hold or import identity keeps that limit. Cloud's gateway also uses
+the one-shot limit. The tool reports the applicable limit for an oversized request.
+
 A Source capability does not grant read access to its destination. If governance
 withholds the custody receipt, the session retains the bytes and reports
 `SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.

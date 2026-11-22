@@ -1568,11 +1568,11 @@
     }
   },
   "upload_files": {
-    "description": "Get a one-use upload. Follow the reply, then pass its handle to save_source or save_evidence.",
+    "description": "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Original, proof, or personal-server folder archive.",
+          "description": "Source, Evidence or import archive.",
           "enum": [
             "source",
             "evidence",
@@ -1582,15 +1582,20 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of the file to upload."
+          "description": "File SHA-256."
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer",
+          "description": "Exact Source bytes."
         },
         "import_identity": {
           "type": "string",
-          "description": "Durable external ID for a held Source upload."
+          "description": "Held Source import ID."
         },
         "hold": {
           "type": "boolean",
-          "description": "Keep the upload for this session; needs expected_sha256."
+          "description": "Hold bytes for a later save."
         },
         "detail": {
           "enum": [
