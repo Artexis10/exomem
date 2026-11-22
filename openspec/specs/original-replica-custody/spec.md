@@ -102,11 +102,11 @@ A verified replica SHALL count as recoverable only when its key version's decryp
 - On a personal install, the owner has confirmed an export of that identity outside the machine, once for each key version, and the media ledger records the confirmation.
 - On a Cloud cell, platform key custody wraps the identity, and the configuration says so.
 
-The owner status SHALL show every other replica of a personal install as present but not recoverable, and SHALL give the reason. A replica whose custody the configuration does not state SHALL show recoverability as unknown. Recoverability is a status about surviving the loss of the primary machine. It SHALL NOT stop fixity from repairing from a verified replica whose identity this install can read. A quarantined replica SHALL NOT count as recoverable, in a store's totals or in an original's view: it SHALL count as not recoverable, with the reason `quarantined`, whoever holds the key.
+When receipt history is complete, a healthy personal replica without a receipt SHALL show as present but not recoverable, with the reason. When the status cannot establish custody from configuration or receipts, it SHALL show recoverability as unknown. Recoverability is a status about surviving the loss of the primary machine. It SHALL NOT stop fixity from repairing from a verified replica whose identity this install can read. A quarantined replica SHALL NOT count as recoverable, in a store's totals or in an original's view: it SHALL count as not recoverable, with the reason `quarantined`, whoever holds the key.
 
 #### Scenario: A replica with an unexported key
 
-- **WHEN** an original on a personal install has one verified replica in a second store, and the owner has not confirmed the key export
+- **WHEN** an original on a personal install has one verified replica in a second store, and complete receipt history shows no confirmed key export
 - **THEN** the status shows zero recoverable replicas and one replica that is not recoverable, with the reason "key not exported"
 - **AND** the status reports the local original separately
 
@@ -170,6 +170,8 @@ The owner status SHALL report these values, per store and in aggregate:
 A per-original view SHALL page through results by path, and SHALL show each replica's last check, its level, any finding and any failed attempt. A paged list of findings SHALL name each quarantined replica's original, store, failed level, time and re-copy state. The aggregate SHALL read one ledger snapshot from indexed state. Its work SHALL be bounded by the stores and returned dimensions, independent of the number of replicas, queued copies and historical keys. The aggregate SHALL NOT walk the bindings. A rebuild in progress SHALL show as unknown. A completed rebuild that skipped unreadable bindings SHALL show as partial and report how many it skipped. A value that the status cannot read SHALL show as unknown, never as zero. The status SHALL NOT read a store: it reports whether each store answered as itself as the background worker last observed it, with the time of that observation. A replica that is known not to survive and a replica whose custody is unstated SHALL be reported apart. A replica that a rebuild restored from its binding has no recorded upload time, and the status SHALL count it as verification time unknown. A replica that passed only a presence check SHALL NOT be reported as content-verified. The status is for the vault owner and SHALL NOT reach another audience.
 
 The exact-path status SHALL read the current binding, replica row, damage authority and applicable key-export receipts. It SHALL use one ledger snapshot. Surviving exact damage evidence SHALL remain visible when a filing row is missing. The status SHALL read a surviving quarantine of the same stored version through its index. Missing damage or key-export evidence SHALL read as unknown. A surviving key-export receipt SHALL still establish custody when export coverage is incomplete. Paged coverage and copy progress SHALL report unknown while their source projection is incomplete. Status reads SHALL leave schema initialization to the writer. A writer that times out while another writer initializes the ledger SHALL report a retryable busy outcome.
+
+An empty ledger or binding rebuild SHALL NOT establish complete key-export history. A rebuilt replica without a surviving upload record or an exact decrypt proof SHALL report unknown recoverability even with a confirmed key. Surviving findings SHALL still establish quarantine.
 
 #### Scenario: A lost verification table
 

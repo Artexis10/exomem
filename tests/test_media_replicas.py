@@ -7,6 +7,7 @@ and the real `age`. The data is invented.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import io
 import json
@@ -305,7 +306,7 @@ def test_a_vault_that_declares_no_store_list_reads_as_one_immediate_store(vault:
 def _measured(vault: Path) -> dict[str, object]:
     media_replicas.rebuild(vault)
     status = media_replicas.status(vault)
-    assert status["state"] == "measured"
+    assert status["totals"] is not None and status["unread_originals"] == 0
     return status
 
 
@@ -367,7 +368,7 @@ def test_the_owner_s_key_export_is_what_makes_a_replica_recoverable(vault: Path,
     _replicate_all(vault)
 
     before = _measured(vault)["totals"]
-    assert (before["recoverable"], before["not_recoverable"]) == (0, 2)
+    assert (before["recoverable"], before["not_recoverable"], before["recoverability_unknown"]) == (0, 0, 2)
     assert media_replicas.confirm_key_export(vault) == "1"
     after = _measured(vault)["totals"]
     assert (after["recoverable"], after["not_recoverable"]) == (2, 0)
@@ -396,6 +397,9 @@ def test_the_status_keeps_a_replica_known_not_to_survive_apart_from_one_whose_cu
         vault: Path, selected_store, mirrored: Path) -> None:
     _offload(vault, _preserved(vault))
     _replicate_all(vault)
+    # This ledger has complete receipt history, as on an intact upgrade from before the status projection.
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE meta SET value = 'complete' WHERE key = ?", (media_replicas._EXPORT_COVERAGE_KEY,))
     [personal] = [s for s in _measured(vault)["stores"] if s["name"] == MIRROR]
     assert (personal["not_recoverable_reasons"], personal["recoverability_unknown_reasons"]) == (["key not exported"], [])
 
@@ -1892,8 +1896,51 @@ def test_a_rebuild_of_a_lost_ledger_keeps_missing_export_receipts_unknown(
 
     media_replicas.confirm_key_export(vault, replica.key_version)
     reopened = media_replicas.status(vault)
-    assert reopened["totals"]["recoverable"] == 2
+    assert reopened["totals"]["recoverable"] == 0
     assert reopened["state"] == "partial"
+
+
+def test_an_empty_rebuild_cannot_recover_a_key_export_confirmed_before_the_first_replica(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    media_replicas.confirm_key_export(vault)
+    media_jobs.job_store_path(vault).unlink()
+    assert media_replicas.rebuild(vault) == 0
+
+    relative, _replica = _replicated(vault)
+    exact = media_replicas.original_view(vault, relative)
+    assert [item["recoverable"] for item in exact["replicas"]] == [None, None]
+    [listed] = media_replicas.page(vault)["originals"]
+    assert [item["recoverable"] for item in listed["replicas"]] == [None, None]
+    aggregate = media_replicas.status(vault)
+    assert aggregate["state"] == "partial"
+    assert (aggregate["totals"]["not_recoverable"], aggregate["totals"]["recoverability_unknown"]) == (0, 2)
+
+
+def test_rebuild_cannot_recover_damage_history_but_a_new_proof_can_establish_health(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, replica = _replicated(vault)
+    media_replicas.quarantine(vault, relative, replica, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    assert _mirror_stats(vault)["quarantined"] == 1
+    media_jobs.job_store_path(vault).unlink()
+    assert media_replicas.rebuild(vault) == 2
+    media_replicas.confirm_key_export(vault, replica.key_version)
+
+    def shown_mirror() -> dict[str, object]:
+        return next(item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR)
+
+    mirror = shown_mirror()
+    assert (mirror["recoverable"], mirror["reason"]) == (None, "damage evidence unavailable")
+    aggregate = media_replicas.status(vault)
+    assert (aggregate["totals"]["recoverable"], aggregate["totals"]["recoverability_unknown"]) == (0, 2)
+    [listed] = media_replicas.page(vault)["originals"]
+    assert all(item["recoverable"] is None for item in listed["replicas"])
+
+    media_replicas.check(vault)
+    assert shown_mirror()["recoverable"] is None
+    assert media_replicas.sample(vault) == 2  # The simulated plaintext finding was a false alarm.
+    assert shown_mirror()["recoverable"] is True
+    assert media_replicas.status(vault)["totals"]["recoverable"] == 2
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -2843,8 +2890,36 @@ def test_offload_checks_one_bounded_slice_of_candidates_before_charging_a_fresh_
                             "MEDIA_ALLOWANCE_EXCEEDED", time.time()))
     assert _offload(vault, last).object not in {reference.object for reference in gone}
 
-    assert (len(censuses) - baseline, len(recorded)) == (baseline, 1)
+    # Direct publication checks for externally restored bindings; candidate selection still walks once.
+    assert (len(censuses) - baseline, len(recorded)) == (2, 1)
     assert len(visited) == 8 and set(visited) < set(gone)
+
+
+def test_an_offload_batch_refreshes_its_allowance_after_an_independent_publish(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _stored(vault, "first", b"a" * 4096)
+    second = _stored(vault, "second", b"b" * 4096)
+    allowance = media_store.media_capacity.age_ciphertext_size(first.stat().st_size)
+    _configure(selected_store, vault, allowance_bytes=allowance)
+    upload = media_store.FilesystemStore.upload
+    intervened = False
+
+    def publish_another_filing(backend, *args, **kwargs):
+        nonlocal intervened
+        version = upload(backend, *args, **kwargs)
+        if not intervened:
+            intervened = True
+            assert media_store.offload(vault, second) is not None
+        return version
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", publish_another_filing)
+    with pytest.raises(media_store.MediaStoreError) as refused:
+        media_store.offload(vault, first, batch=media_store.OffloadBatch(vault))
+
+    assert refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
+    assert originals.original_state(vault, first).reference is None
+    assert originals.original_state(vault, second).reference is not None
 
 
 # --- verify-stored-replicas: what the owner sees ----------------------------------------------------------
@@ -2933,7 +3008,8 @@ def test_the_status_tracks_current_sampling_and_key_exports_while_filings_and_jo
         )
     media_replicas.confirm_key_export(vault, "1")
     stats = _mirror_stats(vault)
-    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"]) == (5, 3, 2)
+    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"],
+            stats["recoverability_unknown"]) == (5, 2, 1, 2)
     assert stats["verification_time_unknown"] == 1
     assert stats["oldest_verified_at"] == "1970-01-01T00:00:02+00:00"
     assert stats["sample"]["skipped_for_size"] == 1
@@ -2949,7 +3025,8 @@ def test_the_status_tracks_current_sampling_and_key_exports_while_filings_and_jo
         conn.execute("UPDATE media_replica_queue SET state = 'done' WHERE binary_rel = 'job'")
         conn.execute("UPDATE media_replica_queue SET kind = 'replicate', state = 'refused' WHERE binary_rel = 'repair'")
     stats = _mirror_stats(vault)
-    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"]) == (4, 3, 1)
+    assert (stats["replicas"], stats["recoverable"], stats["not_recoverable"],
+            stats["recoverability_unknown"]) == (4, 2, 1, 1)
     assert stats["oldest_verified_at"] == "1970-01-01T00:00:03+00:00"
     assert stats["sample"]["skipped_for_size"] == 0
     assert stats["sample"]["not_sampled"] == []
@@ -2961,7 +3038,7 @@ def test_the_status_tracks_current_sampling_and_key_exports_while_filings_and_jo
         conn.execute("DELETE FROM media_key_exports WHERE key_version = '1'")
         conn.execute("DELETE FROM media_replica_queue WHERE binary_rel = 'job'")
     stats = _mirror_stats(vault)
-    assert (stats["recoverable"], stats["not_recoverable"]) == (0, 4)
+    assert (stats["recoverable"], stats["not_recoverable"], stats["recoverability_unknown"]) == (0, 1, 3)
     assert stats["copy"] == {"queued": 1, "copied": 0, "refused": 1, "remaining": 0}
 
 
@@ -2983,9 +3060,11 @@ def test_a_status_projection_upgrade_keeps_existing_proofs_exports_and_pending_c
             conn.execute(f"DROP TRIGGER {trigger}")
         for table in ("media_replica_counts", "media_replica_buckets"):
             conn.execute(f"DROP TABLE {table}")
+        conn.execute("DELETE FROM meta WHERE key = ?", (media_replicas._EXPORT_COVERAGE_KEY,))
 
     assert media_replicas.status(vault)["state"] == "unknown"
     assert not media_replicas.rebuild_due(vault)  # the schema upgrade backfills from the ledger; it does not walk bindings
+    assert media_replicas.status(vault)["state"] == "measured"  # The intact legacy receipts establish coverage.
     assert _mirror_stats(vault) == measured
     assert media_replicas.original_view(vault, relative)["replicas"][-1]["last_check"]["level"] == media_replicas.CONTENT
 
@@ -2993,7 +3072,7 @@ def test_a_status_projection_upgrade_keeps_existing_proofs_exports_and_pending_c
 def test_rebuild_keeps_a_replacement_published_after_it_read_the_old_binding(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     relative, old = _replicated(vault)
-    assert media_replicas.status(vault)["state"] == "measured"
+    assert media_replicas.status(vault)["state"] == "partial"  # A new ledger has no complete export history.
     walk = media_store.bound_originals
     replacement = None
 
@@ -4230,7 +4309,11 @@ def test_a_cache_row_that_failed_to_follow_a_replaced_pointer_is_recorded_by_the
     def fail_once(*args, **kwargs):
         if not failures:
             failures.append(True)
-            raise sqlite3.OperationalError("database is locked")
+            database = media_jobs.MediaJobStore(vault).path
+            with (closing(sqlite3.connect(database)) as holder,
+                  closing(sqlite3.connect(database, timeout=0)) as competing):
+                holder.execute("BEGIN IMMEDIATE")
+                competing.execute("BEGIN IMMEDIATE")
         return repoint(*args, **kwargs)
 
     monkeypatch.setattr(media_store, "_repoint_cache", fail_once)
@@ -4452,6 +4535,82 @@ def test_a_stalled_store_leaves_another_store_a_turn(
 
     row = _replica_row(vault, store="test-store")
     assert row["state"] == media_replicas.UPLOAD_VERIFIED and row["checked_at"] == 0
+
+
+@pytest.mark.parametrize("stalled_marker", [False, True])
+def test_a_copy_uses_one_bounded_identity_preflight(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, stalled_marker: bool,
+) -> None:
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.rebuild(vault)
+    media_replicas.scan(vault, MIRROR)
+    entered, release, returned = (threading.Event() for _ in range(3))
+    real = media_store.FilesystemStore.require_identity
+    probes = 0
+
+    def stalled(backend):
+        nonlocal probes
+        if backend.name == MIRROR:
+            probes += 1
+            if stalled_marker:
+                entered.set()
+                release.wait(10)
+        return real(backend)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "require_identity", stalled)
+
+    def drain():
+        try:
+            media_replicas.drain(vault)
+        finally:
+            returned.set()
+
+    caller = threading.Thread(target=drain, daemon=True)
+    caller.start()
+    try:
+        if stalled_marker:
+            assert entered.wait(5)
+        assert returned.wait(3.5), "the worker still waits in copy preflight"
+        assert probes == 1
+        assert len(_objects(mirrored)) == (0 if stalled_marker else 1)
+        assert media_replicas.progress(vault, MIRROR)["remaining"] == int(stalled_marker)
+        _due_again(vault)
+        assert media_replicas.check(vault) == (1 if stalled_marker else 2)
+        assert _replica_row(vault, store="test-store")["checked_at"] > 0
+    finally:
+        release.set()
+        caller.join(5)
+
+
+def test_a_marker_read_error_leaves_other_stores_checkable(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _replicated(vault)
+    _due_again(vault)
+    root = Path(selected_store[0]["root"])
+    open_file, file_stat = os.open, os.fstat
+    markers = set()
+
+    def open_with_fault(path, *args, **kwargs):
+        descriptor = open_file(path, *args, **kwargs)
+        if isinstance(path, (str, Path)) and Path(path) == root / media_store.STORE_MARKER:
+            markers.add(descriptor)
+        return descriptor
+
+    def marker_fault(descriptor):
+        if descriptor in markers:
+            markers.remove(descriptor)
+            raise OSError(errno.EIO, "the store cannot read its marker")
+        return file_stat(descriptor)
+
+    monkeypatch.setattr(os, "open", open_with_fault)
+    monkeypatch.setattr(os, "fstat", marker_fault)
+
+    assert media_replicas.check(vault) == 1
+    assert _replica_row(vault)["checked_at"] > 0
+    assert _replica_row(vault, store="test-store")["checked_at"] == 0
 
 
 def test_a_sample_under_a_wrong_key_still_finds_a_large_replica_that_is_damaged(

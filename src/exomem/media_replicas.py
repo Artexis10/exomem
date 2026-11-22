@@ -70,8 +70,6 @@ _RETRY_SECONDS = 30.0
 _IDLE_SECONDS = 30.0
 #: The least time between two observations of whether each store answers as itself.
 _OBSERVE_SECONDS = 60.0
-# Keep a stalled marker read from using a round's transfer window.
-_STORE_PROBE_SECONDS = 2.0
 # Let a cooperative filesystem hash verify its held witness and return.
 _HEAD_RETURN_SECONDS = 0.05
 #: A scan writes its queue rows this many at a time.
@@ -154,21 +152,18 @@ def _status_schema(conn: sqlite3.Connection) -> set[str]:
 
 _EXPORT_COVERAGE_KEY = "replica.key_export_coverage"
 _EXPORT_EVIDENCE_UNAVAILABLE = "key export evidence unavailable"
-_SET_UNASSESSED_EXPORT_COVERAGE = "UPDATE meta SET value = ? WHERE key = ? AND value = 'unassessed'"
+_DAMAGE_EVIDENCE_UNAVAILABLE = "damage evidence unavailable"
 
 
 def _initialize_export_coverage(conn: sqlite3.Connection, existing: set[str]) -> None:
-    # The receipt table and its triggers can be recreated. Keep their lost history separately in the ledger.
-    recorded = conn.execute("SELECT 1 FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
-    projected = bool(existing.intersection((*_STATUS_TABLES, *_EXPORT_STATUS_TRIGGERS)))
-    missing_table = "media_key_exports" not in existing
-    lost = (missing_table and "media_replicas" in existing
-            or (projected or recorded)
-            and (not recorded or missing_table or not _EXPORT_STATUS_TRIGGERS.issubset(existing)))
-    # A blank ledger cannot tell a new vault from one that still carries bindings from a lost ledger.
-    coverage = "unassessed" if not existing and not recorded else ("incomplete" if lost else "complete")
+    recorded = conn.execute("SELECT value FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone()
+    current = (recorded is not None and recorded[0] == "complete" and "media_key_exports" in existing
+               and _EXPORT_STATUS_TRIGGERS.issubset(existing))
+    # An intact legacy ledger has receipts. A blank ledger cannot rule out exports, even with no bindings.
+    legacy = recorded is None and existing == set(_STATUS_SOURCES)
+    coverage = "complete" if current or legacy else "incomplete"
     conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value "
-                 "WHERE excluded.value = 'incomplete' AND meta.value <> excluded.value",
+                 "WHERE meta.value <> excluded.value",
                  (_EXPORT_COVERAGE_KEY, coverage))
 
 
@@ -188,6 +183,12 @@ def _proof_level(row: str = "") -> str:
 _PROOF_AT = "MAX(checked_at, decrypted_at)"
 
 
+def _unproved_health(row: str = "") -> str:
+    # A binding recovers the published version, but not findings since its upload. A recorded upload or an exact
+    # decrypt proof establishes health. Presence and ciphertext checks cannot rule out lost plaintext findings.
+    return f"({row}state <> '{QUARANTINED}' AND {row}verified_at IS NULL AND {row}decrypted_at = 0)"
+
+
 def _store_contributions(row: str) -> dict[str, str]:
     """The additive columns of the store count, shared by trigger deltas and the upgrade backfill."""
     return {
@@ -196,9 +197,10 @@ def _store_contributions(row: str) -> dict[str, str]:
         "timed": f"({row}verified_at IS NOT NULL)",
         "verified": f"({row}state = '{UPLOAD_VERIFIED}')",
         "quarantined": f"({row}state = '{QUARANTINED}')",
+        "unproved": _unproved_health(row),
         **{f"proved_{level}": f"COALESCE(({_proof_level(row)}) = '{level}', 0)"
            for level in (PRESENCE, CONTENT, DECRYPTED)},
-        "exported": (f"({row}state <> '{QUARANTINED}' AND EXISTS ("
+        "exported": (f"({row}state <> '{QUARANTINED}' AND NOT {_unproved_health(row)} AND EXISTS ("
                      f"SELECT 1 FROM media_key_exports WHERE key_version = {row}key_version))"),
     }
 
@@ -208,6 +210,7 @@ def _replica_buckets(row: str) -> dict[str, tuple[str, str, str]]:
     healthy = f"{row}state <> '{QUARANTINED}'"
     return {
         "key": (f"{row}key_version", "''", healthy),
+        "unproved": (f"{row}key_version", "''", _unproved_health(row)),
         "sample": (f"{row}key_version", f"CAST(MAX({row}sample_month, {_UNSAMPLEABLE}) AS TEXT)",
                    f"{healthy} AND {row}sample_month <> 0"),
         "failure": ("''", f"{row}failure", f"{healthy} AND {row}failure IS NOT NULL"),
@@ -292,8 +295,9 @@ def _initialize_status(conn: sqlite3.Connection, existing: set[str]) -> None:
     _bucket_triggers(conn, "media_replica_queue", _queue_buckets)
 
     def receipt_delta(row: str, sign: str) -> str:
-        return (f"UPDATE media_replica_counts SET exported = exported {sign} b.n "
-                "FROM media_replica_buckets AS b "
+        return (f"UPDATE media_replica_counts SET exported = exported {sign} (b.n - COALESCE(u.n, 0)) "
+                "FROM media_replica_buckets AS b LEFT JOIN media_replica_buckets AS u "
+                "ON (u.store, u.kind, u.key_version, u.token) = (b.store, 'unproved', b.key_version, '') "
                 f"WHERE media_replica_counts.store = b.store AND b.kind = 'key' AND b.key_version = {row}.key_version")
 
     conn.execute(f"CREATE TRIGGER IF NOT EXISTS {_EXPORT_COUNT_TRIGGER}_insert AFTER INSERT ON media_key_exports "
@@ -784,8 +788,6 @@ def rebuild(vault: Path) -> int:
         conn.execute("UPDATE media_replica_generation SET value = value + 1 WHERE id = 1")
         generation = conn.execute("SELECT value FROM media_replica_generation WHERE id = 1").fetchone()[0]
         conn.execute("DELETE FROM media_replica_census")
-        assess_exports = conn.execute("SELECT 1 FROM meta WHERE key = ? AND value = 'unassessed'",
-                                      (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
     unread = 0
 
     def skip(error: originals.RetirementUnconfirmed) -> None:
@@ -801,24 +803,9 @@ def rebuild(vault: Path) -> int:
         return conn.execute("SELECT value FROM media_replica_generation WHERE id = 1").fetchone()[0] == generation
 
     def flush() -> bool:
-        nonlocal assess_exports
         with closing(ledger._connect()) as conn, conn:
             if not still_current(conn):
                 return False
-            if assess_exports and batch:
-                # Test the bindings against this ledger before inserting them. Record incomplete coverage in
-                # the same transaction as the recovered replicas so an interrupted walk cannot hide the loss.
-                recovered = conn.execute(
-                    "SELECT 1 FROM json_each(?) AS binding WHERE NOT EXISTS (SELECT 1 FROM media_replicas AS r "
-                    "WHERE r.binary_rel = json_extract(binding.value, '$[0]') "
-                    "AND r.store = json_extract(binding.value, '$[1]') "
-                    "AND r.object = json_extract(binding.value, '$[2]') "
-                    "AND r.version = json_extract(binding.value, '$[3]')) LIMIT 1",
-                    (json.dumps([row[:4] for row in batch]),),
-                ).fetchone() is not None
-                if recovered:
-                    conn.execute(_SET_UNASSESSED_EXPORT_COVERAGE, ("incomplete", _EXPORT_COVERAGE_KEY))
-                    assess_exports = False
             conn.executemany(_UPSERT_REBUILT, batch)
         batch.clear()
         return True
@@ -852,8 +839,6 @@ def rebuild(vault: Path) -> int:
         conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
                      "token = random() WHERE state = ? AND (kind = ? OR code = ?)",
                      (PENDING, REFUSED, RECOPY, media_store.NO_VERIFIED_SOURCE))
-        if assess_exports:
-            conn.execute(_SET_UNASSESSED_EXPORT_COVERAGE, ("incomplete" if unread else "complete", _EXPORT_COVERAGE_KEY))
         conn.execute("INSERT INTO media_replica_census(id, rebuilt_at, unread) VALUES (1, ?, ?) "
                      "ON CONFLICT(id) DO UPDATE SET rebuilt_at = excluded.rebuilt_at, unread = excluded.unread",
                      (time.time(), unread))
@@ -949,7 +934,9 @@ def _reachable_now(vault: Path, name: str, *, deadline: float | None = None, for
     """Wait briefly for an identity probe, leaving busy slots and other stores alone."""
     from . import media_store
 
-    timeout = _STORE_PROBE_SECONDS if deadline is None else min(_STORE_PROBE_SECONDS, deadline - time.monotonic())
+    timeout = media_store.STORE_PROBE_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
     try:
         answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name), timeout=timeout)
     except media_store.StoreReadPending:
@@ -1149,12 +1136,15 @@ def _count_samples(config: dict[str, object], stats: dict[str, Any], entry: orig
                                       for reason, count in sorted(counts.items()) if count]
 
 
-def _count_recoverability(config: dict[str, object], stats: dict[str, Any], exported: int,
+def _count_recoverability(config: dict[str, object], stats: dict[str, Any], exported: int, unproved: int,
                           exports_complete: bool) -> None:
-    unexported = stats["replicas"] - stats["quarantined"] - exported
+    unexported = stats["replicas"] - stats["quarantined"] - exported - unproved
     recoverable, reason = _unexported_key_recoverability(config, exports_complete)
     stats["recoverable"] = exported
     stats["not_recoverable"] = stats["quarantined"]
+    stats["recoverability_unknown"] = unproved
+    if unproved:
+        stats["recoverability_unknown_reasons"].append(_DAMAGE_EVIDENCE_UNAVAILABLE)
     if stats["quarantined"]:
         stats["not_recoverable_reasons"].append(QUARANTINED)
     if unexported:
@@ -1164,7 +1154,7 @@ def _count_recoverability(config: dict[str, object], stats: dict[str, Any], expo
             stats["not_recoverable"] += unexported
             stats["not_recoverable_reasons"].append(reason)
         else:
-            stats["recoverability_unknown"] = unexported
+            stats["recoverability_unknown"] += unexported
             stats["recoverability_unknown_reasons"].append(reason)
 
 
@@ -1240,7 +1230,7 @@ def status(vault: Path) -> dict[str, object]:
         stats["quarantined"] = row["quarantined"] or 0
         _count_checks(stats, entry, row)
         _count_samples(config, stats, entry, row, key)
-        _count_recoverability(config, stats, row["exported"] or 0, exports_complete)
+        _count_recoverability(config, stats, row["exported"] or 0, row["unproved"] or 0, exports_complete)
         if counts := json.loads(row["copies"]):
             stats["copy"] = _copy_counts(counts)
     holding = [stats for stats in stores.values() if stats["replicas"]]
@@ -1267,15 +1257,18 @@ def status(vault: Path) -> dict[str, object]:
         stats["oldest_verified_at"] = _iso(stats["oldest_verified_at"])
         for proof in stats["checks"].values():
             proof["oldest_at"] = _iso(proof["oldest_at"])
-    return {**_coverage(census, exports_complete=exports_complete),
+    return {**_coverage(census, exports_complete=exports_complete,
+                        damage_complete=not any(row["unproved"] for row in rows.values())),
             "source": "media ledger table, rebuilt from the bindings",
             "stores": list(stores.values()), "totals": totals}
 
 
-def _coverage(census: sqlite3.Row, *, exports_complete: bool = True) -> dict[str, object]:
+def _coverage(census: sqlite3.Row, *, exports_complete: bool = True, damage_complete: bool = True) -> dict[str, object]:
     unread = census["unread"]
     if unread:
         reason = "some bindings could not be read during the rebuild"
+    elif not damage_complete:
+        reason = _DAMAGE_EVIDENCE_UNAVAILABLE
     else:
         reason = None if exports_complete else _EXPORT_EVIDENCE_UNAVAILABLE
     return {"state": "partial" if reason else "measured",
@@ -1285,7 +1278,7 @@ def _coverage(census: sqlite3.Row, *, exports_complete: bool = True) -> dict[str
 
 _CHECK_COLUMNS = (
     "level, checked_at, decrypted_at, failure, "
-    f"{_proof_level()} AS proof_level, {_PROOF_AT} AS proof_at"
+    f"{_proof_level()} AS proof_level, {_PROOF_AT} AS proof_at, {_unproved_health()} AS unproved"
 )
 
 
@@ -1342,14 +1335,17 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
         entry = entries.get(row["store"])
         recoverable, reason = recoverability(config, row["key_version"], exports,
                                              quarantined=row["state"] == QUARANTINED, exports_complete=exports_complete)
+        if row["unproved"]:
+            recoverable, reason = None, _DAMAGE_EVIDENCE_UNAVAILABLE
         listed.setdefault(row["binary_rel"], []).append({
-            "store": row["store"], "state": row["state"], "verified_at": _iso(row["verified_at"]),
+            "store": row["store"], "state": "unknown" if row["unproved"] else row["state"],
+            "verified_at": _iso(row["verified_at"]),
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
             "recoverable": recoverable, "reason": reason, "key_version": row["key_version"],
             **_check_view(row),
         })
-    return {**_coverage(census, exports_complete=exports_complete),
+    return {**_coverage(census, exports_complete=exports_complete, damage_complete=not any(row["unproved"] for row in rows)),
             "originals": [{"path": path, "replicas": found} for path, found in listed.items()],
             "next_after": next(reversed(listed)) if more and listed else None}
 
@@ -1472,7 +1468,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
         entry = entries.get(replica.store)
         row = recorded.get(replica.store)
         checked = row if _matches_replica(row, replica) else None
-        filings_complete &= checked is not None
+        filings_complete &= checked is not None and not checked["unproved"]
         view = _check_view(checked) if checked is not None else {
             "last_check": None, "decrypted_at": None, "finding": None, "failed_attempt": None,
         }
@@ -1485,8 +1481,8 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
             view["last_check"] = view["failed_attempt"] = None
         if view["finding"] is not None:
             state, recoverable, reason = QUARANTINED, False, QUARANTINED
-        elif not damage_complete or not projection_complete or checked is None:
-            state, recoverable, reason = "unknown", None, "damage evidence unavailable"
+        elif not damage_complete or not projection_complete or checked is None or checked["unproved"]:
+            state, recoverable, reason = "unknown", None, _DAMAGE_EVIDENCE_UNAVAILABLE
         else:
             state = UPLOAD_VERIFIED
             recoverable, reason = recoverability(config, replica.key_version, exports, exports_complete=exports_complete)
@@ -1630,17 +1626,18 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         if row is None:
             break
         foreground_priority.yield_to_foreground()
-        if not _reachable_now(vault, row["store"], deadline=limit):
-            # The store does not answer as itself: an outage, which spends no attempt and writes no refusal. Its
-            # queue waits for the next round, and the other stores go on.
-            paused.add(row["store"])
-            continue
         code = None
         try:
             copy = media_store.recopy if row["kind"] == RECOPY else media_store.replicate
             with mutation_lock.absorbing_busy():
                 copy(vault, vault / row["binary_rel"], row["store"])
                 _reconcile_copy(ledger, row)
+        except (media_store.StoreReadPending, media_store.CopyStoreUnavailable) as error:
+            # The copy had not passed preflight and spent no upload or retry attempt.
+            if isinstance(error, media_store.CopyStoreUnavailable):
+                _note_reach(vault, row["store"], False)
+            paused.add(row["store"])
+            continue
         except sqlite3.Error as error:
             # SQLite attaches extended result codes. Their low byte identifies the primary condition.
             result_code = getattr(error, "sqlite_errorcode", None)
@@ -2322,7 +2319,8 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
             except media_store.StoreReadPending:
                 with closing(ledger._connect()) as conn, conn:
                     _charge(conn, name, month, -replica.ciphertext_size)
-                return sampled - 1
+                sampled -= 1
+                break
             except media_store.KeyRefused:
                 # the bytes match their record: no damage
                 _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)

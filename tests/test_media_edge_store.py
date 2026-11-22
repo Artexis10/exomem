@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -103,6 +106,63 @@ def test_a_head_404_uses_the_edges_absence_evidence(tmp_path: Path, body, absent
             with pytest.raises(MediaStoreError) as outage:
                 store.head("1" * 64, "version")
             assert outage.value.code == "MEDIA_STORE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("operation", ["sample", "absence"])
+def test_a_maintenance_deadline_releases_a_trickling_edge_response(tmp_path: Path, operation: str):
+    disconnected = threading.Event()
+
+    async def trickling(scope, receive, send):
+        if scope["query_string"] == b"version=ready":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": DATA})
+            return
+        status = 200 if operation == "sample" else STATUS_ABSENT
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        if scope["method"] == "HEAD":
+            await send({"type": "http.response.body", "body": b""})
+            return
+        for _chunk in range(200):
+            try:
+                message = await asyncio.wait_for(receive(), timeout=0.02)
+            except TimeoutError:
+                await send({"type": "http.response.body", "body": b"x", "more_body": True})
+            else:
+                if message["type"] == "http.disconnect":
+                    disconnected.set()
+                    return
+        await send({"type": "http.response.body", "body": b""})
+
+    with _listening(trickling) as (host, port):
+        store = _store(host, port, tmp_path)
+        replica = originals.StoredObject(1, "edge", "1", "1" * 64, "slow", 1024**2, SHA256)
+        deadline = time.monotonic() + 0.7
+
+        def slow_read():
+            if operation == "absence":
+                return media_store._verified_head(store, replica, deadline=deadline)
+            return b"".join(media_store._stored_chunks(store, replica, deadline=deadline))
+
+        with pytest.raises(MediaStoreError) as expired:
+            media_store.wait_store_read(tmp_path, "edge", slow_read, timeout=0.7)
+        assert expired.value.code == "MEDIA_STORE_UNAVAILABLE"
+        assert disconnected.wait(1), "the prior connection is still consuming the store's read slot"
+
+        retry_deadline = time.monotonic() + 1
+
+        def read_ready():
+            with store.open(replica.object, "ready", deadline=retry_deadline) as stream:
+                return stream.read()
+
+        while True:
+            try:
+                assert media_store.wait_store_read(
+                    tmp_path, "edge", read_ready, timeout=retry_deadline - time.monotonic(),
+                ) == DATA
+                break
+            except media_store.StoreReadPending:
+                assert time.monotonic() < retry_deadline, "the expired transport did not release the slot"
+                time.sleep(0.01)
 
 
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811

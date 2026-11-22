@@ -60,6 +60,8 @@ It charges a replica's bytes to the month before it downloads them, so an interr
 When the sample window ends, the worker stops waiting and the decoder terminates. The reader stops before another chunk.
 An outstanding marker probe, HEAD, or sample keeps that store's read slot until the transport or filesystem returns.
 The worker gives other stores their turns. A deferred sample spends none of its monthly budget.
+A copy checks the destination marker in that same read slot before opening the source.
+An edge read applies its deadline to the connection, response, and body.
 A replica larger than the remaining budget waits for the next month and counts in `skipped_for_size`.
 The month is a calendar month in UTC.
 An older release ignores this field.

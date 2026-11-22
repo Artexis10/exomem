@@ -230,12 +230,12 @@ def _read_marker(root: Path) -> dict[str, object] | None:
     """The marker's content; None when the root, the marker or its content is absent, unreadable or not a marker."""
     try:
         descriptor = os.open(root / STORE_MARKER, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as marker:
+            if not stat.S_ISREG(os.fstat(marker.fileno()).st_mode):
+                return None
+            raw = marker.read(_MARKER_MAX_BYTES + 1)
     except OSError:
         return None
-    with os.fdopen(descriptor, "rb") as marker:
-        if not stat.S_ISREG(os.fstat(marker.fileno()).st_mode):
-            return None
-        raw = marker.read(_MARKER_MAX_BYTES + 1)
     return _parse_marker(raw)
 
 
@@ -1162,20 +1162,18 @@ def _binding_of(vault: Path, snapshot: OriginalSnapshot) -> originals.BinaryBind
 class OffloadBatch:
     """One owner census for a run of offloads, kept across guard releases (D10).
 
-    The batch never holds the mutation boundary, so other writes run between two members. It rests
-    on offload and the copy again of a damaged pointer (`recopy`) being the only writers that bind a
-    version the census has not seen while the runtime serves; design.md D10 lists every writer of a
-    stored reference (task 5.4.9). `charge` adds each version that a member publishes. A copy again
-    may run in another thread or process, so it cannot charge: when it publishes a new version, it
-    notes that in the ledger before its first write, so that the next `usage` reads the census again.
+    The batch never holds the mutation boundary, so other writes run between two members. Both offload
+    and repair note any new pointer before publishing under that boundary. `charge` adds the pointer to
+    the publishing batch. Any other batch reads the census again before it can publish.
     `end` drops the census so that the next member reads it again, and `failed` does so only for a
     member that reached `charge`: a refused member bound nothing, so the next one reuses the census.
     A stale census can wrongly refuse a member, which the next scan releases, because refusals are
     read again from a fresh census.
     """
 
-    def __init__(self, vault: Path) -> None:
+    def __init__(self, vault: Path, *, record_status: bool = True) -> None:
         self._vault = Path(vault).resolve()
+        self._record_status = record_status
         self._usage: media_allowance.ReferenceUsage | None = None
         self._charged = False
         self._replacements: str | None = None
@@ -1191,17 +1189,20 @@ class OffloadBatch:
             # Read before the census, so that a replacement that lands during the walk is seen by the next call.
             self._replacements = replacements
             self._usage = media_allowance.reference_usage(self._vault)
-            _record_census(ledger, self._usage)
+            if self._record_status:
+                _record_census(ledger, self._usage)
         return self._usage
 
     def begin(self) -> None:
         self._charged = False
 
-    def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
+    def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject,
+               usage: media_allowance.ReferenceUsage) -> None:
         self._charged = True
-        usage = self.usage(ledger)
         usage.charge(_binding_of(self._vault, snapshot), reference)
-        _record_census(ledger, usage)
+        self._replacements = _note_replacement(ledger)
+        if self._record_status:
+            _record_census(ledger, usage)
 
     def failed(self) -> None:
         """A member raised: drop the census when that member may have half-published, which the census cannot know."""
@@ -1212,14 +1213,16 @@ class OffloadBatch:
         self._usage = None
 
 
-#: The `meta` key whose value changes with each copy again of a damaged pointer (`_note_replacement`).
+#: The `meta` key whose value changes before a publication binds a pointer.
 _REPLACEMENTS = "pointer_replacements"
 
 
-def _note_replacement(ledger: MediaJobStore) -> None:
-    """Record, before its first write, that a copy again is replacing a stored version, so that an active census is read again."""
+def _note_replacement(ledger: MediaJobStore) -> str:
+    """Invalidate other active censuses before publishing a pointer."""
+    marker = uuid.uuid4().hex
     _durable(ledger, "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-             (_REPLACEMENTS, uuid.uuid4().hex))
+             (_REPLACEMENTS, marker))
+    return marker
 
 
 def _replacements_noted(ledger: MediaJobStore) -> str:
@@ -1336,15 +1339,14 @@ _FILING_UNREADABLE = (OSError, ValueError, held_fs.HeldFsError, reserved_paths.R
 
 
 def _reuse_walk_inputs(
-    vault: Path, snapshot: OriginalSnapshot, usage: media_allowance.ReferenceUsage | None, key_version: str,
+    vault: Path, snapshot: OriginalSnapshot, census: Callable[[], media_allowance.ReferenceUsage], key_version: str,
 ) -> tuple[media_allowance.ReferenceUsage, list[tuple[Path, StoredObject]], list[StoredObject]]:
     """The census and the versions of equal bytes that offload may reuse, read once under one read boundary."""
     from .writer_lease import get_manager
 
     binary = _binding_of(vault, snapshot)
     with get_manager().consistency_guard(vault, operation="media_offload_admission", holder_kind="background"):
-        if usage is None:
-            usage = media_allowance.reference_usage(vault)
+        usage = census()
         candidates, damaged = _reuse_candidates(vault, binary, usage, key_version)
     return usage, candidates, damaged
 
@@ -1536,10 +1538,14 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
 def _verified_head(store: Store, reference: StoredObject, *, deadline: float | None = None,
                    scheduled: ScheduledRead | None = None) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
+    from .media_edge_store import EdgeStore
+
     with _transport("head"):
         if isinstance(store, FilesystemStore):
             head = store.head(reference.object, reference.version, expected_size=reference.ciphertext_size,
                               deadline=deadline, scheduled=scheduled)
+        elif deadline is not None and isinstance(store, EdgeStore):
+            head = store.head(reference.object, reference.version, deadline=deadline)
         else:
             head = store.head(reference.object, reference.version)
     if head is not None and head.size != reference.ciphertext_size:
@@ -1613,9 +1619,18 @@ class StoreReadTimedOut(MediaStoreError):
         super().__init__("MEDIA_STORE_UNAVAILABLE", "the replica store operation exceeded its deadline")
 
 
+class CopyStoreUnavailable(MediaStoreError):
+    """The destination identity could not be confirmed before a copy started."""
+
+    def __init__(self) -> None:
+        super().__init__("MEDIA_STORE_UNAVAILABLE", "the copy destination did not answer as itself")
+
+
 _ReadResult = TypeVar("_ReadResult")
 _pending_reads: set[tuple[Path, str]] = set()
 _pending_reads_lock = threading.Lock()
+# A marker probe should leave most of the maintenance turn for the actual transfer.
+STORE_PROBE_SECONDS = 2.0
 
 
 def wait_store_read(vault: Path, name: str, read: Callable[[], _ReadResult], *, timeout: float) -> _ReadResult:
@@ -1938,10 +1953,6 @@ def _finish_reference(ledger: MediaJobStore, snapshot: OriginalSnapshot, source:
         conn.close()
 
 
-def _no_census() -> None:
-    return None
-
-
 @contextmanager
 def _ciphertext_reserved(ledger: MediaJobStore, token: str, config: dict[str, object], ciphertext_size: int):
     """Hold the temporary ciphertext's bytes against the hydration capacity, which it shares and takes no slot of (D12, choice 3).
@@ -1980,20 +1991,21 @@ def offload(vault: Path, path: Path, *, batch: OffloadBatch | None = None,
 
     None means that offload published no copy. Notes and datasets stay local, and a damaged pointer goes to repair.
     Quota refusals raise so that the worker retains retryable demand (D10).
-    A `batch` shares its census with this member's checks; without one, each check reads its own.
+    A `batch` shares its census across members. A direct call checks its census again before publication.
     """
-    if batch is not None:
-        batch.begin()
+    direct = batch is None
+    if batch is None:
+        batch = OffloadBatch(vault, record_status=False)
+    batch.begin()
     try:
-        return _offload_member(Path(vault).resolve(), path, batch, job=job)
+        return _offload_member(Path(vault).resolve(), path, batch, direct=direct, job=job)
     except BaseException:
-        if batch is not None:
-            batch.failed()
+        batch.failed()
         raise
 
 
-def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
-                    job: MediaJob | None = None) -> StoredObject | None:
+def _offload_member(vault: Path, path: Path, batch: OffloadBatch, *,
+                    direct: bool, job: MediaJob | None = None) -> StoredObject | None:
     from . import media_replicas
 
     config = _settings(vault)
@@ -2001,7 +2013,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "offload is disabled")
     backend = store_for(vault)
     ledger = MediaJobStore(vault)
-    census = (lambda: batch.usage(ledger)) if batch is not None else _no_census
+    def census() -> media_allowance.ReferenceUsage:
+        return batch.usage(ledger)
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
@@ -2046,7 +2059,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
         # One bounded slice from the current census. A fresh copy still needs room under the allowance.
-        usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census(), str(config["key_version"]))
+        usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census, str(config["key_version"]))
         reuse = None
         binary = _binding_of(vault, snapshot)
         for candidate_path, candidate in candidates:
@@ -2109,13 +2122,16 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
                 source.require_current()
                 if original_state(vault, path) != snapshot:
                     raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
+                if direct:
+                    # A file restored outside the runtime can add a pointer without a ledger marker.
+                    batch.end()
+                publishing_usage = census()
                 decision, _candidate = _offload_admission(
-                    vault, snapshot, reference=reference, select_reuse=False, usage=census(),
+                    vault, snapshot, reference=reference, select_reuse=False, usage=publishing_usage,
                 )
                 _require_allowance(ledger, snapshot, decision.code)
-                if batch is not None:
-                    # Charged before the write: a failed write leaves the batch over-counting, never under.
-                    batch.charge(ledger, snapshot, reference)
+                # Charged before the write: a failed write leaves the batch over-counting, never under.
+                batch.charge(ledger, snapshot, reference, publishing_usage)
                 _seal(ledger, snapshot, reference.object)
                 _publish_reference(vault, snapshot, reference)
                 _note_replica(vault, path, reference, None if reuse is not None else time.time())
@@ -2174,6 +2190,22 @@ def store_reachable(vault: Path, name: str) -> bool | None:
     except MediaStoreError:
         return False
     return True
+
+
+def _copy_backend(vault: Path, name: str) -> Store:
+    """Confirm identity with a bounded preflight before reading or protecting the source."""
+    backend = store_for(vault, name)
+    if isinstance(backend, FilesystemStore):
+        from . import media_replicas
+
+        try:
+            wait_store_read(vault, name, backend.require_identity, timeout=STORE_PROBE_SECONDS)
+        except StoreReadPending:
+            raise
+        except MediaStoreError as error:
+            raise CopyStoreUnavailable() from error
+        media_replicas._note_reach(vault, name, True)
+    return backend
 
 
 def replica_unusable(vault: Path, replica: StoredObject) -> str | None:
@@ -2255,10 +2287,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
     vault = Path(vault).resolve()
     config = _settings(vault)
     require_replica_store(vault, store_name)
-    backend = store_for(vault, store_name)
-    if isinstance(backend, FilesystemStore):
-        # Before any read, hash, encryption or download: a store that does not answer as itself costs nothing.
-        backend.require_identity()
+    backend = _copy_backend(vault, store_name)
     ledger = MediaJobStore(vault)
     with _pin(vault, path) as (_ledger, token), ExitStack() as held:
         snapshot = original_state(vault, path)
@@ -2431,9 +2460,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
     vault = Path(vault).resolve()
     config = _settings(vault)
     entry = require_replica_store(vault, store_name, serves_eviction=True)
-    backend = store_for(vault, store_name)
-    if isinstance(backend, FilesystemStore):
-        backend.require_identity()
+    backend = _copy_backend(vault, store_name)
     ledger = MediaJobStore(vault)
     relative = ledger._relative(path)
     scope = "" if entry.serves_eviction else store_name  # the record of an upload is per store; empty serves eviction
@@ -2889,8 +2916,13 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
 
 def _stored_chunks(backend: Store, reference: StoredObject, *, deadline: float | None = None) -> Iterator[bytes]:
     # Only backend operations are transport failures; local staging writes keep their own errors.
+    from .media_edge_store import EdgeStore
+
     _require_transfer_time(deadline)
-    with _transport("read"), backend.open(reference.object, reference.version) as stream:
+    opened = (backend.open(reference.object, reference.version, deadline=deadline)
+              if deadline is not None and isinstance(backend, EdgeStore)
+              else backend.open(reference.object, reference.version))
+    with _transport("read"), opened as stream:
         remaining = reference.ciphertext_size
         while True:
             _require_transfer_time(deadline)
