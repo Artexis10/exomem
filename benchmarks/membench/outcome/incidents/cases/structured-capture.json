@@ -1,0 +1,1532 @@
+{
+  "incident": "2026-11-22: an assistant left recurring structured work and an agreed decision in the conversation, because nothing recognised them as worth keeping and the product refused every new collection; the cases reproduce the mechanism with invented names and domains.",
+  "cases": [
+    {
+      "id": "evaluation-of-named-candidates",
+      "about": "Over four turns a user compares three named candidates, reacting to each on a date, rules one out, and quotes an outside review about another. Nothing exists to file it in. The work recurs and compares items, so the agent starts one minimal collection keyed by candidate, backfills what was said with its dates, keeps the user's reactions, the assistant's pick and the outside claim apart, and reports it. A fresh session later reads the current state.",
+      "turns": [
+        "I'm picking a coffee grinder for the flat and I've narrowed it to three: the Corvane S2, the Meridol Petite and the Tessaly 600. I tried the Corvane at a shop on 14 Nov. The grind was lovely and even, but it's far too loud for our thin walls. What matters most in a grinder for espresso?",
+        "Tried the Meridol Petite on 18 Nov. Really quiet and the grind is good enough for me, but the hopper is tiny. A review site I read says its burrs wear out within a year. What do you make of that?",
+        "The shop says the Tessaly 600 has been discontinued, so that one is out. Between the other two, which would you go for right now?",
+        "Went back on 20 Nov and tried the Meridol again. Still quiet, and honestly the tiny hopper doesn't bother me when I weigh doses by hand. Anything I'm missing before I buy?"
+      ],
+      "follow_up": "Where do things stand with the grinders I was comparing?",
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "new_collection": {
+          "max_fields": 12,
+          "min_rows": 3,
+          "rows_each": [
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Corvane"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Meridol"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Tessaly"
+              }
+            ]
+          ]
+        },
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "one_row_per_trial": {
+                "type": "boolean",
+                "description": "True if every row names its candidate grinder in a key field and each dated trial or reaction is its own row (the natural key holds the candidate and the trial's date, or another field that tells the trials apart), so a grinder tried on two dates has two rows and no later trial replaced an earlier one. False if the key omits the candidate, or a later trial of a grinder overwrote its earlier dated row."
+              },
+              "attribution_separate": {
+                "type": "boolean",
+                "description": "True if what the user said about a grinder, what the assistant proposed or concluded, and the review site's claim about the burrs are held in separate fields or separate values, and the review site's claim is not written as the user's own opinion. False if two of these share one value, or the review site's claim is missing."
+              },
+              "reactions_dated": {
+                "type": "boolean",
+                "description": "True if the user's dated reactions (Corvane 14 Nov, Meridol 18 Nov and 20 Nov) appear in the rows against the dates the user gave. False if a reaction has no date or the wrong one."
+              },
+              "reported_to_user": {
+                "type": "boolean",
+                "description": "True if at least one answer tells the user that the assistant started a list or table of the grinders and says what it holds. False if the answers never say the assistant stored anything though rows are shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "one_row_per_trial",
+              "attribution_separate",
+              "reactions_dated",
+              "reported_to_user",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "one_row_per_trial": true,
+            "attribution_separate": true,
+            "reactions_dated": true,
+            "reported_to_user": true
+          }
+        },
+        "follow_up_judge": {
+          "key": "The user ruled out the Tessaly 600 (discontinued). The Meridol Petite was found quiet with a good-enough grind and a tiny hopper on 18 Nov; a review site claims its burrs wear out within a year; on 20 Nov the user said the hopper no longer bothers them. The Corvane S2, tried on 14 Nov, grinds evenly but is far too loud. The assistant's own pick is a suggestion, not the user's decision.",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_state_correct": {
+                "type": "boolean",
+                "description": "True if the answer says the Tessaly 600 is ruled out because it was discontinued, the Meridol Petite is quiet and its small hopper no longer bothers the user after the 20 Nov visit, and the Corvane S2 grinds evenly but is too loud. False if it misstates one of these, for example lists the Tessaly as an option or the hopper as a problem."
+              },
+              "earlier_view_available": {
+                "type": "boolean",
+                "description": "True if the answer can say that the user first found the Meridol's hopper too small on 18 Nov and changed their mind on 20 Nov, or mentions the review site's claim about its burrs. False if it gives only a bare verdict with no earlier view."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_state_correct",
+              "earlier_view_available",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_state_correct": true,
+            "earlier_view_available": true
+          }
+        }
+      }
+    },
+    {
+      "id": "equipment-maintenance",
+      "about": "Over three turns a baker reports servicing and faults on three machines on given dates. The vault holds only an unrelated collection of workout sessions. A different domain from the grinders must still produce its own minimal collection with a row per machine or event, and nothing goes into the workouts.",
+      "turns": [
+        "Descaled the proofing cabinet at the bakery today, 3 Nov, and swapped the door gasket. It had been running 4 degrees under the dial. Why would a cabinet run cold after a descale?",
+        "On 9 Nov the dough sheeter's belt started slipping so I tightened it, and the walk-in cooler's compressor was noisy again, third time this autumn. Is a noisy compressor usually the fan or the bearings?",
+        "17 Nov: tightening didn't hold, so I replaced the sheeter belt outright. The proofing cabinet has held temperature since the new gasket. What should I check on the cooler first?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Workout sessions/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "3a9f6c14-7d52-4e08-b1a3-5c8e2f9d0b64",
+            "title": "Workout sessions",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "session"
+              ],
+              "fields": {
+                "session": {
+                  "type": "string",
+                  "required": true
+                },
+                "done_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "minutes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "workouts"
+              ],
+              "terms": [
+                "run",
+                "ride",
+                "swim",
+                "session",
+                "interval",
+                "pace",
+                "training"
+              ]
+            }
+          },
+          "body": "Training sessions for an invented runner.\n",
+          "rows": [
+            {
+              "session": "Tempo run",
+              "done_on": "2026-10-28",
+              "minutes": 42
+            },
+            {
+              "session": "Long ride",
+              "done_on": "2026-11-01",
+              "minutes": 95
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "new_collection": {
+          "max_fields": 12,
+          "min_rows": 3,
+          "rows_each": [
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "proofing"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "sheeter"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "cooler"
+              }
+            ]
+          ]
+        },
+        "collection_row": {
+          "collection": "Records/Workout sessions/_collection.md",
+          "equals": 0
+        },
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "about_the_equipment": {
+                "type": "boolean",
+                "description": "True if the rows are about the bakery's machines (proofing cabinet, dough sheeter, walk-in cooler) and what was done to or found on each. False if they are about something else."
+              },
+              "dates_kept": {
+                "type": "boolean",
+                "description": "True if the dates the user gave (3 Nov, 9 Nov, 17 Nov) appear in the rows against the events they belong to. False if a date is missing or attached to the wrong event."
+              },
+              "reported_to_user": {
+                "type": "boolean",
+                "description": "True if at least one answer tells the user that the assistant started a list or table of the machines and what it holds. False if the answers never say the assistant stored anything though rows are shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "about_the_equipment",
+              "dates_kept",
+              "reported_to_user",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "about_the_equipment": true,
+            "dates_kept": true,
+            "reported_to_user": true
+          }
+        }
+      }
+    },
+    {
+      "id": "reuse-compatible-collection",
+      "about": "A collection of bike repairs exists, keyed by bike and date, beside an unrelated collection of parts orders. Two new repairs are reported over two turns. They go into the repairs collection as two rows, nothing goes into the parts orders, and no new collection is started.",
+      "turns": [
+        "Fixed the co-op's blue tandem today, 14 Nov: new rear brake pads and I trued the back wheel. Is it normal for pads to glaze after only a few months?",
+        "And on 17 Nov I replaced the chain on the red cargo bike, it had stretched badly. How often should a chain be swapped on a cargo bike?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Bike repairs/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "b7d1e5a2-94c3-4f60-8a1b-2e6c0d9f3a75",
+            "title": "Bike repairs",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "bike",
+                "repaired_on"
+              ],
+              "fields": {
+                "bike": {
+                  "type": "string",
+                  "required": true
+                },
+                "repaired_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "repairs"
+              ],
+              "terms": [
+                "repair",
+                "puncture",
+                "brake",
+                "gear",
+                "tyre",
+                "spoke",
+                "workshop"
+              ]
+            }
+          },
+          "body": "Repairs done at an invented community bike workshop.\n",
+          "rows": [
+            {
+              "bike": "Green step-through",
+              "repaired_on": "2026-10-19",
+              "work_done": "Replaced the inner tube"
+            },
+            {
+              "bike": "Orange folder",
+              "repaired_on": "2026-11-02",
+              "work_done": "Adjusted the rear derailleur"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Parts orders/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "d4a8c2f6-1b75-4e39-9c0d-7f3e5a1b8c26",
+            "title": "Parts orders",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part",
+                "ordered_on"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "ordered_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "supplier": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "orders"
+              ],
+              "terms": [
+                "order",
+                "supplier",
+                "delivery",
+                "invoice",
+                "stock",
+                "wholesale"
+              ]
+            }
+          },
+          "body": "Parts bought for an invented community bike workshop.\n",
+          "rows": [
+            {
+              "part": "Box of 700c inner tubes",
+              "ordered_on": "2026-10-10",
+              "supplier": "Northway Cycle Supply"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Bike repairs/_collection.md",
+          "equals": 2,
+          "absent_in": [
+            "Records/Parts orders/_collection.md"
+          ]
+        },
+        "no_new_collection": true,
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "claim_matches_committed": {
+                "type": "boolean",
+                "description": "True if the answers claim no stored row, or every row they say they stored appears in the committed rows shown. False if they say they stored a row that is not shown."
+              },
+              "names_where_filed": {
+                "type": "boolean",
+                "description": "True if at least one answer tells the user that the repairs went into the existing bike repairs list. False if the answers never say so."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "claim_matches_committed",
+              "names_where_filed",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "claim_matches_committed": true,
+            "names_where_filed": true
+          }
+        }
+      }
+    },
+    {
+      "id": "correct-a-stored-value",
+      "about": "A collection of houseplant repotting holds the fig with a 25 cm pot. The user corrects it to 30 cm. The existing row changes, with no second fig row, and a fresh session gives the current size and still knows the earlier figure.",
+      "prompt": "Correction on the fig: its pot is 30 cm, not 25. I misread the label when I repotted it in September. Does that change how often it needs water?",
+      "follow_up": "What pot is the fig in now, and what figure did you have for it before I corrected it?",
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Houseplant repotting/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "5e2c8a71-0d39-4b64-9f17-a4c6b1e83d02",
+            "title": "Houseplant repotting",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "repotted_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "pot_cm": {
+                  "type": "integer"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "repot",
+                "pot",
+                "soil",
+                "root",
+                "drainage",
+                "houseplant"
+              ]
+            }
+          },
+          "body": "Repotting of an invented flat's houseplants.\n",
+          "rows": [
+            {
+              "plant": "Fig",
+              "repotted_on": "2026-09-12",
+              "pot_cm": 25
+            },
+            {
+              "plant": "Monstera",
+              "repotted_on": "2026-10-03",
+              "pot_cm": 30
+            },
+            {
+              "plant": "Peace lily",
+              "repotted_on": "2026-10-20",
+              "pot_cm": 18
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Houseplant repotting/_collection.md",
+          "equals": 0,
+          "seed_row_now": [
+            {
+              "field": "plant",
+              "op": "eq",
+              "value": "Fig"
+            },
+            {
+              "field": "pot_cm",
+              "op": "eq",
+              "value": "30"
+            }
+          ]
+        },
+        "no_new_collection": true,
+        "follow_up_judge": {
+          "key": "The fig's pot is 30 cm. The stored figure before the correction was 25 cm.",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_size_correct": {
+                "type": "boolean",
+                "description": "True if the answer says the fig's pot is 30 cm. False if it says 25 cm is current, gives another figure or cannot say."
+              },
+              "earlier_figure_available": {
+                "type": "boolean",
+                "description": "True if the answer says the earlier figure for the fig was 25 cm. False if it does not give it."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_size_correct",
+              "earlier_figure_available",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_size_correct": true,
+            "earlier_figure_available": true
+          }
+        }
+      }
+    },
+    {
+      "id": "ambiguous-identity",
+      "about": "Over three turns a user compares tiling quotes. Two firms have near-identical names and the user says they may or may not be one firm and has not checked. They stay two rows with the doubt written in, and nothing is merged.",
+      "turns": [
+        "I'm getting quotes to retile the bathroom. Marlow Tiling quoted £2,400 on 5 Nov and could start in three weeks.",
+        "Another quote came on 9 Nov, from Marlowe Tiling Co: £2,150, start in five weeks. The name is nearly the same as the first one. It might be the same firm, it might not; the phone number and email differ and I haven't checked.",
+        "A third, Kestrel Bathrooms, quoted £2,900 on 12 Nov and can start next week. Which of the three would you lean towards?"
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "new_collection": {
+          "max_fields": 12,
+          "min_rows": 3,
+          "rows_each": [
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Marlow Tiling"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Marlowe Tiling Co"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Kestrel"
+              }
+            ]
+          ]
+        },
+        "judge": {
+          "include_calls": ["add_record", "edit_record"],
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "kept_separate": {
+                "type": "boolean",
+                "description": "True if Marlow Tiling and Marlowe Tiling Co are separate rows and no row combines their quotes. False if they are merged into one row."
+              },
+              "doubt_recorded": {
+                "type": "boolean",
+                "description": "True if a row, in a field or in its body text (the committed add_record or edit_record calls show the body), says that Marlow Tiling and Marlowe Tiling Co may be the same firm and that this is not settled. False if the doubt is absent, or the rows state that they are or are not the same firm."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kept_separate",
+              "doubt_recorded",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "kept_separate": true,
+            "doubt_recorded": true
+          }
+        }
+      }
+    },
+    {
+      "id": "passing-mention",
+      "about": "A user mentions once that they are trying a new oat milk. Nothing recurs, compares or changes. No collection starts and the seeded coffee collection gains no row.",
+      "prompt": "Trying a new oat milk this week, the Oatrill barista one from the corner shop. Any tips for getting a good flat white at home?",
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Coffee brews/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "8c1f4b97-3a60-4d25-8e72-b5d9a0c6f134",
+            "title": "Coffee brews",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "brewed_on",
+                "beans"
+              ],
+              "fields": {
+                "brewed_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "beans": {
+                  "type": "string",
+                  "required": true
+                },
+                "method": {
+                  "type": "string"
+                },
+                "rating": {
+                  "type": "integer"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "coffee"
+              ],
+              "terms": [
+                "espresso",
+                "grind",
+                "dose",
+                "extraction",
+                "pour",
+                "roast"
+              ]
+            }
+          },
+          "body": "Home coffee brews of an invented household.\n",
+          "rows": [
+            {
+              "brewed_on": "2026-11-08",
+              "beans": "Harbour blend",
+              "method": "Moka pot",
+              "rating": 3
+            },
+            {
+              "brewed_on": "2026-11-15",
+              "beans": "Harbour blend",
+              "method": "Espresso",
+              "rating": 4
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "no_new_collection": true,
+        "collection_row": {
+          "collection": "Records/Coffee brews/_collection.md",
+          "equals": 0
+        }
+      }
+    },
+    {
+      "id": "capture-off",
+      "about": "The grinder comparison of the first case, with capture set to off. The owner has said the agent initiates nothing, so no collection starts and the session writes nothing to the knowledge base.",
+      "prominence": "off",
+      "turns": [
+        "I'm picking a coffee grinder for the flat and I've narrowed it to three: the Corvane S2, the Meridol Petite and the Tessaly 600. I tried the Corvane at a shop on 14 Nov. The grind was lovely and even, but it's far too loud for our thin walls. What matters most in a grinder for espresso?",
+        "Tried the Meridol Petite on 18 Nov. Really quiet and the grind is good enough for me, but the hopper is tiny. A review site I read says its burrs wear out within a year. What do you make of that?",
+        "The shop says the Tessaly 600 has been discontinued, so that one is out. Between the other two, which would you go for right now?"
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "no_new_collection": true,
+        "no_write": true
+      }
+    },
+    {
+      "id": "decision-agreed",
+      "about": "A user and the assistant settle a standing rule in conversation, with no commit and no request to store it. The agent stores the agreed rule when it is agreed, and a fresh session can state it.",
+      "turns": [
+        "For the food bank volunteer rota I'm thinking we should stop letting people swap shifts on the day itself. It caused three no-shows last month. Thoughts?",
+        "Good point about emergencies. So here's what we'll do: no same-day swaps, unless the shift lead confirms the person's cover before 8am. That's the rule from now on."
+      ],
+      "follow_up": "What's our rule for volunteers swapping shifts at the food bank?",
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "called_any": [
+          "create_note",
+          "add_observation",
+          "edit_note",
+          "save_episode"
+        ],
+        "judge": {
+          "include_calls": [
+            "create_note",
+            "add_observation",
+            "edit_note",
+            "save_episode"
+          ],
+          "schema": {
+            "type": "object",
+            "properties": {
+              "rule_saved": {
+                "type": "boolean",
+                "description": "True if one of the writes shown states the agreed rule in full: no same-day shift swaps unless the shift lead confirms the person's cover before 8am, in force from now on. False if no write is shown, every write was refused, or the rule is partial or reworded so that it no longer says this."
+              },
+              "claim_matches_saved": {
+                "type": "boolean",
+                "description": "True if the answers say nothing was stored, or every storing they claim is shown in the writes. False if they say they stored the rule and no accepted write shows it."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "rule_saved",
+              "claim_matches_saved",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "rule_saved": true,
+            "claim_matches_saved": true
+          }
+        },
+        "follow_up_judge": {
+          "key": "The agreed rule: no same-day shift swaps, unless the shift lead confirms the person's cover before 8am.",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "states_the_rule": {
+                "type": "boolean",
+                "description": "True if the answer states that same-day swaps are not allowed unless the shift lead confirms the person's cover before 8am. False if it cannot say, asks the user to repeat it, or states another rule."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "states_the_rule",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "states_the_rule": true
+          }
+        }
+      }
+    },
+    {
+      "id": "interrupted-write",
+      "about": "A collection of bike repairs exists, keyed by bike and date, beside an unrelated collection of parts orders. A first turn asks a general question and reports nothing to file. A second turn reports four repairs. The case withholds the acknowledgement of the agent's first accepted write: the write commits, and the agent is told its outcome is not known. The agent must replay that write with the same payload and identity, or read the collection, before any new write. The repairs end up as four rows, each exactly once, in the repairs collection.",
+      "turns": [
+        "Quiet Sunday at the co-op workshop, only two of us in. What's a sensible way to triage a backlog of bikes when volunteers are few?",
+        "Got through four this weekend. On 15 Nov I swapped the saddle clamp on the green step-through and re-greased the bottom bracket on the black tourer. On 16 Nov I fitted new brake cables on the yellow tandem and adjusted the rear derailleur on the orange folder again. How often should a bottom bracket be re-greased?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Bike repairs/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "b7d1e5a2-94c3-4f60-8a1b-2e6c0d9f3a75",
+            "title": "Bike repairs",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "bike",
+                "repaired_on"
+              ],
+              "fields": {
+                "bike": {
+                  "type": "string",
+                  "required": true
+                },
+                "repaired_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "repairs"
+              ],
+              "terms": [
+                "repair",
+                "puncture",
+                "brake",
+                "gear",
+                "tyre",
+                "spoke",
+                "workshop"
+              ]
+            }
+          },
+          "body": "Repairs done at an invented community bike workshop.\n",
+          "rows": [
+            {
+              "bike": "Green step-through",
+              "repaired_on": "2026-10-19",
+              "work_done": "Replaced the inner tube"
+            },
+            {
+              "bike": "Orange folder",
+              "repaired_on": "2026-11-02",
+              "work_done": "Adjusted the rear derailleur"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Parts orders/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "d4a8c2f6-1b75-4e39-9c0d-7f3e5a1b8c26",
+            "title": "Parts orders",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part",
+                "ordered_on"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "ordered_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "supplier": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "orders"
+              ],
+              "terms": [
+                "order",
+                "supplier",
+                "delivery",
+                "invoice",
+                "stock",
+                "wholesale"
+              ]
+            }
+          },
+          "body": "Parts bought for an invented community bike workshop.\n",
+          "rows": [
+            {
+              "part": "Box of 700c inner tubes",
+              "ordered_on": "2026-10-10",
+              "supplier": "Northway Cycle Supply"
+            }
+          ]
+        }
+      ],
+      "withhold_first_write_ack": true,
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Bike repairs/_collection.md",
+          "equals": 4,
+          "absent_in": [
+            "Records/Parts orders/_collection.md"
+          ],
+          "rows_each": [
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "green"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-15"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "black"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-15"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "yellow"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-16"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "orange"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-16"
+              }
+            ]
+          ]
+        },
+        "no_new_collection": true,
+        "pending_reconciled": true,
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "claim_matches_committed": {
+                "type": "boolean",
+                "description": "True if the answers claim no stored row, or every row they say they stored appears in the committed rows shown. False if they say they stored a row that is not shown."
+              },
+              "no_false_alarm": {
+                "type": "boolean",
+                "description": "True if no answer tells the user that a repair was not saved, was lost or needs entering again when its row is among the committed rows shown. False if an answer says so for a repair whose row is shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "claim_matches_committed",
+              "no_false_alarm",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "claim_matches_committed": true,
+            "no_false_alarm": true
+          }
+        }
+      }
+    },
+    {
+      "id": "evaluation-of-named-candidates-store",
+      "about": "Over four turns a user compares three named candidates, reacting to each on a date, rules one out, and quotes an outside review about another. Nothing exists to file it in. The work recurs and compares items, so the agent starts one minimal collection keyed by candidate, backfills what was said with its dates, keeps the user's reactions, the assistant's pick and the outside claim apart, and reports it. A fresh session later reads the current state. The vault's collection store is enrolled and served, as the personal service has it.",
+      "turns": [
+        "I'm picking a coffee grinder for the flat and I've narrowed it to three: the Corvane S2, the Meridol Petite and the Tessaly 600. I tried the Corvane at a shop on 14 Nov. The grind was lovely and even, but it's far too loud for our thin walls. What matters most in a grinder for espresso?",
+        "Tried the Meridol Petite on 18 Nov. Really quiet and the grind is good enough for me, but the hopper is tiny. A review site I read says its burrs wear out within a year. What do you make of that?",
+        "The shop says the Tessaly 600 has been discontinued, so that one is out. Between the other two, which would you go for right now?",
+        "Went back on 20 Nov and tried the Meridol again. Still quiet, and honestly the tiny hopper doesn't bother me when I weigh doses by hand. Anything I'm missing before I buy?"
+      ],
+      "follow_up": "Where do things stand with the grinders I was comparing?",
+      "transport": "http",
+      "remote_owner": true,
+      "store": true,
+      "pass": {
+        "new_collection": {
+          "max_fields": 12,
+          "min_rows": 3,
+          "rows_each": [
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Corvane"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Meridol"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Tessaly"
+              }
+            ]
+          ]
+        },
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "one_row_per_trial": {
+                "type": "boolean",
+                "description": "True if every row names its candidate grinder in a key field and each dated trial or reaction is its own row (the natural key holds the candidate and the trial's date, or another field that tells the trials apart), so a grinder tried on two dates has two rows and no later trial replaced an earlier one. False if the key omits the candidate, or a later trial of a grinder overwrote its earlier dated row."
+              },
+              "attribution_separate": {
+                "type": "boolean",
+                "description": "True if what the user said about a grinder, what the assistant proposed or concluded, and the review site's claim about the burrs are held in separate fields or separate values, and the review site's claim is not written as the user's own opinion. False if two of these share one value, or the review site's claim is missing."
+              },
+              "reactions_dated": {
+                "type": "boolean",
+                "description": "True if the user's dated reactions (Corvane 14 Nov, Meridol 18 Nov and 20 Nov) appear in the rows against the dates the user gave. False if a reaction has no date or the wrong one."
+              },
+              "reported_to_user": {
+                "type": "boolean",
+                "description": "True if at least one answer tells the user that the assistant started a list or table of the grinders and says what it holds. False if the answers never say the assistant stored anything though rows are shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "one_row_per_trial",
+              "attribution_separate",
+              "reactions_dated",
+              "reported_to_user",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "one_row_per_trial": true,
+            "attribution_separate": true,
+            "reactions_dated": true,
+            "reported_to_user": true
+          }
+        },
+        "follow_up_judge": {
+          "key": "The user ruled out the Tessaly 600 (discontinued). The Meridol Petite was found quiet with a good-enough grind and a tiny hopper on 18 Nov; a review site claims its burrs wear out within a year; on 20 Nov the user said the hopper no longer bothers them. The Corvane S2, tried on 14 Nov, grinds evenly but is far too loud. The assistant's own pick is a suggestion, not the user's decision.",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_state_correct": {
+                "type": "boolean",
+                "description": "True if the answer says the Tessaly 600 is ruled out because it was discontinued, the Meridol Petite is quiet and its small hopper no longer bothers the user after the 20 Nov visit, and the Corvane S2 grinds evenly but is too loud. False if it misstates one of these, for example lists the Tessaly as an option or the hopper as a problem."
+              },
+              "earlier_view_available": {
+                "type": "boolean",
+                "description": "True if the answer can say that the user first found the Meridol's hopper too small on 18 Nov and changed their mind on 20 Nov, or mentions the review site's claim about its burrs. False if it gives only a bare verdict with no earlier view."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_state_correct",
+              "earlier_view_available",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_state_correct": true,
+            "earlier_view_available": true
+          }
+        }
+      }
+    },
+    {
+      "id": "reuse-compatible-collection-store",
+      "about": "A collection of bike repairs exists, keyed by bike and date, beside an unrelated collection of parts orders. Two new repairs are reported over two turns. They go into the repairs collection as two rows, nothing goes into the parts orders, and no new collection is started. The vault's collection store is enrolled and served, as the personal service has it.",
+      "turns": [
+        "Fixed the co-op's blue tandem today, 14 Nov: new rear brake pads and I trued the back wheel. Is it normal for pads to glaze after only a few months?",
+        "And on 17 Nov I replaced the chain on the red cargo bike, it had stretched badly. How often should a chain be swapped on a cargo bike?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Bike repairs/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "b7d1e5a2-94c3-4f60-8a1b-2e6c0d9f3a75",
+            "title": "Bike repairs",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "bike",
+                "repaired_on"
+              ],
+              "fields": {
+                "bike": {
+                  "type": "string",
+                  "required": true
+                },
+                "repaired_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "repairs"
+              ],
+              "terms": [
+                "repair",
+                "puncture",
+                "brake",
+                "gear",
+                "tyre",
+                "spoke",
+                "workshop"
+              ]
+            }
+          },
+          "body": "Repairs done at an invented community bike workshop.\n",
+          "rows": [
+            {
+              "bike": "Green step-through",
+              "repaired_on": "2026-10-19",
+              "work_done": "Replaced the inner tube"
+            },
+            {
+              "bike": "Orange folder",
+              "repaired_on": "2026-11-02",
+              "work_done": "Adjusted the rear derailleur"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Parts orders/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "d4a8c2f6-1b75-4e39-9c0d-7f3e5a1b8c26",
+            "title": "Parts orders",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part",
+                "ordered_on"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "ordered_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "supplier": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "orders"
+              ],
+              "terms": [
+                "order",
+                "supplier",
+                "delivery",
+                "invoice",
+                "stock",
+                "wholesale"
+              ]
+            }
+          },
+          "body": "Parts bought for an invented community bike workshop.\n",
+          "rows": [
+            {
+              "part": "Box of 700c inner tubes",
+              "ordered_on": "2026-10-10",
+              "supplier": "Northway Cycle Supply"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "store": true,
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Bike repairs/_collection.md",
+          "equals": 2,
+          "absent_in": [
+            "Records/Parts orders/_collection.md"
+          ]
+        },
+        "no_new_collection": true,
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "claim_matches_committed": {
+                "type": "boolean",
+                "description": "True if the answers claim no stored row, or every row they say they stored appears in the committed rows shown. False if they say they stored a row that is not shown."
+              },
+              "names_where_filed": {
+                "type": "boolean",
+                "description": "True if at least one answer tells the user that the repairs went into the existing bike repairs list. False if the answers never say so."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "claim_matches_committed",
+              "names_where_filed",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "claim_matches_committed": true,
+            "names_where_filed": true
+          }
+        }
+      }
+    },
+    {
+      "id": "interrupted-write-store",
+      "about": "A collection of bike repairs exists, keyed by bike and date, beside an unrelated collection of parts orders. A first turn asks a general question and reports nothing to file. A second turn reports four repairs. The case withholds the acknowledgement of the agent's first accepted write: the write commits, and the agent is told its outcome is not known. The agent must replay that write with the same payload and identity, or read the collection, before any new write. The repairs end up as four rows, each exactly once, in the repairs collection. The vault's collection store is enrolled and served, as the personal service has it.",
+      "turns": [
+        "Quiet Sunday at the co-op workshop, only two of us in. What's a sensible way to triage a backlog of bikes when volunteers are few?",
+        "Got through four this weekend. On 15 Nov I swapped the saddle clamp on the green step-through and re-greased the bottom bracket on the black tourer. On 16 Nov I fitted new brake cables on the yellow tandem and adjusted the rear derailleur on the orange folder again. How often should a bottom bracket be re-greased?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Bike repairs/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "b7d1e5a2-94c3-4f60-8a1b-2e6c0d9f3a75",
+            "title": "Bike repairs",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "bike",
+                "repaired_on"
+              ],
+              "fields": {
+                "bike": {
+                  "type": "string",
+                  "required": true
+                },
+                "repaired_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "repairs"
+              ],
+              "terms": [
+                "repair",
+                "puncture",
+                "brake",
+                "gear",
+                "tyre",
+                "spoke",
+                "workshop"
+              ]
+            }
+          },
+          "body": "Repairs done at an invented community bike workshop.\n",
+          "rows": [
+            {
+              "bike": "Green step-through",
+              "repaired_on": "2026-10-19",
+              "work_done": "Replaced the inner tube"
+            },
+            {
+              "bike": "Orange folder",
+              "repaired_on": "2026-11-02",
+              "work_done": "Adjusted the rear derailleur"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Parts orders/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "d4a8c2f6-1b75-4e39-9c0d-7f3e5a1b8c26",
+            "title": "Parts orders",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part",
+                "ordered_on"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "ordered_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "supplier": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "orders"
+              ],
+              "terms": [
+                "order",
+                "supplier",
+                "delivery",
+                "invoice",
+                "stock",
+                "wholesale"
+              ]
+            }
+          },
+          "body": "Parts bought for an invented community bike workshop.\n",
+          "rows": [
+            {
+              "part": "Box of 700c inner tubes",
+              "ordered_on": "2026-10-10",
+              "supplier": "Northway Cycle Supply"
+            }
+          ]
+        }
+      ],
+      "withhold_first_write_ack": true,
+      "transport": "http",
+      "remote_owner": true,
+      "store": true,
+      "pass": {
+        "collection_row": {
+          "collection": "Records/Bike repairs/_collection.md",
+          "equals": 4,
+          "absent_in": [
+            "Records/Parts orders/_collection.md"
+          ],
+          "rows_each": [
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "green"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-15"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "black"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-15"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "yellow"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-16"
+              }
+            ],
+            [
+              {
+                "field": "bike",
+                "op": "contains",
+                "value": "orange"
+              },
+              {
+                "field": "repaired_on",
+                "op": "eq",
+                "value": "2026-11-16"
+              }
+            ]
+          ]
+        },
+        "no_new_collection": true,
+        "pending_reconciled": true,
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "claim_matches_committed": {
+                "type": "boolean",
+                "description": "True if the answers claim no stored row, or every row they say they stored appears in the committed rows shown. False if they say they stored a row that is not shown."
+              },
+              "no_false_alarm": {
+                "type": "boolean",
+                "description": "True if no answer tells the user that a repair was not saved, was lost or needs entering again when its row is among the committed rows shown. False if an answer says so for a repair whose row is shown."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "claim_matches_committed",
+              "no_false_alarm",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "claim_matches_committed": true,
+            "no_false_alarm": true
+          }
+        }
+      }
+    }
+  ]
+}

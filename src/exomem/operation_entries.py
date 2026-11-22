@@ -374,8 +374,9 @@ RECORDS = CommandOperations(
             "Change records",
             "Change human-owned Records: create a collection, append, update, retract or "
             "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
-            "start or cancel an import. `operation.kind` selects the operation. Propose a new collection "
-            "before creating it. Guarded writes need the hashes that the matching read returns. "
+            "start or cancel an import. `operation.kind` selects the operation. Under silent capture "
+            "create a minimal collection with `automatic`; otherwise propose it first. Guarded writes "
+            "need the hashes that the matching read returns. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
             tool_arguments=("response_detail",),
@@ -403,7 +404,7 @@ RECORDS = CommandOperations(
             effect="read", constraints=(LiteralConstraint(("import_request", "mode"), "status"),),
         ),
         _entry(
-            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold"),
+            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold", "automatic"),
             ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         # `item` is required only when the caller is not resuming a held candidate,
@@ -412,7 +413,7 @@ RECORDS = CommandOperations(
             "append", CHANGE_RECORDS,
             (
                 "collection", "item", "why", "item_key", "expected_container_hash", "body",
-                "delivery", "held", "hold",
+                "delivery", "held", "hold", "new_collection", "new_fields",
             ),
             ("collection", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
@@ -420,7 +421,7 @@ RECORDS = CommandOperations(
             "update", CHANGE_RECORDS,
             (
                 "collection", "item_id", "item_key", "changes", "expected_container_hash",
-                "expected_item_version", "why", "refresh_presentation", "held", "hold",
+                "expected_item_version", "why", "refresh_presentation", "held", "hold", "new_fields",
             ),
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),

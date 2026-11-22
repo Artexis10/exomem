@@ -8757,6 +8757,25 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
+@contextmanager
+def mutation_step(step: str) -> Iterator[None]:
+    """Run an earlier store transaction of a command that commits more than one, under `<request id>:<step>`.
+
+    The store keeps one transaction per request identity, so a command's extra transactions each take a
+    derived one. The command's own identity stays on its last transaction, which a retry replays.
+    Outside a mutation it changes nothing.
+    """
+    trace = _ACTIVE_MUTATION_TRACE.get()
+    if trace is None:
+        yield
+        return
+    token = _ACTIVE_MUTATION_TRACE.set((f"{trace[0]}:{step}", trace[1], trace[2]))
+    try:
+        yield
+    finally:
+        _ACTIVE_MUTATION_TRACE.reset(token)
+
+
 def active_mutation_trace() -> tuple[str, str, str] | None:
     """`(request_id, command, receipt)` of the mutation this code runs inside,
     or `None` outside one (a CLI helper, the watcher, a direct call). The heat

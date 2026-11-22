@@ -281,7 +281,7 @@ reference for the canonical operation leaves that product commands route to.
 - a decision is made or a problem just got solved -> stepping-stone: capture via **save_source**/**create_note**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 - the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
-- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection, else create a minimal one under `proactive_capture`; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **save_source** and ask whether to compile only if there is a durable

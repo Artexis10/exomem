@@ -9,7 +9,10 @@ never parses a note itself.
     python arm_side.py seed_collections VAULT   # list of collections on stdin; creates each; prints the pages written
     python arm_side.py prominence LEVEL         # sets the capture prominence; prints the level the arm then resolves
     python arm_side.py records VAULT PATH...    # prints the rows of each Records collection, by knowledge-base path
+    python arm_side.py collections VAULT        # prints every collection of the vault with its schema, rows and automatic flag
     python arm_side.py instructions             # prints the text the arm's server hands every client
+    python arm_side.py write_tools              # prints the names of the tools the arm's surface classes as writes
+    python arm_side.py withhold                 # prints what the transport needs to withhold one write's acknowledgement
     python arm_side.py probe VAULT PATH         # prints the note at the vault-relative PATH
     python arm_side.py sources VAULT            # prints every Source page and every page citing Sources
     python arm_side.py mint                     # session JSON on stdin; prints a sign-in token for a loopback server
@@ -21,9 +24,15 @@ import hashlib
 import io
 import json
 import mimetypes
+import os
 import sys
+import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+
+#: Seconds a process that serves the unit's collection store waits for the store to be admitted.
+STORE_ADMISSION_SECONDS = 120
 
 
 def probe(vault: Path, relative: str) -> dict:
@@ -292,25 +301,210 @@ def prominence(level: str) -> dict:
     return {"level": level, "capture_level": arm_prominence.effective_capture_level()}
 
 
+def has_store() -> bool:
+    """Whether the unit has a lease coordinator, which is what a store vault is served under."""
+    return bool(os.environ.get("EXOMEM_WRITER_LEASE_URL"))
+
+
+def record_memory(vault: Path, **arguments) -> dict:
+    """The arm's ``record_memory`` command. A store collection answers only through the dispatcher that its tools
+    use, so a unit with a store reads through that; a file vault calls the command as it always has."""
+    from exomem import commands
+
+    if not has_store():
+        return commands.op_record_memory(vault, **arguments)
+    from exomem import writer_lease
+
+    command = next(c for c in commands.product_commands_for("mcp") if c.name == "record_memory")
+    return writer_lease.invoke_command(command, vault, **arguments)
+
+
+@contextmanager
+def served_store():
+    """Serve the unit's collection store in this process, as the personal service does, when the unit has a lease
+    coordinator (``EXOMEM_WRITER_LEASE_URL``); a plain file vault needs nothing.
+
+    A store collection answers only in a process that serves its store. The lease is handed back when the block
+    ends, so the unit's own server takes it at once and not after the lease's time to live.
+    """
+    if not has_store():
+        yield
+        return
+    from exomem import writer_lease
+
+    manager = writer_lease.start_server_lifecycle()
+    try:
+        deadline = time.monotonic() + STORE_ADMISSION_SECONDS
+        while manager.status().get("collection_store", {}).get("status") != "admitted":
+            if time.monotonic() > deadline:
+                raise RuntimeError(
+                    f"the collection store was not admitted in {STORE_ADMISSION_SECONDS} s: "
+                    f"{json.dumps(manager.status().get('collection_store'), default=str)[:200]}"
+                )
+            time.sleep(0.2)
+        yield
+    finally:
+        writer_lease.stop_server_lifecycle()
+
+
 def records(vault: Path, collections: list[str]) -> dict:
     """The rows of each collection, as the arm's own records query returns them, by knowledge-base path.
 
     A collection the arm cannot read reports ``error`` and no rows: unknown, never an empty collection.
     """
-    from exomem import commands
     from exomem.governance.principal import owner_principal, request_scope
     from exomem.vault import kb_root
 
     listed = {}
-    with request_scope(owner_principal(surface="mcp")):
+    with served_store(), request_scope(owner_principal(surface="mcp")):
         for relative in collections:
             path = (kb_root(vault) / relative).relative_to(vault).as_posix()
-            answer = commands.op_record_memory(vault, action="query", collection=path, limit=500)
+            answer = record_memory(vault, action="query", collection=path, limit=500)
             rows = answer.get("rows")
             listed[relative] = (
                 {"rows": rows} if isinstance(rows, list) else {"error": json.dumps(answer)[:300]}
             )
     return listed
+
+
+def collections(vault: Path) -> dict:
+    """Every collection the vault holds, as the arm's own discovery reads it, with its rows and whether the arm says it
+    was created automatically.
+
+    A collection is ``{path, kb_path, collection_id, title, semantic_profile, natural_key, fields, automatic, rows}``:
+    ``path`` is vault-relative, ``kb_path`` is relative to the knowledge base (how a case names a collection), and
+    ``automatic`` is the inventory's own flag, ``None`` when the arm's inventory does not report one. ``rows`` is
+    ``None`` for a collection that is not a Records collection and ``{"error": ...}`` in its place when the arm could
+    not read it. A vault the arm could not list in full reports ``error`` and no collections: unknown, never an
+    empty vault.
+    """
+    from exomem import structured_collections
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.vault import kb_root
+
+    with served_store(), request_scope(owner_principal(surface="mcp")):
+        found, unreadable = structured_collections.discover_collections_with_errors(vault)
+        inventory = record_memory(vault, action="inspect")
+        listed = inventory.get("collections")
+        if not isinstance(listed, list):
+            return {"error": json.dumps({"inventory": inventory}, default=str)[:300]}
+        # The file sweep cannot see a store collection and reports its manifest as unreadable; the arm's own
+        # inventory lists it, and its manifest reads in this process because it serves the store.
+        stored = [
+            entry["manifest_path"]
+            for entry in listed
+            if entry["manifest_path"] not in {m.path for m in found}
+        ]
+        unreadable = [item for item in unreadable if item.path not in stored]
+        if unreadable or any((inventory.get("truncated") or {}).values()):
+            return {
+                "error": json.dumps(
+                    {"unreadable": len(unreadable), "inventory": inventory}, default=str
+                )[:300]
+            }
+        found = [
+            *found,
+            *(structured_collections.load_manifest(vault, vault / path) for path in stored),
+        ]
+        automatic = {entry["manifest_path"]: entry.get("automatic") for entry in listed}
+        described = []
+        for manifest in found:
+            rows = None
+            if manifest.semantic_profile == "records":
+                answer = record_memory(vault, action="query", collection=manifest.path, limit=500)
+                rows = (
+                    answer["rows"]
+                    if isinstance(answer.get("rows"), list)
+                    else {"error": json.dumps(answer, default=str)[:300]}
+                )
+            try:
+                kb_path = (
+                    Path(manifest.path).relative_to(kb_root(vault).relative_to(vault)).as_posix()
+                )
+            except ValueError:
+                kb_path = None
+            described.append(
+                {
+                    "path": manifest.path,
+                    "kb_path": kb_path,
+                    "collection_id": manifest.collection_id,
+                    "title": manifest.title,
+                    "semantic_profile": manifest.semantic_profile,
+                    "natural_key": list(manifest.schema.natural_key),
+                    "fields": list(manifest.schema.fields),
+                    "automatic": automatic.get(manifest.path),
+                    "rows": rows,
+                }
+            )
+    return {"collections": described}
+
+
+def write_tools() -> dict:
+    """The tools the arm's own surface classes as writes: each typed tool whose effect is ``write``, and the write door.
+
+    A check that says "no write" reads this list from the arm, so a tool that the arm adds later is counted
+    without a change here.
+    """
+    from exomem import public_surface, public_tools
+
+    typed = [name for name, tool in public_tools.TOOLS.items() if tool.effect == "write"]
+    return {"tools": sorted([*typed, public_surface.DOORS["write"]])}
+
+
+def withhold() -> dict:
+    """What a transport needs to answer a write that committed as the arm answers one whose acknowledgement is uncertain.
+
+    ``result`` is the MCP result of the arm's ``MUTATION_ACKNOWLEDGEMENT_PENDING``, built as the arm builds it: its own
+    error constructor, called with the arguments of the arm's own raise (read from the source of the store runtime
+    that raises it, so no copy of its wording or details can drift), then its own public refusal, its own agent-facing
+    reply and the MCP tool conversion that its server applies. ``writers`` is the arm's own list of write tools, and
+    ``idempotency_key`` the metadata key that carries a call's replay identity.
+    """
+    import ast
+    import inspect
+
+    from fastmcp.tools import FunctionTool
+    from mcp.types import CallToolResult
+
+    from exomem import cli_ops, command_surface
+    from exomem.collection_store import runtime
+
+    code = "MUTATION_ACKNOWLEDGEMENT_PENDING"
+    raised = next(
+        (
+            node
+            for node in ast.walk(ast.parse(inspect.getsource(runtime)))
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "OpError"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == code
+        ),
+        None,
+    )
+    if raised is None:
+        raise RuntimeError(
+            f"the arm's store runtime raises no literal {code}; the unit cannot withhold one"
+        )
+    error = cli_ops.OpError(
+        *(ast.literal_eval(argument) for argument in raised.args),
+        **{keyword.arg: ast.literal_eval(keyword.value) for keyword in raised.keywords},
+    )
+    writers = write_tools()["tools"]
+    body = command_surface.agent_refusal_result(
+        cli_ops.public_refusal(error), error, writers[0], {}, (), write=True
+    )
+    content, structured = (
+        FunctionTool.from_function(lambda: None, name=writers[0])
+        .convert_result(body)
+        .to_mcp_result()
+    )
+    result = CallToolResult(content=content, structuredContent=structured, isError=False)
+    return {
+        "writers": writers,
+        "result": result.model_dump(mode="json", by_alias=True, exclude_none=True),
+        "idempotency_key": command_surface.MCP_IDEMPOTENCY_META_KEY,
+    }
 
 
 def instructions() -> dict:
@@ -442,8 +636,14 @@ if __name__ == "__main__":
         result = prominence(args[0])
     elif command == "records":
         result = records(Path(args[0]), args[1:])
+    elif command == "collections":
+        result = collections(Path(args[0]))
     elif command == "instructions":
         result = instructions()
+    elif command == "write_tools":
+        result = write_tools()
+    elif command == "withhold":
+        result = withhold()
     elif command == "sources":
         result = sources(Path(args[0]))
     elif command == "mint":

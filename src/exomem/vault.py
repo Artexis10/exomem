@@ -11367,6 +11367,44 @@ def latest_operation_id(vault_root: Path, path: str) -> str | None:
     return None
 
 
+def operation_log_lines(
+    vault_root: Path, prefix: str, *, rotated_since: float | None = None, max_archives: int | None = None
+) -> tuple[list[str], bool]:
+    """Every line that starts with `prefix` in the live log and its rotated archives, and whether that is all of them.
+
+    Archives are read newest first by modification time. With `rotated_since` (a Unix time) an archive last
+    written before it is skipped without losing a line: rotation writes an archive after every entry it holds,
+    so it holds nothing newer than that time. With `max_archives` the read stops after that many, and the second
+    value is False when older archives went unread. A store-held archive has no file time and counts as newest.
+    A log that is absent holds no line; one that cannot be read raises, so a count never reads part as the whole.
+    """
+    live, *archives = _operation_log_paths(vault_root)
+
+    def rotated_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return float("inf")
+
+    chosen: list[Path] = []
+    complete = True
+    for at, path in sorted(((rotated_at(path), path) for path in archives), key=lambda pair: pair[0], reverse=True):
+        if rotated_since is not None and at < rotated_since:
+            break
+        if max_archives is not None and len(chosen) >= max_archives:
+            complete = False
+            break
+        chosen.append(path)
+    lines: list[str] = []
+    for log_path in (live, *chosen):
+        try:
+            text, _guard = read_guarded_text(vault_root, log_path)
+        except FileNotFoundError:
+            continue
+        lines.extend(line for line in text.splitlines() if line.startswith(prefix))
+    return lines, complete
+
+
 def plan_log_writes_many(
     vault_root: Path,
     *,
