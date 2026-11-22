@@ -277,11 +277,13 @@ SHA-256 digest of NUL-terminated ASCII domain
 canonical principal id, verified authorization-session id or null, declared purpose or
 null, the SHA-256 request digest, next visible offset, and one caller-visible snapshot
 digest. The request digest SHALL be SHA-256 over RFC 8785 JCS of the closed typed object
-`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled, query, rerank,
-scope}` after public defaults are applied. The
+`{auto_rerank, graph, limit, mode, prefer_active, prefer_compiled,
+prefer_source_passages, query, rerank, scope}` after public defaults are applied. The
 snapshot digest SHALL stream the ordered item/variant-id pairs under NUL-terminated ASCII
 domain `exomem.projected-visible-snapshot.v1\0`, followed by a big-endian u32 pair count and, for
-each UTF-8 field, a big-endian u32 byte length plus its bytes. It SHALL exclude
+each UTF-8 field, a big-endian u32 byte length plus its bytes. For a hit with a
+verified Source passage, the variant field SHALL append the hex SHA-256 of the
+RFC 8785 JCS array of its part, start, end, and released text. It SHALL exclude
 vault/root identity, L0 identities, catalog count/generation, issuance
 time, randomness, and server-only authorization facts. A bounded process-local record
 SHALL retain the exact immutable runtime, authorization-map/selected-projection/request/

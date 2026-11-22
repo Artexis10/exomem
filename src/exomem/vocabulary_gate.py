@@ -238,7 +238,7 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
         return None
     if status.mode != "v2":
         raise vocabulary_authority.VocabularyAuthorityUnavailable("activated authority is unavailable")
-    from . import curation, episode_store, vocabulary_auxiliaries
+    from . import curation, episode_store, source_imports, vocabulary_auxiliaries
 
     # Curation runs and episode journals are operational JSON, no knowledge or index input; their
     # stores' own guards still apply. Both stores write only `.json`, so any other file there is classified.
@@ -270,6 +270,10 @@ def begin_batch(vault_root: Path | None, staged, snapshots, *, auxiliary_manifes
             if snapshot is not None or artifact.content_hash != digest:
                 raise vocabulary_authority.VocabularyAuthorityDenied("declared Source original changed")
             unmatched.discard(relative)
+            continue
+        if auxiliary_manifest is None and source_imports.is_receipt_path(root, relative):
+            # Normal path authority already limits this create-only operational
+            # record to the Source importer. It writes no semantic content.
             continue
         if relative.startswith(operational) and relative.endswith(".json"):
             continue

@@ -358,7 +358,13 @@ def _planned_navigation_adoptions(
 
 
 def search_fields(page: find_corpus.ParsedPage) -> dict[str, str]:
+    from .. import epistemic_graph
+
     fields = {"title": page.title}
+    sources = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
+    if sources:
+        # This field supplies precedence only. It does not add searchable tokens.
+        fields["sources"] = "\n".join(sources)
     for name, value in (
         # The OCR words a media sidecar withheld from search stay out of the projected body too.
         ("body", find_types.without_low_confidence_ocr(page.body, page.frontmatter)),
@@ -491,7 +497,7 @@ def catalog_item(
     same batch is about to write, by vault-relative path; `part_folder` is where the page's
     parts are now when the page is about to move away from them.
     """
-    from .. import extraction_parts, preserve
+    from .. import extraction_parts, preserve, transcript_passages
 
     content = source.encode("utf-8")
     parsed = find_corpus.parse_page(
@@ -514,9 +520,29 @@ def catalog_item(
                 )
             )
         )
+        part_count = extraction_parts.count_of(parsed.frontmatter)
+        multipart = part_count > 1
+        first = preserve.extracted_text(parsed.body) if multipart else ""
         parts = extraction_parts.stored_parts(
-            vault_root, path, source, pending=pending, folder=part_folder
+            vault_root, path, first=first, count=part_count, pending=pending, folder=part_folder
         )
+        head = first if parts else ""
+        fields = search_fields(parsed)
+        if transcript_passages.is_source(path):
+            text = transcript_passages.source_text(
+                parsed.body, multipart=multipart, media_sidecar=bool(parsed.frontmatter.get("media_type")),
+            )
+            coverage = projected_retrieval.timed_source_coverage(text, multipart=multipart)
+            if coverage is not None:
+                if parsed.frontmatter.get("source_identity") is not None:
+                    # The existing Source eraser cannot account for this bank.
+                    fields["source_erasure"] = "managed"
+                else:
+                    if len(parts) < part_count - 1:
+                        # The read window needs all stored part lengths. Test this before catalog fitting.
+                        coverage = projected_retrieval.TIMED_SOURCE_GAP
+                    fields[projected_retrieval.TIMED_SOURCE_FIELD] = coverage
+                    head = text
         variants = projections.with_parts(
             projections.enumerate_projection_variants(
                 item_identity=path,
@@ -524,10 +550,10 @@ def catalog_item(
                 scope_ids=scope_ids,
                 policy=policy,
                 projector_schema_version=target_key.projector_schema_version,
-                full_search_fields=search_fields(parsed),
+                full_search_fields=fields,
             ),
             parts,
-            head=preserve.extracted_text(source) if parts else "",
+            head=head,
         )
         return projection_store.ProjectionItemVariants(
             item_identity=path,
@@ -558,6 +584,13 @@ def fit_parts(
         budget -= kept[item.item_identity]
     from .. import extraction_parts
 
+    def fit_variant(variant: projections.ProjectionVariant, keep: int) -> projections.ProjectionVariant:
+        if len(variant.parts) <= keep:
+            return variant
+        # The timed head uses the Source body and consumes no additional catalog identity.
+        keep_head = keep > 0 or projected_retrieval.TIMED_SOURCE_FIELD in variant.search_fields
+        return replace(variant, parts=variant.parts[:keep], head=variant.head if keep_head else None)
+
     fitted: list[projection_store.ProjectionItemVariants] = []
     left_out: list[str] = []
     for item in items:
@@ -571,12 +604,7 @@ def fit_parts(
             item = projection_store.ProjectionItemVariants(
                 item_identity=item.item_identity,
                 content_hash=item.content_hash,
-                variants=tuple(
-                    replace(variant, parts=variant.parts[:keep], head=variant.head if keep else None)
-                    if len(variant.parts) > keep
-                    else variant
-                    for variant in item.variants
-                ),
+                variants=tuple(fit_variant(variant, keep) for variant in item.variants),
                 scope_ids=item.scope_ids,
             )
         fitted.append(item)
@@ -730,6 +758,9 @@ def _target_vector_measurements(
             "the active vector measurement family cannot be verified"
         ) from error
     active_ids = _variant_ids(active_namespace.items)
+    active_variants = {
+        variant.projection_variant_id: variant for item in active_namespace.items for variant in item.variants
+    }
     active_by_id: dict[str, projected_retrieval.ProjectionVectorMeasurement] = {}
     for row in active_rows:
         if not isinstance(row, projected_retrieval.ProjectionVectorMeasurement):
@@ -857,6 +888,35 @@ def _target_vector_measurements(
                 "the target vector measurements cannot be rebuilt"
             ) from error
 
+    from . import transcript_banks
+
+    def bank_for(variant) -> str | None:
+        if projected_retrieval.TIMED_SOURCE_FIELD not in variant.search_fields:
+            return None
+        variant_id = variant.projection_variant_id
+        previous = active_by_id.get(variant_id)
+        old = active_variants.get(variant_id)
+        if (
+            old is not None and previous is not None and previous.transcript_bank is not None
+            and old.head == variant.head
+            and old.search_fields.get(projected_retrieval.TIMED_SOURCE_FIELD)
+            == variant.search_fields[projected_retrieval.TIMED_SOURCE_FIELD]
+            and transcript_banks.carry(
+                vault_root, active_namespace.namespace_key, target_namespace.namespace_key, previous.transcript_bank,
+            )
+        ):
+            return previous.transcript_bank
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            return None
+        candidates, _ = projected_retrieval.transcript_samples(variant)
+        if not candidates:
+            return None
+        try:
+            vectors = embeddings._embed_live_chunks([match.text for _, match in candidates])
+            return transcript_banks.publish(vault_root, target_namespace.namespace_key, candidates, vectors)
+        except Exception as error:
+            raise CatalogPublicationError("the target transcript measurements cannot be built") from error
+
     target_rows = tuple(
         projected_retrieval.ProjectionVectorMeasurement(
             measurement_key=projections.MeasurementKey(
@@ -870,9 +930,11 @@ def _target_vector_measurements(
                 if variant.projection_variant_id in active_by_id
                 else rebuilt[variant.projection_variant_id]
             ),
+            transcript_bank=bank_for(variant),
         )
         for variant in target_variants
     )
+    transcript_banks.sync(vault_root, target_namespace.namespace_key)
     target_dimensions = {len(row.vector) for row in target_rows}
     expected_dimension = (
         active_root.vector_dimension

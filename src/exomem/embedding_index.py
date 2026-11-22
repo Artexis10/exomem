@@ -48,6 +48,26 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+_TRANSCRIPT_LAYOUT_PREFIX = "transcript-layout:"
+_TRANSCRIPT_LAYOUT_VERSION = 1
+_FILE_MTIMES = "SELECT file_path, MAX(file_mtime) AS file_mtime FROM chunks GROUP BY file_path"
+
+
+def _remember_transcript_layout(conn: sqlite3.Connection, paths: AbstractSet[str]) -> None:
+    if not paths:
+        return
+    # A full replacement writes chunk zero, including in versions that share the five-column table.
+    for event, row in (("INSERT", "NEW"), ("DELETE", "OLD")):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS transcript_layout_{event.lower()} AFTER {event} ON chunks "
+            f"WHEN {row}.chunk_idx = 0 BEGIN "
+            f"DELETE FROM meta WHERE key = '{_TRANSCRIPT_LAYOUT_PREFIX}' || {row}.file_path; END"
+        )
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        ((_TRANSCRIPT_LAYOUT_PREFIX + path, _TRANSCRIPT_LAYOUT_VERSION) for path in paths),
+    )
+
 
 def ordered_chunk_digest(chunks: Iterable[str]) -> str:
     """Hash ordered, length-framed UTF-8 text without retaining another text copy."""
@@ -1431,6 +1451,7 @@ class EmbeddingIndex:
         identity: recall_space.SpaceIdentity,
         validate: Callable[[], bool] | None = None,
         store_stamps: dict[str, StoreStamp] | None = None,
+        transcript_layout: AbstractSet[str] = frozenset(),
     ) -> tuple[int, int, int, int] | None:
         """Publish one bounded group of prepared parents, then release old caches.
 
@@ -1491,6 +1512,9 @@ class EmbeddingIndex:
                 if unit_replacements:
                     sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 _write_store_stamps(conn, store_stamps or {})
+                _remember_transcript_layout(
+                    conn, {path for path, chunks, *_ in replacements if chunks and path in transcript_layout},
+                )
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -3811,9 +3835,7 @@ class EmbeddingIndex:
         conn = self._connect()
         try:
             if paths is None:
-                rows = conn.execute(
-                    "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
-                ).fetchall()
+                rows = conn.execute(_FILE_MTIMES).fetchall()
             else:
                 wanted = sorted(paths)
                 rows = []
@@ -3827,6 +3849,46 @@ class EmbeddingIndex:
         finally:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
+
+    def incremental_file_states(self) -> dict[str, tuple[float, bool]]:
+        """Join layout receipts into the existing scan of indexed file clocks."""
+        if not self.path.exists():
+            return {}
+        conn = self._connect()
+        try:
+            return {
+                path: (mtime, value == _TRANSCRIPT_LAYOUT_VERSION)
+                for path, mtime, value in conn.execute(
+                    f"SELECT files.file_path, files.file_mtime, meta.value FROM ({_FILE_MTIMES}) AS files "
+                    "LEFT JOIN meta ON meta.key = ? || files.file_path",
+                    (_TRANSCRIPT_LAYOUT_PREFIX,),
+                )
+                if isinstance(path, str) and mtime is not None
+            }
+        finally:
+            conn.close()
+
+    def verify_transcript_layout(self, expected: dict[str, list[str]], *, remember: bool) -> set[str]:
+        """Prove one bounded legacy batch and commit any receipts in the same snapshot."""
+        if not expected or not self.path.exists():
+            return set()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE" if remember else "BEGIN")
+                actual: dict[str, list[tuple[int, str]]] = {path: [] for path in expected}
+                for path, index, text in conn.execute(
+                    "SELECT file_path, chunk_idx, chunk_text FROM chunks "
+                    "WHERE file_path IN (SELECT value FROM json_each(?)) ORDER BY file_path, chunk_idx",
+                    (json.dumps(list(expected)),),
+                ):
+                    actual[path].append((index, text))
+                matching = {path for path, chunks in expected.items() if actual[path] == list(enumerate(chunks))}
+                if remember:
+                    _remember_transcript_layout(conn, matching)
+                return matching
+        finally:
+            conn.close()
 
     def semantic_unit_parent_states(
         self,

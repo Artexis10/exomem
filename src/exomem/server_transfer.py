@@ -799,6 +799,7 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
                     filename=filename,
                     content_type=upload.content_type, max_bytes=maximum,
                     expected_sha256=ticket["expected_sha256"],
+                    import_key=ticket.get("import_key"),
                     # An import upload is named again by `imports.file` from the ticket token alone.
                     secret=(upload_handoff.hold_secret(ticket["nonce"])
                             if ticket["lane"] == held_uploads.IMPORT_LANE else None),
