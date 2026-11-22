@@ -2554,23 +2554,36 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
 
     def select(rel: str, content: bytes | None) -> bool:
         if content is None:
-            # A file-mode page: read only its fenced block, through the same
-            # held no-follow leaf the corpus parse reads the page with.
-            try:
-                with reserved_paths.open_generic_binary(
-                    vault_root, rel, physical=True
-                ) as source:
-                    probe = source.stream.read(8)
-                    source.stream.seek(0)
-                    content = vault_module.read_frontmatter_header(
-                        source.stream, 64 * 1024
-                    )
-            except (
-                OSError,
-                reserved_paths.ReservedPathLeafError,
-                vault_module.FrontmatterError,
-            ):
+            # A file-mode page: read only its fenced block through a plain
+            # no-follow open — the wikilink resolver build reads walked pages
+            # the same way. The boolean only narrows the admission set; every
+            # page kept here is read again through the held reader in
+            # admission and the full parse. Any doubt keeps the page.
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            if nofollow is None:
                 return True
+            path = vault_root.joinpath(*rel.split("/"))
+            fd = -1
+            try:
+                fd = os.open(
+                    path,
+                    os.O_RDONLY | nofollow | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
+                )
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return True
+                with os.fdopen(fd, "rb", closefd=True) as stream:
+                    fd = -1
+                    probe = stream.read(8)
+                    stream.seek(0)
+                    content = vault_module.read_frontmatter_header(
+                        stream, 64 * 1024
+                    )
+            except (OSError, vault_module.FrontmatterError):
+                return True
+            finally:
+                if fd >= 0:
+                    os.close(fd)
             if not content and probe.removeprefix(b"\xef\xbb\xbf").startswith(b"---"):
                 # The opener is there but the bounded reader could not fence
                 # the block (a CR-only page's `\r` opener): undecided.

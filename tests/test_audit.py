@@ -1476,6 +1476,29 @@ def test_a_refused_page_with_a_malformed_scalar_does_not_crash_a_custody_only_au
     assert [(f.category, f.path) for f in report.findings] == [("custody_source", kept)]
 
 
+def test_a_symlinked_custody_page_lists_nothing_the_full_audit_does_not(
+    vault: Path,
+) -> None:
+    kept = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    target = vault / "real-source.md"
+    target.write_text(
+        "---\ntype: source\nsource_type: article\ncaptured: 2026-11-01\n"
+        "custody_only: true\ningested_into: []\n---\n\nLinked bytes.\n",
+        encoding="utf-8",
+    )
+    (vault / "Knowledge Base/Sources/Articles/linked.md").symlink_to(target)
+
+    with library_scope():
+        only = audit_module.audit(vault, categories=["custody_source"])
+        mixed = audit_module.audit(
+            vault, categories=["custody_source", "unprocessed_source"]
+        )
+
+    custody_only = {f.path for f in only.findings if f.category == "custody_source"}
+    custody_mixed = {f.path for f in mixed.findings if f.category == "custody_source"}
+    assert custody_only == custody_mixed == {kept}
+
+
 def test_a_budget_that_expires_inside_the_lookup_reports_unknown(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
