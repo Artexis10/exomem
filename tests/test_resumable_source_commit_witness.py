@@ -90,6 +90,14 @@ _WORKER = dedent(
         writer_lease.log_active_mutation_phase = stop_after_commit
     if cut == "revoked":
         os.environ.pop("EXOMEM_OWNER_OAUTH_SUBJECT")
+    if cut == "resume-at-floor":
+        from types import SimpleNamespace
+        from exomem import media_capacity
+        config = Path(os.environ["MEDIA_CONFIG_DIR"]) / "media.json"
+        config.write_text(json.dumps({"vaults": {str(root.resolve()): {"store": "test", "upload_floor_bytes": 1024**2}}}))
+        os.environ["EXOMEM_MEDIA_STORE_CONFIG"] = str(config)
+        # One byte above the floor: no commit of the held original fits.
+        media_capacity.shutil.disk_usage = lambda _path: SimpleNamespace(total=100 * 1024**2, free=1024**2 + 1)
     if cut in ("failed-sync", "uncertain-cleanup", "interrupted-seal"):
         witness = upload_sessions.file_commit_witness_path(root, session_id)
         sync_real = private_state.sync_directory
@@ -301,3 +309,24 @@ def test_owner_removal_before_native_publication_is_a_definitive_failure(vault, 
     assert status["state"] == upload_sessions.FAILED and status["code"] == "UPLOAD_HANDOFF_UNAVAILABLE"
     assert "receipt" not in status and not upload.part.exists()
     assert set(sources.rglob("*.md")) == earlier_paths
+
+
+@pytest.mark.parametrize(("cut", "exit_code"), [("after", 72), ("first", 74)])
+def test_a_source_resumed_at_the_space_floor_keeps_its_receipt_or_unknown_outcome(
+    vault, sent_source, tmp_path, monkeypatch, cut, exit_code,
+):
+    # Publication already spent the original's space, so a full disk must not report it as not preserved.
+    monkeypatch.setenv("MEDIA_CONFIG_DIR", str(tmp_path))
+    upload, data, worker = sent_source
+    stopped = worker(cut)
+    assert stopped.returncode == exit_code, stopped.stdout + stopped.stderr
+    resumed = worker("resume-at-floor")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    status = json.loads(resumed.stdout)
+    if cut == "after":
+        assert status["state"] == upload_sessions.COMMITTED
+        assert status["receipt"]["hash"] == hashlib.sha256(data).hexdigest()
+        assert (vault / status["receipt"]["artifact_path"]).read_bytes() == data
+    else:
+        assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
+        assert upload.part.read_bytes() == data

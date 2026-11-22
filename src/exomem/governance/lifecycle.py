@@ -1924,16 +1924,14 @@ def _receipt_marker_generation(
             if not stat.S_ISREG(entry.st_mode) or _receipt_path_is_reparse(entry) or entry.st_size > MAX_MARKER_BYTES:
                 raise LifecycleError("LIFECYCLE_PATH_UNSAFE", "receipt lifecycle marker is unsafe")
             signature = _physical_signature(path, entry)
-            if os.name == "nt":
-                # Windows lstat ctime is a creation time. Bind the worker's
-                # validation to the exact bytes used for this comparison.
+            if marker_digests is not None:
+                # Only the background refresh reads marker bytes. Windows lstat ctime is a creation
+                # time, so the refresh binds its validation to these exact bytes. A request compares
+                # stat signatures alone, as the tombstone check does, so its cost stays per marker stat.
                 raw = _read_marker_bytes(root, path)
                 if raw is None or _entry_signature(path) != signature:
                     raise LifecycleError("LIFECYCLE_PATH_UNSAFE", "receipt marker changed during the read")
-                digest = hashlib.sha256(raw).digest()
-                if marker_digests is not None:
-                    marker_digests[path] = digest
-                signature = (*signature, digest)
+                marker_digests[path] = hashlib.sha256(raw).digest()
             markers.append(signature)
     if directories != _receipt_directory_signatures(ancestry, checkpoint):
         raise LifecycleError("LIFECYCLE_PATH_UNSAFE", "receipt marker ancestry changed during the read")

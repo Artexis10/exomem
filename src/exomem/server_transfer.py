@@ -453,11 +453,17 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     from . import document_containers
     from .cli_ops import OpError
 
+    from . import source_imports
+
     delegated = upload_sessions.delegated_source(record["id"])
+    capture = source_imports.resumable_capture(vault_root, record) if delegated else None
     try:
         who = (_require_source_origin(vault_root, record) if delegated
                else principal_module.most_restrictive_principal(surface="transfer"))
         with principal_module.request_scope(who), media_capacity.commit_credit(record["id"]):
+            # A committed Source allocates nothing more, so its receipt recovery never meets the floor.
+            if capture is not None and capture.committed_upload_receipt(vault_root, size=record["length"]):
+                return _commit_session(vault_root, part, record)
             try:
                 if media_capacity.upload_floor(vault_root) is not None:
                     copies = upload_sessions.commit_copy_count(vault_root, record["target"])
@@ -474,13 +480,15 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
                                     record["length"], copies, incoming=0, offset=0, extra_sizes=extra_sizes,
                                 )
             except OpError as error:
+                if capture is not None and capture.publication_may_have_started(vault_root):
+                    # A space refusal must not hide a publication that may have started. The retry
+                    # reserves again, so the parked session holds no room meanwhile.
+                    media_capacity.release_commit_credit(vault_root, record["id"])
+                    raise _source_outcome_unknown() from error
                 raise upload_sessions.CommitFailed(error.code, error.message, retryable=True) from error
             return _commit_session(vault_root, part, record)
     except upload_sessions.CommitFailed as error:
-        if delegated and error.code == "UPLOAD_HANDOFF_UNAVAILABLE" and not error.retryable:
-            from . import source_imports
-
-            capture = source_imports.resumable_capture(vault_root, record)
+        if capture is not None and error.code == "UPLOAD_HANDOFF_UNAVAILABLE" and not error.retryable:
             if capture.publication_may_have_started(vault_root):
                 raise _source_outcome_unknown() from error
         raise
