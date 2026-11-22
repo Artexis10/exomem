@@ -745,7 +745,17 @@ class MediaJobStore:
         self.vault_root = vault_root.resolve()
         self.path = job_store_path(self.vault_root)
         if create:
-            self._initialize()
+            try:
+                self._initialize()
+            except sqlite3.OperationalError as error:
+                code = getattr(error, "sqlite_errorcode", None)
+                if code is None or code & 0xFF not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                    raise
+                from .cli_ops import OpError
+                from .media_store import STORE_BUSY_CODE
+
+                raise OpError(STORE_BUSY_CODE, "the media ledger is busy",
+                              details={"status": "retryable"}) from error
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         with reserved_paths._subsystem_authority_scope("media_jobs"):
@@ -782,13 +792,11 @@ class MediaJobStore:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
         if not readonly:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            # Make the complete WAL family reachable while the private-owner
-            # coordination boundary is still held.  An empty new database does
-            # not create WAL/SHM merely by negotiating WAL mode.
-            conn.execute("BEGIN IMMEDIATE")
             try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                # Make the complete WAL family reachable while the private-owner coordination boundary is held.
+                conn.execute("BEGIN IMMEDIATE")
                 if not self._schema_current(conn):
                     self._migrate_offload_columns(conn)
                     self._migrate_eviction_columns(conn)

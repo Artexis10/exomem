@@ -7,16 +7,20 @@ The cell reports every edge and provider fault under the store's own codes.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
-from collections.abc import Mapping
-from contextlib import contextmanager
+import time
+from collections.abc import Awaitable, Iterator, Mapping
+from contextlib import AsyncExitStack, contextmanager
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, TypeVar
 
 import httpx
 
 from . import originals
 from .media_edge_protocol import (
+    ABSENT_CODE,
     ADMIT_ACTION,
     OBJECTS_PATH,
     SHA256_HEADER,
@@ -28,11 +32,13 @@ from .media_edge_protocol import (
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
-from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, _declared_chunks
+from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, ReplicaAbsent, _declared_chunks
 
 URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 CREDENTIAL_FILE_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
 _BLOCK = 1024 * 1024
+# Store errors carry a short protocol envelope, not object data.
+_MAX_ERROR_BYTES = 4096
 
 
 def _unavailable(reason: str) -> MediaStoreError:
@@ -59,9 +65,22 @@ def _refusal(response: httpx.Response, size: int | None = None) -> MediaStoreErr
     return _unavailable(f"the media edge answered {response.status_code}")
 
 
+def _read_refusal(response: httpx.Response, reader: _Reader) -> MediaStoreError:
+    if response.status_code == STATUS_ABSENT:
+        body = reader.read(_MAX_ERROR_BYTES + 1)
+        if len(body) > _MAX_ERROR_BYTES:
+            return _unavailable("the media edge sent an oversized absence reply")
+        try:
+            if json.loads(body)["code"] == ABSENT_CODE:
+                return ReplicaAbsent()
+        except (ValueError, KeyError, RecursionError, TypeError):
+            pass  # a proxy's 404 does not say what the store holds
+    return _refusal(response)
+
+
 class _Reader:
-    def __init__(self, response: httpx.Response):
-        self._chunks = response.iter_raw(_BLOCK)
+    def __init__(self, chunks: Iterator[bytes]):
+        self._chunks = chunks
         self._buffer = bytearray()
 
     def read(self, size: int = -1) -> bytes:
@@ -75,6 +94,14 @@ class _Reader:
         block = bytes(self._buffer[:count])
         del self._buffer[:count]
         return block
+
+
+_ReadValue = TypeVar("_ReadValue")
+
+
+async def _before_deadline(deadline: float, read: Awaitable[_ReadValue]) -> _ReadValue:
+    async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
+        return await read
 
 
 class EdgeStore:
@@ -91,17 +118,54 @@ class EdgeStore:
         return cls(url, Path(credential), connect_seconds=float(config.get("edge_connect_seconds", 5)),
                    read_seconds=float(config.get("edge_read_seconds", 60)))
 
+    def _client_options(self) -> dict:
+        """Read the credential for each operation so rotation applies without a restart."""
+        credential = self._credential_file.read_text(encoding="ascii").strip()
+        if not credential:
+            raise _unavailable("the media edge credential is empty")
+        return {"base_url": self._url, "headers": {"authorization": f"Bearer {credential}"},
+                "timeout": self._timeout, "trust_env": False}
+
     @contextmanager
     def _client(self, operation: str):
-        """Read the credential for each operation, so a rotated one applies without a restart."""
         with _outage(operation):
-            credential = self._credential_file.read_text(encoding="ascii").strip()
-            if not credential:
-                raise _unavailable("the media edge credential is empty")
-            # An in-cluster literal address needs neither proxy nor DNS configuration.
-            with httpx.Client(base_url=self._url, headers={"authorization": f"Bearer {credential}"},
-                              timeout=self._timeout, trust_env=False) as client:
+            with httpx.Client(**self._client_options()) as client:
                 yield client
+
+    @contextmanager
+    def _reading_response(self, method: str, path: str, params: dict[str, str], *,
+                          deadline: float | None, headers: dict[str, str] | None = None):
+        """Present one response to the synchronous reader, with a total deadline for maintenance."""
+        headers = {"accept-encoding": "identity", **(headers or {})}
+        if deadline is None:
+            with self._client("read") as client, client.stream(method, path, params=params, headers=headers) as response:
+                block = _BLOCK if response.status_code == 200 else _MAX_ERROR_BYTES + 1
+                yield response, _Reader(response.iter_raw(block))
+            return
+
+        with _outage("read"), asyncio.Runner() as runner:
+            held = AsyncExitStack()
+
+            async def open_response() -> httpx.Response:
+                client = await held.enter_async_context(httpx.AsyncClient(**self._client_options()))
+                return await held.enter_async_context(client.stream(method, path, params=params, headers=headers))
+
+            def run(read):
+                return runner.run(_before_deadline(deadline, read))
+
+            try:
+                response = run(open_response())
+                block = _BLOCK if response.status_code == 200 else _MAX_ERROR_BYTES + 1
+                chunks = response.aiter_raw(block)
+                held.push_async_callback(chunks.aclose)
+
+                def raw():
+                    while (chunk := run(anext(chunks, None))) is not None:
+                        yield chunk
+
+                yield response, _Reader(raw())
+            finally:
+                runner.run(held.aclose())
 
     def upload(self, name: str, stream: BinaryIO, *, size: int, sha256: str) -> str:
         if not originals.is_sha256(name) or not originals.is_sha256(sha256) or size < 0:
@@ -122,11 +186,18 @@ class EdgeStore:
         except (ValueError, KeyError, TypeError) as error:
             raise _unavailable("the media edge answered without a version") from error
 
-    def head(self, name: str, version: str) -> ObjectHead | None:
-        with self._client("head") as client:
-            response = client.head(f"{OBJECTS_PATH}{name}", params={"version": version})
+    def head(self, name: str, version: str, *, deadline: float | None = None) -> ObjectHead | None:
+        path, params = f"{OBJECTS_PATH}{name}", {"version": version}
+        with self._reading_response("HEAD", path, params, deadline=deadline) as (response, _):
+            pass  # HEAD has no body to retain.
         if response.status_code == STATUS_ABSENT:
-            return None
+            # Ask for one byte so a legacy edge can identify its absence reply.
+            with self._reading_response("GET", path, params, deadline=deadline,
+                                        headers={"range": "bytes=0-0"}) as (probe, reader):
+                if probe.status_code == STATUS_ABSENT:
+                    if isinstance(_read_refusal(probe, reader), ReplicaAbsent):
+                        return None
+            raise _unavailable("the media edge did not confirm the missing version")
         if response.status_code != 200:
             raise _refusal(response)
         status = response.headers.get(STATUS_HEADER)
@@ -140,10 +211,9 @@ class EdgeStore:
             raise _unavailable("the media edge answered without a size and digest") from error
 
     @contextmanager
-    def open(self, name: str, version: str):
-        with self._client("read") as client:
-            with client.stream("GET", f"{OBJECTS_PATH}{name}", params={"version": version}) as response:
-                if response.status_code != 200:
-                    response.read()
-                    raise _refusal(response)
-                yield _Reader(response)
+    def open(self, name: str, version: str, *, deadline: float | None = None):
+        with self._reading_response("GET", f"{OBJECTS_PATH}{name}", {"version": version},
+                                    deadline=deadline) as (response, reader):
+            if response.status_code != 200:
+                raise _read_refusal(response, reader)
+            yield reader

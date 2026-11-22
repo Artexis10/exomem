@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 
 from . import held_fs, originals, reserved_paths, runtime_resources, trash_metadata
@@ -45,29 +47,76 @@ def blocked_fields(blockers: tuple[Blocker, ...]) -> dict:
     return {"blocked_by": [{"path": item.path, "reason": item.reason} for item in blockers]}
 
 
-@dataclass(frozen=True, slots=True)
+_VersionKey = tuple[str, str, str]
+_LiveVersion = tuple[_VersionKey, str]
+
+
+@dataclass(slots=True)
 class ReferenceUsage:
-    versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] | None
+    versions: dict[_VersionKey, tuple[originals.BinaryBinding, originals.StoredObject]] | None
     observed_at: str
     live_paths: dict[tuple[str, str, str], str] = field(default_factory=dict)
     # Why the census is unknown, when notes explain it: the first few by path.
     blockers: tuple[Blocker, ...] = ()
+    _used_bytes: int | None = field(init=False, repr=False, compare=False)
+    # Only groups with several versions need an ordered index that can remove failed entries cheaply.
+    _reuse: dict[tuple[str, int, str], _LiveVersion | OrderedDict[_VersionKey, str]] = field(
+        init=False, default_factory=dict, repr=False, compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        self._used_bytes = None
+        if self.versions is None:
+            return
+        self._used_bytes = sum(binary.size for binary, _reference in self.versions.values())
+        for version, path in self.live_paths.items():
+            binary, reference = self.versions[version]
+            self._index_reuse(binary, reference, version, path)
+
+    def _index_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject,
+                     version: _VersionKey, path: str) -> None:
+        key = (binary.sha256, binary.size, reference.key_version)
+        matches = self._reuse.get(key)
+        if matches is None:
+            self._reuse[key] = version, path
+        elif isinstance(matches, tuple):
+            self._reuse[key] = OrderedDict((matches, (version, path)))
+        else:
+            matches[version] = path
 
     @property
     def used_bytes(self) -> int | None:
-        if self.versions is None:
-            return None
-        return sum(binary.size for binary, _reference in self.versions.values())
+        return self._used_bytes
 
-    def charged(
-        self, binary: originals.BinaryBinding, reference: originals.StoredObject,
-    ) -> ReferenceUsage:
-        """This census plus a version that a writer is about to bind; an unknown census stays unknown."""
+    def charge(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
+        """Add a version to this active batch's census before binding it."""
         key = _key(reference)
-        if self.versions is None or key in self.versions:
-            return self
-        return ReferenceUsage({**self.versions, key: (binary, reference)}, self.observed_at,
-                              {**self.live_paths, key: binary.path})
+        if self.versions is None or self._used_bytes is None or key in self.versions:
+            return
+        self.versions[key] = binary, reference
+        self.live_paths[key] = binary.path
+        self._used_bytes += binary.size
+        self._index_reuse(binary, reference, key, binary.path)
+
+    def reuse_candidates(self, binary: originals.BinaryBinding, key_version: str, *, limit: int
+                         ) -> list[tuple[Path, originals.StoredObject]]:
+        if self.versions is None:
+            return []
+        matches = self._reuse.get((binary.sha256, binary.size, key_version))
+        if matches is None:
+            return []
+        entries = (matches,) if isinstance(matches, tuple) else matches.items()
+        return [(Path(path), self.versions[key][1]) for key, path in islice(entries, limit)]
+
+    def skip_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
+        """Keep a failed version in the allowance while this census stops offering it for reuse."""
+        group = (binary.sha256, binary.size, reference.key_version)
+        matches = self._reuse.get(group)
+        if isinstance(matches, tuple):
+            if matches[0] == _key(reference):
+                del self._reuse[group]
+        elif matches is not None:
+            matches.pop(_key(reference), None)
 
 
 def _key(reference: originals.StoredObject) -> tuple[str, str, str]:
