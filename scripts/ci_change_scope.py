@@ -111,15 +111,18 @@ def changed_test_modules(paths: list[str], root: Path = Path(".")) -> list[str]:
     )
 
 
-def changed_test_groups(modules: list[str], python: str, durations: dict[str, float]) -> list[dict]:
+def changed_test_groups(
+    modules: list[str], python: str, durations: dict[str, float], shards: int
+) -> list[dict]:
     """Matrix entries that split `modules` into groups of at most `_GROUP_SECONDS`.
 
     Group `i` of `k` runs as shard `i` with `--splits=k`; pytest-split balances
     the groups by the same durations. A module without measurements counts as zero.
+    The count never exceeds the tier's shards, so a group carries at most a shard's load.
     """
     chosen = set(modules)
     seconds = sum(time for node, time in durations.items() if node.split("::", 1)[0] in chosen)
-    groups = max(1, math.ceil(seconds / _GROUP_SECONDS))
+    groups = min(shards, max(1, math.ceil(seconds / _GROUP_SECONDS)))
     return [
         {"python-version": python, "shard": group, "splits": groups, "selection": f"changed tests {group}/{groups}"}
         for group in range(1, groups + 1)
@@ -167,12 +170,7 @@ def job_matrices(
     def entries(chosen: list[str], pythons: list[str], shards: int) -> list[dict]:
         if not chosen:
             return []
-        result = []
-        for python in pythons:
-            groups = changed_test_groups(chosen, python, durations)
-            # A change that needs more groups than the tier has shards runs the shards instead.
-            result += groups if len(groups) <= shards else _shards([python], shards)
-        return result
+        return [entry for python in pythons for entry in changed_test_groups(chosen, python, durations, shards)]
 
     return entries(core, runtimes, core_shards), entries(harness, floor, harness_shards)
 
@@ -191,7 +189,8 @@ def main(omitted: str) -> int:
         # Only the scope job builds the test matrices; other callers read the docs decision.
         if "FULL_PYTHON_VERSIONS" in os.environ:
             # release_evidence.py scope owns the Full decision; the workflow passes it here.
-            full = os.environ.get("FULL") == "true"
+            # A missing or unexpected value must stop the job: a silent False would drop Full's runtimes.
+            full = {"true": True, "false": False}[os.environ["FULL"]]
             runtimes = json.loads(os.environ["FULL_PYTHON_VERSIONS"])
             core, harness = job_matrices(
                 paths,

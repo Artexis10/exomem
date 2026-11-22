@@ -1062,7 +1062,9 @@ def test_generated_push_waits_until_the_proposal_reports_the_pushed_head(tmp_pat
         )
 
 
-@pytest.mark.parametrize("case", ["projection", "updated-branch", "race-repair", "forged-code"])
+@pytest.mark.parametrize(
+    "case", ["projection", "updated-branch", "race-repair", "newer-release-on-main", "forged-code"]
+)
 def test_reconciliation_pr_skips_tests_only_when_merging_it_gives_the_projection(
     tmp_path, monkeypatch, case
 ):
@@ -1087,9 +1089,11 @@ def test_reconciliation_pr_skips_tests_only_when_merging_it_gives_the_projection
         """What reconcile() writes onto `base`: version, origin, regenerated package."""
         git(tmp_path, "checkout", "--quiet", "--detach", base)
         origin = tmp_path / cuts.origin_path("v1.1.0")
-        origin.parent.mkdir(parents=True, exist_ok=True)
-        origin.write_text(json.dumps(record))
-        (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
+        if not origin.exists():
+            # Like reconcile_files: an accepted origin keeps later versions; only outputs regenerate.
+            origin.parent.mkdir(parents=True, exist_ok=True)
+            origin.write_text(json.dumps(record))
+            (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
         (tmp_path / "generated.txt").write_text((tmp_path / "src/generator_input.txt").read_text())
         projected = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
         git(tmp_path, "checkout", "--quiet", "main")
@@ -1110,6 +1114,15 @@ def test_reconciliation_pr_skips_tests_only_when_merging_it_gives_the_projection
         (tmp_path / "src/generator_input.txt").write_text("two\n")
         git(tmp_path, "checkout", "--quiet", "HEAD~1", "--", "generated.txt")
         main = commit(tmp_path, "feat: change a generator input")
+        head = project(main)
+    elif case == "newer-release-on-main":
+        # Main already carries this origin and a newer release; the old cut only regenerates.
+        git(tmp_path, "merge", "--quiet", "--ff-only", head)
+        newer = tmp_path / cuts.origin_path("v1.2.0")
+        newer.write_text(json.dumps({**record, "tag": "v1.2.0", "source": "e" * 40}))
+        (tmp_path / ".release-please-manifest.json").write_text('{".": "1.2.0"}\n')
+        (tmp_path / "src/generator_input.txt").write_text("three\n")
+        main = commit(tmp_path, "chore: a newer release lands")
         head = project(main)
     elif case == "forged-code":
         git(tmp_path, "checkout", "--quiet", "--detach", head)

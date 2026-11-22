@@ -155,6 +155,10 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
     assert json.loads(scope_env["FULL_PYTHON_VERSIONS"])[0] == "3.11", "the floor is listed first"
+    # The matrices take Full from release_evidence.py's decision, which must run first.
+    steps = [step.get("id") for step in workflow["jobs"]["scope"]["steps"]]
+    assert steps.index("scope") < steps.index("docs-scope")
+    assert scope_env["FULL"] == "${{ steps.scope.outputs.full }}"
 
     shard_label = "${{ matrix.selection || format('shard {0}/{1}', matrix.shard, matrix.splits) }}"
     assert job["name"] == f"{tier} tests (py${{{{ matrix.python-version }}}}, {shard_label})"
@@ -819,7 +823,7 @@ def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups
     decision, _ = _change_scope(
         repository,
         "pull_request",
-        {"FULL_PYTHON_VERSIONS": '["3.11"]', "CORE_SHARDS": "24", "HARNESS_SHARDS": "6"},
+        {"FULL": "false", "FULL_PYTHON_VERSIONS": '["3.11"]', "CORE_SHARDS": "24", "HARNESS_SHARDS": "6"},
     )
 
     assert decision["docs_only"] == "false"
@@ -856,11 +860,11 @@ _HARNESS_MODULE = "tests/test_cjk_readiness.py"
             {("3.11", "changed"), ("3.13", "changed")},
             {("3.11", "changed")},
         ),
-        # A change to more tests than the shards hold runs the shards instead of more groups.
+        # A change to more tests than the shards hold still runs changed-test groups, capped below.
         (
             sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").glob("test_*.py")),
             False,
-            {(python, shard) for python in ("3.11", "3.13") for shard in range(1, 25)},
+            {("3.11", "changed"), ("3.13", "changed")},
             {("3.11", "changed")},
         ),
         # Docs-only runs the marked tests in one shard per tier.
@@ -889,6 +893,10 @@ def test_change_scope_builds_each_events_test_matrices(
         paths, full=full, runtimes=["3.11", "3.13"], core_shards=24, harness_shards=6, root=ROOT
     )
 
+    for entries, shard_count in zip(built, (24, 6)):
+        for python in {entry["python-version"] for entry in entries}:
+            # More groups than shards would put more jobs on a pull request than a push runs.
+            assert sum(entry["python-version"] == python for entry in entries) <= shard_count
     for entries, expected in zip(built, (core, harness)):
         assert {
             (entry["python-version"], "changed" if "selection" in entry else entry["shard"])

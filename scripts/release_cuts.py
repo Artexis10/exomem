@@ -777,19 +777,18 @@ def check_reconciliation(head: str, main: str, source: str) -> str:
     if merged is None:
         raise ValueError("reconciliation does not merge cleanly onto main")
     # The origin naming this source, as reconcile() pushes it, even when main has a newer release.
-    candidates = subprocess.run(
-        ("git", "grep", "-l", "--fixed-strings", source, merged, "--", ORIGIN_DIRECTORY),
-        text=True,
-        capture_output=True,
-        timeout=60,
-    ).stdout.splitlines()
-    records = [json.loads(git("show", path)) for path in candidates]
-    records = [record for record in records if record.get("source") == source]
-    if len(records) != 1:
+    paths = git("ls-tree", "--name-only", f"{merged}:{ORIGIN_DIRECTORY}").splitlines()
+    matches = [
+        (path, record)
+        for path in paths
+        if (record := json.loads(git("show", f"{merged}:{ORIGIN_DIRECTORY}/{path}"))).get("source")
+        == source
+    ]
+    if len(matches) != 1:
         raise ValueError("reconciliation must carry exactly one origin for its branch's source")
-    record = records[0]
+    path, record = matches[0]
     tag = record["tag"]
-    if f"{merged}:{origin_path(tag)}" not in candidates:
+    if f"{ORIGIN_DIRECTORY}/{path}" != origin_path(tag):
         raise ValueError("release origin path differs from its tag")
     # The record comes from the PR; its Git object names reach git commands below.
     for name in (record["head"], record["release"], record["predecessor"]["reconciliation_commit"]):
