@@ -1,0 +1,11 @@
+{
+  "id": "m13-article-history-of-databases",
+  "title": "An article about the history of databases is read for general interest",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I just finished a long article about how the first relational databases came to be: the early papers, the rivalry between the two original implementations, how the query language got its name. Fascinating stuff.",
+    "Can you help me jot down the main points before I forget them?"
+  ]
+}

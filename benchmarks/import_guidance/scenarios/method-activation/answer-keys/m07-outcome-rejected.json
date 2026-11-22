@@ -1,0 +1,16 @@
+{
+  "reference": "The person reports a finished trial with evidence: two weeks in the release job, Linux and macOS builds about 55 percent faster, Windows failing with cache lock errors on about one run in three, and a decision to drop it. A correct assistant serves the technology-signal method and writes the item for this tool and project as rejected, with the figures the person gave as outcome evidence, a one or two sentence outcome summary, and the Windows flakiness as the rationale. It does not delete the item, because rejected items stop the idea from returning. It closes any linked Planning item as done or cancelled and may offer a compiled insight about the Windows failure, but adds no figures the person did not give. The Windows build notes and the release checklist stay unchanged unless the person asks. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Notes/Procedures/pebble-ledger-release-checklist.md",
+    "Notes/Research/pebble-ledger/windows-build-notes.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

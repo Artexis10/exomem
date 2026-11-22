@@ -1,0 +1,16 @@
+{
+  "reference": "The person reports a successful trial with evidence: three weeks on the laptop copy, no missed write, two restores from the replica that matched byte for byte, negligible CPU cost, and a decision to switch it on for the real database. A correct assistant serves the technology-signal method and writes the item for this tool and project as adopted, with that evidence and a short outcome summary. It closes the linked Planning item as done. Because the person is changing how the project is backed up, the assistant may offer to write a decision, but does not rewrite the existing decision about keeping the data in one SQLite file without being asked. It adds no numbers the person did not give. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Entities/Decisions/Keep Pebble Ledger data in one SQLite file.md",
+    "Entities/Libraries/rusqlite.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

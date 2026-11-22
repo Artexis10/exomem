@@ -1,0 +1,12 @@
+{
+  "reference": "Negative twin of the technology-signal cases. Technology comes up, but only as what a friend does for a living, with no project of the person's and no idea they want to try. No method in the vault covers it, and nothing durable needs to go into Technology Signals. A correct assistant selects no method, does not create a signal item or a plan item, and answers the question from the friend's page: vegetarian, no mushrooms. Adding a line to the friend's page about the new job would be acceptable but is not required.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [],
+  "destination": null,
+  "trigger_turn": 0
+}

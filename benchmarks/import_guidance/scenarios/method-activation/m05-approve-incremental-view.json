@@ -1,0 +1,11 @@
+{
+  "id": "m05-approve-incremental-view",
+  "title": "A trial of an incremental summary view is approved",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "The weekly totals on Fernwatch take about 300 ms now and the readings table keeps growing. Postgres has an extension called pg_ivm that keeps a summary view up to date incrementally instead of recalculating it.",
+    "Yes, go ahead and try it. Staging database only, the weekly totals view, two weeks, and I'll judge it by how stale the numbers get."
+  ]
+}

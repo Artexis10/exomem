@@ -1,0 +1,11 @@
+{
+  "id": "m02-build-tool",
+  "title": "A build tool found for a side project's slow pipeline is discussed",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "How long does the Fernwatch front end take to build in CI these days? I think it was nine minutes.",
+    "Right, that's what I thought. I ran across a bundler called Rspack that can keep its cache on disk between runs and only rebuild what changed. If that holds up in CI it could cut most of those nine minutes. I haven't touched it yet, it just seems worth a look for Fernwatch."
+  ]
+}
