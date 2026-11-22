@@ -692,8 +692,9 @@ def reconcile(record: dict) -> None:
             if accepted is not None and tree == git("rev-parse", f"{main}^{{tree}}"):
                 return
             existing = evidence.api(f"pulls/{prs[0]['number']}") if prs else None
+            pushed = None
             if existing is None or prospective_tree(main, existing["head"]["sha"]) != tree:
-                push_reconciliation(root, record)
+                pushed = push_reconciliation(root, record)
         pr = (
             prs[0]
             if prs
@@ -708,22 +709,32 @@ def reconcile(record: dict) -> None:
                 },
             )
         )
+        refresh = False
         for _ in range(evidence.CHECK_POLLS):
             current = evidence.api(f"pulls/{pr['number']}")
+            # GitHub moves the PR head seconds after a push; never read the old head's checks.
+            if pushed is not None and current["head"]["sha"] != pushed:
+                time.sleep(evidence.CHECK_POLL_SECONDS)
+                continue
             checks = evidence.inherited_checks(current["head"]["sha"], evidence.main_check_policy())
             if checks is None:
                 time.sleep(evidence.CHECK_POLL_SECONDS)
                 continue
             if any(check["bucket"] != "pass" for check in checks):
-                raise ValueError(
-                    "reconciliation required checks failed; repair or refresh this cut"
-                )
+                latest = trusted_main()
+                # Red checks on a head that is no longer this main's projection need a re-push,
+                # not a stop; red checks on the current projection are a real failure.
+                if prospective_tree(latest, current["head"]["sha"]) == projection(latest):
+                    raise ValueError(
+                        "reconciliation required checks failed; repair or refresh this cut"
+                    )
+                refresh = True
             break
         else:
             raise ValueError("reconciliation is pending; retry after its required checks finish")
         latest = trusted_main()
         expected = projection(latest)
-        if prospective_tree(latest, current["head"]["sha"]) != expected:
+        if refresh or prospective_tree(latest, current["head"]["sha"]) != expected:
             # Main can move freely. Only a conflict or changed generated tree needs fresh CI.
             continue
         evidence.command(
@@ -765,11 +776,20 @@ def check_reconciliation(head: str, main: str, source: str) -> str:
     merged = prospective_tree(main, head)
     if merged is None:
         raise ValueError("reconciliation does not merge cleanly onto main")
-    version = json.loads(git("show", f"{merged}:.release-please-manifest.json"))["."]
-    tag = "v" + version
-    record = json.loads(git("show", f"{merged}:{origin_path(tag)}"))
-    if record.get("source") != source or record.get("tag") != tag:
-        raise ValueError("reconciliation origin differs from its branch's release source")
+    # The origin naming this source, as reconcile() pushes it, even when main has a newer release.
+    paths = git("ls-tree", "--name-only", f"{merged}:{ORIGIN_DIRECTORY}").splitlines()
+    matches = [
+        (path, record)
+        for path in paths
+        if (record := json.loads(git("show", f"{merged}:{ORIGIN_DIRECTORY}/{path}"))).get("source")
+        == source
+    ]
+    if len(matches) != 1:
+        raise ValueError("reconciliation must carry exactly one origin for its branch's source")
+    path, record = matches[0]
+    tag = record["tag"]
+    if f"{ORIGIN_DIRECTORY}/{path}" != origin_path(tag):
+        raise ValueError("release origin path differs from its tag")
     # The record comes from the PR; its Git object names reach git commands below.
     for name in (record["head"], record["release"], record["predecessor"]["reconciliation_commit"]):
         evidence.cut_branch(name)
