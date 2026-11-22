@@ -143,7 +143,7 @@ A per-original view SHALL page through results by path, and SHALL show each repl
 
 The exact-path status SHALL read the current binding, replica row, damage authority and applicable key-export receipts. It SHALL use one ledger snapshot. Surviving exact damage evidence SHALL remain visible when a filing row is missing. The status SHALL read a surviving quarantine of the same stored version through its index. Missing damage or key-export evidence SHALL read as unknown. A surviving key-export receipt SHALL still establish custody when export coverage is incomplete. Paged coverage and copy progress SHALL report unknown while their source projection is incomplete. Status reads SHALL leave schema initialization to the writer. A writer that times out while another writer initializes the ledger SHALL report a retryable busy outcome.
 
-An empty ledger or binding rebuild SHALL NOT establish complete key-export history. A rebuilt replica without a surviving upload record or an exact decrypt proof SHALL report unknown recoverability even with a confirmed key. Surviving findings SHALL still establish quarantine.
+An empty ledger or binding rebuild SHALL NOT establish complete key-export history. A replica without surviving plaintext proof SHALL report unknown recoverability even with a confirmed key. Encryption from verified local plaintext and a successful exact decrypt establish that proof. A ciphertext copy or a reused version SHALL carry the surviving proof of its exact source. Confirming a ciphertext upload SHALL record its time independently of plaintext proof. Reusing a version SHALL leave a new filing's upload time unknown. Surviving findings SHALL still establish quarantine.
 
 #### Scenario: A lost verification table
 

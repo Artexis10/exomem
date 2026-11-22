@@ -8,6 +8,7 @@ The cell reports every edge and provider fault under the store's own codes.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import Awaitable, Iterator, Mapping
@@ -36,6 +37,8 @@ from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, ReplicaAbs
 URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 CREDENTIAL_FILE_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
 _BLOCK = 1024 * 1024
+# Store errors carry a short protocol envelope, not object data.
+_MAX_ERROR_BYTES = 4096
 
 
 def _unavailable(reason: str) -> MediaStoreError:
@@ -62,12 +65,15 @@ def _refusal(response: httpx.Response, size: int | None = None) -> MediaStoreErr
     return _unavailable(f"the media edge answered {response.status_code}")
 
 
-def _read_refusal(response: httpx.Response) -> MediaStoreError:
+def _read_refusal(response: httpx.Response, reader: _Reader) -> MediaStoreError:
     if response.status_code == STATUS_ABSENT:
+        body = reader.read(_MAX_ERROR_BYTES + 1)
+        if len(body) > _MAX_ERROR_BYTES:
+            return _unavailable("the media edge sent an oversized absence reply")
         try:
-            if response.json()["code"] == ABSENT_CODE:
+            if json.loads(body)["code"] == ABSENT_CODE:
                 return ReplicaAbsent()
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, RecursionError, TypeError):
             pass  # a proxy's 404 does not say what the store holds
     return _refusal(response)
 
@@ -130,9 +136,11 @@ class EdgeStore:
     def _reading_response(self, method: str, path: str, params: dict[str, str], *,
                           deadline: float | None, headers: dict[str, str] | None = None):
         """Present one response to the synchronous reader, with a total deadline for maintenance."""
+        headers = {"accept-encoding": "identity", **(headers or {})}
         if deadline is None:
             with self._client("read") as client, client.stream(method, path, params=params, headers=headers) as response:
-                yield response, response.read, response.iter_raw(_BLOCK)
+                block = _BLOCK if response.status_code == 200 else _MAX_ERROR_BYTES + 1
+                yield response, _Reader(response.iter_raw(block))
             return
 
         with _outage("read"), asyncio.Runner() as runner:
@@ -147,14 +155,15 @@ class EdgeStore:
 
             try:
                 response = run(open_response())
-                chunks = response.aiter_raw(_BLOCK)
+                block = _BLOCK if response.status_code == 200 else _MAX_ERROR_BYTES + 1
+                chunks = response.aiter_raw(block)
                 held.push_async_callback(chunks.aclose)
 
                 def raw():
                     while (chunk := run(anext(chunks, None))) is not None:
                         yield chunk
 
-                yield response, lambda: run(response.aread()), raw()
+                yield response, _Reader(raw())
             finally:
                 runner.run(held.aclose())
 
@@ -179,15 +188,14 @@ class EdgeStore:
 
     def head(self, name: str, version: str, *, deadline: float | None = None) -> ObjectHead | None:
         path, params = f"{OBJECTS_PATH}{name}", {"version": version}
-        with self._reading_response("HEAD", path, params, deadline=deadline) as (response, _, _):
+        with self._reading_response("HEAD", path, params, deadline=deadline) as (response, _):
             pass  # HEAD has no body to retain.
         if response.status_code == STATUS_ABSENT:
             # Ask for one byte so a legacy edge can identify its absence reply.
             with self._reading_response("GET", path, params, deadline=deadline,
-                                        headers={"range": "bytes=0-0"}) as (probe, read_body, _):
+                                        headers={"range": "bytes=0-0"}) as (probe, reader):
                 if probe.status_code == STATUS_ABSENT:
-                    read_body()
-                    if isinstance(_read_refusal(probe), ReplicaAbsent):
+                    if isinstance(_read_refusal(probe, reader), ReplicaAbsent):
                         return None
             raise _unavailable("the media edge did not confirm the missing version")
         if response.status_code != 200:
@@ -205,8 +213,7 @@ class EdgeStore:
     @contextmanager
     def open(self, name: str, version: str, *, deadline: float | None = None):
         with self._reading_response("GET", f"{OBJECTS_PATH}{name}", {"version": version},
-                                    deadline=deadline) as (response, read_body, chunks):
+                                    deadline=deadline) as (response, reader):
             if response.status_code != 200:
-                read_body()
-                raise _read_refusal(response)
-            yield _Reader(chunks)
+                raise _read_refusal(response, reader)
+            yield reader

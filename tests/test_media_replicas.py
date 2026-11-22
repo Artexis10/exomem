@@ -526,6 +526,30 @@ def test_a_settlement_error_cannot_hide_the_first_due_verification(
     assert "cannot record the queued copy" in caplog.text
 
 
+def test_translated_ledger_contention_preserves_copy_attempts_and_due_verification(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.cli_ops import OpError
+
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.rebuild(vault)
+    media_replicas.scan(vault, MIRROR)
+    _due_again(vault)
+
+    def ledger_busy(*_args):
+        raise OpError(media_store.STORE_BUSY_CODE, "media ledger is busy")
+
+    monkeypatch.setattr(media_store, "replicate", ledger_busy)
+
+    assert media_replicas.work(vault)
+    assert _replica_row(vault, store="test-store")["checked_at"] > 0
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT state, attempts FROM media_replica_queue WHERE store = ?", (MIRROR,)).fetchone() == (
+            media_replicas.PENDING, 0)
+
+
 def test_a_repeated_replicate_keeps_the_progress_of_a_running_request_and_starts_a_new_one_when_it_ends(
         vault: Path, selected_store, mirrored: Path, monkeypatch) -> None:
     monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
@@ -733,6 +757,25 @@ def test_a_store_that_does_not_answer_is_checked_before_any_work_and_spends_no_a
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         assert ledger.execute("SELECT state, attempts, code FROM media_replica_queue").fetchall() == [("pending", 0, None)]
     assert originals.original_state(vault, original).replicas == ()
+
+
+def test_invalid_destination_setup_pauses_a_queued_copy_until_configured(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.rebuild(vault)
+    assert media_replicas.scan(vault, MIRROR) == 1
+    _declare(vault, selected_store, mirrored, max_object_bytes="invalid")
+
+    assert media_replicas.drain(vault) == 0
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT state, attempts, code FROM media_replica_queue").fetchall() == [("pending", 0, None)]
+    assert originals.original_state(vault, original).replicas == ()
+
+    _declare(vault, selected_store, mirrored)
+    assert media_replicas.drain(vault) == 1
+    assert media_replicas.progress(vault, MIRROR)["copied"] == 1
 
 
 def test_a_replica_that_the_binding_no_longer_lists_is_not_read_by_repair(vault: Path, selected_store, mirrored: Path) -> None:
@@ -1688,13 +1731,13 @@ def test_a_first_copy_keeps_its_job_when_the_published_replica_cannot_record_its
     path = media_jobs.MediaJobStore(vault).path
     note = media_store._note_replica
 
-    def fail_the_row_after_publication(root, original_path, replica, verified_at):
+    def fail_the_row_after_publication(root, original_path, replica, verified_at, copied_from=None):
         media_replicas.quarantine(vault, relative, pointer, level=media_replicas.DECRYPTED,
                                   failure=media_replicas.PLAINTEXT_MISMATCH)
         with closing(sqlite3.connect(path)) as conn, conn:
             conn.execute("CREATE TRIGGER test_projection_down BEFORE INSERT ON media_replicas "
                          "BEGIN SELECT RAISE(ABORT, 'simulated projection failure'); END")
-        note(root, original_path, replica, verified_at)
+        note(root, original_path, replica, verified_at, copied_from)
 
     monkeypatch.setattr(media_replicas, "_DRAIN_BATCH", 1)
     with monkeypatch.context() as failed:
@@ -1941,6 +1984,51 @@ def test_rebuild_cannot_recover_damage_history_but_a_new_proof_can_establish_hea
     assert media_replicas.sample(vault) == 2  # The simulated plaintext finding was a false alarm.
     assert shown_mirror()["recoverable"] is True
     assert media_replicas.status(vault)["totals"]["recoverable"] == 2
+
+
+def test_a_reused_exact_version_inherits_health_without_a_new_upload_time(
+        vault: Path, selected_store) -> None:
+    _configure(selected_store, vault, stores=[{"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE,
+                                              "sample_bytes_per_month": 0}])
+    assert media_replicas.rebuild(vault) == 0
+    first = _preserved(vault, category="first")
+    second = _preserved(vault, category="second")
+    assert _offload(vault, first) == _offload(vault, second)
+    media_replicas.confirm_key_export(vault)
+    assert media_replicas.sample(vault) == 0
+
+    relative = second.relative_to(vault).as_posix()
+    [exact] = media_replicas.original_view(vault, relative)["replicas"]
+    listed = next(row for row in media_replicas.page(vault)["originals"] if row["path"] == relative)
+    assert [(item["recoverable"], item["verified_at"], item["last_check"])
+            for item in (exact, *listed["replicas"])] == [(True, None, None)] * 2
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["recoverability_unknown"], totals["verification_time_unknown"]) == (2, 0, 1)
+
+
+def test_a_ciphertext_copy_does_not_gain_health_when_its_own_upload_is_confirmed(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    primary, mirror = selected_store[0]["stores"]
+    _configure(selected_store, vault, stores=[{**entry, "sample_bytes_per_month": 0} for entry in (primary, mirror)])
+    original = _preserved(vault)
+    _offload(vault, original)
+    assert media_store.evict(vault, original)
+    assert originals.original_state(vault, original).state == "evicted"
+    media_jobs.job_store_path(vault).unlink()
+    assert media_replicas.rebuild(vault) == 1
+    media_replicas.confirm_key_export(vault)
+
+    media_store.replicate(vault, original, MIRROR)
+
+    relative = original.relative_to(vault).as_posix()
+    exact = media_replicas.original_view(vault, relative)
+    [listed] = media_replicas.page(vault)["originals"]
+    for view in (exact, listed):
+        [copied] = [item for item in view["replicas"] if item["store"] == MIRROR]
+        assert copied["verified_at"] is not None
+        assert (copied["recoverable"], copied["reason"]) == (None, "damage evidence unavailable")
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["recoverability_unknown"], totals["verification_time_unknown"]) == (0, 2, 1)
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -2412,6 +2500,11 @@ def test_a_copy_again_of_a_version_that_two_filings_share_uploads_it_once_and_ke
     assert _entry(vault, second, pointer.store) == fresh
     assert media_allowance.reference_usage(vault).used_bytes == size
     assert len(_objects(Path(selected_store[0]["root"]))) == 2  # the damaged version and its one replacement
+
+    media_replicas.confirm_key_export(vault)
+    media_replicas.rebuild(vault)
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["recoverability_unknown"], totals["verification_time_unknown"]) == (2, 0, 1)
 
 
 def test_eviction_recovers_an_absent_shared_version_at_the_existing_allowance(vault: Path, selected_store) -> None:
@@ -3990,6 +4083,19 @@ def test_a_missing_large_version_leaves_the_rounds_byte_share_for_the_next_repli
     assert _replica_row_of(vault, intact, missing.store)["level"] == media_replicas.CONTENT
 
 
+def test_a_new_publication_updates_the_round_budget_before_the_next_rebuild(vault: Path, selected_store) -> None:
+    ledger = media_jobs.MediaJobStore(vault)
+    original = _stored(vault, "Recordings", b"x" * (4 * 1024**2))
+    media_replicas.rebuild(vault)
+    cycle = media_replicas._CHECK_INTERVAL / 20
+    store = "test-store"
+    assert media_replicas._check_plan(ledger, [store], cycle)[store] == (16, 64 * 1024**2)
+
+    replica = _offload(vault, original)
+
+    assert media_replicas._check_plan(ledger, [store], cycle)[store] == (20, 20 * replica.ciphertext_size)
+
+
 def test_the_round_at_the_default_settings_checks_two_stores_of_the_sizing_target_within_the_cycle(
         vault: Path, selected_store, mirrored: Path) -> None:
     """Two stores of 500,000 replicas and 25 TB share one read cap: too short a round leaves the second behind its cycle."""
@@ -3997,8 +4103,11 @@ def test_the_round_at_the_default_settings_checks_two_stores_of_the_sizing_targe
     stores = ["test-store", MIRROR]
     with closing(ledger._connect()) as conn, conn:
         for store in stores:
-            conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
-                         (store, 500_000, 25 * 10**12))
+            conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
+                         "VALUES ('Originals/file.bin', ?, 'object', '1', '1', 1, ?, 0)",
+                         (store, media_replicas.UPLOAD_VERIFIED))
+            conn.execute("UPDATE media_replica_counts SET replicas = ?, bytes = ? WHERE store = ?",
+                         (500_000, 25 * 10**12, store))
     cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
 
     plan = media_replicas._check_plan(ledger, stores, cycle)
@@ -4016,12 +4125,12 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
     ledger = media_jobs.MediaJobStore(vault)
     size = 50 * 10**6  # the sizing target's average object: 25 TB over 500,000 replicas
     with closing(ledger._connect()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
-                     (MIRROR, 500_000, 25 * 10**12))
         for number in range(150):
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
                          "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
                          (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", size, media_replicas.UPLOAD_VERIFIED))
+        conn.execute("UPDATE media_replica_counts SET replicas = ?, bytes = ? WHERE store = ?",
+                     (500_000, 25 * 10**12, MIRROR))
     clock = [0.0]
     monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
@@ -4078,13 +4187,13 @@ def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_
     two such reads ten minutes apart ran at several times the configured rate."""
     gib = 1024**3
     with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
-                     (MIRROR, 500_000, 25 * 10**12))
         for number in range(2):
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
                          "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
                          (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", 100 * gib,
                           media_replicas.UPLOAD_VERIFIED))
+        conn.execute("UPDATE media_replica_counts SET replicas = ?, bytes = ? WHERE store = ?",
+                     (500_000, 25 * 10**12, MIRROR))
     clock, reads = [0.0], []
     monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
@@ -4184,13 +4293,13 @@ def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
     gib = 1024**3
     ledger = media_jobs.MediaJobStore(vault)
     with closing(ledger._connect()) as conn, conn:
-        conn.execute("INSERT OR REPLACE INTO media_replica_store_totals(store, replicas, bytes) VALUES (?, ?, ?)",
-                     (MIRROR, 500_000, 10**15))
         for number in range(3):
             conn.execute("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, state, seen) "
                          "VALUES (?, ?, ?, '1', '1', ?, ?, (SELECT value FROM media_replica_generation WHERE id = 1))",
                          (f"Originals/file-{number}.bin", MIRROR, f"object-{number}", 10 * gib,
                           media_replicas.UPLOAD_VERIFIED))
+        conn.execute("UPDATE media_replica_counts SET replicas = ?, bytes = ? WHERE store = ?",
+                     (500_000, 10**15, MIRROR))
     clock = [0.0]
     monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",

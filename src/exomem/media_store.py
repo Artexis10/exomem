@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 class MediaStoreError(RuntimeError):
     def __init__(self, code: str, reason: str):
         self.code = code
+        self.reason = reason
         super().__init__(f"{code}: {reason}")
 
 
@@ -1620,10 +1621,10 @@ class StoreReadTimedOut(MediaStoreError):
 
 
 class CopyStoreUnavailable(MediaStoreError):
-    """The destination identity could not be confirmed before a copy started."""
+    """The destination could not be opened or its identity could not be confirmed before a copy."""
 
-    def __init__(self) -> None:
-        super().__init__("MEDIA_STORE_UNAVAILABLE", "the copy destination did not answer as itself")
+    def __init__(self, message: str = "the copy destination did not answer as itself") -> None:
+        super().__init__("MEDIA_STORE_UNAVAILABLE", message)
 
 
 _ReadResult = TypeVar("_ReadResult")
@@ -2194,7 +2195,12 @@ def store_reachable(vault: Path, name: str) -> bool | None:
 
 def _copy_backend(vault: Path, name: str) -> Store:
     """Confirm identity with a bounded preflight before reading or protecting the source."""
-    backend = store_for(vault, name)
+    try:
+        backend = store_for(vault, name)
+    except MediaStoreError as error:
+        if error.code != "MEDIA_STORE_UNAVAILABLE":
+            raise
+        raise CopyStoreUnavailable(error.reason) from error
     if isinstance(backend, FilesystemStore):
         from . import media_replicas
 
@@ -2240,12 +2246,14 @@ def replica_readability(config: dict[str, object], entry: originals.StoreEntry |
     return None
 
 
-def _note_replica(vault: Path, path: Path, replica: StoredObject, verified_at: float | None) -> None:
+def _note_replica(vault: Path, path: Path, replica: StoredObject, verified_at: float | None,
+                  copied_from: StoredObject | None = None) -> None:
     """Record a published replica in the derived table. A failure costs the row only: the next rebuild restores it."""
     from . import media_replicas
 
     try:
-        media_replicas.record(vault, MediaJobStore(vault)._relative(path), replica, verified_at=verified_at)
+        media_replicas.record(vault, MediaJobStore(vault)._relative(path), replica, verified_at=verified_at,
+                              copied_from=copied_from)
     except (sqlite3.Error, OSError) as error:
         log.warning("a published replica is not yet in the replica table: %s", type(error).__name__)
 
@@ -2335,7 +2343,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
                 raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the binding changed")
             _seal(ledger, snapshot, name)
             _commit_reference(vault, prepare_replica(vault, snapshot, replica))
-            _note_replica(vault, path, replica, time.time())
+            _note_replica(vault, path, replica, time.time(), copied)
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?",
                      (ledger._relative(path), name))
 
@@ -2548,7 +2556,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
                 _repoint_cache(vault, ledger, snapshot, damaged, replica)
             else:
                 _commit_reference(vault, prepare_replica(vault, snapshot, replica))
-            _note_replica(vault, path, replica, None if sibling is not None else time.time())
+            _note_replica(vault, path, replica, None if sibling is not None else time.time(), copied)
             _durable(ledger, "DELETE FROM media_protections WHERE binary_rel = ? AND object = ?", (relative, name))
 
         _publishing(vault, "media_store_replica_recopy", publish, publishing=(replica,), copied_from=copied)

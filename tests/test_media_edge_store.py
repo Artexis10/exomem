@@ -165,6 +165,23 @@ def test_a_maintenance_deadline_releases_a_trickling_edge_response(tmp_path: Pat
                 time.sleep(0.01)
 
 
+@pytest.mark.parametrize("operation", ["open", "head"])
+def test_an_oversized_edge_absence_envelope_is_unavailable(tmp_path: Path, operation: str):
+    body = {"code": ABSENT_CODE, "excess": "x" * 8192}
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        store = _store(host, port, tmp_path)
+        deadline = time.monotonic() + 2
+        with pytest.raises(MediaStoreError) as refused:
+            if operation == "head":
+                store.head("1" * 64, "version", deadline=deadline)
+            else:
+                with store.open("1" * 64, "version", deadline=deadline):
+                    pytest.fail("an oversized absence reply cannot return a stream")
+
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert not isinstance(refused.value, ReplicaAbsent)
+
+
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)

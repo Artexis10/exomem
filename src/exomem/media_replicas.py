@@ -119,6 +119,8 @@ _ADDED_COLUMNS = (
     # The digest of the stored ciphertext, so the copies of bytes that decrypt wrong are found by the rows themselves.
     # An earlier release's row has none until a rebuild fills it.
     ("ciphertext_sha256", "TEXT"),
+    # A current publication records plaintext evidence independently of its upload time. Older uploads leave this NULL.
+    ("plaintext_proved", "INTEGER"),
 )
 #: A sample cannot read this row because the binding lists no exact plaintext digest or cannot be read.
 _UNSAMPLEABLE = -1
@@ -183,10 +185,47 @@ def _proof_level(row: str = "") -> str:
 _PROOF_AT = "MAX(checked_at, decrypted_at)"
 
 
+def _plaintext_proof(row: str = "") -> str:
+    return f"(COALESCE({row}plaintext_proved, {row}verified_at IS NOT NULL) OR {row}decrypted_at > 0)"
+
+
 def _unproved_health(row: str = "") -> str:
-    # A binding recovers the published version, but not findings since its upload. A recorded upload or an exact
-    # decrypt proof establishes health. Presence and ciphertext checks cannot rule out lost plaintext findings.
-    return f"({row}state <> '{QUARANTINED}' AND {row}verified_at IS NULL AND {row}decrypted_at = 0)"
+    # Presence and ciphertext checks cannot rule out lost plaintext findings.
+    return f"({row}state <> '{QUARANTINED}' AND {_plaintext_proof(row)} = 0)"
+
+
+# These are the ledger fields that identify the exact stored ciphertext and the identity that can decrypt it.
+_HEALTH_FIELDS = ("object", "version", "store", "key_version", "size", "ciphertext_sha256")
+_HEALTH_COLUMNS = ", ".join(_HEALTH_FIELDS)
+_HEALTH_ELIGIBLE = f"state <> '{QUARANTINED}' AND ciphertext_sha256 IS NOT NULL"
+_EXACT_HEALTH_INDEX = "media_replicas_exact_health"
+_KNOWN_EXACT_PROOF = (f"SELECT 1 FROM media_replicas INDEXED BY {_EXACT_HEALTH_INDEX} "
+                      f"WHERE {_HEALTH_ELIGIBLE} AND {_plaintext_proof()} = 1")
+
+
+def _health_key(replica: originals.StoredObject) -> tuple[str, str, str, str, int, str]:
+    return (replica.object, replica.version, replica.store, replica.key_version,
+            replica.ciphertext_size, replica.ciphertext_sha256)
+
+
+_PROVED_EXACT = _KNOWN_EXACT_PROOF + f" AND ({_HEALTH_COLUMNS}) = (?, ?, ?, ?, ?, ?) LIMIT 1"
+
+
+_INHERIT_PROOF = (
+    f"UPDATE media_replicas AS alias INDEXED BY {_EXACT_HEALTH_INDEX} SET plaintext_proved = 1 "
+    f"WHERE {_HEALTH_ELIGIBLE} AND {_plaintext_proof()} = 0 "
+)
+_INHERIT_EXACT_PROOF = _INHERIT_PROOF + f"AND ({_HEALTH_COLUMNS}) = (?, ?, ?, ?, ?, ?)"
+_INHERIT_REBUILT_PROOFS = _INHERIT_PROOF + (
+    f"AND EXISTS ({_KNOWN_EXACT_PROOF} "
+    f"AND ({_HEALTH_COLUMNS}) = ({', '.join(f'alias.{column}' for column in _HEALTH_FIELDS)}))"
+)
+
+
+def _restore_exact_proofs(conn: sqlite3.Connection) -> None:
+    # A binding walk can restore an alias before it links the surviving proof's old row to its exact digest.
+    if conn.execute(_KNOWN_EXACT_PROOF + " LIMIT 1").fetchone() is not None:
+        conn.execute(_INHERIT_REBUILT_PROOFS)
 
 
 def _store_contributions(row: str) -> dict[str, str]:
@@ -325,6 +364,7 @@ def _initialize_status(conn: sqlite3.Connection, existing: set[str]) -> None:
 def initialize(conn: sqlite3.Connection) -> None:
     """Create the replica tables. A table created fresh clears the census, so its first rows read as unknown."""
     existing = _status_schema(conn)
+    recreated = bool(existing.intersection(_STATUS_TABLES)) and not _REPLICA_STATUS_TRIGGERS.issubset(existing)
     _initialize_export_coverage(conn, existing)
     conn.execute("CREATE TABLE IF NOT EXISTS media_replicas ("
                  "binary_rel TEXT NOT NULL, store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, "
@@ -335,6 +375,11 @@ def initialize(conn: sqlite3.Connection) -> None:
     healed = [(name, kind) for name, kind in _ADDED_COLUMNS if name not in have]
     for name, kind in healed:
         conn.execute(f"ALTER TABLE media_replicas ADD COLUMN {name} {kind}")
+    if "plaintext_proved" not in have and _STATUS_TABLES[0] in existing:
+        # The former summary triggers classified health from the upload time alone.
+        for trigger in _REPLICA_STATUS_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        existing.difference_update(_REPLICA_STATUS_TRIGGERS)
     # A check round takes the replicas checked longest ago first, and a sample those proved by decryption longest ago
     # first, each as one range read in index order with no sort. The literal in the partial index is the one the
     # queries below repeat: SQLite uses a partial index only when the query states the same condition.
@@ -355,6 +400,8 @@ def initialize(conn: sqlite3.Connection) -> None:
     # costs nothing to find again.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_held ON media_replicas(object, version) "
                  f"WHERE state <> '{QUARANTINED}'")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS {_EXACT_HEALTH_INDEX} ON media_replicas("
+                 f"{_plaintext_proof()}, {_HEALTH_COLUMNS}) WHERE {_HEALTH_ELIGIBLE}")
     # The filings of one ciphertext, under any name, that are not quarantined: the ones a wrong plaintext of it
     # quarantines together (`_inherit`, `_quarantine_listing`). A finding that repeats reads none that it handled before,
     # however many filings hold the ciphertext. A release finds the quarantined ones through the records (`_released`).
@@ -391,8 +438,8 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_generation ("
                  "id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL)")
     conn.execute("INSERT OR IGNORE INTO media_replica_generation(id, value) VALUES (1, 0)")
-    recreated = bool(existing.intersection(_STATUS_TABLES)) and not _REPLICA_STATUS_TRIGGERS.issubset(existing)
-    if "media_replicas" not in existing or healed or recreated:
+    needs_rebuild = "media_replicas" not in existing or any(name != "plaintext_proved" for name, _ in healed) or recreated
+    if needs_rebuild:
         # Lost rows or newly added fields need a fresh walk. A walk that started before the reset cannot certify it.
         conn.execute("DELETE FROM media_replica_census")
         conn.execute("UPDATE media_replica_generation SET value = value + 1 WHERE id = 1")
@@ -426,9 +473,6 @@ def initialize(conn: sqlite3.Connection) -> None:
     # What the worker last saw of each store that has a cheap check, so a status never reads a store.
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_reach ("
                  "store TEXT PRIMARY KEY, reachable INTEGER NOT NULL, observed_at REAL NOT NULL)")
-    # The replicas and bytes each store held at the last rebuild: what a check round sizes its byte budget from.
-    conn.execute("CREATE TABLE IF NOT EXISTS media_replica_store_totals ("
-                 "store TEXT PRIMARY KEY, replicas INTEGER NOT NULL, bytes INTEGER NOT NULL)")
     # The ciphertext bytes that sampled checks downloaded from each store in each UTC calendar month (YYYYMM).
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_samples ("
                  "store TEXT NOT NULL, month INTEGER NOT NULL, bytes INTEGER NOT NULL, "
@@ -441,6 +485,8 @@ def initialize(conn: sqlite3.Connection) -> None:
     if _restore_damage(conn):
         conn.execute(_INHERIT_ALL)
         _quarantine_listing(conn, time.time())
+    if not needs_rebuild and "plaintext_proved" not in have:
+        _restore_exact_proofs(conn)
     if queue_lost:
         # A surviving demand can safely rescan current bindings. Lost rows cannot say who belonged to its former scan.
         conn.execute("UPDATE media_replica_demands SET scanned_at = NULL, scan_token = random()")
@@ -499,7 +545,7 @@ def _iso(value: float | None) -> str | None:
 # --- what a publication records ---------------------------------------------------------------------
 
 
-def _upsert(seen: str) -> str:
+def _upsert(seen: str, plaintext_proved: str) -> str:
     """The statement that writes one row; `seen` is the SQL that gives the row's generation.
 
     A row for the same object and version keeps its upload time and its check results, a quarantine included. A new
@@ -515,11 +561,15 @@ def _upsert(seen: str) -> str:
         return f"{column} = CASE WHEN {unchanged} THEN media_replicas.{column} ELSE {fresh} END"
 
     return ("INSERT INTO media_replicas(binary_rel, store, object, version, key_version, size, verified_at, state, seen, "
-            f"ciphertext_sha256) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {seen}, ?) ON CONFLICT(binary_rel, store) DO UPDATE SET "
+            f"ciphertext_sha256, plaintext_proved) VALUES (?, ?, ?, ?, ?, ?, ?, ?, {seen}, ?, {plaintext_proved}) "
+            "ON CONFLICT(binary_rel, store) DO UPDATE SET "
             "object = excluded.object, version = excluded.version, key_version = excluded.key_version, "
             "size = excluded.size, seen = excluded.seen, ciphertext_sha256 = excluded.ciphertext_sha256, "
             f"verified_at = CASE WHEN {unchanged} THEN COALESCE(excluded.verified_at, media_replicas.verified_at) "
             "ELSE excluded.verified_at END, "
+            f"plaintext_proved = CASE WHEN {unchanged} THEN MAX(COALESCE(excluded.plaintext_proved, 0), "
+            "COALESCE(media_replicas.plaintext_proved, media_replicas.verified_at IS NOT NULL)) "
+            "ELSE excluded.plaintext_proved END, "
             + keep("state", "excluded.state") + ", " + keep("checked_at", "0") + ", " + keep("level", "NULL") + ", "
             + keep("decrypted_at", "0") + ", " + keep("failure", "NULL") + ", " + keep("sample_month", "0") + ", "
             + keep("check_from", "0") + ", " + keep("sample_from", "0"))
@@ -527,13 +577,15 @@ def _upsert(seen: str) -> str:
 
 #: A publication reads the generation in the same statement as its write, so a rebuild that starts in between cannot
 #: strand the row below its own generation.
-_UPSERT_PUBLISHED = _upsert("(SELECT value FROM media_replica_generation WHERE id = 1)")
-_UPSERT_REBUILT = _upsert("?") + " WHERE media_replicas.seen < excluded.seen"
+_UPSERT_PUBLISHED = _upsert("(SELECT value FROM media_replica_generation WHERE id = 1)", "?")
+_UPSERT_REBUILT = _upsert("?", "NULL") + " WHERE media_replicas.seen < excluded.seen"
 
 
-def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, verified_at: float | None) -> None:
+def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, verified_at: float | None,
+           copied_from: originals.StoredObject | None = None) -> None:
     """Note a replica that a binding now lists. `verified_at` is its upload time; None when this write does not know it.
 
+    A ciphertext upload records its exact source in `copied_from`, so its upload time only proves the new transfer.
     A version that a finding recorded as damaged stays damaged for a filing that lists it later: the row is written
     quarantined with its request, in the same transaction, so a publication that raced the finding is never trusted.
     So is a copy of ciphertext that a finding recorded as decrypting wrong, under whatever name it was written
@@ -541,16 +593,20 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
     the row through its digest (`quarantine_all`).
     """
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        changed = _record_replica(conn, binary_rel, replica, verified_at=verified_at)
+        conn.execute("BEGIN IMMEDIATE")
+        changed = _record_replica(conn, binary_rel, replica, verified_at=verified_at, copied_from=copied_from)
     if changed:
         wake()
 
 
 def _record_replica(conn: sqlite3.Connection, binary_rel: str, replica: originals.StoredObject, *,
-                    verified_at: float | None) -> bool:
+                    verified_at: float | None, copied_from: originals.StoredObject | None = None) -> bool:
+    # Only a fresh encryption checked the local plaintext. A ciphertext copy carries its exact source's evidence.
+    proved = ((verified_at is not None and copied_from is None)
+              or conn.execute(_PROVED_EXACT, _health_key(copied_from or replica)).fetchone() is not None)
     conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
                                      replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED,
-                                     replica.ciphertext_sha256))
+                                     replica.ciphertext_sha256, proved))
     conn.execute(_INHERIT_OF, {"digest": replica.ciphertext_sha256})
     return _quarantine_listing(conn, time.time(), replica, binary_rel=binary_rel)
 
@@ -831,9 +887,7 @@ def rebuild(vault: Path) -> int:
         _restore_damage(conn)
         conn.execute(_INHERIT_ALL)
         _quarantine_listing(conn, time.time())
-        conn.execute("DELETE FROM media_replica_store_totals")
-        conn.execute("INSERT INTO media_replica_store_totals(store, replicas, bytes) "
-                     "SELECT store, replicas, bytes FROM media_replica_counts")
+        _restore_exact_proofs(conn)
         # A request that had no verified source, a copy again or a first replica, may have one now: the original came
         # back, another replica did, or a pointer that was found wrong has been repaired.
         conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
@@ -1647,9 +1701,12 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         except media_store.MediaStoreError as error:
             code = error.code
         except OpError as error:
-            if error.code != "MUTATION_BUSY" or error.details.get("committed") is not False:
+            if error.code == media_store.STORE_BUSY_CODE:
+                code = error.code
+            elif error.code == "MUTATION_BUSY" and error.details.get("committed") is False:
+                code = media_store.STORE_BUSY_CODE
+            else:
                 raise
-            code = media_store.STORE_BUSY_CODE
         except (OSError, ValueError) as error:
             code = type(error).__name__
         if code is None:
@@ -1943,7 +2000,7 @@ _CHECK_PLAN = (
     "SELECT wanted.value AS store, COALESCE(t.replicas, 0) AS replicas, COALESCE(t.bytes, 0) AS bytes, "
     "(SELECT check_from FROM media_replicas WHERE store = wanted.value "
     f"AND state <> '{QUARANTINED}' AND check_from <= ? ORDER BY check_from LIMIT 1) AS oldest "
-    "FROM json_each(?) AS wanted LEFT JOIN media_replica_store_totals AS t ON t.store = wanted.value "
+    "FROM json_each(?) AS wanted LEFT JOIN media_replica_counts AS t ON t.store = wanted.value "
     "ORDER BY oldest NULLS LAST, wanted.key"
 )
 
@@ -2136,13 +2193,15 @@ def _mark_sample(vault: Path, row: sqlite3.Row, month: int, *, attempted: origin
                      "AND object = ? AND version = ?", (month, row["binary_rel"], row["store"], name, version))
 
 
-def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject, store: str) -> None:
+def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) -> None:
     """Record a sample that matched: it clears every finding of an attempt, and a replica quarantined meanwhile stays so."""
     now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("UPDATE media_replicas SET decrypted_at = ?, sample_from = ?, failure = NULL "
-                     "WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
-                     f"AND state <> '{QUARANTINED}'", (now, now, row["binary_rel"], store, replica.object, replica.version))
+        exact = _health_key(replica)
+        if conn.execute("UPDATE media_replicas SET decrypted_at = ?, sample_from = ?, failure = NULL "
+                        f"WHERE binary_rel = ? AND ({_HEALTH_COLUMNS}) = (?, ?, ?, ?, ?, ?) "
+                        f"AND state <> '{QUARANTINED}'", (now, now, row["binary_rel"], *exact)).rowcount:
+            conn.execute(_INHERIT_EXACT_PROOF, exact)
 
 
 def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) -> None:
@@ -2344,7 +2403,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                 elif quarantined:
                     _released(vault, row, replica)
                 else:
-                    _proved(vault, row, replica, name)
+                    _proved(vault, row, replica)
             if failing >= _STORE_FAILURES:
                 break  # a store or key that fails three in a row is the likelier cause; the next round tries again
     return sampled
