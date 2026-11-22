@@ -60,8 +60,8 @@ ACCEPTED_REFUSALS = frozenset({"MUTATION_BUSY", "MUTATION_WARMING", "COLLECTION_
 #: Replay outcomes that are not final: the drainer tries the same identity again
 #: later. An outcome-unknown or acknowledgement-pending replay resolves on a
 #: same-identity retry, which the idempotency store answers.
+#: `MUTATION_OUTCOME_UNKNOWN` is not here: the idempotency store keeps it for good, so it is final.
 RETRY_REFUSALS = ACCEPTED_REFUSALS | {  # nosemgrep: ep-word-set -- closed public error codes of the mutation protocol.
-    "MUTATION_OUTCOME_UNKNOWN",
     "MUTATION_ACKNOWLEDGEMENT_PENDING",
     # Committed, terminal not persisted: its own remediation is a same-identity retry.
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
@@ -173,7 +173,8 @@ def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Conne
                 "command TEXT NOT NULL, arguments TEXT, principal TEXT NOT NULL, surface TEXT, "
                 "state TEXT NOT NULL, owner TEXT, attempts INTEGER NOT NULL DEFAULT 0, "
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
-                "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL)"
+                "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
+                "generation INTEGER NOT NULL DEFAULT 0, boundary_held INTEGER NOT NULL DEFAULT 0)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -464,6 +465,11 @@ class _Claim:
     principal: dict[str, Any]
     surface: dict[str, Any] | None
     attempts: int
+    generation: int
+
+
+def _replay_identity(claim: _Claim) -> str:
+    return f"intake:{claim.id}" if claim.generation == 0 else f"intake:{claim.id}:{claim.generation}"
 
 
 def _claim_head(vault_root: Path) -> _Claim | float | None:
@@ -486,9 +492,20 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
                 return _IDLE_POLL_SECONDS
             if row["state"] == QUEUED and row["next_attempt_at"] > now:
                 return max(0.05, row["next_attempt_at"] - now)
+            generation = int(row["generation"])
+            if row["state"] == APPLYING and not row["boundary_held"]:
+                # No attempt under this replay identity ever held the vault boundary, so no leaf
+                # ran under it. The attempt that left the row applying may still have the identity
+                # pending under a dead owner, which the idempotency store keeps as outcome-unknown
+                # for good; a fresh identity replays the save instead of leaving it stuck.
+                # `boundary_held` is sticky per identity, so an identity that ever reached the
+                # boundary (and so may have committed) is never abandoned this way.
+                generation += 1
             conn.execute(
-                "UPDATE intake SET state = ?, owner = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?",
-                (APPLYING, mine, now, row["id"]),
+                "UPDATE intake SET state = ?, owner = ?, attempts = attempts + 1, updated_at = ?, "
+                "boundary_held = CASE WHEN generation = ? THEN boundary_held ELSE 0 END, "
+                "generation = ? WHERE id = ?",
+                (APPLYING, mine, now, generation, generation, row["id"]),
             )
             return _Claim(
                 id=row["id"],
@@ -497,6 +514,7 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
                 principal=json.loads(row["principal"]),
                 surface=json.loads(row["surface"]) if row["surface"] else None,
                 attempts=int(row["attempts"]) + 1,
+                generation=generation,
             )
     except FileNotFoundError:
         return None
@@ -533,6 +551,17 @@ def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
         injected: tuple[Any, ...] = (vault_root, schema_module.load_source_schema(vault_root))
     else:
         injected = (vault_root,)
+    from . import mutation_lock
+
+    marked = threading.Event()
+
+    def mark_boundary_held() -> None:
+        # Durable before the leaf runs: after a crash, a row whose attempt held the boundary
+        # is uncertain and replays only under the same identity.
+        if not marked.is_set():
+            _with_store_retry(lambda: _mark_boundary_held(vault_root, claim))
+            marked.set()
+
     token = _REPLAYING.set(True)
     try:
         with (
@@ -540,11 +569,12 @@ def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
             capabilities.active_surface(descriptor) if descriptor is not None else _nothing(),
             principal_module.invocation_scope(),
             writer_lease.caller_holds_no_request_worker(),
+            mutation_lock.on_boundary_acquired(mark_boundary_held),
         ):
             result = writer_lease.invoke_command(
                 command,
                 *injected,
-                idempotency_key=f"intake:{claim.id}",
+                idempotency_key=_replay_identity(claim),
                 idempotency_principal_scope=principal.audience_id,
                 # Receipts require a UUID request id; one per attempt, derived from the save.
                 mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{claim.id}:{claim.attempts}")),
@@ -569,6 +599,14 @@ def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
 @contextmanager
 def _nothing() -> Iterator[None]:
     yield
+
+
+def _mark_boundary_held(vault_root: Path, claim: _Claim) -> None:
+    with _write(vault_root) as conn:
+        conn.execute(
+            "UPDATE intake SET boundary_held = 1 WHERE id = ? AND generation = ?",
+            (claim.id, claim.generation),
+        )
 
 
 def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
@@ -879,7 +917,13 @@ def read(vault_root: Path, ref: str | None = None, limit: int | None = None) -> 
             APPLIED: "Saved: the queued save was applied.",
             FAILED: "Not saved: the queued save failed. Its arguments are below; correct and send it again.",
         }
-        return {"user_summary": summaries[view["state"]], "queued_write": view}
+        summary = summaries[view["state"]]
+        if view["state"] == FAILED and view.get("error", {}).get("code") == "MUTATION_OUTCOME_UNKNOWN":
+            summary = (
+                "Not confirmed: the service stopped while applying this save, so it may have landed. "
+                "Check the page before sending it again; its arguments are below."
+            )
+        return {"user_summary": summary, "queued_write": view}
     cap = max(1, min(int(limit or _LIST_LIMIT), _LIST_LIMIT))
     try:
         with _store(vault_root, create=False) as conn:

@@ -29,7 +29,7 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 
 ### Requirement: Queued saves land once, in arrival order
 
-One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. The drainer SHALL replay each save under its own durable replay identity, so a save whose commit happened before a process stop is not written again after the restart. While a save is queued or being applied, a resend with the save's original idempotency identity SHALL return the same receipt and SHALL NOT run. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
+One drainer in the serving process SHALL apply queued saves in acceptance order, through the ordinary dispatcher, as the principal that sent each save. A contention refusal during application SHALL leave the save queued and retried, without a limit on attempts. The drainer SHALL replay each save under its own durable replay identity, so a save whose commit happened before a process stop is not written again after the restart. A replay that stopped before it held the vault boundary SHALL be replayed under a fresh identity, so a dead attempt never leaves a save stuck. A replay that held the boundary and whose commit cannot be proven or ruled out SHALL end `failed` with `MUTATION_OUTCOME_UNKNOWN`, keep its arguments, and SHALL NOT block the saves behind it. While a save is queued or being applied, a resend with the save's original idempotency identity SHALL return the same receipt and SHALL NOT run. A new eligible save that arrives while saves are queued SHALL wait behind them and SHALL be queued behind them if the queue does not empty within the intake wait.
 
 #### Scenario: Two clients' saves land after the hold ends
 
@@ -39,9 +39,16 @@ One drainer in the serving process SHALL apply queued saves in acceptance order,
 
 #### Scenario: A restart mid-queue loses nothing and duplicates nothing
 
-- **WHEN** the service stops while saves are queued and one is being applied
+- **WHEN** the service stops while saves are queued and one is waiting for the boundary to apply
 - **AND** the service starts again
 - **THEN** every queued save commits exactly once
+
+#### Scenario: A stop inside an uncertain commit is visible, not stuck
+
+- **WHEN** the service stops after a replay held the boundary and before its commit could be proven
+- **AND** the service starts again without commit evidence for it
+- **THEN** that save is recorded `failed` with `MUTATION_OUTCOME_UNKNOWN` and its arguments
+- **AND** the saves behind it are applied
 
 #### Scenario: A resend while queued runs nothing
 

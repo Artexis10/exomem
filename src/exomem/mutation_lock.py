@@ -371,7 +371,18 @@ def on_boundary_acquired(callback: Callable[[], None]) -> Iterator[None]:
     wait would turn a boundary acquisition into a wait-for edge. Exceptions
     are logged at DEBUG and never break the acquisition.
     """
-    token = _BOUNDARY_ACQUIRED_OBSERVER.set(callback)
+    outer = _BOUNDARY_ACQUIRED_OBSERVER.get()
+    if outer is None:
+        observer = callback
+    else:
+        # A nested binding keeps the outer observer: each still fires once per acquisition.
+        def observer() -> None:
+            try:
+                outer()
+            finally:
+                callback()
+
+    token = _BOUNDARY_ACQUIRED_OBSERVER.set(observer)
     try:
         yield
     finally:

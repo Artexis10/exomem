@@ -48,13 +48,15 @@ One drainer thread applies queued saves by acceptance sequence. A new eligible s
 
 - The drainer replays with its own explicit identity, `intake:<id>`, scoped to the owner's audience. It has the 24-hour explicit retention. A crash after the commit and before the intake row is marked replays the stored terminal on restart instead of writing again.
 - The intake row stores the original effective idempotency key. While the row is queued or applying, a resend with that key returns the same receipt and runs nothing. A second identical save sent with the same key therefore cannot overtake or duplicate the queued one.
-- A crash in the middle of a replay leaves the idempotency row pending under a dead owner. The idempotency store's existing recovery applies (`MUTATION_OUTCOME_UNKNOWN`, then a fresh attempt). The drainer treats that code as contention and retries later.
+- The idempotency store claims a replay identity before the attempt waits for the boundary, and it keeps an identity whose owner died mid-attempt as `MUTATION_OUTCOME_UNKNOWN` for good, because it cannot prove the dead attempt did not commit. Retrying that identity would block the queue forever. So the intake row records, durably and before the leaf runs, that an attempt under the current identity held the boundary (through `mutation_lock.on_boundary_acquired`, which now chains observers). The marker is sticky for the identity. After a crash:
+  - No attempt under the identity ever held the boundary: no leaf ran, so the drainer replays the save under a fresh identity (`intake:<id>:<n>`). This is the common case, a worker killed while its replay waited in line.
+  - An attempt held the boundary: the save may have committed. The drainer replays under the same identity; the store's commit evidence resumes it exactly once, and without evidence the store answers `MUTATION_OUTCOME_UNKNOWN`. That answer is final: the row becomes `failed`, keeps its arguments, and its read says the save may have landed and to check the page before resending.
 - A resend with a new identity (a new session) is a new save. The receipt tells the agent not to resend, and the outcome read lets a later session check instead.
 
 ### Outcomes
 
 - Applied: the row keeps the compact result (`user_summary`, page title and id where the result names them) and drops the arguments. Applied rows are pruned after 7 days.
-- Contention again: the row stays queued; the drainer backs off from 1 s up to 30 s and retries without limit. Contention is not a failure.
+- Contention again, or a pending or committed-uncertain answer that a same-identity retry resolves: the row stays queued; the drainer backs off from 1 s up to 30 s and retries without limit. Contention is not a failure.
 - Any other refusal: the row becomes `failed` with the public refusal and keeps its arguments. It stays until the owner dismisses it with `exomem intake dismiss <id>`. Dismissal is an owner operation on machine-local state, like `exomem lease release`, so it is a CLI command and not a write mode inside a read tool. The service never edits a queued save to make it fit, for example by refreshing a stale hash guard.
 - An unexpected exception in the drainer marks the row failed with code `INTERNAL`, so one bad row cannot stop the queue.
 

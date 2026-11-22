@@ -280,3 +280,28 @@ def test_only_the_owner_can_read_queued_saves(vault: Path, managers, drainer) ->
             assert refused.value.code == "QUEUED_WRITE_OWNER_ONLY"
     with request_scope(local_owner_principal(surface="mcp")):
         assert commands.op_review_memory(vault, mode="queued-write", ref=ref)["queued_write"]["ref"] == ref
+
+
+def test_a_replay_that_stopped_before_the_boundary_lands_once_under_a_fresh_identity(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    real_claim = write_intake._claim_head
+    paused = threading.Event()
+    paused.set()
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        ref = _send(_command("remember"), vault, _remember_kwargs(vault, 10))["queued_write"]["ref"]
+
+        def stopped_while_waiting(*_args, **_kwargs):
+            raise SystemExit("service stopped while the replay waited for the boundary")
+
+        # The replay dies in line, before it ever holds the boundary.
+        monkeypatch.setattr(writer_lease, "invoke_command", stopped_while_waiting)
+        with pytest.raises(SystemExit):
+            write_intake._apply(vault, real_claim(vault))
+    monkeypatch.undo()
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: _writer)
+    applied = _wait_for_state(vault, ref, "applied")
+    assert applied["attempts"] == 2
+    assert len(_pages_titled(vault, "Queued save 10")) == 1
