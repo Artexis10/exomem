@@ -65,6 +65,8 @@ When a cell is deleted, the platform SHALL destroy every live copy of its cell r
 
 Copies inside platform backups SHALL expire with those backups' retention. Platform backups include control-database backups, cluster datastore snapshots and backup object versions. The deletion record SHALL retain each deployed policy's source, window and observation time. It SHALL set `keys_expire_at` only after the last live key copy is absent and every retention window is known. The date SHALL start at the last live copy's destruction, plus the longest retention window. Unknown retention or absence SHALL remain unknown. The platform SHALL report the cell's keys destroyed only after the proven date. Until then, the platform SHALL say which platform backups can still hold copies.
 
+Each window SHALL be a bound that the provider or the storage system enforces even when the platform's own jobs stop. A count of backups is not such a bound. The backup-object window SHALL come from the source declared for the cell's own backup store. A cell whose store has no declared source SHALL keep an unknown date. The deployment SHALL render the windows from the configuration that sets them, with the time of the readback that observed them. A source observed longer ago than the configured maximum age SHALL make the date unknown. After the date passes, the platform SHALL report the keys destroyed only once a listing of the cell's backup prefix finds no object.
+
 Database retirement SHALL precede Kubernetes and provider probes. The controller SHALL delete the cell's child Secret independently of provider cleanup. A running or terminating workload SHALL prevent a claim that all live copies are absent. A legacy shared passphrase or a retained old volume SHALL prevent a finite destruction claim without its own evidence.
 
 #### Scenario: A provider cannot answer during deletion
@@ -87,6 +89,21 @@ Database retirement SHALL precede Kubernetes and provider probes. The controller
 
 - **WHEN** a deleted cell's status is read before `keys_expire_at`
 - **THEN** it names the platform backups that still hold copies, and does not report the keys destroyed
+
+#### Scenario: A cell in a store with no bounded retention
+
+- **WHEN** a deleted cell's backups live in a bucket that never deletes hidden versions
+- **THEN** its `keys_expire_at` stays unknown, while a deleted cell in the locked bucket gets a date
+
+#### Scenario: A stale retention observation
+
+- **WHEN** a declared source was observed longer ago than the configured maximum age
+- **THEN** a deletion records no `keys_expire_at`, and says which source is stale
+
+#### Scenario: The date passes, but a backup remains
+
+- **WHEN** `keys_expire_at` has passed and the listing still finds an object under the cell's backup prefix
+- **THEN** the platform does not report the keys destroyed, and names the store that still holds copies
 
 ### Requirement: A tenant can lock their cell with their own key
 

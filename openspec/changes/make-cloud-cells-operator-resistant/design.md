@@ -196,6 +196,16 @@ The owner status exposes this evidence independently of cell availability.
 
 A shorter window needs master-key epoch rotation: re-wrap every live root key under a new master key, then destroy the old key and every escrowed copy. That is deferred to its own change, because it touches every cell and the escrow procedure.
 
+*Amendment, 2026-11-22: sources per store, enforced bounds and a confirmation.* A forecast built from hand-typed windows can state a date that no system enforces. Four rules close that gap:
+- **Per store.** A deleted cell's `object_versions` window comes from the source whose `bucket` matches the cell's backup bucket (`_backup_store` in `reconcile.py`). Old cells keep the founder-account bucket, and new cells use the locked cell-data bucket. The other two kinds apply to every cell. A cell whose bucket has no declared source keeps `keys_expire_at` unknown. The legacy bucket never deletes a hidden version, so a cell backed up there stays unknown until its store is emptied.
+- **Enforced bounds only.** Each window is a bound that holds even when the platform's own jobs stop running:
+  - the provider's lifecycle and lock settings for buckets;
+  - for control-database backups, time-based backup retention plus a bucket rule that removes anything older;
+  - a count-based retention gives no time bound. With one, the control-database source stays undeclared.
+  - The `object_versions` window for the locked bucket adds the deletion grace, the compliance lock, the hide-to-delete day and the provider's observed delay (`automate-cell-storage-deletion` D2). It applies only where the custodian's purge runs; without it, the store's current versions never expire.
+- **One source.** The deployment renders the windows from the Terraform outputs that set them, with `observed_at` set to the provider readback time. Nobody copies a number by hand. A source observed longer ago than `cellctl.keyRetentionMaxAge` makes the forecast unknown.
+- **Forecast, then confirmation.** `keys_expire_at` remains a forecast. The owner status reports the keys destroyed only after a listing finds no object left under the cell's prefix in its backup bucket. The key watcher's list-only key runs that listing. Snapshot and control-database windows rest on the provider's lifecycle settings, which the key watcher already reads.
+
 ### D3. The tenant lock is opt-in and leaves no platform copy of its keys
 
 **The invariant.** For a tenant-locked cell, no copy of its cell root key or of any content key (D1) is written to:
@@ -378,6 +388,23 @@ Entries appear within ten minutes of receipt. An entry shows time, identity tier
 This is the one mechanism that stops adversary 1 before the fact. A presence check needs a human by design: its purpose is to keep automation that holds the operator's credentials away from content. A wrongly firing check costs the operator a touch for each admin session, Terraform run or escrow decryption. A missing or incompatible authenticator blocks administration until it is available, and the operator pays that delay. A skipped check would cost an unrecorded read of a tenant's vault. The exemptions keep releases and running services out of that cost.
 
 The remaining agent path is code. An agent that can merge to `main` can ship code that leaks content in the next release. That path leaves a public pull request, commit and release, and the required checks run on it, but on this solo-maintained repository no second person reviews it. It is a stated limit, disclosed beside the claims (D7).
+
+*Amendment, 2026-11-22: break-glass reaches one cell, and the cluster ends it within the hour.* Before this amendment, the procedure set the one-hour limit, and the cluster enforced none of it. A holder of the break-glass group held `cluster-admin`, so inside the hour they could extend their own access. Any leaked earlier certificate also regained power at every later opening, because the standing binding named the group. The amendment changes four things:
+- **No standing binding.** No binding grants the group `exomem:break-glass` any role. The ClusterRole `exomem-break-glass-cell` grants only exec, attach, port-forward and ephemeral containers on pods, and get on Secrets. It grants no RBAC, admission, certificate, impersonation or namespace rights.
+- **One cell per opening.** Each opening uses a certificate request with a common name unique to that opening, for at most 3600 seconds. One RoleBinding in the target `exo-cell-*` or `exo-scratch-*` namespace binds that one user to `exomem-break-glass-cell`. The binding carries the opening's TTL label. The access record and the tenant access log can then attribute each opening to one cell.
+- **The cluster ends it.** A reaper deletes each break-glass RoleBinding once its TTL has passed. It is a CronJob that runs every minute, a `cellctl` image subcommand under its own ServiceAccount. Admission limits that ServiceAccount to deleting those bindings. Admission also refuses four kinds of binding:
+  - a binding of `exomem-break-glass-cell` outside a cell or scratch namespace;
+  - one that names a group, or more than one subject;
+  - one whose TTL label is missing or longer than one hour, checked with CEL `duration()`;
+  - any binding whose subjects name the group `exomem:break-glass`.
+  A credential from an earlier opening is therefore powerless at every later one.
+- **A certificate cap.** `kube-controller-manager-arg: cluster-signing-duration=720h` caps every certificate that the CSR API signs at 30 days. K3s signs node and kubelet certificates outside that API, so the cap does not touch them.
+
+Kyverno's cleanup controller is the closest maintained tool. The chart installs Kyverno only with the deploy tier (`operatorDeploy.enabled`). Installing it only to delete one kind of object would add an admission webhook to the cluster's critical path. When the deploy tier enables Kyverno, the reaper moves to its cleanup policy.
+
+Cluster repair beyond one cell is node root. It goes through `/etc/rancher/k3s/k3s.yaml`, inside a presence-checked node session.
+
+**Limits.** Node root, or anyone holding the client CA key (including escrowed CA material), can sign a certificate outside the CSR API. They can also impersonate with `--as`, remove the reaper or the policies, or rewrite the node-local audit log. Those are admin-tier capabilities under this decision's presence check. A leaked client certificate is answered by rotating the client CA (`exomem-k3s-rotate-client-ca.sh`, rehearsed in CI).
 
 #### Batch B source and sandbox plan
 
