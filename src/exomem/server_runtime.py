@@ -23,6 +23,7 @@ import anyio
 from . import (
     env_compat,
     foreground_priority,
+    media_engines,
     media_jobs,
     media_processing,
     metrics,
@@ -1100,9 +1101,9 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     unavailable_reason: str | None = None
     unavailable_action: str | None = None
     if worker is None:
-        if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+        if os.environ.get(media_engines.RUNTIME_DISABLE_ENV):
             unavailable_reason, unavailable_action = media_jobs.runtime_block(
-                media_jobs.EXTRACTION_DISABLED_CODE, "EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+                media_jobs.EXTRACTION_DISABLED_CODE, f"{media_engines.RUNTIME_DISABLE_ENV} is set"
             )
         else:
             unavailable_reason, unavailable_action = media_jobs.runtime_block(
@@ -1149,6 +1150,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 binary,
                 explicit=False,
                 commit_guard=reconcile_commit_guard,
+                enqueue_preview=False,
             ),
         )
         if unavailable_reason is not None and unavailable_action is not None:
@@ -1189,7 +1191,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
 
 def _create_media_worker(vault_root: Path) -> Any | None:
     """Construct a media worker without starting background execution."""
-    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+    if os.environ.get(media_engines.RUNTIME_DISABLE_ENV):
         return None
 
     from . import media_worker as media_worker_module

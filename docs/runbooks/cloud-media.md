@@ -50,6 +50,34 @@ A source release does not activate a cell, change a deployment or authorize a pr
 To undo activation, remove `frames` from the cell or fleet selection and let the existing controller reconcile the cell.
 Media status and stored originals remain available.
 
+## Stored media previews
+
+Add `previews` to the cell's media engine selection to generate previews for new image and video filings.
+On personal installs, include `previews` in `EXOMEM_MEDIA_ENGINES` with the other engines you use.
+Preview generation is off by default. The existing worker claims due preview jobs after ordinary media work.
+Previews can run with the text and CLIP engines off. `EXOMEM_DISABLE_MEDIA_EXTRACTION` disables the whole worker, including preview generation.
+Enabling previews adds no backfill for existing companions. Source and Evidence capture record preview demand for the exact original digest.
+Startup and periodic discovery record demand when they first bind an original or change its binding. A first binding can use an existing prose companion.
+If queue admission fails, media reconciliation can recover that demand while retaining the filing.
+After a restore omits preview records, reconciliation can rebuild previously successful previews for current marked versions.
+The codec child needs POSIX resource limits. Its wall time is at most 15 seconds within the remaining job budget.
+Preview generation is unavailable in the inline debug worker. Stored previews remain readable through the same proof.
+The preview engine uses the existing memory brakes. The video decoder caps input frames at 16 million pixels.
+The worker yields to foreground writers before publishing. It retries a busy publication at most twice after the first attempt.
+A temporary hydration refusal delays the job without spending an attempt.
+If the worker stops at the attempt limit, it queues a check of the installed record. Ordinary media jobs run first.
+A read or flush refusal delays the check. The check opens only the private record.
+An unavailable record delays generation and preserves a successful receipt during reconciliation.
+The worker retains the outcome for that digest so reconciliation does not replay an exhausted preview.
+A retry leaves extraction results intact.
+The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.
+
+Use `inspect_memory` with operation `media.preview` and the canonical original path.
+On Cloud, select `frames` to offer this operation.
+Each read adds one keyed record lookup and reads at most 64 KiB of preview state, with a 25 ms p95 lookup budget at 500,000 records.
+Before hydration, the recovery slot checks access-tier, cold-blocked, RAW derived-pixel and path-only disclosure and connector denials.
+The held proof checks current lifecycle state and byte-bound grants. It can hydrate an original to prove custody before release.
+
 ## Speech and image query artifacts
 
 With `speech` enabled, ingestion queues transcription through the existing serialized media worker.

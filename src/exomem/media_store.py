@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from itertools import chain
 from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
@@ -639,14 +641,14 @@ def cache_matches(vault: Path, path: Path, *, snapshot: OriginalSnapshot | None 
     return recorded is not None and recorded == _identity(vault, path)
 
 
-def cached_sha256(vault: Path, path: Path, version: held_fs.FileVersion) -> str | None:
+def cached_sha256(vault: Path, path: Path, version: held_fs.FileVersion, *, strict_custody: bool = False) -> str | None:
     """The verified SHA-256 of a file at this exact version when the cache identity records it, else None.
 
     A caller that holds the file passes the version taken from its handle, so a match
     reads no byte (D3). None means the file has no record or no longer matches it.
     """
     vault = Path(vault).resolve()
-    selected = original_state(vault, path)
+    selected = _read_state(vault, path, strict_custody=True) if strict_custody else original_state(vault, path)
     try:
         recorded = _recorded_identity(vault, vault / path, selected)
     except sqlite3.Error:
@@ -769,8 +771,10 @@ def clear_dead_reservations(vault: Path) -> int:
 
 
 @contextmanager
-def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None = None):
+def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None = None, strict_custody: bool = False):
     """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
+    from .cli_ops import OpError
+
     store = MediaJobStore(vault)
     relative = store._relative(path)
     token = uuid.uuid4().hex
@@ -788,9 +792,9 @@ def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None 
     try:
         yield store, token
     finally:
-        conn = store._connect()
+        custody_error = sys.exception()
         try:
-            with conn:
+            with closing(store._connect()) as conn, conn:
                 if read:
                     conn.execute("UPDATE media_cache SET owner_read = MAX(COALESCE(owner_read, :read_at), :read_at) "
                                  "WHERE binary_rel = "
@@ -801,8 +805,20 @@ def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None 
                                  {"token": token, "read_at": time.time()})
                 # A row that still names a temporary keeps it reserved until a clear removes the file.
                 conn.execute("DELETE FROM media_access WHERE token = ? AND temporary_name IS NULL", (token,))
-        finally:
-            conn.close()
+        except (sqlite3.Error, OpError) as cleanup_error:
+            from .lexstore import classify_sqlite_error
+
+            if not (isinstance(custody_error, reserved_paths.ReservedPathLeafError)
+                    or strict_custody and custody_error is not None):
+                raise
+            if isinstance(cleanup_error, sqlite3.Error):
+                busy = classify_sqlite_error(cleanup_error) == "transient"
+            else:
+                busy = cleanup_error.code == "MUTATION_BUSY" and cleanup_error.details.get("committed") is False
+            if not busy:
+                raise
+            # The retained pin still protects the source. A later worker can clear it after this process stops.
+            log.warning("pin cleanup deferred after a custody refusal")
 
 
 def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
@@ -3080,6 +3096,7 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
             yield source
         return
     from . import original_pool
+    from .vault import MALFORMED_FRONTMATTER_ERRORS
 
     assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
     bound = originals.BinaryBinding(relative, snapshot.binary_sha256, snapshot.binary_size)
@@ -3087,9 +3104,20 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
     def require_binding() -> None:
         # The bound path, digest and size name the bytes; the companion's other fields, such as the
         # extraction text that a pinned job writes, may change while the bytes are held.
-        current = originals.bound_companion(vault, relative)
+        try:
+            current = originals.bound_companion(vault, relative)
+        except MALFORMED_FRONTMATTER_ERRORS as error:
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED") from error
         if (current is None or vault / current[0] != snapshot.sidecar_path
                 or originals.binary_binding(current[1]) != bound):
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
+        # The pool supplies bytes only while the logical path has no resident entry.
+        try:
+            reserved_paths.inspect_generic_path(vault, relative)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+        else:
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
 
     try:
@@ -3100,7 +3128,10 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
                 source.require_current()
                 require_binding()
 
-            yield reserved_paths.GenericBinarySource(source.stream, source.version, require_current, source.current_version)
+            yield reserved_paths.GenericBinarySource(
+                source.stream, source.version, require_current, source.current_version,
+                partial(_open_local_original, vault, relative, snapshot, physical=physical, check_size=False),
+            )
             require_current()
     except held_fs.HeldFsError as error:
         raise reserved_paths.ReservedPathLeafError(error.code) from error
@@ -3114,17 +3145,23 @@ def pooled_head(vault: Path, relative: str, snapshot: OriginalSnapshot) -> Objec
     return head
 
 
-def _read_state(vault: Path, target: Path) -> OriginalSnapshot:
+def _read_state(vault: Path, target: str | Path, *, strict_custody: bool = False) -> OriginalSnapshot:
     """The state that a read acts on; a retirement that its witness no longer confirms refuses as unverified."""
+    from .vault import MALFORMED_FRONTMATTER_ERRORS
+
     try:
-        return original_state(vault, target)
+        return original_state(vault, target, strict_companion=strict_custody)
     except originals.RetirementUnconfirmed as error:
         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", error.reason) from error
+    except MALFORMED_FRONTMATTER_ERRORS as error:
+        if not strict_custody:
+            raise
+        raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED") from error
 
 
 @contextmanager
 def open_original(vault: Path, path: str | Path, *, physical: bool = False, read: bool = False,
-                  job: MediaJob | None = None, deadline: float | None = None):
+                  job: MediaJob | None = None, deadline: float | None = None, strict_custody: bool = False):
     """Pin before resolution; retain verified bytes through the caller's read.
 
     `read` marks an owner's playback or viewing; processing and imports record no read. A request passes its
@@ -3144,22 +3181,24 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
             except reserved_paths.ReservedPathLeafError as error:
                 if error.code != "MISSING":
                     raise
-                snapshot = _read_state(vault, target)
+                snapshot = _read_state(vault, target, strict_custody=strict_custody)
                 if snapshot.local_path is None:
                     raise error
             else:
                 if job is not None:
+                    if strict_custody:
+                        _read_state(vault, target, strict_custody=True)
                     source.require_current()
                     # The claimed job proves the ledger exists, so this store skips the schema setup.
                     if not MediaJobStore(vault, create=False).bind_original(job, relative):
                         raise MediaStoreError("MEDIA_ORIGINAL_CHANGED", "the job no longer owns these original bytes")
                 yield source
                 return
-    with _pin(vault, target, read=read) as (ledger, token):
-        snapshot = _read_state(vault, target)
+    with _pin(vault, target, read=read, strict_custody=strict_custody) as (ledger, token):
+        snapshot = _read_state(vault, target, strict_custody=strict_custody)
         if snapshot.state == "evicted":
             _hydrate(vault, snapshot, ledger, token)
-            snapshot = _read_state(vault, target)
+            snapshot = _read_state(vault, target, strict_custody=strict_custody)
         with ExitStack() as opened:
             try:
                 source = opened.enter_context(_open_local_original(vault, relative, snapshot, physical=physical))
@@ -3211,10 +3250,11 @@ def logical_view(vault: Path, path: str | Path, *, job: MediaJob | None = None):
 
 
 def hold_original(vault: Path, path: str, *, recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                  deadline: float | None = None):
+                  deadline: float | None = None, strict_exit: bool = False):
     """Retain a logical original for checked whole-file and range delivery, including pooled bytes."""
-    return reserved_paths._hold_binary_file(vault, path, open_original(vault, path, read=True, deadline=deadline),
-                                           recorded_sha256=recorded_sha256, deadline=deadline)
+    original = open_original(vault, path, read=True, deadline=deadline, strict_custody=strict_exit)
+    return reserved_paths._hold_binary_file(vault, path, original, recorded_sha256=recorded_sha256,
+                                           deadline=deadline, strict_exit=strict_exit)
 
 
 def read_original_bytes(vault: Path, path: str, *, max_bytes: int | None = None) -> reserved_paths.GenericFileSnapshot:

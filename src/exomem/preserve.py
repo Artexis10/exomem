@@ -590,6 +590,7 @@ def preserve(
     if category_refusal:
         missing.append("category")
         reasons.append(category_refusal)
+    from . import media_previews
     from .governance import raw_protection as raw_guard
 
     filename_safe, raw_protection = _artifact_name(
@@ -860,6 +861,7 @@ def preserve(
                     sha256=artifact_hash,
                     size=artifact_size,
                 )
+            sidecar_md = media_previews.stamp_intent(sidecar_md, rel_artifact, artifact_hash)
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
                     vault_root, parent=rel_artifact, parent_page=sidecar_rel,
@@ -1046,6 +1048,8 @@ def preserve(
 
     from .media_store import enqueue_offload
 
+    if not media_pending and not media_previews.enqueue(vault_root, artifact_path, expected_sha256=artifact_hash):
+        warnings.append("Preview admission deferred. Media reconciliation will retry the recorded intent.")
     enqueue_offload(vault_root, artifact_path)
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),

@@ -39,7 +39,7 @@ def test_selected_cloud_cell_lists_video_and_status(vault, monkeypatch):
         tools = asyncio.run(mcp.list_tools())
         reads = next(tool for tool in tools if tool.name == "inspect_memory")
         operations = set(reads.parameters["properties"]["operation"]["enum"])
-        assert {"media.video", "media.status"} <= operations
+        assert {"media.video", "media.preview", "media.status"} <= operations
         assert "media.image" not in operations
     finally:
         mcp._exomem_local_runtime_activation._shutdown.set()
@@ -470,18 +470,21 @@ time.sleep(30)
         mcp._exomem_local_runtime_activation._shutdown.set()
 
 
-def test_frame_status_checks_codecs_without_importing_native_decoder(cloud_frames, monkeypatch):
+@pytest.mark.parametrize("missing_codec", ["av", "PIL"])
+def test_frame_status_checks_codecs_without_importing_native_decoder(cloud_frames, monkeypatch, missing_codec):
+    import builtins
     import importlib.util
+    from importlib.machinery import ModuleSpec
 
-    inspected = []
+    import_module = builtins.__import__
 
-    def missing(name):
-        inspected.append(name)
-        return None
+    def without_native_decoder(name, *args, **kwargs):
+        assert name != "av"
+        return import_module(name, *args, **kwargs)
 
-    monkeypatch.setattr(importlib.util, "find_spec", missing)
+    monkeypatch.setattr(builtins, "__import__", without_native_decoder)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None if name == missing_codec else ModuleSpec(name, None))
     assert media_engines.status()["frames"] == media_engines.UNAVAILABLE
-    assert "av" in inspected
 
 
 @pytest.fixture

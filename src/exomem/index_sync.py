@@ -2139,15 +2139,19 @@ def upsert_after_write(
 
 
 def drop_media_residue(vault_root: Path, removed_rel_paths: list[str]) -> None:
-    """Drop the speech progress and the scene frames of recordings that left these paths.
+    """Drop previews, speech progress and scene frames for filings that left these paths.
 
     A removed video drops its scene-frame derivatives: clear_scene_frames deletes the
     `<video>.frames/` jpg+sidecar pairs and their rows (recursive, idempotent). No-op (guarded
     inside clear_scene_frames) when the video never had persisted frames. Each step is
     best-effort: the removal it follows already happened.
     """
-    from . import media_types, scene_frames
+    from . import media_previews, media_types, scene_frames
 
+    try:
+        media_previews.retire(vault_root, removed_rel_paths)
+    except Exception as error:  # noqa: BLE001 - preview cleanup is best-effort
+        log.warning("preview cleanup deferred (%s)", type(error).__name__)
     for rel in removed_rel_paths:
         media_type = media_types.media_type_for(rel)
         if media_type in {"audio", "video"}:
@@ -2181,19 +2185,27 @@ def delete_after_remove(
         find,
         lexstore,
         memory_refs,
+        originals,
+        reserved_paths,
     )
 
     if not dispatch_lexstore and publish_corpus_change:
         raise ValueError("lexstore may be skipped only after an already-published watcher batch")
-    safe_paths = [
-        normalized
-        for item in removed_rel_paths
-        if (normalized := _safe_relative_path(str(item))) is not None
-    ]
-    from .originals import evicted
-
-    # Eviction publishes no deletion: an evicted original keeps its index rows.
-    safe_paths = [rel for rel in safe_paths if not evicted(vault_root, rel)]
+    safe_paths = []
+    for item in removed_rel_paths:
+        relative = _safe_relative_path(str(item))
+        if relative is None:
+            continue
+        try:
+            # Eviction publishes no deletion: an evicted original keeps its index rows.
+            if originals.evicted(vault_root, relative):
+                continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # Only a confirmed directory proves the old binary could no longer be filed here.
+            if (error.code != "UNSAFE_PATH"
+                    or reserved_paths.inspect_generic_path(vault_root, relative).kind != "directory"):
+                raise
+        safe_paths.append(relative)
     requested_report, paths_truncated = _bounded_paths(safe_paths)
     if not safe_paths:
         return IndexSyncReport("delete", requested_report, requested_report, ())

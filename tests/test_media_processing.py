@@ -1053,9 +1053,10 @@ def test_reconcile_all_media_is_bounded_pruned_and_soft_fails_per_artifact(
     calls: list[tuple[Path, bool]] = []
 
     def reconcile_media(
-        root: Path, path: Path, *, explicit: bool = True
+        root: Path, path: Path, *, explicit: bool = True, enqueue_preview: bool = True,
     ) -> None:
         assert root == vault
+        assert not enqueue_preview
         calls.append((path, explicit))
         if path == first:
             raise OSError("one unreadable artifact must not abort the pass")

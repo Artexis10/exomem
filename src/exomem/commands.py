@@ -10384,6 +10384,7 @@ def _process_media(
                     binary,
                     explicit=False,
                     commit_guard=_commit_guard,
+                    enqueue_preview=False,
                 ),
                 propagate_transient_errors=True,
             )
@@ -10539,7 +10540,7 @@ def _media_remediation(code: str) -> str:
 def op_read_media(
     vault_root: Path,
     path: str | None = None,
-    media: Literal["video", "image"] = "video",
+    media: Literal["video", "image", "preview"] = "video",
     paths: list[str] | None = None,
     max_frames: int = 8,
     start_sec: float | None = None,
@@ -10547,7 +10548,7 @@ def op_read_media(
     max_side: int | Literal["original"] | None = None,
     region: list[float] | None = None,
 ) -> fastmcp_types.ToolResult:
-    """Show stored images or sampled video frames inline (MCP only).
+    """Show images, sampled video frames or a stored preview inline (MCP only).
 
     Args:
         path: Image or video path.
@@ -10557,6 +10558,10 @@ def op_read_media(
         max_side: Long side px or "original".
         region: Crop [x, y, w, h] as fractions, for detail.
     """
+    if media == "preview":
+        if path is None or paths is not None:
+            raise ValueError("MEDIA_PATH_REQUIRED: a preview read takes one path")
+        return _show_media_preview(vault_root, path)
     if media == "image":
         from . import cloud_cell
 
@@ -10576,6 +10581,19 @@ def op_read_media(
         end_sec=end_sec,
         max_side=max_side,
     )
+
+
+def _show_media_preview(vault_root: Path, path: str) -> fastmcp_types.ToolResult:
+    from . import media_previews
+
+    descriptor, jpeg = media_previews.show(vault_root, path)
+    outcome = "Showing the stored preview." if jpeg is not None else "No current preview is available."
+    meta = {"outcome": outcome, "status": "available" if jpeg is not None else "unavailable",
+            "path": descriptor["path"]}
+    content = [fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+    if jpeg is not None:
+        content.append(fastmcp_types.Image(data=jpeg, format="jpeg").to_image_content())
+    return fastmcp_types.ToolResult(content=content, structured_content=meta)
 
 
 def _show_images(
