@@ -1,6 +1,6 @@
 {
   "openspec_version": "2.1.1",
-  "comment": "Strict-validation warnings that existed when this repo moved to OpenSpec 2.1.1. CI fails on any warning not listed. Regenerate only to shrink it: node scripts/openspec_strict_gate.mjs --write-baseline -- <cmd>",
+  "comment": "Strict-validation warnings that existed when this repo moved to OpenSpec 2.1.1. CI fails on any warning not listed. Regenerate only to shrink it or to carry a renamed requirement: node scripts/openspec_strict_gate.mjs --write-baseline -- <cmd>",
   "keys": [
     "too-long action-first-audit :: A Custody-Only Audit Reads Only Custody-Marked Sources",
     "too-long action-first-audit :: Recurring-identity evidence persists without changing findings",
@@ -741,9 +741,9 @@
     "too-long epistemic-state-bench :: Emergence budget constants are calibrated once, then frozen and versioned",
     "too-long epistemic-state-bench :: Every Scenario Carries A Fairness Packet",
     "too-long epistemic-state-bench :: Lifecycle-routing replay family f27",
-    "too-long epistemic-state-bench :: Loop-closure scenario families f15–f19",
+    "too-long epistemic-state-bench :: Loop-closure scenario families f15\u2013f19",
     "too-long epistemic-state-bench :: Negative Controls Accompany Every Table",
-    "too-long epistemic-state-bench :: No-nudge scenario families f20–f26",
+    "too-long epistemic-state-bench :: No-nudge scenario families f20\u2013f26",
     "too-long epistemic-state-bench :: Registration is not release",
     "too-long epistemic-state-bench :: Replay assertions are deterministic, paired and anti-vacuous",
     "too-long epistemic-state-bench :: Role and transient-state replay tests require delivered signals and state resolution",

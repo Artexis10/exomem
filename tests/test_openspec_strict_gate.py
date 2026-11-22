@@ -161,3 +161,83 @@ def test_stale_baseline_keys_report_but_pass(tmp_path: Path) -> None:
     result = _run_gate(tmp_path, healed)
     assert result.returncode == 0
     assert "no longer occur" in result.stdout
+
+
+def test_requirement_names_follow_the_validators_indexing(tmp_path: Path) -> None:
+    """`requirements[i]` names come from every `###` child of `## Requirements`.
+
+    A fenced `### Requirement:` example, a `### Requirement:` outside the
+    section, and a non-Requirement `###` header inside it must not shift the
+    names: the gate mirrors the parser, so a new overlong requirement cannot
+    inherit a baselined name (and vice versa).
+    """
+
+    _init_repo(tmp_path)
+    (tmp_path / "openspec" / "specs" / "demo" / "spec.md").write_text(
+        "# demo Specification\n\n"
+        "## Purpose\n\n"
+        "### Requirement: Outside Section\n"
+        "not inside Requirements\n\n"
+        "## Requirements\n\n"
+        "### Rationale\n"
+        "context only\n\n"
+        "```markdown\n"
+        "### Requirement: Fenced Example\n"
+        "```\n\n"
+        "### Requirement: Real Long\n"
+        "body\n",
+        encoding="utf-8",
+    )
+    warning_at = lambda i: {
+        "level": "WARNING",
+        "path": f"requirements[{i}]",
+        "message": LONG_WARNING["message"],
+    }
+    report = {
+        "items": [
+            {
+                "id": "demo",
+                "type": "spec",
+                "valid": False,
+                "issues": [warning_at(0), warning_at(1)],
+            }
+        ]
+    }
+    stub = _write_stub(tmp_path, report)
+    assert _run_gate(tmp_path, stub, "--write-baseline").returncode == 0
+
+    keys = json.loads((tmp_path / "openspec" / "strict-baseline.json").read_text())["keys"]
+    # requirements[0] is the non-Requirement `### Rationale` header, matching
+    # the parser; the fenced and outside-section headers are not counted.
+    assert keys == ["too-long demo :: Rationale", "too-long demo :: Real Long"]
+    assert _run_gate(tmp_path, stub).returncode == 0
+
+    grown = _write_stub(
+        tmp_path,
+        {"items": [{**report["items"][0], "issues": [warning_at(0), warning_at(1), warning_at(2)]}]},
+    )
+    result = _run_gate(tmp_path, grown)
+    assert result.returncode == 1
+    assert "too-long demo :: #2" in result.stderr
+
+
+def test_missing_git_is_an_internal_error(tmp_path: Path) -> None:
+    """Outside a repo the symlink check skips; a missing git binary must not."""
+
+    _init_repo(tmp_path)
+    stub = _write_stub(tmp_path, _report())
+    assert _run_gate(tmp_path, stub, "--write-baseline").returncode == 0
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "node").symlink_to(shutil.which("node"))
+    result = subprocess.run(
+        ["node", str(GATE), "--", str(stub)],
+        cwd=tmp_path,
+        env={"PATH": str(bindir)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "git" in result.stderr
