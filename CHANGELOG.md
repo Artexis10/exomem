@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.200.0](https://github.com/Artexis10/exomem/compare/v0.199.0...v0.200.0) (2026-11-22)
+
+
+### Features
+
+* **cloud:** verify retained restic backup packs ([#3030](https://github.com/Artexis10/exomem/issues/3030)) ([86e5db9](https://github.com/Artexis10/exomem/commit/86e5db9922237d7d14feef403ec7805a3c948ee2))
+* **media:** select speaker labels per recording ([#3033](https://github.com/Artexis10/exomem/issues/3033)) ([63ed9be](https://github.com/Artexis10/exomem/commit/63ed9be340a2a52a9b2aa7fe229245bb95acc480))
+
+
+### Bug Fixes
+
+* **audit:** scope the custody-only corpus read to custody-marked Sources ([#3043](https://github.com/Artexis10/exomem/issues/3043)) ([e0a20d4](https://github.com/Artexis10/exomem/commit/e0a20d4ef75391987f5ae51ef948971e6fdecc04))
+* **brief:** close the scorer review follow-ups and record the release proof ([#3035](https://github.com/Artexis10/exomem/issues/3035)) ([4011a0e](https://github.com/Artexis10/exomem/commit/4011a0e71530f70fd0281d3473e347a0c25a25a3))
+* **collection-store:** release a view that an earlier store instance rendered ([#3047](https://github.com/Artexis10/exomem/issues/3047)) ([cfb27c9](https://github.com/Artexis10/exomem/commit/cfb27c96d0797d64f60e16032160ab407c41c5b7))
+* **plugin:** pass --client claude to the continuation checkpoint hooks ([#3040](https://github.com/Artexis10/exomem/issues/3040)) ([620781f](https://github.com/Artexis10/exomem/commit/620781f711233acde995fe21289ce66ba057f695))
+* **search:** keep dataset values searchable after a card read fails at start-up ([#3044](https://github.com/Artexis10/exomem/issues/3044)) ([b8087f7](https://github.com/Artexis10/exomem/commit/b8087f724e9be77087f7e2affd229346b549e89a))
+
 ## [0.199.0](https://github.com/Artexis10/exomem/compare/v0.198.0...v0.199.0) (2026-11-22)
 
 
