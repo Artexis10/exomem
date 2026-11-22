@@ -560,8 +560,9 @@ def test_resident_preview_refuses_malformed_companion_at_acquisition(vault, sele
     assert originals.original_state(vault, saved.path).present
 
 
-def test_process_worker_retries_definitive_preview_settlement_without_accepting_old_record(
-    vault, tmp_path, monkeypatch,
+@pytest.mark.parametrize("settlement_error", ["busy", "readonly"])
+def test_process_worker_settles_a_definitive_preview_without_accepting_old_record(
+    vault, tmp_path, monkeypatch, caplog, settlement_error,
 ):
     from test_shared_originals import _pooled_capture
 
@@ -584,6 +585,7 @@ def test_process_worker_retries_definitive_preview_settlement_without_accepting_
 
     local_original = media_store._open_local_original
     connect = media_jobs.MediaJobStore._connect
+    finish_preview = media_jobs.MediaJobStore.finish_preview
     refused_writes = []
 
     with closing(sqlite3.connect(ledger.path, timeout=0)) as holder:
@@ -592,7 +594,8 @@ def test_process_worker_retries_definitive_preview_settlement_without_accepting_
             with local_original(*args, **kwargs) as source:
                 yield source
                 binary.write_bytes(_photo(633, 915))
-                holder.execute("BEGIN IMMEDIATE")
+                if settlement_error == "busy":
+                    holder.execute("BEGIN IMMEDIATE")
 
         def connect_until_holder_clears(*args, **kwargs):
             if holder.in_transaction:
@@ -607,20 +610,44 @@ def test_process_worker_retries_definitive_preview_settlement_without_accepting_
                         raise
             return connect(*args, **kwargs)
 
+        def readonly_first_settlement(self, job, **kwargs):
+            if refused_writes:
+                return finish_preview(self, job, **kwargs)
+
+            def readonly_connection(*args, **options):
+                connection = connect(self, *args, **options)
+                connection.execute("PRAGMA query_only=ON")
+                return connection
+
+            with monkeypatch.context() as failed_write:
+                failed_write.setattr(self, "_connect", readonly_connection)
+                try:
+                    return finish_preview(self, job, **kwargs)
+                except sqlite3.OperationalError as error:
+                    refused_writes.append(error.sqlite_errorcode)
+                    raise
+
         def unexpected_decode(*args, **kwargs):
             pytest.fail("settling a definitive refusal must not run the codec again")
 
         monkeypatch.setattr(media_store, "_open_local_original", replace_then_hold_ledger)
-        monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", connect_until_holder_clears)
         monkeypatch.setattr(media_previews, "_decode", unexpected_decode)
-        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
-        assert refused_writes == [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY]
+        if settlement_error == "busy":
+            monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", connect_until_holder_clears)
+            assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+            assert refused_writes == [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY]
+        else:
+            monkeypatch.setattr(media_jobs.MediaJobStore, "finish_preview", readonly_first_settlement)
+            assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+            assert refused_writes == [sqlite3.SQLITE_READONLY]
         settled = ledger.get(claim.id)
 
     assert settled is not None and settled.state == media_jobs.COMPLETED
     assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
     assert settled.last_error == "preview original unavailable"
     assert media_previews.read(vault, relative, claim.preview_sha256) == previous_jpeg
+    if settlement_error == "readonly":
+        assert sum("SQLITE_READONLY" in record.getMessage() for record in caplog.records) == 1
 
 
 def test_retryable_hydration_contention_keeps_preview_pending(vault, monkeypatch):

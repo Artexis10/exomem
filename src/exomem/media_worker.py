@@ -691,39 +691,45 @@ class MediaWorker:
             finally:
                 self._q.task_done()
 
+    def _process_preview(self, job: _Job, store: MediaJobStore, *, deadline: float | None) -> _ProcessOutcome:
+        from . import media_previews, media_store, originals, reserved_paths
+
+        if job.preview_finish_error is not None:
+            store.finish_preview(job, error=job.preview_finish_error)
+        elif media_engines.preview_generation_enabled():
+            try:
+                installed = media_previews.generate(self._vault_root, job, store, deadline=deadline)
+            except media_previews.InitialRecordUnavailable:
+                store.return_for_retry(job, "preview record unavailable")
+            except Exception as error:  # noqa: BLE001 - a preview failure ends only this claim
+                if (isinstance(error, media_store.MediaStoreError)
+                        and error.code in media_store.RETRYABLE_HYDRATION_CODES):
+                    store.return_for_retry(job, error.code)
+                elif ((isinstance(error, OpError) and error.code in _TRANSIENT_OPERATION_CODES)
+                      or _ledger_busy(error)):
+                    store.retry_preview(job)
+                elif (isinstance(error, (reserved_paths.ReservedPathLeafError, originals.RetirementUnconfirmed))
+                      or (isinstance(error, media_store.MediaStoreError)
+                          and error.code in {"MEDIA_ORIGINAL_CHANGED", "MEDIA_ORIGINAL_UNVERIFIED"})):
+                    return _ProcessOutcome(_PREVIEW_SETTLEMENT, "preview original unavailable")
+                else:
+                    log.warning("media preview unavailable (%s)", type(error).__name__)
+                    store.finish_preview(job, error="preview unavailable")
+            else:
+                return _ProcessOutcome(_PREVIEW_SETTLEMENT, None if installed else "preview unavailable")
+        else:
+            store.retry_preview(job)
+        return _ProcessOutcome(_COMPLETE)
+
     def _process(self, job: _Job, *, deadline: float | None = None) -> _ProcessOutcome:
         from . import held_fs, media_store, originals, reserved_paths
 
         if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
-            from . import media_previews
-
             store = self._store or MediaJobStore(self._vault_root, create=False)
-            if job.preview_finish_error is not None:
-                store.finish_preview(job, error=job.preview_finish_error)
-            elif media_engines.preview_generation_enabled():
-                try:
-                    installed = media_previews.generate(self._vault_root, job, store, deadline=deadline)
-                except media_previews.InitialRecordUnavailable:
-                    store.return_for_retry(job, "preview record unavailable")
-                except Exception as error:  # noqa: BLE001 - a preview failure ends only this claim
-                    if (isinstance(error, media_store.MediaStoreError)
-                            and error.code in media_store.RETRYABLE_HYDRATION_CODES):
-                        store.return_for_retry(job, error.code)
-                    elif ((isinstance(error, OpError) and error.code in _TRANSIENT_OPERATION_CODES)
-                          or _ledger_busy(error)):
-                        store.retry_preview(job)
-                    elif (isinstance(error, (reserved_paths.ReservedPathLeafError, originals.RetirementUnconfirmed))
-                          or (isinstance(error, media_store.MediaStoreError)
-                              and error.code in {"MEDIA_ORIGINAL_CHANGED", "MEDIA_ORIGINAL_UNVERIFIED"})):
-                        return _settle_known_preview(store, job, "preview original unavailable")
-                    else:
-                        log.warning("media preview unavailable (%s)", type(error).__name__)
-                        store.finish_preview(job, error="preview unavailable")
-                else:
-                    return _settle_known_preview(store, job, None if installed else "preview unavailable")
-            else:
-                store.retry_preview(job)
-            return _ProcessOutcome(_COMPLETE)
+            outcome = self._process_preview(job, store, deadline=deadline)
+            if outcome.state == _PREVIEW_SETTLEMENT:
+                return _settle_known_preview(store, job, outcome.error)
+            return outcome
 
         offload_error = None
         # Offload runs before extraction can hand a blocked result to the parent.
@@ -3380,8 +3386,9 @@ def run_child(
                 if config is not None:
                     media_brakes.apply_hard_limit(budget_of(job), config)
                 try:
-                    if config is not None and job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
-                        outcome = worker._process(job, deadline=last_work + config.job_timeout_seconds)
+                    if job.media_type == media_jobs.PREVIEW_MEDIA_TYPE:
+                        deadline = None if config is None else last_work + config.job_timeout_seconds
+                        outcome = worker._process_preview(job, store, deadline=deadline)
                     else:
                         outcome = worker._process(job)
                 finally:
@@ -3474,13 +3481,24 @@ def run_child(
                         return 0  # one job per child under the brakes
                     continue
                 if outcome.state == _PREVIEW_SETTLEMENT:
-                    # Keep this outcome in the child until the exact claim settles. A prior record proves no result
-                    # for this attempt, and re-entering the codec would risk replacing that record.
+                    # Known outcomes settle outside the failure handler. Only an unknown result needs receipt recovery.
+                    storage_error_logged = False
                     while outcome.state == _PREVIEW_SETTLEMENT:
+                        try:
+                            outcome = _settle_known_preview(store, job, outcome.error)
+                        except sqlite3.Error as write_error:
+                            if not storage_error_logged:
+                                log.warning(
+                                    "media worker: preview settlement could not write the ledger (%s)",
+                                    getattr(write_error, "sqlite_errorname", type(write_error).__name__),
+                                    exc_info=True,
+                                )
+                                storage_error_logged = True
+                        if outcome.state != _PREVIEW_SETTLEMENT:
+                            break
                         if not _parent_alive(parent_pid):
                             return 0
                         time.sleep(0.25)
-                        outcome = _settle_known_preview(store, job, outcome.error)
                 elif outcome.state == BLOCKED:
                     store.mark(job, BLOCKED, outcome.error, blocked_reason=outcome.blocked_reason)
                 elif outcome.state == FAILED:
