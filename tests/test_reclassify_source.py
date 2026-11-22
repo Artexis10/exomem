@@ -206,7 +206,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         server,
     )
     from exomem import vault as vault_module
-    from exomem.governance import egress
+    from exomem.governance import egress, lifecycle
 
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
@@ -319,7 +319,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             scope.parent.mkdir(parents=True, exist_ok=True)
             rule.parent.mkdir(parents=True, exist_ok=True)
             scope.write_text(
-                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Evidence/field-log.md"]\n',
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/measurement-0.md"]\n',
                 encoding="utf-8",
             )
             rule.write_text(
@@ -330,8 +330,21 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             policy_changed = await preview(preview_run_id=run_id)
             assert policy_changed["error"]["code"] == "NOT_FOUND", policy_changed
             assert "result" not in policy_changed and "next_cursor" not in policy_changed
+            restricted = await preview()
+            assert restricted["error"]["code"] == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", restricted
+            assert "references" not in restricted and "run_id" not in restricted
+            erased = sorted(paths)[0]
+            rule.write_text(rule.read_text().replace("audience: owner", "audience: principal:report-reader"))
+            deletion = await call("manage_memory_file", operation="delete", path=erased, confirm=True)
+            assert (vault / erased).exists() is False, deletion
+            assert lifecycle.is_tombstoned(vault, erased)
             rule.unlink()
             scope.unlink()
+            freshness.on_files_changed(vault, deleted=[vault / erased])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[erased])
+            after_erasure = await preview(preview_run_id=run_id)
+            assert after_erasure["error"]["code"] == "NOT_FOUND", after_erasure
+            assert "result" not in after_erasure and "next_cursor" not in after_erasure
 
             changed = sorted(paths)[-1]
             changed_path = vault / changed

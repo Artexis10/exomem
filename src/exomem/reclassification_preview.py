@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from collections.abc import Iterator, Mapping
-from contextlib import closing, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,8 +23,7 @@ from . import (
     request_budget,
 )
 from .cli_ops import OpError
-from .governance import authorization_session_authority, connector_boundary, egress, policy, store
-from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
+from .governance import connector_boundary, egress, lifecycle, policy
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -69,6 +67,7 @@ class RetainedReport(dict):
     def __init__(self, result: Mapping[str, Any]) -> None:
         super().__init__(result)
         self._proof = _digest(result)
+        self.exact_paths = frozenset(entry["path"] for entry in result.get("entries", ()))
 
     def require_complete_projection(self, result: Any) -> None:
         if _digest(result) != self._proof:
@@ -87,19 +86,13 @@ def _authority_binding(root: Path, who: RequestPrincipal) -> _Authority:
     compiled = policy.load(root)
     if compiled.blocked or compiled.conflicted:
         raise _not_found()
-    session = who.verified_authorization_session
-    session_stamp = None
-    if session is not None and any(rule.audience == who.audience_id for rule in compiled.rules):
-        try:
-            with closing(store.open_authorization_session_read_connection(root)) as connection:
-                session_stamp = authorization_session_authority.session_release_stamp(
-                    connection, context=session, audience=who.audience_id, now=int(time.time()),
-                )
-        except AuthorizationSessionUnavailable:
-            raise _not_found() from None
+    tombstones = lifecycle.tombstoned_paths(root)
+    request_budget.checkpoint()
+    if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
+        raise _not_found()
     key = _digest((
         compiled.fingerprint, recall_policy.recall_policy_identity(root),
-        connector_boundary.cache_identity(root, who)[-1], asdict(who), session_stamp,
+        connector_boundary.cache_identity(root, who)[-1], asdict(who), sorted(tombstones),
     ))
     return _Authority(key, bool(compiled.scopes) or not egress._access_config_absent(root))
 
@@ -233,6 +226,7 @@ def report(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,
         )
+        reclassify_source.preview_release_policy(root, who)
         if (authority.depends_on_membership and result.get("state") == maintenance_jobs.COMPLETED
                 and result.get("snapshot_current") is not True):
             raise _stale_report()
@@ -244,6 +238,7 @@ def report(
     else:
         if snapshot_key is None:
             raise reclassify_source.preview_warming()
+        reclassify_source.preview_release_policy(root, who)
         surface = capabilities.current_active_surface()
         result = maintenance_jobs.start_source_preview(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,

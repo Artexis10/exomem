@@ -6152,6 +6152,19 @@ def _artifact_text_key(key: Any) -> bool:
     )
 
 
+_EXACT_REPORT_PATHS: ContextVar[frozenset[str]] = ContextVar("exact_report_paths", default=frozenset())
+
+
+@contextmanager
+def exact_report_paths(paths: frozenset[str]) -> Iterator[None]:
+    """Mark canonical paths already proved by a complete retained report."""
+    token = _EXACT_REPORT_PATHS.set(paths)
+    try:
+        yield
+    finally:
+        _EXACT_REPORT_PATHS.reset(token)
+
+
 def _withheld_cross_check(
     command_name: str,
     vault_root: Path,
@@ -9608,6 +9621,12 @@ def filter_withheld_entries(
         if _tombstoned(rel_path):
             normalized = _normalize_pathish(rel_path)
             return () if normalized is None else (normalized,)
+        if rel_path in _EXACT_REPORT_PATHS.get():
+            try:
+                reserved_paths.inspect_generic_file(vault_root, rel_path, physical=True)
+            except (OSError, reserved_paths.ReservedPathLeafError):
+                verdicts[rel_path] = False
+            return (rel_path,)
         if rel_path.startswith(("http://", "https://", "exomem://")):
             return ()
         # RAW spelling first. `_decode_pathish` is otherwise unconditional,

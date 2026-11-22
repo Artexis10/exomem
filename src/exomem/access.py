@@ -76,6 +76,12 @@ def access_config_path(vault_root: Path) -> Path:
     return managed_root(vault_root) / "_access.yaml"
 
 
+def has_excluded_paths(vault_root: Path) -> bool:
+    """Whether the policy can hide paths from a whole-vault reduction."""
+    _fingerprint, config, unavailable = _policy_state(vault_root)
+    return unavailable or bool(config["excluded"])
+
+
 def _load_config(vault_root: Path) -> dict[str, list[str]]:
     """Read ``_access.yaml`` → ``{"readonly": [...], "excluded": [...]}``.
 

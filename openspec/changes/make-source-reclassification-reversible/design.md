@@ -47,7 +47,9 @@ The delivered design had its own review in `add-curation-relocation-protocol`.
 
 Bound candidate collection and response size in the interactive request. A positive overflow starts or rejoins a read-only preview through the maintenance job runner. A current publication must still prove the candidate set. Contention or incomplete evidence yields the existing warming response.
 
-Use the existing job receipt and a report-local cursor to report one bounded page at a time. Publish the summary and approval digest after the job proves the complete report. Bind page delivery to the owner, current governance policy, session grants, and connector authority. Later vault edits mark the completed snapshot as old. If release depends on page membership, a changed or unknown snapshot needs a fresh preview. Refuse the whole response if the release filter changes any report value. A failed or interrupted job cannot expose staged rows.
+Use the existing job receipt and a report-local cursor to report one bounded page at a time. Publish the summary and approval digest after the job proves the complete report. Admit the managed report only while the owner's authority covers every contributor. An owner-scoped rule or Access exclusion can withhold a contributor even if it does not appear in the report. Refuse managed previews under those conditions before counting references.
+
+Bind page delivery to live owner credentials, the governing policy, the connector ceiling, and the erasure set. Ordinary edits mark the completed snapshot as old. When release depends on page membership, a changed or unknown snapshot needs a fresh preview. The release filter checks guarded report paths without enumerating their directories. Refuse the whole response if the filter changes any value. A failed or interrupted job cannot expose staged rows.
 
 The paged approval digest binds the Source, destination, full referrer report, and pointer-write proof. The writer checks it against the current plan and rechecks the proof before saving pointer records and renaming the Source. The existing inline approval digest stays readable.
 

@@ -42,6 +42,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from . import (
+    access,
     file_watcher,
     foreground_priority,
     freshness,
@@ -60,7 +61,7 @@ from . import (
 )
 from . import move_file as move_file_module
 from .cli_ops import OpError
-from .governance import egress
+from .governance import egress, lifecycle, policy
 from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
@@ -632,12 +633,14 @@ def propose(
         return _propose(vault_root, path, source_kind=source_kind, domain=domain)
 
     try:
+        admission = preview_release_policy(vault_root, who)
         with nullcontext() if paged else foreground_priority.cancellable(owner):
             foreground_priority.check_cancelled()
             result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner,
-                              candidate_limit=candidate_limit, paged=paged)
+                              candidate_limit=candidate_limit, paged=paged, tombstones=admission[1])
             foreground_priority.check_cancelled()
-            if managed_preview_stop(vault_root, who) is not owner:
+            if (managed_preview_stop(vault_root, who) is not owner
+                    or preview_release_policy(vault_root, who) != admission):
                 raise preview_warming()
             return result
     except foreground_priority.BulkCancelled:
@@ -647,8 +650,11 @@ def propose(
 def _propose(
     vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
     candidate_limit: int | None = None, paged: bool = False,
+    tombstones: frozenset[str] = frozenset(),
 ) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
+    if lifecycle.is_tombstoned_in(tombstones, rel):
+        raise ReclassifyError("SOURCE_NOT_FOUND", "source does not exist")
     read_text = _read_inline_text if candidate_limit is not None else read_guarded_text
     text, source_guard = read_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
@@ -726,11 +732,12 @@ def _propose(
     inbound = (
         _visible_inbound(vault_root, rel) if owner is None
         else _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
-                                     candidate_limit=candidate_limit)
+                                     candidate_limit=candidate_limit, tombstones=tombstones)
     )
     outcome = (
         _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes,
-                          candidate_limit=candidate_limit, paged_classification=classification if paged else None)
+                          candidate_limit=candidate_limit, paged_classification=classification if paged else None,
+                          tombstones=tombstones)
         if destination is not None
         else _ReferrerOutcome()
     )
@@ -740,11 +747,9 @@ def _propose(
             source_guard.recheck(vault_root)
         except PathGuardError:
             raise preview_warming() from None
-        if (
-            _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
-                                     candidate_limit=candidate_limit) != inbound
-            or _preview_generation(vault_root) != generation
-        ):
+        current_inbound = _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
+                                                   candidate_limit=candidate_limit, tombstones=tombstones)
+        if current_inbound != inbound or _preview_generation(vault_root) != generation:
             raise preview_warming()
     return ReclassifyProposal(
         path=rel,
@@ -795,6 +800,25 @@ def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | Non
     return stop if allowed else None
 
 
+def preview_release_policy(vault_root: Path, who: RequestPrincipal) -> tuple[str, frozenset[str]]:
+    """Admit a managed report only if every surviving referrer may contribute."""
+    compiled = policy.load(vault_root)
+    if access.publication_policy_snapshot(vault_root) is None:
+        raise preview_warming()
+    if (compiled.blocked or compiled.conflicted or access.has_excluded_paths(vault_root)
+            or any(rule.audience == who.audience_id and rule.options.get("suspended") is not True
+                   for rule in compiled.rules)):
+        raise OpError(
+            "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+            "The current policy does not authorize a complete managed reference report.",
+        )
+    tombstones = lifecycle.tombstoned_paths(vault_root)
+    request_budget.checkpoint()
+    if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
+        raise preview_warming()
+    return compiled.fingerprint, tombstones
+
+
 def _preview_generation(vault_root: Path) -> tuple:
     """Bind both the literal inbound index and the projected prose candidates."""
     generation = freshness.preview_reference_generation(vault_root)
@@ -841,7 +865,7 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
 
 def _managed_preview_inbound(
     vault_root: Path, rel: str, owner: Event, *, read_hashes: Mapping[str, str | None] | None = None,
-    candidate_limit: int | None = None,
+    candidate_limit: int | None = None, tombstones: frozenset[str] = frozenset(),
 ) -> list[InboundLink]:
     from . import find
 
@@ -853,6 +877,8 @@ def _managed_preview_inbound(
         raise PreviewNeedsJob() from None
     if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
+            if tombstones:
+                return [hit for hit in inbound if not lifecycle.is_tombstoned_in(tombstones, hit.path)]
             return inbound
         find.schedule_inbound_rebuild(vault_root, stop=owner)
     raise preview_warming()
@@ -942,6 +968,7 @@ def _referrer_outcome(
     read_hashes: dict[str, str | None] | None = None,
     candidate_limit: int | None = None,
     paged_classification: tuple[str | None, str | None] | None = None,
+    tombstones: frozenset[str] = frozenset(),
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -982,7 +1009,8 @@ def _referrer_outcome(
     named_in = [
         page
         for page in (lookup.pages if lookup is not None else ())
-        if visible is None or visible(page)
+        if (not tombstones or not lifecycle.is_tombstoned_in(tombstones, page))
+        and (visible is None or visible(page))
     ]
     forms: dict[str, set[str]] = {}
     for hit in inbound:
@@ -1084,7 +1112,8 @@ def _write_correction(
     move's operation, by which an undo finds their pointer-write records and restores each.
     """
     paged = preview_digest is not None and preview_digest.startswith(_PAGED_APPROVAL_PREFIX)
-    if paged and (destination == rel or not egress.unrestricted_content_access(vault_root, effective_principal())):
+    who = effective_principal()
+    if paged and (destination == rel or not egress.unrestricted_content_access(vault_root, who)):
         raise _stale_paged_approval()
     if destination == rel:
         batch_atomic_write(
@@ -1108,7 +1137,11 @@ def _write_correction(
         generation = freshness.preview_reference_generation(vault_root)
         if generation is None or generation[1] is None or generation[3] is not None:
             raise _stale_paged_approval()
-        return generation
+        try:
+            release = preview_release_policy(vault_root, who)
+        except OpError:
+            raise _stale_paged_approval() from None
+        return generation, release
 
     approved_generation = current_reference_generation() if paged else None
 
