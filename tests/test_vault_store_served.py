@@ -44,6 +44,7 @@ from exomem import (
     extraction_parts,
     graph_drain,
     media_jobs,
+    media_replicas,
     media_store,
     media_worker,
     mutation_lock,
@@ -491,16 +492,14 @@ def test_a_media_store_offload_publishes_its_reference_through_the_served_door(
     assert media_store.original_state(stored, PICTURE).state == "cached"
 
 
-def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_next_one_releases(
+def test_a_quarantined_eviction_pointer_waits_for_a_busy_boundary_before_repair(
     stored, service, selected_store, monkeypatch, caplog
 ):
-    """An eviction whose absent stored version must be released while another holder keeps the
-    vault boundary: ``MEDIA_STORE_BUSY`` escapes to the worker, which logs a failure or (at start)
-    skips the rest of its scan, or the reference to the lost copy is never released."""
+    """Preserve the pointer and bytes while the served boundary is busy, then publish a verified replacement."""
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([PICTURE])
     reference = _offload(stored, stored / PICTURE)
-    # The stored copy is gone, so the eviction must release the reference instead of evicting.
+    # The stored copy is gone. Eviction leaves its pointer for the repair worker.
     (Path(selected_store[0]["root"]) / reference.object / reference.version).unlink()
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, stored / PICTURE))
     monkeypatch.setattr(store_media, "BUSY_WAIT_SECONDS", 0.5)
@@ -509,13 +508,17 @@ def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_ne
     with held_elsewhere(stored):
         assert media_store.evict_to_target(stored) == 0
         media_worker._evict(stored)
+        assert media_replicas.has_quarantined(stored, (reference,))
+        assert media_replicas.drain(stored) == 0
 
     assert reference.object.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    media_worker._evict(stored)
+    assert media_replicas.drain(stored) == 1
 
-    assert reference.object.encode() not in read.owned_bytes(stored, f"{PICTURE}.md")
+    repaired = media_store.original_state(stored, PICTURE).reference
+    assert repaired is not None and repaired != reference
+    assert media_store.check_replica(stored, repaired) is None
     assert (stored / PICTURE).read_bytes() == PICTURE_BYTES
 
 

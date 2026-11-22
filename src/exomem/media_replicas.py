@@ -1576,7 +1576,8 @@ def _pick(paused: set[str]) -> str:
 
 def drain(vault: Path, *, deadline: float | None = None) -> int:
     """Copy up to a batch of queued originals; return how many it settled (copied or refused)."""
-    from . import media_store
+    from . import media_store, mutation_lock
+    from .cli_ops import OpError
 
     vault = Path(vault).resolve()
     ledger = MediaJobStore(vault)
@@ -1600,13 +1601,18 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         try:
             copy = media_store.recopy if row["kind"] == RECOPY else media_store.replicate
             try:
-                copy(vault, vault / row["binary_rel"], row["store"])
-                _reconcile_copy(ledger, row)
+                with mutation_lock.absorbing_busy():
+                    copy(vault, vault / row["binary_rel"], row["store"])
+                    _reconcile_copy(ledger, row)
             except sqlite3.Error as error:
                 raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE,
                                                   "the copy's replica record could not be settled") from error
         except media_store.MediaStoreError as error:
             code = error.code
+        except OpError as error:
+            if error.code != "MUTATION_BUSY" or error.details.get("committed") is not False:
+                raise
+            code = media_store.STORE_BUSY_CODE
         except (OSError, ValueError, sqlite3.Error) as error:
             code = type(error).__name__
         if code is None:
