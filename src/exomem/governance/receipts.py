@@ -53,7 +53,8 @@ _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
-_MONTH_FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
+# Receipt evidence names encode a UTC month and optionally the first sequence in a numbered part.
+_MONTH_FILE = re.compile(r"^([0-9]{4}-[0-9]{2})(?:\.([0-9]{19}))?\.jsonl$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
@@ -393,7 +394,7 @@ def _durable_locator_matches(
             and record["seq"] == durable_seq
             and record["hash"] == durable_hash
             and _record_hash(record) == durable_hash
-            and _month_path(vault_root, instance_id, record["timestamp"]) == path
+            and _month_path(vault_root, instance_id, record["timestamp"]).stem == path.name[:7]
         )
     except (OSError, ValueError, json.JSONDecodeError, ReceiptError):
         return False
@@ -429,14 +430,23 @@ def _validated_month_path(instance_dir: Path, candidate: Path) -> Path:
 
 
 def _valid_month_name(name: str) -> bool:
-    if _MONTH_FILE.fullmatch(name) is None:
-        return False
-    year, month = name.removesuffix(".jsonl").split("-", 1)
+    return _evidence_name_key(name) is not None
+
+
+def _evidence_name_key(name: str) -> tuple[str, int] | None:
+    match = _MONTH_FILE.fullmatch(name)
+    if match is None:
+        return None
+    calendar, part = match.groups()
+    year, month = calendar.split("-", 1)
     try:
-        parsed = datetime(int(year), int(month), 1)
+        datetime(int(year), int(month), 1)
     except ValueError:
-        return False
-    return parsed.strftime("%Y-%m") == name.removesuffix(".jsonl")
+        return None
+    if part is None:
+        return calendar, 0
+    sequence = int(part)
+    return (calendar, sequence) if 0 < sequence <= (1 << 63) - 1 else None
 
 
 def _after_month_enumeration(_instance_dir: Path, _name: str) -> None:
@@ -519,30 +529,24 @@ def _open_windows_month_fd(
 def _monthly_evidence_names(
     instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
-    names: list[str] = []
+    named: list[tuple[tuple[str, int], str]] = []
     issues: list[dict[str, str]] = []
-    # Monthly file names are the fixed JSONL evidence protocol.
-    pattern = "????-??.jsonl"
-    candidates = instance_dir.glob(pattern)
-    if checkpoint is not None:
-        candidates = []
-        try:
-            with os.scandir(instance_dir) as entries:
-                for entry in entries:
+    try:
+        with os.scandir(instance_dir) as entries:
+            for entry in entries:
+                if checkpoint is not None:
                     checkpoint()
-                    candidate = Path(entry.path)
-                    if candidate.match(pattern):
-                        candidates.append(candidate)
-        except FileNotFoundError:
-            return names, issues
-    for candidate in sorted(candidates):
-        if checkpoint is not None:
-            checkpoint()
-        if not _valid_month_name(candidate.name):
-            issues.append({"code": "invalid_month_filename", "path": str(candidate), "detail": "month is not calendar-real"})
-            continue
-        names.append(candidate.name)
-    return names, issues
+                candidate = Path(entry.name)
+                if not (candidate.match("????-??.jsonl") or candidate.match("????-??.???????????????????.jsonl")):
+                    continue
+                key = _evidence_name_key(entry.name)
+                if key is None:
+                    issues.append({"code": "invalid_month_filename", "path": entry.path, "detail": "invalid receipt month or part"})
+                else:
+                    named.append((key, entry.name))
+    except FileNotFoundError:
+        return [], []
+    return [name for _, name in sorted(named)], sorted(issues, key=lambda issue: issue["path"])
 
 
 @contextmanager
@@ -739,7 +743,7 @@ def _verify_records(
             checkpoint()
         path = str(record.pop("_path"))
         offset = int(record.pop("_offset"))
-        month = Path(path).stem
+        month = Path(path).name[:7]
         try:
             _normalized, parsed = _timestamp(record.get("timestamp"))
             if f"{parsed:%Y-%m}" != month:
@@ -750,6 +754,10 @@ def _verify_records(
         if envelope_error is not None:
             issues.append({"code": "invalid_envelope", "path": path, "detail": envelope_error})
             continue
+        if offset == 0:
+            part = _evidence_name_key(Path(path).name)
+            if part is not None and part[1] and record.get("seq") != part[1]:
+                issues.append({"code": "invalid_part_start", "path": path, "detail": "part starts at a different sequence"})
         if previous_month is not None and month != previous_month and record.get("prev") != expected_hash:
             issues.append({"code": "broken_month_link", "path": path, "detail": "first record does not link to prior month"})
         if record.get("seq") != expected_seq:
@@ -826,7 +834,7 @@ def _lifecycle_instance_intents(
             cached = _LifecycleReceiptSegment(
                 int(tail["seq"]) if tail is not None else anchor.last_seq,
                 str(tail["hash"]) if tail is not None else anchor.last_hash,
-                path.stem if tail is not None else anchor.last_month,
+                name[:7] if tail is not None else anchor.last_month,
                 tuple(record for record in valid if record["event_type"] == "critical" and record["phase"] == "intent"),
             )
             if reusable:
@@ -1342,7 +1350,7 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     if not isinstance(record, dict) or _envelope_error(record) is not None:
         raise ReceiptError("receipt tail has an invalid envelope")
     _normalized, parsed = _timestamp(record["timestamp"])
-    if f"{parsed:%Y-%m}" != Path(name).stem:
+    if f"{parsed:%Y-%m}" != name[:7]:
         raise ReceiptError("receipt tail timestamp does not match its evidence month")
     if _record_hash(record) != record["hash"]:
         raise ReceiptError("receipt tail hash is invalid")
@@ -1362,8 +1370,10 @@ def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
     if issues:
         raise ReceiptError(issues[0]["detail"])
     for name in names:
-        if name <= target.name:
-            _fsync_path(instance_dir / name)
+        _fsync_path(instance_dir / name)
+        if name == target.name:
+            return
+    raise ReceiptError("receipt evidence path is missing")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1558,8 +1568,12 @@ def append_event(
                 if existing is not None:
                     return existing
             path = _month_path(vault_root, instance_id, timestamp)
-            if tail is not None and path.name < Path(tail["_path"]).name:
-                raise ReceiptError("backdated receipt month rotation is refused")
+            if tail is not None:
+                previous = Path(tail["_path"])
+                if path.stem < previous.name[:7]:
+                    raise ReceiptError("backdated receipt month rotation is refused")
+                if path.stem == previous.name[:7]:
+                    path = previous
             record: dict[str, Any] = {
                 "schema": SCHEMA,
                 "event_id": eid,

@@ -265,6 +265,29 @@ def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
     assert receipts.verify_chain(vault)["valid"] is True
 
 
+def test_receipt_readers_join_legacy_month_and_numbered_part(vault: Path) -> None:
+    for second in ("00", "01"):
+        receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []},
+            timestamp=f"2000-01-01T00:00:{second}Z",
+        )
+    month = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    first, second = month.read_bytes().splitlines(keepends=True)
+    month.write_bytes(first)
+    part = month.with_name("2000-01.0000000000000000002.jsonl")
+    part.write_bytes(second)
+
+    assert [entry["seq"] for entry in receipts.event_records(vault)] == [1, 2]
+    assert receipts.verify_chain(vault)["valid"] is True
+    assert receipts._read_tail_record(month.parent)["seq"] == 2
+    receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2000-01-01T00:00:02Z",
+    )
+    assert month.read_bytes() == first
+    assert part.read_bytes().startswith(second)
+    assert receipts.verify_chain(vault)["valid"] is True
+
+
 def test_a_consistent_copy_without_a_local_anchor_reads_as_unanchored_but_valid(
     vault: Path, tmp_path: Path, receipt_state_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
