@@ -239,6 +239,11 @@ class BulkCancelled(BaseException):
     """Owned bulk work stopped; ordinary proof failures must not swallow it."""
 
 
+def cancellation_event() -> threading.Event | None:
+    """Return this scope's stop signal for a guarded operation on another thread."""
+    return getattr(_local, "stop", None)
+
+
 def check_cancelled() -> None:
     """Cancel this thread's owned bulk scope between complete work units."""
     from . import request_budget
