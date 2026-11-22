@@ -21,10 +21,13 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import foreground_priority, held_fs, originals, reserved_paths
 from .media_jobs import MediaJobStore
+
+if TYPE_CHECKING:
+    from . import media_store
 
 log = logging.getLogger(__name__)
 
@@ -143,6 +146,29 @@ def _status_schema(conn: sqlite3.Connection) -> set[str]:
         "SELECT name FROM sqlite_schema WHERE type IN ('table', 'trigger') AND tbl_name IN (?, ?, ?, ?, ?)",
         (*_STATUS_SOURCES, *_STATUS_TABLES),
     )}
+
+
+_EXPORT_COVERAGE_KEY = "replica.key_export_coverage"
+_EXPORT_EVIDENCE_UNAVAILABLE = "key export evidence unavailable"
+
+
+def _initialize_export_coverage(conn: sqlite3.Connection, existing: set[str]) -> None:
+    # The receipt table and its triggers can be recreated. Keep their lost history separately in the ledger.
+    projected = bool(existing.intersection(_STATUS_TABLES)) or conn.execute(
+        "SELECT 1 FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone() is not None
+    missing_table = "media_key_exports" not in existing
+    lost = (missing_table and "media_replicas" in existing
+            or projected and (missing_table or not _EXPORT_STATUS_TRIGGERS.issubset(existing)))
+    conn.execute("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value "
+                 "WHERE excluded.value = 'incomplete' AND meta.value <> excluded.value",
+                 (_EXPORT_COVERAGE_KEY, "incomplete" if lost else "complete"))
+
+
+def _export_coverage_complete(conn: sqlite3.Connection, schema: set[str]) -> bool:
+    if "media_key_exports" not in schema or not _EXPORT_STATUS_TRIGGERS.issubset(schema):
+        return False
+    coverage = conn.execute("SELECT value FROM meta WHERE key = ?", (_EXPORT_COVERAGE_KEY,)).fetchone()
+    return coverage is None or coverage[0] == "complete"
 
 
 def _proof_level(row: str = "") -> str:
@@ -287,6 +313,7 @@ def _initialize_status(conn: sqlite3.Connection, existing: set[str]) -> None:
 def initialize(conn: sqlite3.Connection) -> None:
     """Create the replica tables. A table created fresh clears the census, so its first rows read as unknown."""
     existing = _status_schema(conn)
+    _initialize_export_coverage(conn, existing)
     conn.execute("CREATE TABLE IF NOT EXISTS media_replicas ("
                  "binary_rel TEXT NOT NULL, store TEXT NOT NULL, object TEXT NOT NULL, version TEXT NOT NULL, "
                  "key_version TEXT NOT NULL, verified_at REAL, state TEXT NOT NULL, seen INTEGER NOT NULL, "
@@ -845,32 +872,30 @@ def confirm_key_export(vault: Path, key_version: str | None = None) -> str:
 
 
 def _exports(conn: sqlite3.Connection) -> dict[str, float]:
-    try:
-        return {row["key_version"]: row["confirmed_at"]
-                for row in conn.execute("SELECT key_version, confirmed_at FROM media_key_exports")}
-    except sqlite3.OperationalError:
-        return {}
+    return dict(conn.execute("SELECT key_version, confirmed_at FROM media_key_exports"))
 
 
 def recoverability(config: dict[str, object], key_version: str, exports: dict[str, float], *,
-                   quarantined: bool = False) -> tuple[bool | None, str | None]:
+                   quarantined: bool = False, exports_complete: bool = True) -> tuple[bool | None, str | None]:
     """Whether a replica made under `key_version` survives the loss of this machine, and the reason when it does not.
 
     A quarantined replica does not: its bytes are damaged or absent, whoever holds the key. Otherwise it does when a
     platform holds the identity (the configuration says so) or the owner confirmed an export. A vault that lists its
-    own stores is a personal install, where the owner's export is the only way, so an unconfirmed key reads as not
-    recoverable. A vault with neither, such as a Cloud cell's, says nothing about custody: unknown.
+    own stores is a personal install, where the owner's export is the only way. An unconfirmed key reads as
+    not recoverable if the export history is complete. A vault with neither source of custody evidence reports unknown.
     """
     if quarantined:
         return False, QUARANTINED
     if key_version in exports:
         return True, None
-    return _unexported_key_recoverability(config)
+    return _unexported_key_recoverability(config, exports_complete)
 
 
-def _unexported_key_recoverability(config: dict[str, object]) -> tuple[bool | None, str | None]:
+def _unexported_key_recoverability(config: dict[str, object], exports_complete: bool) -> tuple[bool | None, str | None]:
     if config.get(originals.KEY_CUSTODY) == originals.PLATFORM_CUSTODY:
         return True, None
+    if not exports_complete:
+        return None, _EXPORT_EVIDENCE_UNAVAILABLE
     if originals.STORES in config:
         return False, "key not exported"
     return None, "key custody unknown"
@@ -1084,9 +1109,10 @@ def _count_samples(config: dict[str, object], stats: dict[str, Any], entry: orig
                                       for reason, count in sorted(counts.items()) if count]
 
 
-def _count_recoverability(config: dict[str, object], stats: dict[str, Any], exported: int) -> None:
+def _count_recoverability(config: dict[str, object], stats: dict[str, Any], exported: int,
+                          exports_complete: bool) -> None:
     unexported = stats["replicas"] - stats["quarantined"] - exported
-    recoverable, reason = _unexported_key_recoverability(config)
+    recoverable, reason = _unexported_key_recoverability(config, exports_complete)
     stats["recoverable"] = exported
     stats["not_recoverable"] = stats["quarantined"]
     if stats["quarantined"]:
@@ -1133,8 +1159,10 @@ def status(vault: Path) -> dict[str, object]:
     try:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # never recreates a table
             conn.execute("BEGIN")
-            if not _STATUS_REQUIRED_SCHEMA.issubset(_status_schema(conn)):
+            schema = _status_schema(conn)
+            if not _STATUS_REQUIRED_SCHEMA.issubset(schema):
                 return _unknown("the replica status schema is incomplete")
+            exports_complete = _export_coverage_complete(conn, schema)
             census = _census(conn)
             if census is None:
                 return _unknown("the replica table is being rebuilt from the bindings")
@@ -1172,7 +1200,7 @@ def status(vault: Path) -> dict[str, object]:
         stats["quarantined"] = row["quarantined"] or 0
         _count_checks(stats, entry, row)
         _count_samples(config, stats, entry, row, key)
-        _count_recoverability(config, stats, row["exported"] or 0)
+        _count_recoverability(config, stats, row["exported"] or 0, exports_complete)
         if counts := json.loads(row["copies"]):
             stats["copy"] = _copy_counts(counts)
     holding = [stats for stats in stores.values() if stats["replicas"]]
@@ -1199,15 +1227,19 @@ def status(vault: Path) -> dict[str, object]:
         stats["oldest_verified_at"] = _iso(stats["oldest_verified_at"])
         for proof in stats["checks"].values():
             proof["oldest_at"] = _iso(proof["oldest_at"])
-    return {**_coverage(census),
+    return {**_coverage(census, exports_complete=exports_complete),
             "source": "media ledger table, rebuilt from the bindings",
             "stores": list(stores.values()), "totals": totals}
 
 
-def _coverage(census: sqlite3.Row) -> dict[str, object]:
+def _coverage(census: sqlite3.Row, *, exports_complete: bool = True) -> dict[str, object]:
     unread = census["unread"]
-    return {"state": "partial" if unread else "measured",
-            "reason": "some bindings could not be read during the rebuild" if unread else None,
+    if unread:
+        reason = "some bindings could not be read during the rebuild"
+    else:
+        reason = None if exports_complete else _EXPORT_EVIDENCE_UNAVAILABLE
+    return {"state": "partial" if reason else "measured",
+            "reason": reason,
             "as_of": _iso(census["rebuilt_at"]), "unread_originals": unread}
 
 
@@ -1246,10 +1278,12 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
     try:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # a read never recreates a table
             conn.execute("BEGIN")
-            if not _STATUS_REQUIRED_SCHEMA.issubset(_status_schema(conn)):
+            schema = _status_schema(conn)
+            if not _STATUS_REQUIRED_SCHEMA.issubset(schema):
                 return _unknown("the replica status schema is incomplete", originals=None, next_after=None)
             census = _census(conn)
             exports = _exports(conn)
+            exports_complete = _export_coverage_complete(conn, schema)
             paths = [row[0] for row in conn.execute(
                 "SELECT DISTINCT binary_rel FROM media_replicas WHERE binary_rel > ? ORDER BY binary_rel LIMIT ?",
                 (after or "", limit + 1))]
@@ -1266,7 +1300,8 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
     listed: dict[str, list[dict[str, object]]] = {}
     for row in rows:
         entry = entries.get(row["store"])
-        recoverable, reason = recoverability(config, row["key_version"], exports, quarantined=row["state"] == QUARANTINED)
+        recoverable, reason = recoverability(config, row["key_version"], exports,
+                                             quarantined=row["state"] == QUARANTINED, exports_complete=exports_complete)
         listed.setdefault(row["binary_rel"], []).append({
             "store": row["store"], "state": row["state"], "verified_at": _iso(row["verified_at"]),
             "failure_domain": entry.failure_domain if entry is not None else None,
@@ -1274,7 +1309,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
             "recoverable": recoverable, "reason": reason, "key_version": row["key_version"],
             **_check_view(row),
         })
-    return {**_coverage(census),
+    return {**_coverage(census, exports_complete=exports_complete),
             "originals": [{"path": path, "replicas": found} for path, found in listed.items()],
             "next_after": next(reversed(listed)) if more and listed else None}
 
@@ -1372,7 +1407,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
                     exports = dict(conn.execute(
                         "SELECT key_version, confirmed_at FROM media_key_exports WHERE key_version IN "
                         "(SELECT value FROM json_each(?))", (json.dumps(sorted({r.key_version for r in replicas})),)))
-                    exports_complete = _EXPORT_STATUS_TRIGGERS.issubset(schema)
+                    exports_complete = _export_coverage_complete(conn, schema)
                 if "media_replicas" in sources:
                     missing_versions = tuple(replica for replica in replicas if replica.store not in versions)
                     if missing_versions and _QUARANTINED_VERSION_INDEX not in sources:
@@ -1412,12 +1447,9 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
             state, recoverable, reason = QUARANTINED, False, QUARANTINED
         elif not damage_complete or not projection_complete or checked is None:
             state, recoverable, reason = "unknown", None, "damage evidence unavailable"
-        elif (not exports_complete and replica.key_version not in exports
-              and config.get(originals.KEY_CUSTODY) != originals.PLATFORM_CUSTODY):
-            state, recoverable, reason = UPLOAD_VERIFIED, None, "key export evidence unavailable"
         else:
             state = UPLOAD_VERIFIED
-            recoverable, reason = recoverability(config, replica.key_version, exports)
+            recoverable, reason = recoverability(config, replica.key_version, exports, exports_complete=exports_complete)
         found.append({
             "store": replica.store, "state": state,
             "verified_at": _iso(checked["verified_at"]) if checked is not None else None,
@@ -1677,13 +1709,19 @@ def work(vault: Path, *, deadline: float | None = None) -> bool:
     if waiting:
         scan(vault, waiting[0])
         return True
-    settled = drain(vault, deadline=deadline)
+    now = time.monotonic()
+    next_check = _checked.get(vault)
+    drain_until = now + _DRAIN_SECONDS if deadline is None else min(deadline, now + _DRAIN_SECONDS)
+    if next_check is not None:
+        drain_until = min(drain_until, next_check + _CHECK_INTERVAL)
+    settled = drain(vault, deadline=drain_until)
     # Verification does not wait for an empty queue: a backlog of copies would otherwise hold every check and sample
     # back for as long as it lasts, with replicas overdue. A round costs one bounded drain and one bounded check.
-    if time.monotonic() - _checked.get(vault, -_CHECK_INTERVAL) < _CHECK_INTERVAL:
+    now = time.monotonic()
+    if (deadline is not None and now >= deadline) or (next_check is not None and now - next_check < _CHECK_INTERVAL):
         return settled > 0
-    _checked[vault] = time.monotonic()
-    return settled + check(vault) + sample(vault) > 0
+    _checked[vault] = now
+    return settled + check(vault, deadline=deadline) + sample(vault, deadline=deadline) > 0
 
 
 # --- scheduled checks --------------------------------------------------------------------------------
@@ -1726,7 +1764,13 @@ class _ReadCap:
         if self.due >= self.limit:
             return False
         foreground_priority.wait_for_retry(max(0.0, self.due - time.monotonic()))
-        return True
+        return time.monotonic() < self.limit
+
+    def charge(self, started: float, size: int) -> None:
+        if size > 0:
+            self.due = max(self.due, started) + size / self.rate
+            if self.key is not None:
+                _owed[self.key] = self.due
 
     @contextmanager
     def reading(self, size: int):
@@ -1746,10 +1790,8 @@ class _ReadCap:
             charged = False
             raise
         finally:
-            if charged and size > 0:
-                self.due = max(self.due, started) + size / self.rate
-                if self.key is not None:
-                    _owed[self.key] = self.due
+            if charged:
+                self.charge(started, size)
 
 
 def scheduled_level(entry: originals.StoreEntry) -> str | None:
@@ -1875,6 +1917,9 @@ def _round_seconds(content_bytes: int, rate: float) -> float:
     return min(_CHECK_ROUND_MAX, max(_CHECK_ROUND_SECONDS, _CHECK_ROUND_FACTOR * content_bytes / rate))
 
 
+_scheduled_reads: dict[tuple[Path, str], media_store.ScheduledRead] = {}
+
+
 def check(vault: Path, *, deadline: float | None = None) -> int:
     """One bounded round of scheduled checks over every store whose descriptor allows one; return the replicas attempted.
 
@@ -1884,38 +1929,52 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
     store that does not answer as itself, or fails `_STORE_FAILURES` replicas in a row, ends its own round and changes
     no row that it did not attempt. The store that has waited longest goes first.
     """
+    from . import media_store
+
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
     if config is None or config.get("enabled") is not True:
         return 0
     ledger = MediaJobStore(vault)
     cycle, rate = check_cycle(), check_read_rate()
-    levels = {name: level for name, entry in originals.store_entries(config).items()
+    entries = originals.store_entries(config)
+    levels = {name: level for name, entry in entries.items()
               if (level := scheduled_level(entry)) is not None}
     plan = _check_plan(ledger, levels, cycle)
-    content_bytes = sum(share[1] for name, share in plan.items() if levels[name] == CONTENT)
-    limit = time.monotonic() + _round_seconds(content_bytes, rate) if deadline is None else deadline
+    reads_bytes = {name for name in levels if media_store.head_reads_bytes(entries[name])}
+    for key in tuple(_scheduled_reads):
+        if key[0] == vault and key[1] not in reads_bytes:
+            del _scheduled_reads[key]
+    content_bytes = sum(share[1] for name, share in plan.items() if name in reads_bytes)
+    limit = time.monotonic() + _round_seconds(content_bytes, rate)
+    if deadline is not None:
+        limit = min(limit, deadline)
     cap = _ReadCap(rate, limit, (vault, "check"))
-    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit, share) for name, share in plan.items())
+    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit, share, reads_bytes=name in reads_bytes)
+               for name, share in plan.items())
 
 
 def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycle: float, cap: _ReadCap,
-                 limit: float, share: tuple[int, int]) -> int:
+                 limit: float, share: tuple[int, int], *, reads_bytes: bool = True) -> int:
     """One store's part of a check round: the replicas attempted."""
     from . import media_store
 
+    if time.monotonic() >= limit:
+        return 0
     if (answer := media_store.store_reachable(vault, name)) is not None:
         _note_reach(vault, name, answer)
     if answer is False:
         return 0
     rows, budget = share
     attempted = spent = failing = 0
+    read = (_scheduled_reads.setdefault((vault, name), media_store.ScheduledRead())
+            if reads_bytes else media_store.ScheduledRead())
     while attempted < rows:
         picked = _due(ledger, name, cycle, min(rows - attempted, _CHECK_BATCH))
         if not picked:
             break
         for row in picked:
-            if time.monotonic() >= limit or (level == CONTENT and (spent >= budget or not cap.ready())):
+            if time.monotonic() >= limit or (reads_bytes and (spent >= budget or not cap.ready())):
                 return attempted
             foreground_priority.yield_to_foreground()
             attempted += 1
@@ -1926,16 +1985,20 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 _failed(vault, row, bound)
                 continue
             replica = bound[1]
-            size = replica.ciphertext_size if level == CONTENT else 0  # a presence check moves no object
-            spent += size
+            started = time.monotonic()
+            if started >= limit:
+                return attempted - 1
+            read.bytes_read = None
+            size = replica.ciphertext_size if reads_bytes else 0
             try:
-                with cap.reading(size):
-                    failure = media_store.check_replica(vault, replica, deadline=limit)
+                failure = media_store.check_replica(vault, replica, deadline=limit, scheduled=read)
+            except media_store.ReplicaCheckPending:
+                return attempted
             except media_store.ReplicaAbsent as missing:
-                spent -= size
+                size = 0
                 failure = missing.failure
             except ValueError:
-                spent -= size  # refused before it read anything
+                size = 0  # refused before it read anything
                 _failed(vault, row, RECORD_INVALID, attempted=replica)  # the store answered; it cannot address this version
                 continue
             except media_store.MediaStoreError:
@@ -1947,6 +2010,10 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
                 if failing >= _STORE_FAILURES:
                     return attempted
                 continue
+            finally:
+                charged = size if read.bytes_read is None else read.bytes_read
+                spent += charged
+                cap.charge(started, charged)
             failing = 0
             if failure is None:
                 _passed(vault, row["binary_rel"], replica, level)
@@ -2106,10 +2173,14 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
     if config is None or config.get("enabled") is not True:
         return 0
     ledger = MediaJobStore(vault)
-    limit = time.monotonic() + _CHECK_ROUND_SECONDS if deadline is None else deadline
+    limit = time.monotonic() + _CHECK_ROUND_SECONDS
+    if deadline is not None:
+        limit = min(limit, deadline)
     cap, cycle = _ReadCap(check_read_rate(), limit, (vault, "sample")), check_cycle()
     month, key_version, sampled = _month(time.time()), str(config.get("key_version")), 0
     for name, entry in originals.store_entries(config).items():
+        if time.monotonic() >= limit:
+            break
         if (_unscheduled_reason(entry) is not None or entry.sample_bytes_per_month <= 0
                 or media_store.unreadable_reason(vault, name, key_version) is not None):
             continue
@@ -2166,12 +2237,16 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     _mark_sample(vault, row, month, attempted=replica)
                     skips += 1
                 continue
+            if time.monotonic() >= limit:
+                with closing(ledger._connect()) as conn, conn:
+                    _charge(conn, name, month, -replica.ciphertext_size)
+                break
             reads += 1
             sampled += 1
             try:
                 with cap.reading(replica.ciphertext_size):
                     damage = media_store.sample_replica(
-                        vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256))
+                        vault, replica, media_store.ObjectHead(snapshot.binary_size, snapshot.binary_sha256), deadline=limit)
             except media_store.KeyRefused:
                 # the bytes match their record: no damage
                 _failed(vault, row, media_store.KEY_REFUSED, attempted=replica, sample=True)
@@ -2257,5 +2332,6 @@ def _run(vault: Path) -> None:
         except Exception:  # noqa: BLE001 - a failed unit must not end the worker or deny the service
             log.warning("media replicas: a unit of work failed; the worker tries again", exc_info=True)
         if not busy:
-            _wake.wait(_IDLE_SECONDS)
+            until_check = _checked.get(vault, 0.0) + _CHECK_INTERVAL - time.monotonic()
+            _wake.wait(min(_IDLE_SECONDS, until_check) if until_check > 0 else _IDLE_SECONDS)
         _wake.clear()

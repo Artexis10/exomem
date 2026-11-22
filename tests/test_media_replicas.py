@@ -13,9 +13,10 @@ import json
 import os
 import sqlite3
 import subprocess
+import threading
 import time
 import types
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,7 @@ from exomem import (
     original_fixity,
     original_pool,
     originals,
+    reserved_paths,
 )
 
 MIRROR = "mirror"
@@ -1746,29 +1748,45 @@ def test_exact_status_reads_the_quarantine_of_a_sibling_filing_after_authority_l
         assert conn.execute("SELECT COUNT(*) FROM media_damaged_versions").fetchone() == (0,)
 
 
-def test_exact_status_keeps_unknown_export_coverage_and_credits_a_surviving_receipt(
-        vault: Path, selected_store, mirrored: Path) -> None:
+@pytest.mark.parametrize("receipt_survives", [False, True])
+def test_export_coverage_loss_survives_ledger_recovery_and_preserves_positive_receipts(
+        vault: Path, selected_store, mirrored: Path, receipt_survives: bool) -> None:
     relative, replica = _replicated(vault)
     media_replicas.confirm_key_export(vault, replica.key_version)
     path = media_jobs.MediaJobStore(vault).path
     with closing(sqlite3.connect(path)) as conn, conn:
         [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_key_exports'").fetchone()
         conn.execute("DROP TABLE media_key_exports")
-        conn.execute(schema)
+        if receipt_survives:
+            conn.execute(schema)
 
-    status = media_replicas.original_view(vault, relative)
+    exact = media_replicas.original_view(vault, relative)
+    assert exact["state"] == "partial"
+    assert all(item["recoverable"] is None for item in exact["replicas"])
 
-    assert status["state"] == "partial"
-    assert all(item["recoverable"] is None for item in status["replicas"])
+    if receipt_survives:
+        # An older writer can confirm a key before the current writer restores the table's triggers.
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("INSERT INTO media_key_exports VALUES (?, ?)", (replica.key_version, time.time()))
+    media_jobs.MediaJobStore(vault)  # The current writer reinstalls the triggers and rebuilds the projection.
+    media_jobs.MediaJobStore(vault)  # Open the repaired ledger again.
 
-    # An older runtime can confirm one key in the recreated table before the new runtime repairs its coverage.
-    with closing(sqlite3.connect(path)) as conn, conn:
-        conn.execute("INSERT INTO media_key_exports VALUES (?, ?)", (replica.key_version, time.time()))
-    status = media_replicas.original_view(vault, relative)
+    exact = media_replicas.original_view(vault, relative)
+    aggregate = media_replicas.status(vault)
+    [listed] = media_replicas.page(vault)["originals"]
+    expected = True if receipt_survives else None
+    assert exact["state"] == aggregate["state"] == "partial"
+    assert [item["recoverable"] for item in exact["replicas"]] == [expected, expected]
+    assert [item["recoverable"] for item in listed["replicas"]] == [expected, expected]
+    assert aggregate["totals"]["recoverable"] == (2 if receipt_survives else 0)
+    assert aggregate["totals"]["not_recoverable"] == 0
+    assert aggregate["totals"]["recoverability_unknown"] == (0 if receipt_survives else 2)
 
-    assert status["state"] == "partial"
-    [mirror] = [item for item in status["replicas"] if item["store"] == MIRROR]
-    assert mirror["recoverable"] is True
+    if not receipt_survives:
+        media_replicas.confirm_key_export(vault, replica.key_version)
+        current = media_replicas.status(vault)
+        assert current["totals"]["recoverable"] == 2
+        assert current["state"] == "partial"  # The confirmed key does not restore the table's history.
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -2685,8 +2703,9 @@ def test_a_filing_published_on_a_version_that_a_finding_condemned_meanwhile_is_w
     assert (second.relative_to(vault).as_posix(), media_replicas.RECOPY) in _requests(vault)
 
 
+@pytest.mark.parametrize("previous_refusal", [False, True])
 def test_offload_checks_one_bounded_slice_of_candidates_before_charging_a_fresh_copy(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, previous_refusal: bool) -> None:
     lost = 10
     root = Path(selected_store[0]["root"])
     gone = []
@@ -2709,7 +2728,13 @@ def test_offload_checks_one_bounded_slice_of_candidates_before_charging_a_fresh_
     monkeypatch.setattr(media_store, "_head_failure",
                         lambda backend, reference: visited.append(reference) or head_failure(backend, reference))
 
-    assert _offload(vault, _preserved(vault, category="last")).object not in {reference.object for reference in gone}
+    last = _preserved(vault, category="last")
+    if previous_refusal:
+        with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+            ledger.execute("INSERT INTO media_offload_refusals(binary_rel, sha256, code, created_at) VALUES (?, ?, ?, ?)",
+                           (last.relative_to(vault).as_posix(), originals.original_state(vault, last).binary_sha256,
+                            "MEDIA_ALLOWANCE_EXCEEDED", time.time()))
+    assert _offload(vault, last).object not in {reference.object for reference in gone}
 
     assert (len(censuses) - baseline, len(recorded)) == (baseline, 1)
     assert len(visited) == 8 and set(visited) < set(gone)
@@ -3346,8 +3371,8 @@ def test_a_sample_that_decrypts_a_version_leaves_a_finding_that_another_filing_r
     picked = []
     sample_replica = media_store.sample_replica
 
-    def sample_then_the_sibling_finds_it_bad(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead):
-        damage = sample_replica(root, entry, head)
+    def sample_then_the_sibling_finds_it_bad(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead, *, deadline):
+        damage = sample_replica(root, entry, head, deadline=deadline)
         if not picked:
             picked.append(entry)
             media_replicas.quarantine(root, held[second], entry, level=level, failure=failure)
@@ -3380,8 +3405,8 @@ def test_a_sample_that_decrypts_a_copy_leaves_a_finding_that_the_pointer_recorde
     found_again = []
     sample_replica = media_store.sample_replica
 
-    def sample_then_the_pointer_is_found_wrong_again(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead):
-        damage = sample_replica(root, entry, head)
+    def sample_then_the_pointer_is_found_wrong_again(root: Path, entry: originals.StoredObject, head: media_store.ObjectHead, *, deadline):
+        damage = sample_replica(root, entry, head, deadline=deadline)
         if not found_again:
             found_again.append(entry)
             media_replicas.quarantine(root, relative, pointer, level=media_replicas.DECRYPTED,
@@ -3816,7 +3841,7 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
                         lambda seconds: clock.__setitem__(0, clock[0] + seconds))
 
-    def read_by_the_store(_vault, replica, *, deadline):
+    def read_by_the_store(_vault, replica, *, deadline, scheduled):
         clock[0] += replica.ciphertext_size / (50 * 10**6)  # a NAS that serves 50 MB a second: about 1 s a replica
         return None
 
@@ -3832,6 +3857,33 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
 
     assert checked == share[0] == 116
     assert clock[0] < limit  # the whole share, at the cap, fits the round with the margin that sizes it
+
+
+def test_the_idle_worker_starts_the_next_round_when_it_is_due(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full-duration store check must not add idle polling drift to the thirty-day cycle."""
+    media_jobs.MediaJobStore(vault)
+    clock, starts = [0.0], []
+    monkeypatch.setattr(media_replicas, "time", types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(media_replicas, "observe", lambda _vault: None)
+    monkeypatch.setattr(media_replicas, "rebuild_due", lambda _vault: False)
+    monkeypatch.setattr(media_replicas, "sample", lambda _vault, *, deadline: 0)
+    monkeypatch.setattr(media_replicas, "_wake", types.SimpleNamespace(
+        wait=lambda seconds: clock.__setitem__(0, clock[0] + seconds), clear=lambda: None))
+    stop = threading.Event()
+    monkeypatch.setattr(media_replicas, "_stop", stop)
+
+    def check(_vault, *, deadline):
+        starts.append(clock[0])
+        clock[0] += 345
+        if len(starts) == 2:
+            stop.set()
+        return 1
+
+    monkeypatch.setattr(media_replicas, "check", check)
+    media_replicas._run(vault)
+
+    assert starts == [0.0, 600.0]
 
 
 def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_again(
@@ -3853,7 +3905,7 @@ def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_
                         lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
         1, row["store"], "1", row["object"], row["version"], 100 * gib, "0" * 64)))
-    monkeypatch.setattr(media_store, "check_replica", lambda _vault, replica, *, deadline: reads.append(
+    monkeypatch.setattr(media_store, "check_replica", lambda _vault, replica, *, deadline, scheduled: reads.append(
         (clock[0], replica.ciphertext_size)))
 
     for _round in range(8):  # the worker's check interval is ten minutes
@@ -3864,6 +3916,79 @@ def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_
     rate = media_replicas.check_read_rate()
     for number, (started, _size) in enumerate(reads):
         assert sum(size for _started, size in reads[:number]) <= rate * started  # what was read before is paid for
+
+
+@pytest.mark.parametrize("resize", [False, True])
+def test_a_filesystem_check_charges_only_the_ciphertext_it_reads(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, resize: bool) -> None:
+    """A presence label can still cost bytes. A held-size refusal costs zero."""
+    _declare(vault, selected_store, mirrored, head_recomputes=resize)
+    _relative, replica = _replicated(vault)
+    _due_again(vault)
+    if resize:
+        with _stored_file(mirrored, replica).open("r+b") as stream:
+            stream.truncate(replica.ciphertext_size + 1)
+    now = time.monotonic() + 600
+    clock = types.SimpleNamespace(monotonic=lambda: now, time=time.time)
+    monkeypatch.setattr(media_replicas, "time", clock)
+    monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry", lambda _seconds: None)
+    monkeypatch.setattr(reserved_paths, "time", clock)
+
+    media_replicas.check(vault, deadline=now + 60.0)
+
+    cap_finish = media_replicas._owed[(vault, "check")]
+    first_size = _replica_row(vault, store="test-store")["size"]
+    charged = first_size + (0 if resize else replica.ciphertext_size)
+    assert cap_finish - now == pytest.approx(charged / media_replicas.check_read_rate(), abs=1e-9)
+    row = _replica_row(vault)
+    assert (row["level"], row["failure"]) == (
+        (media_replicas.CONTENT, "size_mismatch") if resize else (media_replicas.PRESENCE, None))
+
+
+@pytest.mark.parametrize("changed_between_rounds", [False, True])
+def test_a_filesystem_check_resumes_a_held_hash_across_rounds(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch,
+        changed_between_rounds: bool) -> None:
+    """A healthy large copy can finish and an old prefix cannot vouch for a changed file."""
+    original = _stored(vault, "Recordings", b"x" * (2 * 1024**2))
+    _offload(vault, original)
+    _replicate_all(vault)
+    replica = originals.original_state(vault, original).replicas[0]
+    _due_again(vault)
+    ledger = media_jobs.MediaJobStore(vault)
+    clock = [10.0]
+    timed = types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time)
+    monkeypatch.setattr(media_replicas, "time", timed)
+    monkeypatch.setattr(reserved_paths, "time", timed)
+    real_digest = media_store._digest
+
+    def slow_digest(stream, **kwargs):
+        def read(size):
+            chunk = stream.read(size)
+            clock[0] += 0.75
+            return chunk
+
+        return real_digest(types.SimpleNamespace(read=read), **kwargs)
+
+    monkeypatch.setattr(media_store, "_digest", slow_digest)
+    cap = media_replicas._ReadCap(media_replicas.check_read_rate(), 10.5)
+    cycle = media_replicas.check_cycle()
+    allowance = (1, replica.ciphertext_size)
+    media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle, cap, 10.5, allowance)
+    assert (_replica_row(vault)["checked_at"], _replica_row(vault)["failure"]) == (0, None)
+    assert cap.due == pytest.approx(10.0 + 1024**2 / cap.rate)
+    if changed_between_rounds:
+        _damage_a_byte(_stored_file(mirrored, replica))
+
+    for _round in range(3):
+        clock[0] += 600.0
+        limit = clock[0] + 0.5
+        cap = media_replicas._ReadCap(cap.rate, limit)
+        media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle, cap, limit, allowance)
+
+    row = _replica_row(vault)
+    assert row["checked_at"] > 0
+    assert row["failure"] == ("digest_mismatch" if changed_between_rounds else None)
 
 
 def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
@@ -3887,7 +4012,7 @@ def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
     monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
         1, row["store"], "1", row["object"], row["version"], 10 * gib, "0" * 64)))
 
-    def drops_the_connection(_vault, _replica, *, deadline):
+    def drops_the_connection(_vault, _replica, *, deadline, scheduled):
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the connection dropped")
 
     monkeypatch.setattr(media_store, "check_replica", drops_the_connection)
@@ -3914,7 +4039,7 @@ def test_samples_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
                         lambda seconds: clock.__setitem__(0, clock[0] + seconds))
 
-    def drops_the_connection(_vault, replica, _expected):
+    def drops_the_connection(_vault, replica, _expected, *, deadline):
         read.append(replica.ciphertext_size)
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the connection dropped")
 
@@ -3936,9 +4061,9 @@ def test_a_store_that_the_last_round_left_waiting_is_checked_first_in_the_next(
         ledger.execute("UPDATE media_replicas SET check_from = 100 WHERE store = ?", (MIRROR,))
     visited, check_store = [], media_replicas._check_store
 
-    def visiting(vault_root, ledger, name, *rest):
+    def visiting(vault_root, ledger, name, *rest, **options):
         visited.append(name)
-        return check_store(vault_root, ledger, name, *rest)
+        return check_store(vault_root, ledger, name, *rest, **options)
 
     monkeypatch.setattr(media_replicas, "_check_store", visiting)
 
@@ -4020,12 +4145,12 @@ def test_a_store_that_goes_away_during_a_round_ends_its_round_and_leaves_the_row
     _due_again(vault)
     check_replica, reads = media_store.check_replica, []
 
-    def unmounted_after_the_first_read(vault_root, replica, *, deadline):
+    def unmounted_after_the_first_read(vault_root, replica, *, deadline, scheduled):
         if replica.store == MIRROR:
             reads.append(replica.object)
             if len(reads) == 2:
                 (mirrored / media_store.STORE_MARKER).unlink()
-        return check_replica(vault_root, replica, deadline=deadline)
+        return check_replica(vault_root, replica, deadline=deadline, scheduled=scheduled)
 
     monkeypatch.setattr(media_store, "check_replica", unmounted_after_the_first_read)
 
@@ -4044,7 +4169,7 @@ def test_a_failed_attempt_does_not_land_on_a_version_that_a_copy_again_published
     _due_again(vault)
     newer = dataclasses.replace(replica, version="a-newer-version")
 
-    def republished_then_unavailable(vault_root, checked, *, deadline):
+    def republished_then_unavailable(vault_root, checked, *, deadline, scheduled):
         if checked.store == MIRROR:
             media_replicas.record(vault, relative, newer, verified_at=None)
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store did not answer")
@@ -4082,6 +4207,44 @@ def _large_replicated(vault: Path, mirrored: Path) -> tuple[str, originals.Store
     snapshot = originals.original_state(vault, original)
     replica = next(entry for entry in snapshot.replicas if entry.store == MIRROR)
     return original.relative_to(vault).as_posix(), replica, _stored_file(mirrored, replica)
+
+
+def test_a_sample_stops_mid_download_without_quarantining_the_replica(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _relative, replica, _stored_path = _large_replicated(vault, mirrored)
+    _unproven(vault)
+    clock, reads = [time.monotonic() + 600], []
+    limit = clock[0] + 5
+    timed = types.SimpleNamespace(monotonic=lambda: clock[0], time=time.time)
+    monkeypatch.setattr(media_replicas, "time", timed)
+    monkeypatch.setattr(media_store, "time", timed)
+    opened = media_store.FilesystemStore.open
+
+    @contextmanager
+    def slow_open(backend, name, version):
+        with opened(backend, name, version) as stream:
+            if name != replica.object:
+                yield stream
+                return
+
+            def read(size):
+                chunk = stream.read(min(size, 65536))
+                reads.append(len(chunk))
+                clock[0] = limit + 1
+                return chunk
+
+            yield types.SimpleNamespace(read=read)
+
+    monkeypatch.setattr(media_store.FilesystemStore, "open", slow_open)
+    media_replicas.sample(vault, deadline=limit)
+
+    assert reads == [65536]
+    row = _replica_row(vault)
+    assert (row["state"], row["failure"], row["decrypted_at"]) == (
+        media_replicas.UPLOAD_VERIFIED, media_replicas.READ_FAILED, 0)
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT bytes FROM media_replica_samples WHERE store = ?", (MIRROR,)).fetchone() == (
+            replica.ciphertext_size,)
 
 
 def test_a_sample_under_a_wrong_key_still_finds_a_large_replica_that_is_damaged(

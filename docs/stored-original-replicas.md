@@ -28,11 +28,14 @@ A store whose checks are not scheduled is never sampled and is never charged byt
 ## Set the cycle and the read rate
 
 Each replica is checked about once in 30 days, oldest check first.
-A round runs every ten minutes and takes each store's share of the cycle: its replicas and, for a content check, its bytes, each times ten minutes over the cycle.
-A content check reads at up to 32 MiB per second on average: an object is read at the store's speed, and only what remains of its share of time after the read is waited out. An object so large that its wait outlasts a round leaves the wait to the next rounds, which read nothing until it is paid.
-A read that fails after the store answered counts as a read of the whole object, because Exomem cannot tell how much it moved.
-The stores of a round share that cap. At 500,000 replicas and 25 TB in one store, a round checks 116 replicas and 5.4 GiB in about 216 seconds, which covers the store in 30 days. Two such stores take about 432 seconds a round, and also finish in 30 days.
-Three such stores need more than the cap allows within the ten minutes, so their cycle runs a little over 30 days. Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` to shorten it.
+The worker schedules a round every ten minutes. Each store's share uses its replica count and, when HEAD reads ciphertext, its total bytes.
+The read cap defaults to 32 MiB per second. It applies to filesystem HEAD even when the descriptor gives a presence check.
+A filesystem size mismatch costs no ciphertext read. If the window ends during hashing, the next round resumes after confirming the same held file version.
+A read of unknown size after a store starts work counts toward the cap conservatively. Waits that outlast a round carry forward.
+At 500,000 similarly sized replicas and 25 TB in one store, the calculation gives 116 replicas and 5.4 GiB in about 216 seconds per round.
+Two such stores use about 432 seconds per round. At this distribution and cadence, both cover their replicas within 30 days.
+Larger or unevenly sized objects and slow or unavailable stores can lengthen the cycle.
+Raise `EXOMEM_REPLICA_CHECK_READ_MIB_PER_SECOND` if the read cap is the limiting factor.
 The store that has waited longest goes first in each round.
 Set these two environment variables on the service to change them:
 
@@ -53,7 +56,8 @@ An invalid value makes the store unavailable and the status names the field.
 Expected result: the next status shows the new `budget_bytes` for that store.
 
 The sample takes the replica whose sample turn came longest ago first.
-It charges a replica's bytes to the month before it downloads them, so a sample that stops part-way is still paid for.
+It charges a replica's bytes to the month before it downloads them, so an interrupted download still counts.
+When the sample window ends, the reader stops before another chunk and terminates the decoder. An outstanding store read can take until its transport or filesystem returns.
 A replica larger than the remaining budget waits for the next month and counts in `skipped_for_size`.
 The month is a calendar month in UTC.
 An older release ignores this field.

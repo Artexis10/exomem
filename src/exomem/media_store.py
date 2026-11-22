@@ -142,18 +142,59 @@ class Store(Protocol):
     def open(self, name: str, version: str): ...
 
 
-def _digest(stream: BinaryIO, *, deadline: float | None = None, limit: int | None = None) -> ObjectHead:
+class _HashProgress:
+    def __init__(self) -> None:
+        self.size = 0
+        self.requested = 0
+        self.digest = hashlib.sha256()
+
+
+class ReplicaCheckPending(Exception):
+    """This round ended between chunks of a held filesystem hash."""
+
+
+class ScheduledRead:
+    """Carry one filesystem hash per scheduled store across rounds without keeping a file open."""
+
+    def __init__(self) -> None:
+        self.bytes_read: int | None = None
+        self._binding: tuple[Path, str, str, held_fs.FileVersion] | None = None
+        self._progress: _HashProgress | None = None
+
+    def reset(self) -> None:
+        self._binding = self._progress = None
+
+    def hash(self, stream: BinaryIO, binding: tuple[Path, str, str, held_fs.FileVersion],
+             deadline: float | None) -> ObjectHead:
+        if self._binding != binding or self._progress is None:
+            self._binding, self._progress = binding, _HashProgress()
+        progress = self._progress
+        start = progress.size
+        try:
+            stream.seek(start)
+            return _digest(stream, deadline=deadline, limit=binding[-1].size, progress=progress)
+        except reserved_paths.ReservedPathLeafError as error:
+            raise ReplicaCheckPending() from error
+        finally:
+            # An errored read can have moved at most this last chunk.
+            self.bytes_read = progress.size - start + progress.requested
+
+
+def _digest(stream: BinaryIO, *, deadline: float | None = None, limit: int | None = None,
+            progress: _HashProgress | None = None) -> ObjectHead:
     """Hash a stream, up to the held length when the caller has a size proof."""
-    digest = hashlib.sha256()
-    size = 0
-    while True:
+    current = progress if progress is not None else _HashProgress()
+    while limit is None or current.size < limit:
         reserved_paths._copy_deadline(deadline)
-        remaining = min(1024 * 1024, limit - size) if limit is not None else 1024 * 1024
+        remaining = min(1024 * 1024, limit - current.size) if limit is not None else 1024 * 1024
+        current.requested = remaining
         chunk = stream.read(remaining)
+        current.requested = 0
         if not chunk:
-            return ObjectHead(size, digest.hexdigest())
-        size += len(chunk)
-        digest.update(chunk)
+            break
+        current.size += len(chunk)
+        current.digest.update(chunk)
+    return ObjectHead(current.size, current.digest.hexdigest())
 
 
 def _chunks(stream: BinaryIO):
@@ -325,7 +366,9 @@ class FilesystemStore:
                         yield stream
 
     def head(self, name: str, version: str, *, expected_size: int | None = None,
-             deadline: float | None = None) -> ObjectHead | None:
+             deadline: float | None = None, scheduled: ScheduledRead | None = None) -> ObjectHead | None:
+        if scheduled is not None:
+            scheduled.bytes_read = 0
         self._validate_locator(name, version)
         with self._held() as filesystem:
             parent_result = filesystem.parent(name)
@@ -341,7 +384,14 @@ class FilesystemStore:
                         raise ReplicaMismatch("size_mismatch")
                     with os.fdopen(os.dup(file.descriptor), "rb", buffering=0) as stream:
                         try:
-                            proof = _digest(stream, deadline=deadline, limit=before.size)
+                            if scheduled is None:
+                                proof = _digest(stream, deadline=deadline, limit=before.size)
+                            else:
+                                proof = scheduled.hash(stream, (self.root, name, version, before), deadline)
+                        except ReplicaCheckPending as error:
+                            if file.version() != before:
+                                raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the held replica changed during the read") from error
+                            raise
                         except reserved_paths.ReservedPathLeafError as error:
                             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the replica check exceeded its deadline") from error
                     if file.version() != before:
@@ -406,6 +456,16 @@ def connection_refusal(entry: originals.StoreEntry) -> str | None:
     if not entry.serves_eviction and entry.connection.get("adapter") == "media-edge":
         return "a media-edge store has no connection of its own: only the store that serves eviction uses the edge"
     return None
+
+
+def head_reads_bytes(entry: originals.StoreEntry) -> bool:
+    """Whether a scheduled HEAD can read ciphertext, even with a presence-only proof."""
+    if entry.head_recomputes is True:
+        return True
+    try:
+        return isinstance(_entry_adapter(entry), FilesystemStore)
+    except MediaStoreError:
+        return False
 
 
 def connection_unusable(entry: originals.StoreEntry) -> str | None:
@@ -1472,11 +1532,13 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     _commit_reference(vault, prepare_reference(vault, snapshot, reference))
 
 
-def _verified_head(store: Store, reference: StoredObject, *, deadline: float | None = None) -> ObjectHead | None:
+def _verified_head(store: Store, reference: StoredObject, *, deadline: float | None = None,
+                   scheduled: ScheduledRead | None = None) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
         if isinstance(store, FilesystemStore):
-            head = store.head(reference.object, reference.version, expected_size=reference.ciphertext_size, deadline=deadline)
+            head = store.head(reference.object, reference.version, expected_size=reference.ciphertext_size,
+                              deadline=deadline, scheduled=scheduled)
         else:
             head = store.head(reference.object, reference.version)
     if head is not None and head.size != reference.ciphertext_size:
@@ -1492,14 +1554,15 @@ _BYTES_HERE = ("local", "cached")
 _ABSENT, _CONDEMNED = ReplicaAbsent.failure, "condemned"
 
 
-def _head_failure(backend: Store, replica: StoredObject, *, deadline: float | None = None) -> str | None:
+def _head_failure(backend: Store, replica: StoredObject, *, deadline: float | None = None,
+                  scheduled: ScheduledRead | None = None) -> str | None:
     """Ask `backend` about the replica's version: None when it matches the entry, else why it does not.
 
     The answers are `absent`, `condemned`, `size_mismatch` and `digest_mismatch`. A store that cannot answer raises
     `MEDIA_STORE_UNAVAILABLE`: that is no finding, and the caller keeps what it had.
     """
     try:
-        head = _verified_head(backend, replica, deadline=deadline)
+        head = _verified_head(backend, replica, deadline=deadline, scheduled=scheduled)
     except ReplicaMismatch as mismatch:
         return mismatch.failure
     if head is None:
@@ -1508,9 +1571,18 @@ def _head_failure(backend: Store, replica: StoredObject, *, deadline: float | No
     return _CONDEMNED if head.condemned else None
 
 
-def check_replica(vault: Path, replica: StoredObject, *, deadline: float | None = None) -> str | None:
-    """Check the stored version. A confirmed absence raises before any ciphertext is charged."""
-    failure = _head_failure(store_for(vault, replica.store), replica, deadline=deadline)
+def check_replica(vault: Path, replica: StoredObject, *, deadline: float | None = None,
+                  scheduled: ScheduledRead | None = None) -> str | None:
+    """Check the stored version, retaining a partial filesystem hash at a round boundary."""
+    pending = False
+    try:
+        failure = _head_failure(store_for(vault, replica.store), replica, deadline=deadline, scheduled=scheduled)
+    except ReplicaCheckPending:
+        pending = True
+        raise
+    finally:
+        if scheduled is not None and not pending:
+            scheduled.reset()
     if failure == _ABSENT:
         raise ReplicaAbsent()
     return failure
@@ -1526,7 +1598,7 @@ class _NullSink:
         return None
 
 
-def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> str | None:
+def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead, *, deadline: float | None = None) -> str | None:
     """Download and decrypt `replica` and hash its plaintext against `expected`: None when it matches, else why not.
 
     The answers are `size_mismatch` and `digest_mismatch` (the ciphertext differs from its record) and
@@ -1537,7 +1609,7 @@ def sample_replica(vault: Path, replica: StoredObject, expected: ObjectHead) -> 
     from . import media_replicas
 
     try:
-        head = write_stored_original(vault, replica, _NullSink(), store=replica.store, prove=True)
+        head = write_stored_original(vault, replica, _NullSink(), store=replica.store, prove=True, deadline=deadline)
     except ReplicaMismatch as mismatch:
         return mismatch.failure
     return None if head == expected else media_replicas.PLAINTEXT_MISMATCH
@@ -1678,7 +1750,7 @@ def _refuse(store: MediaJobStore, snapshot: OriginalSnapshot, refusal: MediaStor
 
 def _refused(
     store: MediaJobStore, snapshot: OriginalSnapshot, config: dict[str, object], *,
-    usage: media_allowance.ReferenceUsage | None = None,
+    usage: media_allowance.ReferenceUsage | None = None, recheck_allowance: bool = True,
 ) -> str | None:
     conn = store._connect(readonly=True)
     try:
@@ -1687,7 +1759,9 @@ def _refused(
                            (store._relative(snapshot.path), snapshot.binary_sha256)).fetchone()
     finally:
         conn.close()
-    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage) if row is not None else None
+    if row is None or (not recheck_allowance and row["code"] in media_allowance.ALLOWANCE_REFUSAL_CODES):
+        return None
+    return _refusal_code(store.vault_root, row, snapshot, config, usage=usage)
 
 
 def _refusal_code(
@@ -1862,9 +1936,8 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
     with _pin(vault, path) as (_ledger, token), _offload_input(vault, path, ledger) as snapshot:
         if snapshot.binary_sha256 is None or snapshot.binary_size is None:
             raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", "the original has no exact sidecar binding")
-        refusal = _refused(ledger, snapshot, config, usage=census())
-        if refusal in media_allowance.ALLOWANCE_REFUSAL_CODES:
-            _require_allowance(ledger, snapshot, refusal)
+        # The current allowance is assessed after the worker's one slice of reusable versions.
+        refusal = _refused(ledger, snapshot, config, recheck_allowance=False)
         if refusal is not None:
             return None
         if not snapshot.offloadable:
@@ -2572,7 +2645,13 @@ def _hydrate_reserved(vault: Path, snapshot: OriginalSnapshot, ledger: MediaJobS
         raise
 
 
-def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *, prove: bool = False) -> Iterator[bytes]:
+def _require_transfer_time(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the sampled read exceeded its deadline")
+
+
+def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *, prove: bool = False,
+                      deadline: float | None = None) -> Iterator[bytes]:
     """Stream plaintext; exhaustion settles what a failed read means. This is the one place that proves damage.
 
     A read that reaches the end of the ciphertext judges it against the record: a size or digest that differs from it
@@ -2583,6 +2662,7 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *,
     a signal stopped says nothing about either and raises `MEDIA_STORE_UNAVAILABLE` (a platform that reports a stopped
     process as a positive code reads it as a key refusal, which damages nothing).
     """
+    _require_transfer_time(deadline)
     process = subprocess.Popen(["age", "--decrypt", "--identity", identity],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     assert process.stdin is not None and process.stdout is not None
@@ -2593,7 +2673,9 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *,
     def feed() -> None:
         piping = True
         try:
-            with closing(_stored_chunks(backend, reference)) as chunks:
+            stream = (_stored_chunks(backend, reference, deadline=deadline) if deadline is not None
+                      else _stored_chunks(backend, reference))
+            with closing(stream) as chunks:
                 for chunk in chunks:
                     if stopped.is_set():
                         return
@@ -2613,6 +2695,15 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *,
             with suppress(OSError):
                 process.stdin.close()
 
+    def expire() -> None:
+        stopped.set()
+        with suppress(OSError):
+            process.kill()
+
+    timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire) if deadline is not None else None
+    if timer is not None:
+        timer.daemon = True
+        timer.start()
     feeder = threading.Thread(target=feed, name="media-hydration-feed", daemon=True)
     feeder.start()
     try:
@@ -2627,7 +2718,10 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *,
         raise
     finally:
         feeder.join()
+        if timer is not None:
+            timer.cancel()
         process.stdout.close()
+    _require_transfer_time(deadline)
     if feed_errors:
         raise feed_errors[0]
     if not abandoned:
@@ -2644,10 +2738,10 @@ def _decrypted_chunks(backend: Store, reference: StoredObject, identity: str, *,
 
 
 def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: BinaryIO, *,
-                  prove: bool = False) -> ObjectHead:
+                  prove: bool = False, deadline: float | None = None) -> ObjectHead:
     """Download and decrypt in one pass; local sink failures remain local errors. `prove` is `_decrypted_chunks`'s."""
     plaintext, size = hashlib.sha256(), 0
-    with closing(_decrypted_chunks(backend, reference, identity, prove=prove)) as chunks:
+    with closing(_decrypted_chunks(backend, reference, identity, prove=prove, deadline=deadline)) as chunks:
         for chunk in chunks:
             plaintext.update(chunk)
             size += len(chunk)
@@ -2657,7 +2751,7 @@ def _decrypt_into(backend: Store, reference: StoredObject, identity: str, sink: 
 
 
 def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO, *, store: str | None = None,
-                          prove: bool = False) -> ObjectHead:
+                          prove: bool = False, deadline: float | None = None) -> ObjectHead:
     """Decrypt one stored version into `sink` and return the plaintext's head; the export pack's read (D8).
 
     `store` names the declared store that holds the version, as a replica's pointer does; None reads the store that
@@ -2666,7 +2760,8 @@ def write_stored_original(vault: Path, reference: StoredObject, sink: BinaryIO, 
     The pack reads a staging copy, not the live vault, so this takes no pin, reservation or ledger row. A
     transport failure raises `MEDIA_STORE_UNAVAILABLE`, after `sink` may have received a verified prefix.
     """
-    return _decrypt_into(store_for(vault, store), reference, str(_settings(vault)["identity_path"]), sink, prove=prove)
+    return _decrypt_into(store_for(vault, store), reference, str(_settings(vault)["identity_path"]), sink,
+                         prove=prove, deadline=deadline)
 
 
 def _payload_path(companion: str, binary: originals.BinaryBinding, displaced: bool) -> str:
@@ -2723,11 +2818,17 @@ def evicted_members(vault: Path, binding: originals.StoreBinding) -> Iterator[tu
             yield relative, held, reference
 
 
-def _stored_chunks(backend: Store, reference: StoredObject) -> Iterator[bytes]:
+def _stored_chunks(backend: Store, reference: StoredObject, *, deadline: float | None = None) -> Iterator[bytes]:
     # Only backend operations are transport failures; local staging writes keep their own errors.
+    _require_transfer_time(deadline)
     with _transport("read"), backend.open(reference.object, reference.version) as stream:
         remaining = reference.ciphertext_size
-        while chunk := stream.read(min(1024 * 1024, remaining + 1)):
+        while True:
+            _require_transfer_time(deadline)
+            chunk = stream.read(min(1024 * 1024, remaining + 1))
+            _require_transfer_time(deadline)
+            if not chunk:
+                break
             if len(chunk) > remaining:
                 raise ReplicaMismatch("size_mismatch")
             remaining -= len(chunk)
