@@ -149,7 +149,9 @@ other hits as `related`; read one of them to switch subject.
 
 The brief takes every compiled note one link from the subject page, in either direction, and
 at most five compiled notes one link further, those nearest the subject page first.
-`ranked_by` says whether nearness or recency chose them. It serves three sections:
+`ranked_by` is `recency` when the service cannot measure nearness to the subject page, for
+example when the page has no stored vectors; the newest notes are then kept. With
+`similarity`, notes without stored vectors follow the scored ones, newest first. It serves three sections:
 `conclusions`, `sources` and `open_questions`. Each
 item carries its `ref`, `path` and `updated`. A cut shows in `missing` with a count and the
 reason `cap`; it is never silent. A superseded or closed unit is left out and counted on its
