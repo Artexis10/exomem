@@ -87,7 +87,9 @@ def test_windows_probe_and_relative_leaf_round_trip(tmp_path: Path) -> None:
 def test_windows_held_root_can_publish_and_flush_owner_files_without_root_delete(tmp_path: Path) -> None:
     held_fs = _held_fs()
     with held_fs.acquire(tmp_path).require() as filesystem:
-        with filesystem.parent(".", access="flush").require() as root:
+        opened = filesystem.parent(".", access="flush")
+        assert opened.ok, opened.error.cause if opened.error else None
+        with opened.require() as root:
             assert not filesystem.unlink_directory(root).ok
             assert held_fs.publish_bytes(filesystem, root, "policy.json", b"first").ok
             assert filesystem.flush_directory(root).ok
