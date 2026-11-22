@@ -357,11 +357,15 @@ def _lexical_allocation_bytes(rows: lexstore.PageRows | None) -> int:
     documents = (rows.stemmed, *(unit.stemmed for unit in rows.units))
     columns = (rows.title_lower, rows.body_lower)
     units = (rows.columns, *(unit.columns for unit in rows.units))
+    structure_size = len((rows.structure_json or "").encode())
     records = sum(
         sum(9 + (len(value.encode()) if isinstance(value, str) else 8)
             for value in unit.values())
         for unit in units
-    ) + len((rows.structure_json or "").encode())
+    ) + structure_size
+    if rows.columns["in_kb"] and epistemic_graph._is_graph_page(rows.columns["path"]):
+        # The file graph node embeds the same JSON summary in its metadata.
+        records += structure_size
     if not lexstore.fts5_available():
         return records
     content = sum(len(text.encode()) for text in (*documents, *columns))
@@ -456,6 +460,57 @@ def _source_fts_delete_bytes(
     return 4 * postings, scrub_bytes
 
 
+def _catalogue_record_size(columns: tuple[str, ...]) -> str:
+    """SQL for an upper bound on a persisted table or index record's byte length."""
+    # The record header uses one size varint and one serial-type varint per column.
+    sizes = [str(9 * (len(columns) + 1))]
+    for column in columns:
+        field = '"' + column.replace('"', '""') + '"'
+        sizes.append(
+            f"CASE typeof({field}) WHEN 'null' THEN 0 "
+            f"WHEN 'text' THEN length(CAST({field} AS BLOB)) "
+            f"WHEN 'blob' THEN length({field}) ELSE 8 END"
+        )
+    return " + ".join(sizes)
+
+
+def _source_derived_scrub_pages(tx: Connection, sources: tuple[str, ...], usable: int) -> int:
+    """Count overflow pages secure delete can clear for these stored source records."""
+    pages = 0
+    # These are the tables the lexical and graph writers delete by source path.
+    # The file's graph node stores its own copy of the structural summary.
+    for table, key in (
+        ("pages", "path"), ("semantic_units", "parent_path"), ("unit_revisions", "parent_path"),
+        ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
+        ("graph_dependencies", "source_path"), ("graph_dependency_coverage", "source_path"),
+    ):
+        columns = tuple(name for (name,) in tx.execute(
+            "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
+        ))
+        sizes = [_catalogue_record_size(columns)]
+        # SQLite file format, B-tree payload fractions. `usable` already excludes the
+        # four-byte overflow pointer. Subtract the maximum reserved bytes for both limits.
+        limits = [usable + 4 - 35]
+        for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table,)):
+            indexed = []
+            for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
+                if cid == -2:
+                    raise ValueError("cannot size an expression index in the source catalogue")
+                indexed.append("rowid" if cid == -1 else name)
+            sizes.append(_catalogue_record_size(tuple(indexed)))
+            limits.append((usable + 4 - 12) * 64 // 255 - 23)
+        # Count each existing row's record separately. A partial index can only omit
+        # some of these rows, so including its key gives a safe upper bound.
+        fields = ", ".join(sizes)
+        for start in range(0, len(sources), read.KEYS_PER_QUERY):
+            batch = sources[start : start + read.KEYS_PER_QUERY]
+            within = ", ".join("?" * len(batch))
+            for record in tx.execute(f"SELECT {fields} FROM {table} WHERE {key} IN ({within})", batch):
+                pages += sum((size + usable - 1) // usable
+                             for size, limit in zip(record, limits, strict=True) if size > limit)
+    return pages
+
+
 @contextmanager
 def _reserve_payload_pages(
     writer: CollectionWriter, puts: tuple[PagePut, ...], moves: dict[str, PageMove],
@@ -510,6 +565,8 @@ def _reserve_payload_pages(
         database_pages = overflow_pages + 2 * btree_paths
         # Secure deletion can write the old overflow pages to WAL while freeing them in the DB.
         scrub_pages = (scrub_bytes + removed_content + usable - 1) // usable
+        if scrub:
+            scrub_pages += _source_derived_scrub_pages(conn, tuple(moves), usable)
         wal_pages = overflow_pages + scrub_pages + 6 * btree_paths + 1  # Includes the revision row.
         room.reserve_store_pages(
             database, target_bytes=(before + database_pages) * page_size,

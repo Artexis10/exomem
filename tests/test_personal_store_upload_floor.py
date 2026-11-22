@@ -211,3 +211,62 @@ def test_public_move_of_a_pending_original_meters_its_lineage_rewrite(
     free[0] = floor + 32 * floor
     assert destination not in projecting.run_pass().deferred
     assert (served / destination).read_bytes() == moved
+
+
+def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 40 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=256 * floor, free=free[0]))
+    original = b"# Field notes\n\n" + b"- [rule] Confirm the valve.\n" * 610
+    source = "Knowledge Base/Evidence/Tests/Minutes/field.md"
+    destination = "Knowledge Base/_archive/field.md"
+    assert not any(lexstore.page_membership(destination))
+    filing = write.StoreChange(write.Origin.GOVERNED, "file original",
+                               puts=(write.PagePut(source, original, media_allocation=True),))
+    before = read.current_revision(served)
+    with pytest.raises(OpError) as filing_busy:
+        write.commit(writer, filing)
+    assert filing_busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == before and not read.page_exists(served, source)
+
+    free[0] = floor + 128 * floor
+    write.commit(writer, filing)
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    writer.connection.execute("PRAGMA secure_delete = ON")
+    assert writer.handle.checkpoint()
+    change = write.StoreChange(write.Origin.GOVERNED, "archive original",
+                               moves=(write.PageMove(source, destination),))
+    headroom = 24 * floor
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        (structure_size,) = reader.execute(
+            "SELECT length(CAST(structure_json AS BLOB)) FROM pages WHERE path = ?", (source,),
+        ).fetchone()
+        (graph_size,) = reader.execute(
+            "SELECT MAX(length(CAST(metadata AS BLOB))) FROM graph_nodes WHERE path = ?", (source,),
+        ).fetchone()
+        assert structure_size + graph_size > headroom
+        assert reader.execute("SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?", (source,)).fetchone() == (610,)
+        wal_size = wal.stat().st_size
+        free[0] = floor + headroom
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, change)
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and wal.stat().st_size == wal_size
+        assert read.owned_bytes(served, source) == original and not read.page_exists(served, destination)
+
+        free[0] = floor + 128 * floor
+        write.commit(writer, change)
+        assert wal.stat().st_size - wal_size > headroom
+        assert read.owned_bytes(served, destination) == original and not read.page_exists(served, source)
+        with closing(connection.open_reader(database)) as current:
+            assert current.execute("SELECT path FROM pages WHERE path IN (?, ?)", (source, destination)).fetchall() == []
