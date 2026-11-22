@@ -654,7 +654,8 @@ def propose(
 
 
 def _propose(
-    vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
+    vault_root: Path, path: str, *, source_kind: str | None, domain: str | None,
+    owner: Event | None = None,
     candidate_limit: int | None = None, paged: bool = False,
     visible: Callable[[str], bool] | None = None,
 ) -> ReclassifyProposal:
@@ -747,7 +748,8 @@ def _propose(
     )
     outcome = (
         _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes,
-                          candidate_limit=candidate_limit, paged_classification=classification if paged else None,
+                          candidate_limit=candidate_limit,
+                          paged_classification=classification if paged else None,
                           visible=visible, held_sink=held_sink)
         if destination is not None
         else _ReferrerOutcome()
@@ -794,7 +796,10 @@ _PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
 
 def is_preview_call(command: str, arguments: Mapping[str, object]) -> bool:
     """Select the read-only preview operation from the command schema."""
-    return command == "manage_memory_file" and arguments.get("operation") == _PREVIEW_CALL["operation"]
+    return (
+        command == "manage_memory_file"
+        and arguments.get("operation") == _PREVIEW_CALL["operation"]
+    )
 
 
 def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | None:
@@ -841,7 +846,9 @@ def preview_release_basis(vault_root: Path, who: RequestPrincipal) -> PreviewRel
     session_stamp = None
     if session is not None and not compiled.empty:
         try:
-            with closing(store.open_authorization_session_read_connection(vault_root)) as connection:
+            with closing(
+                store.open_authorization_session_read_connection(vault_root)
+            ) as connection:
                 session_stamp = authorization_session_authority.session_release_stamp(
                     connection, context=session, audience=who.audience_id, now=int(time.time()),
                 )
@@ -899,13 +906,17 @@ def _preview_referrer_view(
     keep = egress.release_walk_filter(vault_root, principal=who, tombstones=tombstones,
                                      read_page=read_page, on_unavailable=unavailable)
     if keep is None:
-        keep = egress.content_permits_filter(vault_root, who, read_page=read_page, on_unavailable=unavailable)
+        keep = egress.content_permits_filter(
+            vault_root, who, read_page=read_page, on_unavailable=unavailable
+        )
 
     def visible(path: str) -> bool:
         request_budget.checkpoint()
         if lifecycle.is_tombstoned_in(tombstones, path):
             return False
-        with bridges.preview_read_bound(_INLINE_MARKDOWN_BYTES if bounded else None, unavailable, large):
+        with bridges.preview_read_bound(
+            _INLINE_MARKDOWN_BYTES if bounded else None, unavailable, large
+        ):
             return keep(path)
 
     return visible
@@ -956,14 +967,16 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
 
 
 def _managed_preview_inbound(
-    vault_root: Path, rel: str, owner: Event, *, read_hashes: Mapping[str, str | None] | None = None,
+    vault_root: Path, rel: str, owner: Event, *,
+    read_hashes: Mapping[str, str | None] | None = None,
     candidate_limit: int | None = None, visible: Callable[[str], bool] | None = None,
 ) -> list[InboundLink]:
     from . import find
 
     try:
         inbound = vault.cached_inbound_wikilinks(
-            vault_root, rel, visible=visible, read_hashes=read_hashes, candidate_limit=candidate_limit,
+            vault_root, rel, visible=visible, read_hashes=read_hashes,
+            candidate_limit=candidate_limit,
         )
     except vault.InboundCandidatesExceeded:
         raise PreviewNeedsJob() from None
@@ -1079,7 +1092,7 @@ def _record_held_row(
     from . import document_containers
     from .governance import connector_boundary
 
-    if not rel.lower().endswith(".md"):
+    if not rel.lower().endswith(".md") or sink.compiled is None:
         return
     # Only a file's content guard carries a stat witness; a store-guarded page cannot.
     if guard.leaf_policy != "content" or guard.expected_content_hash is None:
@@ -1153,11 +1166,14 @@ class _PagedPlanProof:
         self._hash.update(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
         self._hash.update(b"\n")
 
-    def examine(self, item: move_file_module.InboundRewrite, *, visible: bool, writable: bool) -> None:
+    def examine(
+        self, item: move_file_module.InboundRewrite, *, visible: bool, writable: bool
+    ) -> None:
         self._add([
             item.path, item.guard.expected_content_hash, vault.content_hash(item.content),
             item.changes, item.mentions, item.left_mentions, item.append_only, item.refusal,
-            pointer_write.preview_digest(self.moves, (item.repoint,)) if item.repoint is not None else None,
+            pointer_write.preview_digest(self.moves, (item.repoint,))
+            if item.repoint is not None else None,
             visible, writable,
         ])
 
@@ -1242,12 +1258,16 @@ def _referrer_outcome(
         _PagedPlanProof(rel, destination, text, inbound, paged_classification)
         if paged_classification is not None else None
     )
-    iter_reader = _read_inline_text if candidate_limit is not None else None
+    iter_reader: Callable[[Path, Path], tuple[str, PathGuard]] | None = (
+        _read_inline_text if candidate_limit is not None else None
+    )
     if held_sink is not None:
         base_reader = iter_reader or read_guarded_text
 
-        def iter_reader(root: Path, page: Path) -> tuple[str, PathGuard]:
+        def _held_iter_reader(root: Path, page: Path) -> tuple[str, PathGuard]:
             return _witnessed_read(base_reader, held_sink, root, page)
+
+        iter_reader = _held_iter_reader
 
     plans = move_file_module.iter_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
@@ -1273,7 +1293,9 @@ def _referrer_outcome(
         elif changes and item.repoint is not None:
             repointed.append(item.path)
             if proof is None:
-                repoint_hashes.append((item.repoint.path, item.repoint.before_hash, item.repoint.after_hash))
+                repoint_hashes.append(
+                    (item.repoint.path, item.repoint.before_hash, item.repoint.after_hash)
+                )
         elif changes or item.mentions:
             rewritten.append(item.path)
         elif item.append_only:
@@ -1378,7 +1400,10 @@ def _write_correction(
 
     approved_generation = current_reference_generation() if paged else None
     approved_view = (
-        _preview_referrer_view(vault_root, who, approved_generation[1].erasure.paths, failure=_stale_paged_approval)
+        _preview_referrer_view(
+            vault_root, who, approved_generation[1].erasure.paths,
+            failure=_stale_paged_approval
+        )
         if approved_generation is not None else None
     )
     if approved_view is not None and not approved_view(rel):
@@ -1391,7 +1416,10 @@ def _write_correction(
             raise _stale_paged_approval()
         proof = _PagedPlanProof(rel, destination, text, inbound, classification)
         for item in plans:
-            proof.examine(item, visible=visible is None or visible(item.path), writable=writable(item.path))
+            proof.examine(
+                item, visible=visible is None or visible(item.path),
+                writable=writable(item.path)
+            )
         if proof.digest() != preview_digest:
             raise _stale_paged_approval()
         guards = (source_guard, *(item.guard for item in plans))
@@ -1433,7 +1461,8 @@ def _write_correction(
             extra_writes=extra_writes,
             _validate_prepared_bindings=_validate_prepared_bindings,
             _referrer_proof=(
-                move_file_module.ReferrerProof(approved_view, verify_referrers) if approved_view is not None else None
+                move_file_module.ReferrerProof(approved_view, verify_referrers)
+                if approved_view is not None else None
             ),
             lineage_entry=lineage_entry,
             undo_lineage=undo_lineage,
@@ -1453,7 +1482,8 @@ def _write_correction(
 def _stale_paged_approval() -> ReclassifyError:
     return ReclassifyError(
         "RECLASSIFICATION_PREVIEW_STALE",
-        "The current correction does not match its paged preview. Preview it again before applying.",
+        "The current correction does not match its paged preview."
+        " Preview it again before applying.",
     )
 
 

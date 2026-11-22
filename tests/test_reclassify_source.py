@@ -232,7 +232,8 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
 
     for scope, directory in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
-            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
         ))
     assert vault_module.prime_inbound_index(vault, eager=True)
     lexstore.ensure_fresh(vault)
@@ -260,18 +261,22 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
 
             async def preview(**extra):
-                return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
+                return await call(
+                    "manage_memory_file", operation="propose-reclassification", **args, **extra
+                )
 
             async def ready(run_id, *, allow_stale=False):
                 async with asyncio.timeout(12):
                     while True:
                         status = await preview(preview_run_id=run_id)
                         if (status.get("state") != "running"
-                                and status.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                                and status.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
                             break
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
-                if allow_stale and status.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE":
+                if (allow_stale and status.get("error", {}).get("code")
+                        == "RECLASSIFICATION_PREVIEW_STALE"):
                     return None
                 assert status.get("state") == "completed", status
                 return status
@@ -355,7 +360,8 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             scope.parent.mkdir(parents=True, exist_ok=True)
             rule.parent.mkdir(parents=True, exist_ok=True)
             scope.write_text(
-                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/measurement-0.md"]\n',
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+                'paths: ["Notes/measurement-0.md"]\n',
                 encoding="utf-8",
             )
             rule.write_text(
@@ -370,10 +376,13 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert restricted["error"]["code"] == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", restricted
             assert "references" not in restricted and "run_id" not in restricted
             erased = sorted(paths)[0]
-            rule.write_text(rule.read_text().replace("audience: owner", "audience: principal:report-reader"))
+            rule.write_text(
+                rule.read_text().replace("audience: owner", "audience: principal:report-reader")
+            )
             bridge = vault / KB / "Notes" / Path(source).name
             bridge.write_text(_bridge_text(sources=f"  - '{title_link}'\n",
-                                           relations=f"- derived_from {title_link}\n"), encoding="utf-8")
+                                           relations=f"- derived_from {title_link}\n"),
+                                       encoding="utf-8")
             bridge_rel = bridge.relative_to(vault).as_posix()
             assert egress.release_level_for(vault, bridge_rel) == 0
             freshness.on_files_changed(vault, changed=[bridge])
@@ -384,17 +393,22 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             governed = await fresh_report()
             assert governed["result"]["references"] == terminal["result"]["references"], governed
             bridge.unlink()
-            deletion = await call("manage_memory_file", operation="delete", path=erased, confirm=True)
+            deletion = await call(
+                "manage_memory_file", operation="delete", path=erased, confirm=True
+            )
             assert (vault / erased).exists() is False, deletion
             assert lifecycle.is_tombstoned(vault, erased)
             rule.unlink()
             scope.unlink()
             freshness.on_files_changed(vault, deleted=[vault / erased, bridge])
-            vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[erased, bridge_rel])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[], deleted_rels=[erased, bridge_rel]
+            )
             async with asyncio.timeout(12):
                 while True:
                     after_erasure = await preview(preview_run_id=run_id)
-                    if after_erasure.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                    if (after_erasure.get("error", {}).get("code")
+                            != "RECLASSIFICATION_PREVIEW_WARMING"):
                         break
                     for leaked in ("result", "references", "entries", "next_cursor"):
                         assert leaked not in after_erasure, after_erasure
@@ -409,7 +423,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             restored_bytes = f"Sync copied the old link back: [[{source}]].\n"
             erased_path.write_text(restored_bytes, encoding="utf-8")
             freshness.on_files_changed(vault, changed=[changed_path, erased_path])
-            vault_module.on_inbound_files_changed(vault, changed_rels=[changed, erased], deleted_rels=[])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[changed, erased], deleted_rels=[]
+            )
             lexstore.ensure_fresh(vault)
             refused = await call("manage_memory_file", operation="reclassify", **args,
                                  reason="Correct the Source kind", preview_digest=digest)
@@ -455,23 +471,35 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                 return epoch
 
             with monkeypatch.context() as edit:
-                edit.setattr(graph_sync, "prepare_rename_epoch", add_a_referrer_after_the_graph_floor)
-                refused = await call("manage_memory_file", operation="reclassify", **args, reason="Correct Source kind",
+                edit.setattr(
+                    graph_sync, "prepare_rename_epoch", add_a_referrer_after_the_graph_floor
+                )
+                refused = await call(
+                    "manage_memory_file", operation="reclassify", **args,
+                    reason="Correct Source kind",
                                      preview_digest=refreshed["result"]["preview_digest"])
             assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
             assert (vault / source).is_file() and source in (vault / evidence).read_text()
             assert (graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)) == prior_graph
 
-            vault_module.on_inbound_files_changed(vault, changed_rels=[late.relative_to(vault).as_posix()], deleted_rels=[])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[late.relative_to(vault).as_posix()],
+                deleted_rels=[]
+            )
             lexstore.ensure_fresh(vault)
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
             refreshed = await fresh_report()
             corrected = await call("manage_memory_file", operation="reclassify", **args,
-                                   reason="Correct the Source kind", preview_digest=refreshed["result"]["preview_digest"])
+                                   reason="Correct the Source kind",
+                                   preview_digest=refreshed["result"]["preview_digest"])
             destination = refreshed["result"]["destination"]
             assert corrected.get("path") == destination, corrected
-            assert (vault / destination).is_file() and f"[[{destination.removesuffix('.md')}]]" in (vault / evidence).read_text()
+            assert (vault / destination).is_file()
+            assert (
+                f"[[{destination.removesuffix('.md')}]]"
+                in (vault / evidence).read_text()
+            )
             assert lifecycle.is_tombstoned(vault, erased)
             assert erased_path.read_text() == restored_bytes
 
@@ -516,7 +544,8 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
 
     for scope, directory in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
-            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
         ))
     assert vault_module.prime_inbound_index(vault, eager=True)
     lexstore.ensure_fresh(vault)
@@ -525,7 +554,8 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
     find.shared_resolver(vault)
     stop = threading.Event()
     monkeypatch.setattr(
-        __import__("exomem.file_watcher", fromlist=["x"]), "observing_inbound_recovery_stop", lambda _: stop,
+        __import__("exomem.file_watcher", fromlist=["x"]),
+        "observing_inbound_recovery_stop", lambda _: stop,
     )
     mcp = server.build_server(require_auth=False)
 
@@ -563,14 +593,17 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
             args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
 
             async def preview(**extra):
-                return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
+                return await call(
+                    "manage_memory_file", operation="propose-reclassification", **args, **extra
+                )
 
             # One real governed delete: a critical intent and a tombstone in the history.
             governance = vault / KB / "_Governance"
             (governance / "scopes").mkdir(parents=True, exist_ok=True)
             (governance / "rules").mkdir(parents=True, exist_ok=True)
             (governance / "scopes" / "unrelated.yaml").write_text(
-                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/unrelated.md"]\n',
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+                'paths: ["Notes/unrelated.md"]\n',
                 encoding="utf-8",
             )
             (governance / "rules" / "unrelated.yaml").write_text(
@@ -578,7 +611,9 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
                 'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\nceiling: 0\n',
                 encoding="utf-8",
             )
-            deletion = await call("manage_memory_file", operation="delete", path=unrelated, confirm=True)
+            deletion = await call(
+                "manage_memory_file", operation="delete", path=unrelated, confirm=True
+            )
             assert not deletion.get("is_error"), deletion
             async with asyncio.timeout(10):
                 while not lifecycle.is_tombstoned(vault, unrelated):
@@ -594,7 +629,8 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
                     while True:
                         status = await preview(**extra)
                         if (status.get("state") != "running"
-                                and status.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                                and status.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
                             latencies.append(time_module.monotonic() - started)
                             return status
                         for leaked in ("result", "references", "entries", "next_cursor"):
@@ -611,7 +647,8 @@ def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
                     await asyncio.sleep(0.05)
             assert queued.get("state") == "running", queued
             terminal = await page(preview_run_id=queued["run_id"])
-            assert terminal["state"] == "completed" and terminal["result"]["preview_digest"], terminal
+            assert (terminal["state"] == "completed"
+                    and terminal["result"]["preview_digest"]), terminal
             assert terminal["result"]["path"] == source
 
             cursor = first_cursor = terminal["next_cursor"]
@@ -705,7 +742,10 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
         )
     stop = threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
-    body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
+    body = {
+        "operation": "propose-reclassification", "path": source,
+        "source_kind": "dataset-export",
+    }
     headers = _headers(credential.bearer)
 
     if hold_at == "session-closed":
@@ -716,7 +756,8 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
             closed_at = int(time.time())
             with closing(store.open_authorization_session_connection(vault)) as connection:
                 authorization_session_lifecycle.close_verified_session(
-                    connection, custody=authorization_custody.load_authorization_custody(vault, now=closed_at),
+                    connection,
+                    custody=authorization_custody.load_authorization_custody(vault, now=closed_at),
                     context=credential.context, now=closed_at,
                 )
 
@@ -788,11 +829,15 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
 
 
 @pytest.mark.parametrize("fault", [
-    "release", "render", "cold-resolver", "uncertified-resolver", "removed-link", "changed-source", "catalogue-link",
-    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "catalogue-unsupported-overflow",
+    "release", "render", "cold-resolver", "uncertified-resolver",
+    "removed-link", "changed-source", "catalogue-link",
+    "catalogue-candidates", "catalogue-unavailable",
+    "catalogue-unsupported", "catalogue-unsupported-overflow",
     "inbound-freshness-lock", "unreadable-container",
 ])
-def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
+def test_served_preview_retries_when_its_planning_or_release_proof_fails(
+    vault, source_schema, monkeypatch, fault
+):
     from _public_call import public_call
     from fastmcp import Client
     from fastmcp.tools import FunctionTool
@@ -851,7 +896,10 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
 
     monkeypatch.setattr(request_budget, "RequestBudget", Budget)
     if fault in ("release", "render"):
-        target, name = (egress, "postfilter") if fault == "release" else (FunctionTool, "convert_result")
+        target, name = (
+            (egress, "postfilter") if fault == "release"
+            else (FunctionTool, "convert_result")
+        )
         convert = getattr(target, name)
 
         def expire(*args, **kwargs):
@@ -872,7 +920,10 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         monkeypatch.setattr(move_file, "iter_inbound_rewrites", edit_during_planning)
     elif fault == "catalogue-unavailable":
         # Current inbound links cannot prove that the catalogue checked prose references.
-        monkeypatch.setattr(path_mentions, "find_pages", lambda *a, **kw: path_mentions.Lookup((), False))
+        monkeypatch.setattr(
+            path_mentions, "find_pages",
+            lambda *a, **kw: path_mentions.Lookup((), False),
+        )
     elif fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):
         monkeypatch.setattr(lexstore, "_usable", lambda: False)
         if fault == "catalogue-unsupported-overflow":
@@ -925,7 +976,8 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
                 find.shared_resolver(vault)
                 find._RESOLVER_CHECKPOINTS.pop(vault, None)
             call = public_call("manage_memory_file", {
-                "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+                "operation": "propose-reclassification", "path": source,
+                "source_kind": "dataset-export",
             })
             retry = await _call(client, *call)
             if fault == "catalogue-unsupported-overflow":
@@ -938,7 +990,8 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
                     while True:
                         retry = await _call(client, *status)
                         if (retry.get("state") != "running"
-                                and retry.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING"):
+                                and retry.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
                             break
                         await asyncio.sleep(0.1)
             error = retry.get("error", {})
@@ -966,7 +1019,9 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
 
 
 @pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])
-def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source_schema, monkeypatch, gap):
+def test_a_live_watcher_recovers_preview_without_a_foreground_walk(
+    vault, source_schema, monkeypatch, gap
+):
     from exomem import file_watcher, find, freshness
     from exomem import vault as vault_module
     from exomem.cli_ops import OpError
@@ -974,10 +1029,16 @@ def test_a_live_watcher_recovers_preview_without_a_foreground_walk(vault, source
 
     monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
     source = _capture(vault, source_schema, title="Stream flow measurements").path
-    entries = [(str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)]
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ]
     freshness.seed(vault, "vault", entries)
     stop = threading.Event()
-    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: None if stop.is_set() else stop)
+    monkeypatch.setattr(
+        file_watcher, "observing_inbound_recovery_stop",
+        lambda _: None if stop.is_set() else stop,
+    )
     assert vault_module.prime_inbound_index(vault, eager=True)
     if gap == "external-pending":
         freshness.mark_external_pending(vault)
@@ -2101,7 +2162,7 @@ def test_a_reclassification_says_so_when_it_could_not_check_path_mentions(
 
 
 def _governed_held_page(vault: Path) -> str:
-    """A vault governed enough for a compiled policy: one scope over one note, denied to nobody here."""
+    """One scope over one note, denied to nobody here: a minimally governed vault."""
     rel = f"{KB}/Notes/held.md"
     governance = vault / KB / "_Governance"
     (governance / "scopes").mkdir(parents=True, exist_ok=True)
@@ -2112,7 +2173,8 @@ def _governed_held_page(vault: Path) -> str:
     )
     (governance / "rules" / "held.yaml").write_text(
         'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
-        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: principal:report-reader\nceiling: 0\n',
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        'audience: principal:report-reader\nceiling: 0\n',
         encoding="utf-8",
     )
     (vault / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -2194,7 +2256,9 @@ def test_a_file_changed_between_its_two_witness_stats_leaves_no_held_evidence(va
     assert sink == {}
 
 
-def test_completed_paged_report_stores_held_evidence_only_privately(vault, source_schema, monkeypatch):
+def test_completed_paged_report_stores_held_evidence_only_privately(
+    vault, source_schema, monkeypatch
+):
     import hashlib
     import json
     import os
@@ -2224,7 +2288,8 @@ def test_completed_paged_report_stores_held_evidence_only_privately(vault, sourc
     copy_dataset_fixture(vault)
     for scope, directory in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
-            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
         ))
     assert vault_module.prime_inbound_index(vault, eager=True)
     lexstore.ensure_fresh(vault)
