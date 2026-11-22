@@ -14,7 +14,7 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 
 ### Requirement: Only eligible saves are accepted
 
-A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command declares `busy_intake` in the command registry, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, and the serialised arguments fit within 4 MiB. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
+A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command declares `busy_intake` in the command registry, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, the call is keyed, and its arguments fit within 4 MiB. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
 
 #### Scenario: An ineligible write keeps the busy refusal
 
@@ -26,6 +26,11 @@ A save SHALL be accepted only when the intake is enabled, a drainer runs in the 
 - **WHEN** a caller with a delegated authorization session sends an eligible save while the boundary is busy
 - **THEN** it returns `MUTATION_BUSY` with `committed: false` as before
 
+#### Scenario: A save without an idempotency identity keeps the busy refusal
+
+- **WHEN** a REST save without an `Idempotency-Key` header meets a busy boundary
+- **THEN** it returns `MUTATION_BUSY` and queues nothing
+
 #### Scenario: A process without a drainer keeps the busy refusal
 
 - **WHEN** a stdio server or the CLI meets a busy boundary on an eligible save
@@ -33,7 +38,7 @@ A save SHALL be accepted only when the intake is enabled, a drainer runs in the 
 
 ### Requirement: The intake stays off the uncontended path
 
-A save that meets no contention SHALL NOT read the intake store, and a fault in the intake SHALL NOT refuse a save that would otherwise run. A drainer with nothing queued SHALL NOT poll the store or change the vault's private identities.
+A save that meets no contention SHALL NOT read the intake store, and a fault in the intake SHALL NOT refuse a save that would otherwise run. A drainer with nothing queued SHALL NOT write to the store or change the vault's private identities, and SHALL read it at most once every few minutes.
 
 #### Scenario: An unreadable intake store does not block an ordinary save
 

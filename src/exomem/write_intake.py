@@ -918,8 +918,9 @@ class Admission:
     control: dict[str, Any]
     principal: dict[str, Any]
     surface: dict[str, Any] | None
-    origin: str | None
-    origin_ttl: float | None
+    #: The dispatcher's own idempotency identity and its retry window; a save without one is not admitted.
+    origin: str
+    origin_ttl: float
 
     def run(self, call: Callable[[], Any]) -> Any:
         """Run the save, or queue it when the boundary stays busy.
@@ -964,8 +965,6 @@ class Admission:
             _WAIT_CAP.reset(token)
 
     def _indexed_answer(self) -> dict[str, Any] | None:
-        if self.origin is None:
-            return None
         known = self.drainer.lookup(self.origin)
         if known is None:
             return None
@@ -1013,12 +1012,11 @@ class Admission:
         intake_id = uuid.uuid4().hex
         now = time.time()
         with _write(self.drainer.vault_root, create=create) as conn:
-            if self.origin is not None:
-                row = conn.execute(
-                    "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?)", (self.origin, *_OPEN_STATES)
-                ).fetchone()
-                if row is not None:
-                    return _receipt(conn, row), None
+            row = conn.execute(
+                "SELECT * FROM intake WHERE origin = ? AND state IN (?, ?)", (self.origin, *_OPEN_STATES)
+            ).fetchone()
+            if row is not None:
+                return _receipt(conn, row), None
             conn.execute(
                 "INSERT INTO intake (id, origin, origin_ttl, command, arguments, principal, surface, state, "
                 "accepted_at, updated_at, next_attempt_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1156,6 +1154,10 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     except Exception:  # noqa: BLE001 - a call whose identity cannot be derived runs as before
         log.debug("write intake could not derive the identity of a %s save", command.name, exc_info=True)
         return None
+    if origin is None:
+        # Without an idempotency identity a resend cannot be told from a new save, so each resend
+        # would queue another copy; such a caller keeps today's busy refusal.
+        return None
     return Admission(
         drainer=drainer,
         command=command,
@@ -1163,8 +1165,8 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         control=control,
         principal=principal,
         surface=_surface_record(),
-        origin=origin[0] if origin is not None else None,
-        origin_ttl=origin[1] if origin is not None else None,
+        origin=origin[0],
+        origin_ttl=origin[1],
     )
 
 

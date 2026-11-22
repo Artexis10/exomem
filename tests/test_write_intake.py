@@ -273,7 +273,8 @@ def test_coordination_status_reports_the_intake_and_unknown_when_unreadable(
     _writer, holder = managers
     with _Hold(holder, vault):
         _send(_command("remember"), vault, _remember_kwargs(vault, 8))
-        assert write_intake.status(vault)["queued"] + write_intake.status(vault)["applying"] == 1
+        status = write_intake.status(vault)
+        assert status["queued"] + status["applying"] == 1
 
     def unreadable(*_args, **_kwargs):
         raise OSError("disk read failed")
@@ -568,3 +569,15 @@ def test_a_resend_of_a_known_save_is_answered_from_the_index_when_its_row_cannot
     resend = _send(remember, vault, kwargs)
     assert resend["queued_write"] == {"ref": ref, "state": "applied"}
     assert len(_pages_titled(vault, "Queued save 25")) == 1
+
+
+def test_a_save_without_an_idempotency_identity_keeps_the_busy_refusal(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unkeyed resend cannot be told from a new save, so queueing it would land it once per send.
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "1")
+    _writer, holder = managers
+    with _Hold(holder, vault), pytest.raises(OpError) as refused:
+        _send(_command("remember"), vault, _remember_kwargs(vault, 26), scope=None)
+    assert refused.value.code == "MUTATION_BUSY"
+    assert write_intake.read(vault)["items"] == []
