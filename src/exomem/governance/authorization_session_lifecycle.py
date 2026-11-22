@@ -32,6 +32,10 @@ class AuthorizationSessionUnavailable(RuntimeError):
         super().__init__("authorization session is unavailable")
 
 
+class AuthorizationSessionUnreadable(AuthorizationSessionUnavailable):
+    """A read failure prevented the session check."""
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizationSessionContext:
     session_id: str
@@ -196,11 +200,12 @@ def _ready_custody(
         if not readiness.ready:
             raise AuthorizationSessionUnavailable
         return active_key
+    except (sqlite3.Error, schema_v4.ActiveStateUnreadable, authorization_custody.AuthorizationCustodyUnreadable):
+        raise AuthorizationSessionUnreadable from None
     except (
         AttributeError,
         TypeError,
         ValueError,
-        sqlite3.Error,
         schema_v4.SchemaV4Error,
         authorization_custody.AuthorizationCustodyUnavailable,
         authorization_serving_membership.ServingMembershipUnavailable,
@@ -576,11 +581,12 @@ def _resolve_verified_context(
         ):
             raise AuthorizationSessionUnavailable
         return _ResolvedSession(context, record)
+    except (sqlite3.Error, AuthorizationSessionUnreadable):
+        raise AuthorizationSessionUnreadable from None
     except (
         IndexError,
         TypeError,
         ValueError,
-        sqlite3.Error,
         AuthorizationSessionUnavailable,
     ):
         raise AuthorizationSessionUnavailable from None

@@ -1913,6 +1913,9 @@ It returns a Source receipt after the full hash matches and the Source commits.
 It can retrieve the same receipt for 24 hours after settlement. The account
 must retain its owner binding and the issuing MCP login must remain active.
 Refreshing the access token keeps that login active.
+Each receipt read applies the current release policy to the Source and its
+original. If the policy withholds either path, the upload keeps its receipt
+and reports that it cannot release it.
 
 If creation reports a spent handoff without returning a session, request a
 new handoff. If a known session becomes unavailable, check Source custody

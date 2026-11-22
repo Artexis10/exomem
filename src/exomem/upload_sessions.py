@@ -26,7 +26,8 @@ store-wide lock serialises creation.
 A session expires `TTL_SECONDS` after its last accepted part. Delegated
 Source offsets are published only after syncing the bytes, and terminal
 Source receipts have their own retention window. The serving runtime sweeps
-expired sessions at start, and an expired lookup cleans up its own session.
+expired sessions at startup and in bounded batches while serving. An expired
+lookup also cleans up its own session.
 """
 
 from __future__ import annotations
@@ -36,15 +37,16 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
+from contextlib import closing
 from dataclasses import dataclass, field
-from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -59,8 +61,14 @@ STORE_DIRNAME = "upload-sessions"
 SOURCE_STORE_DIRNAME = "source-upload-sessions"
 SOURCE_ID_PREFIX = "source-"
 _RECEIPTS_DIRNAME = "receipts"
+_COMMIT_WITNESS_SUFFIX = ".commit"
+_PENDING_COMMIT_WITNESS_SUFFIX = ".commit-pending"
 #: A session lives this long after its last accepted part.
 TTL_SECONDS = 24 * 3600
+# Wait five minutes between passes. A large store yields every 128 directory entries.
+_SWEEP_INTERVAL_SECONDS = 5 * 60.0
+_SWEEP_BATCH_SIZE = 128
+_SWEEP_BATCH_PAUSE_SECONDS = 1.0
 #: Bytes one request may carry: under the proxy edge's 100 MB body cap.
 MAX_PATCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_BYTES = 2 * 1024**3
@@ -236,7 +244,7 @@ def valid_session_id(session_id: str) -> bool:
 
 
 def _witness_path(store: Path, session_id: str) -> Path:
-    return store / f"{session_id}.commit"
+    return store / f"{session_id}{_COMMIT_WITNESS_SUFFIX}"
 
 
 def file_commit_witness_path(vault_root: Path, session_id: str) -> Path:
@@ -246,6 +254,11 @@ def file_commit_witness_path(vault_root: Path, session_id: str) -> Path:
     if not delegated_source(session_id) or not valid_session_id(session_id):
         raise ValueError("invalid Source upload session ID")
     return _witness_path(vault_state_dir(vault_root) / SOURCE_STORE_DIRNAME, session_id)
+
+
+def pending_file_commit_witness(path: Path) -> Path:
+    """Locate the seal's pending marker beside its witness."""
+    return path.with_suffix(_PENDING_COMMIT_WITNESS_SUFFIX)
 
 
 def valid_session_secret(secret: str) -> bool:
@@ -261,7 +274,8 @@ _remove = private_state.remove
 
 def _remove_session_payloads(store: Path, session_id: str) -> None:
     if delegated_source(session_id):
-        _remove(_witness_path(store, session_id))
+        witness = _witness_path(store, session_id)
+        _remove(witness, pending_file_commit_witness(witness))
     _remove(store / f"{session_id}.part")
 
 
@@ -332,11 +346,19 @@ def _drop(store: Path, session_id: str) -> None:
     _forget(session_id)
 
 
-def _expired(record: dict, now: float) -> bool:
+def _expiry_timestamp(record: dict | None) -> float | None:
+    if record is None:
+        return None
     try:
-        return not float(record["expires"]) > now
-    except (KeyError, TypeError, ValueError):
-        return True
+        expiry = float(record["expires"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    return expiry if math.isfinite(expiry) else None
+
+
+def _expired(record: dict, now: float) -> bool:
+    expiry = _expiry_timestamp(record)
+    return expiry is None or expiry <= now
 
 
 def _expire(store: Path, session_id: str, now: float) -> dict | None:
@@ -344,7 +366,10 @@ def _expire(store: Path, session_id: str, now: float) -> dict | None:
     try:
         with _session_lock(store, session_id):
             record = _read_record(store, session_id)
-            if record is not None and not _expired(record, now):
+            expiry = _expiry_timestamp(record)
+            if expiry is None:
+                return None
+            if expiry > now:
                 return record
             _drop(store, session_id)
     except Timeout:
@@ -355,30 +380,75 @@ def _expire(store: Path, session_id: str, now: float) -> dict | None:
 def sweep(vault_root: Path) -> None:
     """Remove expired sessions with their bytes, and anything a crash left behind."""
     now = _now()
+    for store, path in _sweep_entries(vault_root):
+        _sweep_entry(store, path, now)
+
+
+def _sweep_entries(vault_root: Path) -> Generator[tuple[Path, Path], None, None]:
     for store in _existing_stores(vault_root):
-        _sweep(store, now)
-
-
-def _sweep(store: Path, now: float) -> None:
-    receipts = store / _RECEIPTS_DIRNAME
-    for meta in chain(store.glob("*.json"), receipts.glob("*.json")):
-        if valid_session_id(meta.stem):
-            record = _read_record_at(meta.parent, meta.stem)
-            if record is None or _expired(record, now):
-                _expire(store, meta.stem, now)
-    for leftover in chain(store.glob("*.part"), store.glob("*.tmp"), store.glob("*.commit")):
-        session_id = leftover.name.partition(".")[0]
-        if not valid_session_id(session_id):
-            continue
-        try:
-            if leftover.stat().st_mtime + TTL_SECONDS > now:
+        for directory in (store, store / _RECEIPTS_DIRNAME):
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        yield store, Path(entry.path)
+            except FileNotFoundError:
                 continue
-            with _session_lock(store, session_id):
-                record = _read_record(store, session_id)
-                if leftover.suffix == ".tmp" or record is None or record.get("state") not in _LIVE:
-                    _remove(leftover)
-        except (OSError, Timeout):
+
+
+def _session_record_absent(store: Path, session_id: str) -> bool:
+    # A corrupt or unreadable record is not proof that the bytes are abandoned.
+    leaf = f"{session_id}.json"
+    for directory in (store, store / _RECEIPTS_DIRNAME):
+        try:
+            (directory / leaf).lstat()
+        except FileNotFoundError:
             continue
+        return False
+    return True
+
+
+def _sweep_entry(store: Path, path: Path, now: float) -> None:
+    if path.suffix == ".json":
+        if valid_session_id(path.stem):
+            record = _read_record_at(path.parent, path.stem)
+            expiry = _expiry_timestamp(record)
+            if expiry is not None and expiry <= now:
+                _expire(store, path.stem, now)
+        return
+    # These are the closed suffixes of session payloads and interrupted file writes.
+    if path.suffix not in (".part", ".tmp", _COMMIT_WITNESS_SUFFIX, _PENDING_COMMIT_WITNESS_SUFFIX):
+        return
+    session_id = path.name.partition(".")[0]
+    if not valid_session_id(session_id):
+        return
+    try:
+        if path.stat().st_mtime + TTL_SECONDS > now:
+            return
+        with _session_lock(store, session_id):
+            record = _read_record(store, session_id)
+            if path.suffix == ".tmp" or (record is not None and record.get("state") in (COMMITTED, FAILED)):
+                _remove(path)
+            elif record is None and _session_record_absent(store, session_id):
+                _remove(path)
+    except (OSError, Timeout):
+        pass
+
+
+def run_expiry_sweep(vault_root: Path, stop: threading.Event) -> None:
+    """Reclaim expired session files off the request path for the serving runtime."""
+    while not stop.wait(_SWEEP_INTERVAL_SECONDS):
+        try:
+            # Keep the scan cursor across batches. Restarting at each pause would
+            # repeatedly read the same names and strand older entries.
+            with closing(_sweep_entries(vault_root)) as entries:
+                for count, (store, path) in enumerate(entries, start=1):
+                    if stop.is_set():
+                        return
+                    _sweep_entry(store, path, _now())
+                    if count % _SWEEP_BATCH_SIZE == 0 and stop.wait(_SWEEP_BATCH_PAUSE_SECONDS):
+                        return
+        except OSError:
+            log.warning("upload session expiry sweep could not finish", exc_info=True)
 
 
 @dataclass
@@ -497,6 +567,7 @@ def _create_locked(
             f"at most {MAX_LIVE_PER_BINDING} upload sessions may be open at once; finish or cancel one",
             429,
         )
+    # Physical free space still excludes the expired parts that await cleanup.
     if reserved + length > shutil.disk_usage(store).free:
         raise SessionError("UPLOAD_SESSION_NO_SPACE", "not enough free disk space for this upload", 507)
     secret = secrets.token_urlsafe(32)
@@ -542,7 +613,10 @@ def open_session(vault_root: Path, session_id: str, secret: str | None) -> Sessi
     ):
         raise _not_found()
     now = _now()
-    if _expired(record, now):
+    expiry = _expiry_timestamp(record)
+    if expiry is None:
+        raise _not_found()
+    if expiry <= now:
         record = _expire(store, session_id, now)
         if record is None:
             raise SessionError("UPLOAD_SESSION_EXPIRED", "this upload session has expired", 410)
@@ -721,11 +795,8 @@ def _reattempt(store: Path, session_id: str, committer: Committer) -> None:
             return
         running.reattempt = None
     record = _read_record(store, session_id)
-    try:
-        expired = record is None or float(record["expires"]) <= _now()
-    except (KeyError, TypeError, ValueError):
-        expired = True
-    if expired or record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if (record is None or _expired(record, _now()) or record["state"] != RETRYABLE
+            or record.get("code") not in _REATTEMPT_CODES):
         return
     # An empty context: nothing of the request that began the session, its principal included,
     # reaches the commit, which binds the transfer principal itself.

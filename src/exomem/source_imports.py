@@ -300,42 +300,88 @@ class ResumableCapture(ImportCapture):
         return None
 
     def seal_file_commit(self, receipt: Receipt) -> None:
+        from .upload_sessions import pending_file_commit_witness
+        from .writer_lease import _PostCommitOutcomeUncertain
+
         path = self.file_witness
         assert path is not None
+        pending = pending_file_commit_witness(path)
         receipt_hash = vault.content_hash(receipt.model_dump_json() + "\n")
         # The session owns this private directory and keeps its lock through publication.
         with private_state.stage_record(path.parent, path.stem, {"receipt_sha256": receipt_hash},
                                         temp_suffix=".tmp", durable=True) as temporary:
-            os.link(temporary, path)
-        private_state.sync_directory(path.parent)
+            try:
+                os.link(temporary, pending)
+            except OSError as error:
+                if _publication_path_possible(pending):
+                    raise _PostCommitOutcomeUncertain() from error
+                raise
+            linked = False
+            try:
+                # A crash during a failed seal must leave the pending name whenever the commit link survives.
+                private_state.sync_directory(path.parent)
+                os.link(temporary, path)
+                linked = True
+                private_state.sync_directory(path.parent)
+            except OSError as error:
+                if not linked and _publication_path_possible(path):
+                    raise _PostCommitOutcomeUncertain() from error
+                try:
+                    if linked:
+                        path.unlink()
+                        private_state.sync_directory(path.parent)
+                    pending.unlink()
+                    private_state.sync_directory(path.parent)
+                except OSError as cleanup:
+                    raise _PostCommitOutcomeUncertain() from cleanup
+                raise
+            # The commit link is durable. A failed retirement leaves the latch blocking recovery
+            # until terminal cleanup. It cannot make the writer roll back those proven bytes.
+            private_state.remove(pending)
+
+    def publication_may_have_started(self, root: Path) -> bool:
+        """Retain the upload if its exact publication left any evidence or cannot be checked."""
+        from .collection_store.connection import CollectionStoreError
+        from .upload_sessions import pending_file_commit_witness
+        from .vault_store import read as store_read
+
+        path = self._path(root)
+        if self.file_witness is not None:
+            return any(_publication_path_possible(item) for item in (
+                path, self.file_witness, pending_file_commit_witness(self.file_witness),
+            ))
+        try:
+            with reserved_paths._subsystem_authority_scope(OWNER):
+                page = store_read.owned_page(root, path.relative_to(root).as_posix())
+            return page is not None or _publication_path_possible(path)
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+            return True
 
     def committed_upload_receipt(self, root: Path, *, size: int) -> dict | None:
         """Read the exact sealed Source and original under the upload's current principal."""
         from .collection_store.connection import CollectionStoreError
-        from .governance.egress import release_level_for
-        from .governance.policy import DISCLOSURE_MAX
+        from .upload_sessions import pending_file_commit_witness
 
         try:
+            if self.file_witness is not None:
+                if _publication_path_possible(pending_file_commit_witness(self.file_witness)):
+                    return None
+                with self.file_witness.open("rb") as source:
+                    witness = json.loads(source.read(_MAX_RECEIPT_BYTES + 1))
             relative = self._path(root).relative_to(root).as_posix()
             with reserved_paths._subsystem_authority_scope(OWNER):
                 raw, _ = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_RECEIPT_BYTES)
+            if self.file_witness is not None and witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
+                return None
             receipt = self._read_receipt(raw)
             self._require_same_input(receipt)
-            if self.file_witness is not None:
-                with self.file_witness.open("rb") as source:
-                    witness = json.loads(source.read(_MAX_RECEIPT_BYTES + 1))
-                if witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
-                    return None
+            payload = _released_upload_payload(root, page=receipt.page, ref=receipt.ref,
+                                               artifact=receipt.artifact, sha256=self.original_sha256)
             if (
-                release_level_for(root, receipt.page) != DISCLOSURE_MAX
-                or release_level_for(root, receipt.artifact) != DISCLOSURE_MAX
-            ):
-                return None
-            payload = duplicates.stored_payload(root, receipt.page)
-            if (
-                payload is None or payload.lane != duplicates.SOURCES or payload.ref != receipt.ref
-                or payload.protected != self.protected or payload.artifact_path != receipt.artifact
-                or payload.sha256 != self.original_sha256 or vault.content_hash(payload.text) != receipt.source_hash
+                payload is None or payload.protected != self.protected
+                or vault.content_hash(payload.text) != receipt.source_hash
                 or duplicates.original_size(root, receipt.page, payload, bound=True) != size
             ):
                 return None
@@ -345,6 +391,47 @@ class ResumableCapture(ImportCapture):
             "path": receipt.page, "ref": receipt.ref, "artifact_path": receipt.artifact,
             "hash": self.original_sha256, "hash_algorithm": "sha256", "size": size,
         }
+
+
+def _publication_path_possible(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def _released_upload_payload(
+    root: Path, *, page: str, ref: str, artifact: str, sha256: str,
+) -> duplicates.PagePayload | None:
+    from .collection_store.connection import CollectionStoreError
+    from .governance.egress import _release_level_for_path_only_snapshot, release_level_for
+    from .governance.policy import DISCLOSURE_MAX
+
+    try:
+        if release_level_for(root, page) != DISCLOSURE_MAX:
+            return None
+        payload = duplicates.stored_payload(root, page)
+        if (
+            payload is not None and payload.lane == duplicates.SOURCES and payload.ref == ref
+            and payload.artifact_path == artifact and payload.sha256 == sha256
+            and not duplicates.binding_unproven(root, page, payload)
+            # A historical receipt cannot stand in for a live content-bound artifact grant.
+            and _release_level_for_path_only_snapshot(root, artifact, content_fingerprint=None) == DISCLOSURE_MAX
+        ):
+            return payload
+    except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+        return None
+    return None
+
+
+def upload_receipt_releasable(root: Path, *, page: object, ref: object, artifact: object, sha256: object) -> bool:
+    """Decide release against current Source metadata without reading the original."""
+    if not (isinstance(page, str) and isinstance(ref, str) and isinstance(artifact, str) and isinstance(sha256, str)):
+        return False
+    return _released_upload_payload(root, page=page, ref=ref, artifact=artifact, sha256=sha256) is not None
 
 
 def resumable_capture(root: Path, record: dict) -> ResumableCapture:

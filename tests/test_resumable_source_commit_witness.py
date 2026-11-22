@@ -27,7 +27,10 @@ _WORKER = dedent(
     import time
     from pathlib import Path
 
-    from exomem import auth_sessions, server_auth, server_transfer, source_imports, upload_sessions, vault, writer_lease
+    from exomem import (
+        auth_sessions, private_state, server_auth, server_transfer, source_imports, upload_sessions,
+        vault, writer_lease,
+    )
 
     root, login_dir = (Path(value) for value in sys.argv[1:3])
     session_id, secret, cut = sys.argv[3:]
@@ -50,6 +53,28 @@ _WORKER = dedent(
             if phase == "canonical_files_committed":
                 os._exit(72)
         writer_lease.log_active_mutation_phase = stop_after_commit
+    if cut == "revoked":
+        os.environ.pop("EXOMEM_OWNER_OAUTH_SUBJECT")
+    if cut in ("failed-sync", "uncertain-cleanup", "interrupted-seal"):
+        witness = upload_sessions.file_commit_witness_path(root, session_id)
+        sync_real = private_state.sync_directory
+        failed = False
+        def fail_witness_sync(path):
+            global failed
+            if path == witness.parent and witness.is_file() and not failed:
+                failed = True
+                if cut == "interrupted-seal":
+                    os._exit(73)
+                raise OSError("witness-directory sync failed")
+            sync_real(path)
+        private_state.sync_directory = fail_witness_sync
+        if cut == "uncertain-cleanup":
+            unlink_real = Path.unlink
+            def fail_witness_cleanup(path, *args, **kwargs):
+                if path == witness and failed:
+                    raise OSError("witness unlink failed")
+                return unlink_real(path, *args, **kwargs)
+            Path.unlink = fail_witness_cleanup
 
     session = upload_sessions.open_session(root, session_id, secret)
     upload_sessions.start_commit(session, lambda part, record: server_transfer.commit_session(root, part, record))
@@ -70,8 +95,8 @@ _WORKER = dedent(
 )
 
 
-@pytest.mark.parametrize(("cut", "exit_code"), [("before", 71), ("after", 72)])
-def test_a_process_cut_reports_only_the_committed_source_receipt(vault, tmp_path, monkeypatch, cut, exit_code):
+@pytest.fixture
+def sent_source(vault, tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", _SIGNER)
     monkeypatch.setenv("EXOMEM_BASE_URL", _ISSUER)
     monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
@@ -110,9 +135,6 @@ def test_a_process_cut_reports_only_the_committed_source_receipt(vault, tmp_path
     patch = upload_sessions.Patch(upload, 0, len(data))
     patch.write(data)
     assert patch.close() == (len(data), True)
-    sources = vault / "Knowledge Base" / "Sources"
-    earlier_paths = set(sources.rglob("*.md"))
-
     def worker(cut_at: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-c", _WORKER, str(vault), str(login_dir), upload.id, secret, cut_at],
@@ -120,6 +142,14 @@ def test_a_process_cut_reports_only_the_committed_source_receipt(vault, tmp_path
             env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
         )
 
+    return upload, data, worker
+
+
+@pytest.mark.parametrize(("cut", "exit_code"), [("before", 71), ("after", 72), ("interrupted-seal", 73)])
+def test_a_process_cut_reports_only_the_committed_source_receipt(vault, sent_source, cut, exit_code):
+    upload, data, worker = sent_source
+    sources = vault / "Knowledge Base" / "Sources"
+    earlier_paths = set(sources.rglob("*.md"))
     stopped = worker(cut)
     assert stopped.returncode == exit_code, stopped.stdout + stopped.stderr
     assert len(list(source_imports.receipt_root(vault).glob("*.json"))) == 1
@@ -128,7 +158,7 @@ def test_a_process_cut_reports_only_the_committed_source_receipt(vault, tmp_path
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     status = json.loads(resumed.stdout)
     assert set(sources.rglob("*.md")) - earlier_paths == {installed}
-    if cut == "before":
+    if cut != "after":
         assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
         assert "receipt" not in status
         assert upload.part.read_bytes() == data
@@ -136,6 +166,55 @@ def test_a_process_cut_reports_only_the_committed_source_receipt(vault, tmp_path
         assert status["state"] == upload_sessions.COMMITTED
         receipt = status["receipt"]
         assert receipt["path"] == installed.relative_to(vault).as_posix()
-        assert receipt["hash"] == digest and receipt["size"] == len(data)
+        assert receipt["hash"] == hashlib.sha256(data).hexdigest() and receipt["size"] == len(data)
         assert (vault / receipt["artifact_path"]).read_bytes() == data
         assert not upload.part.exists()
+
+
+@pytest.mark.parametrize("fault", ["failed-sync", "uncertain-cleanup"])
+def test_witness_sync_failure_allows_retry_only_after_proven_cleanup(vault, sent_source, fault):
+    upload, data, worker = sent_source
+    sources = vault / "Knowledge Base" / "Sources"
+    earlier_paths = set(sources.rglob("*.md"))
+    refused = worker(fault)
+    assert refused.returncode == 0, refused.stdout + refused.stderr
+    status = json.loads(refused.stdout)
+    assert status["state"] == upload_sessions.RETRYABLE and "receipt" not in status
+    assert set(sources.rglob("*.md")) == earlier_paths
+    assert not list(source_imports.receipt_root(vault).glob("*.json"))
+    assert upload.part.read_bytes() == data
+    retried = worker("resume")
+    assert retried.returncode == 0, retried.stdout + retried.stderr
+    status = json.loads(retried.stdout)
+    if fault == "uncertain-cleanup":
+        assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
+        assert "receipt" not in status and upload.part.read_bytes() == data
+        assert set(sources.rglob("*.md")) == earlier_paths
+    else:
+        assert status["state"] == upload_sessions.COMMITTED
+        receipt = status["receipt"]
+        assert set(sources.rglob("*.md")) - earlier_paths == {vault / receipt["path"]}
+        assert (vault / receipt["artifact_path"]).read_bytes() == data
+
+
+def test_displaced_owner_binding_does_not_destroy_the_pending_receipt(vault, sent_source):
+    upload, data, worker = sent_source
+    stopped = worker("after")
+    assert stopped.returncode == 72, stopped.stdout + stopped.stderr
+    canonical, = source_imports.receipt_root(vault).glob("*.json")
+    receipt = json.loads(canonical.read_text(encoding="utf-8"))
+
+    revoked = worker("revoked")
+    assert revoked.returncode == 0, revoked.stdout + revoked.stderr
+    status = json.loads(revoked.stdout)
+    assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
+    assert "receipt" not in status and upload.part.read_bytes() == data
+
+    restored = worker("resume")
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+    status = json.loads(restored.stdout)
+    assert status["state"] == upload_sessions.COMMITTED
+    assert status["receipt"]["ref"] == receipt["ref"]
+    assert status["receipt"]["path"] == receipt["page"]
+    assert (vault / status["receipt"]["artifact_path"]).read_bytes() == data
+    assert list(source_imports.receipt_root(vault).glob("*.json")) == [canonical]

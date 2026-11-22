@@ -281,6 +281,24 @@ def _source_upload_receipt(vault_root: Path, result: dict) -> dict:
     return receipt
 
 
+def _source_outcome_unknown() -> upload_sessions.CommitFailed:
+    return upload_sessions.CommitFailed(
+        "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown. Uploaded bytes remain held", retryable=True,
+    )
+
+
+def _source_receipt_releasable(vault_root: Path, who: principal_module.RequestPrincipal, receipt: object) -> bool:
+    from . import source_imports
+
+    if not isinstance(receipt, dict):
+        return False
+    with principal_module.request_scope(who):
+        return source_imports.upload_receipt_releasable(
+            vault_root, page=receipt.get("path"), ref=receipt.get("ref"),
+            artifact=receipt.get("artifact_path"), sha256=receipt.get("hash"),
+        )
+
+
 def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     """Publish one Source through the maintained mutation replay protocol."""
     from . import add, schema, source_imports
@@ -344,12 +362,13 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 idempotency_key=record["id"], public_idempotency_key=None,
             )
     except OpError as error:
-        if error.code == "MUTATION_OUTCOME_UNKNOWN":
+        if error.code in (
+            "MUTATION_OUTCOME_UNKNOWN", "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
+            "MUTATION_ACKNOWLEDGEMENT_PENDING",
+        ):
             if (recovered := recovered_receipt()) is not None:
                 return recovered
-            raise upload_sessions.CommitFailed(
-                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown. Uploaded bytes remain held", retryable=True,
-            ) from error
+            raise _source_outcome_unknown() from error
         raise upload_sessions.CommitFailed(
             error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
         ) from error
@@ -357,9 +376,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
         # Signed receipt recovery can prove a commit without recovering its complete leaf result.
         if (recovered := recovered_receipt()) is not None:
             return recovered
-        raise upload_sessions.CommitFailed(
-            "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
-        )
+        raise _source_outcome_unknown()
     # Also project older cached results before they leave the transfer principal's scope.
     return _source_upload_receipt(vault_root, result)
 
@@ -385,10 +402,20 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     """
     # The legacy lane token carries no caller identity. A delegated Source rechecks its stored issuer,
     # including retries in a fresh timer or process with no request context.
-    who = (_require_source_origin(vault_root, record) if upload_sessions.delegated_source(record["id"])
-           else principal_module.most_restrictive_principal(surface="transfer"))
-    with principal_module.request_scope(who):
-        return _commit_session(vault_root, part, record)
+    delegated = upload_sessions.delegated_source(record["id"])
+    try:
+        who = (_require_source_origin(vault_root, record) if delegated
+               else principal_module.most_restrictive_principal(surface="transfer"))
+        with principal_module.request_scope(who):
+            return _commit_session(vault_root, part, record)
+    except upload_sessions.CommitFailed as error:
+        if delegated and error.code == "UPLOAD_HANDOFF_UNAVAILABLE" and not error.retryable:
+            from . import source_imports
+
+            capture = source_imports.resumable_capture(vault_root, record)
+            if capture.publication_may_have_started(vault_root):
+                raise _source_outcome_unknown() from error
+        raise
 
 
 def _commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -1518,9 +1545,10 @@ def register_transfer_routes(
             )
         except upload_sessions.SessionError as exc:
             return _tus_refusal(exc.code, exc.reason, exc.status)
+        who = None
         if upload_sessions.delegated_source(session.id):
             try:
-                await run_in_threadpool(upload_handoff.source_principal, vault_root, session.record)
+                who = await run_in_threadpool(upload_handoff.source_principal, vault_root, session.record)
             except upload_handoff.SourceOriginBusy:
                 return _tus_refusal("UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", 503)
             except ValueError:
@@ -1529,7 +1557,14 @@ def register_transfer_routes(
         await run_in_threadpool(upload_sessions.start_commit, session, commit)
         state = session.record["state"]
         if request.method == "GET":
-            return JSONResponse(session.view(), headers=_tus_headers(session))
+            view = session.view()
+            if (who is not None and state == upload_sessions.COMMITTED
+                    and not await run_in_threadpool(_source_receipt_releasable, vault_root, who, view.get("receipt"))):
+                view = {
+                    "state": upload_sessions.RETRYABLE, "offset": session.length, "length": session.length,
+                    "code": "SOURCE_OUTCOME_UNKNOWN", "reason": "the Source receipt cannot be released",
+                }
+            return JSONResponse(view, headers=_tus_headers(session))
         if request.method == "HEAD":
             if state == upload_sessions.FAILED:
                 return Response(status_code=410, headers=_tus_headers(session))

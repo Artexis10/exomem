@@ -307,11 +307,14 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
     class InterruptedPart(_ASGISyncTransport):
         interrupted = False
         resumed = False
+        locator = None
 
         def handle_request(self, request):
             if request.method != "POST":
                 assert "authorization" not in request.headers
             response = super().handle_request(request)
+            if request.method == "POST" and response.status_code == 201:
+                self.locator = (response.headers["location"], response.headers[upload_sessions.SECRET_HEADER])
             if request.method == "PATCH" and response.status_code == 204 and not self.interrupted:
                 self.interrupted = True
                 raise httpx.ReadError("the part acknowledgement was lost", request=request)
@@ -335,6 +338,76 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
         transport=_ASGISyncTransport(upload_env[-1]),
     ) == 0
     assert json.loads(capsys.readouterr().out) == receipt
+    from exomem.governance import lifecycle
+
+    location, secret = transport.locator
+    with httpx.Client(transport=_ASGISyncTransport(upload_env[-1]), base_url="https://capture.example") as client:
+        headers = {upload_sessions.SECRET_HEADER: secret}
+        original_tombstone = lifecycle.is_tombstoned
+        with monkeypatch.context() as withheld:
+            withheld.setattr(lifecycle, "is_tombstoned", lambda root, path: (
+                path == receipt["path"] or original_tombstone(root, path)
+            ))
+            hidden = client.get(location, headers=headers)
+            assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+            session = upload_sessions.open_session(upload_env[0], location.rsplit("/", 1)[-1], secret)
+            assert session.record["state"] == upload_sessions.COMMITTED
+        assert client.get(location, headers=headers).json()["receipt"] == receipt
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("protocol", "tus 0.2.0"), ("resend_header", "Authorization"), ("metadata", ["filename"]),
+])
+def test_attach_checks_the_advertised_source_session_contract(upload_env, monkeypatch, tmp_path, field, value):
+    from exomem import upload_handoff
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"exact Source original"
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    descriptor["resumable"][field] = value
+    handoff = tmp_path / "contract.json"
+    handoff.write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(data)
+
+    def never_send(_request):
+        pytest.fail("an incompatible descriptor contacted the service")
+
+    assert _attach_main(
+        ["--handoff-file", str(handoff), "--root", str(tmp_path), "original.bin"],
+        transport=httpx.MockTransport(never_send),
+    ) == 2
+
+
+def test_attach_reads_the_definitive_failure_of_a_retained_source_session(upload_env, monkeypatch, tmp_path, capsys):
+    from exomem import upload_handoff, upload_sessions
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"exact Source original"
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    handoff = tmp_path / "contract.json"
+    handoff.write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(data)
+    args = ["--handoff-file", str(handoff), "--root", str(tmp_path), "original.bin"]
+
+    def lose_the_transfer(request):
+        if request.method == "POST":
+            return httpx.Response(201, headers={
+                "location": upload_sessions.SESSIONS_PATH + "/source-" + "f" * 32,
+                upload_sessions.SECRET_HEADER: "s" * 43,
+            })
+        raise httpx.ReadError("local transfer stopped", request=request)
+
+    assert _attach_main(args, transport=httpx.MockTransport(lose_the_transfer)) == 1
+    capsys.readouterr()
+
+    def failed_upload(request):
+        if request.method == "HEAD":
+            return httpx.Response(410)
+        assert request.method == "GET"
+        return httpx.Response(200, json={"state": "failed", "code": "UPLOAD_SHA256_MISMATCH"})
+
+    assert _attach_main(args, transport=httpx.MockTransport(failed_upload)) == 1
+    assert "the upload failed (UPLOAD_SHA256_MISMATCH)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("revoke_at", [None, "restart", "staging", "owner_binding", "publication"])

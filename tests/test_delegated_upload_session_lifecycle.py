@@ -10,9 +10,11 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
+from test_upload_sessions import _listening
 
-from exomem import upload_sessions
+from exomem import server, upload_sessions
 
 _APPEND = """
 import os
@@ -143,9 +145,11 @@ def test_expiry_preserves_the_bytes_and_receipt_of_an_admitted_commit(vault, mon
     release = threading.Event()
     captured = []
     witness = upload_sessions.file_commit_witness_path(vault, session.id)
+    pending = upload_sessions.pending_file_commit_witness(witness)
 
     def commit(part: Path, record: dict) -> dict:
         witness.write_bytes(b"receipt proof")
+        pending.touch()
         entered.set()
         if not release.wait(10):
             raise RuntimeError("the expiry probe stalled")
@@ -163,11 +167,13 @@ def test_expiry_preserves_the_bytes_and_receipt_of_an_admitted_commit(vault, mon
         upload_sessions.startup_sweep(vault)
         assert session.part.read_bytes() == data
         assert witness.read_bytes() == b"receipt proof"
+        assert pending.exists()
     finally:
         release.set()
     assert _committed(vault, session, secret) == {"hash": hashlib.sha256(data).hexdigest()}
     assert captured == [data]
     assert not witness.exists()
+    assert not pending.exists()
 
 
 def test_open_sessions_share_admission_with_legacy_and_release_the_slot_on_commit(vault):
@@ -186,3 +192,67 @@ def test_open_sessions_share_admission_with_legacy_and_release_the_slot_on_commi
 
     assert _committed(vault, session, secret) == {"hash": hashlib.sha256(data).hexdigest()}
     _create(vault, data)
+
+
+def test_serving_runtime_reclaims_abandoned_parts_and_receipts_without_a_request(vault, monkeypatch):
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(upload_sessions, "_SWEEP_INTERVAL_SECONDS", 0.02, raising=False)
+    monkeypatch.setattr(upload_sessions, "_SWEEP_BATCH_PAUSE_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(upload_sessions, "_SWEEP_BATCH_SIZE", 2, raising=False)
+    mcp = server.build_server(require_auth=False)
+
+    with _listening(mcp.http_app()) as (host, port), httpx.Client(
+        base_url=f"http://{host}:{port}", trust_env=False, timeout=10,
+    ) as client:
+        assert client.get("/health").status_code == 200
+        activation = mcp._exomem_local_runtime_activation
+        startup_deadline = time.monotonic() + 10
+        while activation._thread is None:
+            assert time.monotonic() < startup_deadline, "the runtime did not activate"
+            time.sleep(0.02)
+        activation._thread.join(20)
+        assert not activation._thread.is_alive()
+
+        data = b"sample"
+        legacy, _ = _create(vault, data, source=False)
+        delegated, _ = _create(vault, data)
+        for abandoned in (legacy, delegated):
+            patch = upload_sessions.Patch(abandoned, 0, 3)
+            patch.write(data[:3])
+            patch.close()
+            assert abandoned.part.read_bytes() == data[:3]
+
+        finished, secret = _create(vault, data)
+        patch = upload_sessions.Patch(finished, 0, len(data))
+        patch.write(data)
+        patch.close()
+        upload_sessions.start_commit(finished, lambda part, record: {"hash": record["sha256"]})
+        assert _committed(vault, finished, secret) == {"hash": hashlib.sha256(data).hexdigest()}
+        receipt, = finished.store.rglob(f"{finished.id}.json")
+
+        active, secret = _create(vault, data)
+        patch = upload_sessions.Patch(active, 0, len(data))
+        patch.write(data)
+        patch.close()
+        entered, release = threading.Event(), threading.Event()
+
+        def commit(part: Path, record: dict) -> dict:
+            entered.set()
+            if not release.wait(15):
+                raise RuntimeError("the expiry probe stalled")
+            assert part.read_bytes() == data
+            return {"hash": record["sha256"]}
+
+        upload_sessions.start_commit(active, commit)
+        assert entered.wait(10)
+        try:
+            later = upload_sessions._now() + upload_sessions.TTL_SECONDS + 1
+            monkeypatch.setattr(upload_sessions, "_now", lambda: later)
+            deadline = time.monotonic() + 4
+            while legacy.part.exists() or delegated.part.exists() or receipt.exists():
+                assert time.monotonic() < deadline, "the serving runtime left expired uploads on disk"
+                time.sleep(0.02)
+            assert active.part.read_bytes() == data
+        finally:
+            release.set()
+        assert _committed(vault, active, secret) == {"hash": hashlib.sha256(data).hexdigest()}

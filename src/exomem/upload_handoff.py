@@ -52,6 +52,9 @@ _now = time.time
 class SourceOriginBusy(ValueError):
     """The issuing login could not be checked. Retry without replacing the ticket."""
 
+    def __init__(self) -> None:
+        super().__init__("UPLOAD_ORIGIN_BUSY: the issuing login cannot be checked yet")
+
 
 class SourceTicketSpent(ValueError):
     """The service removed a ticket but could not confirm durable consumption."""
@@ -186,14 +189,22 @@ async def _active(root: Path, who: principal.RequestPrincipal) -> bool:
 
 def _require_source_login(state: auth_sessions.OriginLogin) -> None:
     if state is auth_sessions.OriginLogin.UNREADABLE:
-        raise SourceOriginBusy("UPLOAD_ORIGIN_BUSY: the issuing login cannot be checked yet")
+        raise SourceOriginBusy
     if state is not auth_sessions.OriginLogin.VALID:
         raise _unavailable()
 
 
+def _require_source_governance(root: Path, who: principal.RequestPrincipal) -> None:
+    try:
+        if who.surface == "mcp" and raw_protection.has_unrestricted_access(root, who, report_unreadable=True):
+            return
+    except raw_protection.AuthorityUnreadable:
+        raise SourceOriginBusy from None
+    raise _unavailable()
+
+
 async def _check_source_authority(root: Path, who: principal.RequestPrincipal) -> None:
-    if who.surface != "mcp" or not raw_protection.has_unrestricted_access(root, who):
-        raise _unavailable()
+    _require_source_governance(root, who)
     _require_source_login(await auth_sessions.origin_login_state(who, require_owner=True))
 
 
@@ -401,11 +412,10 @@ def source_principal(vault_root: Path, record: dict) -> principal.RequestPrincip
         validate_sha256(authority["ticket_sha256"])
         if (authority["deployment"] != artifact_recovery.deployment(vault_root)
                 or not authority["binding"] or authority["binding"] != record["binding"]
-                or authority["binding"] != held_uploads.principal_binding(who)
-                or who.surface != "mcp" or who.origin_session is None or who.client_binding is None
-                or not raw_protection.has_unrestricted_access(vault_root, who)):
+                or authority["binding"] != held_uploads.principal_binding(who)):
             raise _unavailable()
     except (KeyError, TypeError, ValueError, AttributeError):
         raise _unavailable() from None
+    _require_source_governance(vault_root, who)
     _require_source_login(auth_sessions.origin_login_state_sync(who, require_owner=True))
     return who

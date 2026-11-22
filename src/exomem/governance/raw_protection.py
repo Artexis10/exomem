@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -25,6 +26,10 @@ from .principal import OWNER_AUDIENCE, RequestPrincipal
 PREFIX = "__exomem_raw_v1__"
 COMPATIBILITY_ID = "raw-protection-v1"
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+
+
+class AuthorityUnreadable(RuntimeError):
+    """The protected authority stores could not be checked."""
 
 
 def marked(path: str) -> bool:
@@ -65,9 +70,9 @@ def is_owner(who: RequestPrincipal) -> bool:
     return who.resolved and who.audience_id == OWNER_AUDIENCE
 
 
-def has_unrestricted_access(root: Path, who: RequestPrincipal) -> bool:
+def has_unrestricted_access(root: Path, who: RequestPrincipal, *, report_unreadable: bool = False) -> bool:
     """Keep owner recall unrestricted only while its authority remains valid."""
-    return is_owner(who) and _authority(root, who)[0]
+    return is_owner(who) and _authority(root, who, report_unreadable=report_unreadable)[0]
 
 
 def protect(page: str, *, artifact_path: str, digest: str) -> str:
@@ -123,7 +128,9 @@ def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileC
     return None
 
 
-def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
+def _authority(
+    root: Path, who: RequestPrincipal, *, report_unreadable: bool = False,
+) -> tuple[bool, str | None]:
     """Verify issuer and live session once, retaining its trusted release purpose."""
     if not who.resolved or not who.issuer_family:
         return False, None
@@ -132,26 +139,30 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
     if who.authorization_session_id is not None and context is None:
         return False, None
     if context is not None:
-        connection = None
+        if context.issuer_family != who.issuer_family:
+            return False, None
         try:
-            if context.issuer_family != who.issuer_family:
-                return False, None
-            connection = store.open_authorization_session_connection(root)
-            now = int(time.time())
-            custody = authorization_custody.load_authorization_custody(root, now=now)
-            authorization_session_lifecycle.status_verified_session(
-                connection, custody=custody, context=context, now=now,
-            )
-            trusted_purpose = authorization_session_authority.active_session_purpose(
-                connection, context=context, audience=who.audience_id, now=now,
-            )
-        except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
+            with closing(store.open_authorization_session_connection(root)) as connection:
+                now = int(time.time())
+                custody = authorization_custody.load_authorization_custody(
+                    root, now=now, require_readable_membership=report_unreadable,
+                )
+                authorization_session_lifecycle.status_verified_session(
+                    connection, custody=custody, context=context, now=now,
+                )
+                trusted_purpose = authorization_session_authority.active_session_purpose(
+                    connection, context=context, audience=who.audience_id, now=now,
+                )
+        except (OSError, sqlite3.Error,
+                authorization_custody.AuthorizationCustodyUnreadable,
+                authorization_session_lifecycle.AuthorizationSessionUnreadable):
+            if report_unreadable:
+                raise AuthorityUnreadable("authorization session could not be checked") from None
+            return False, None
+        except (store.UnsupportedGovernanceSchema,
                 authorization_custody.AuthorizationCustodyUnavailable,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             return False, None
-        finally:
-            if connection is not None:
-                connection.close()
     return True, trusted_purpose
 
 

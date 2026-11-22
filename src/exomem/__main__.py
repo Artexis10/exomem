@@ -777,6 +777,10 @@ def _attach_handoff(args, *, transport=None) -> int:
             size = descriptor["size_bytes"]
             if (descriptor["lane"] != "source" or type(size) is not int or size != descriptor["max_bytes"]
                     or transfer["create_url"] != base + upload_sessions.SESSIONS_PATH
+                    or transfer["protocol"] != f"tus {upload_sessions.TUS_VERSION}"
+                    or transfer["resend_header"] != upload_sessions.SECRET_HEADER
+                    or not isinstance(transfer["metadata"], list)
+                    or sorted(transfer["metadata"]) != sorted(upload_sessions.required_metadata("source"))
                     or type(transfer["max_part_bytes"]) is not int
                     or not 0 < transfer["max_part_bytes"] <= upload_sessions.MAX_PATCH_BYTES
                     or type(transfer["max_bytes"]) is not int or size > transfer["max_bytes"]):
@@ -955,7 +959,10 @@ def _send_upload_session(
         session = None
     if session is not None:
         held = client.head(url, headers={**tus, "Exomem-Upload-Secret": secret})
-        if held.status_code in (404, 410):
+        if delegated and held.status_code == 410:
+            # HEAD also returns 410 for a retained failed record. GET can still give its exact failure.
+            offset = size
+        elif held.status_code in (404, 410):
             if delegated:
                 return _attach_refused(held, None, retained_source=True)
             record_path.unlink(missing_ok=True)
@@ -1034,6 +1041,9 @@ def _send_upload_session(
         if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
             return _attach_refused(sent, None, retained_source=delegated)
         held = client.head(url, headers=headers)
+        if delegated and held.status_code == 410:
+            offset = size
+            break
         if held.status_code != 200:
             return _attach_refused(held, None, retained_source=delegated)
         advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))

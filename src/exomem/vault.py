@@ -6885,6 +6885,7 @@ def _batch_atomic_write_locked(
     # diff about whitespace hides that.
     canonical_started_monotonic = _fast_ack_monotonic()
     additive_guard = None
+    file_commit_sealed = False
     try:
         from . import vocabulary_auxiliaries, vocabulary_gate
         from .writer_lease import (
@@ -7048,6 +7049,7 @@ def _batch_atomic_write_locked(
         if _seal_file_commit is not None:
             # A provisional file receipt can precede the final validation and the authority commit.
             _seal_file_commit()
+            file_commit_sealed = True
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
         # Opens the span the writer lease closes when the mutation row reaches
         # `canonically_committed`. On the 0.83.1 deploy that stretch was the
@@ -7066,10 +7068,10 @@ def _batch_atomic_write_locked(
             with call_spans.span("commit_tail.mutation_committed"):
                 mark_active_mutation_committed()
     except Exception as commit_error:
-        if additive_guard is not None and additive_guard.committed:
-            # Authority and canonical bytes are already committed together.
+        if file_commit_sealed or (additive_guard is not None and additive_guard.committed):
+            # A seal or a spent authority proves the canonical bytes already committed.
             # A later diagnostic failure must recover that outcome, never
-            # roll the bytes back while leaving an exact approval spent.
+            # roll the bytes back while leaving committed proof.
             mark_active_mutation_committed()
             raise
         rollback_errors: list[BaseException] = []
