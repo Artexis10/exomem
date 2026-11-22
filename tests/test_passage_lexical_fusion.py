@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sqlite3
 
 import numpy as np
@@ -94,6 +95,9 @@ def test_a_lexical_match_is_answered_only_from_published_current_bytes(
     # An editor changes the passage without a file event, and the index embeds the new bytes.
     edited = vault / captured["Edited"]
     edited.write_text(edited.read_text().replace("The keeper sleeps.", "Lanterns burned lamp oil"))
+    # The index skips a file whose stored mtime is within a second of the file's.
+    later = edited.stat().st_mtime + 5
+    os.utime(edited, (later, later))
     embeddings.index_incremental(vault)
     # The stale row's vector ranks it third by dense similarity, so dense alone would answer
     # two passages; its text ranks it second lexically, after the edit.
