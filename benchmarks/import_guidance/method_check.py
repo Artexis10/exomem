@@ -181,6 +181,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--scenario", default="all")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
+    # The seed worker runs from each arm's work folder, so the case folder must not depend on the caller's cwd.
+    args.cases = args.cases.resolve()
     cases = session_close.load_cases(args.scenario, args.cases)
     keys = {case.id: json.loads((args.cases / "answer-keys" / f"{case.id}.json").read_text(encoding="utf-8")) for case in cases}
     missing = [case.id for case in cases if "methods" not in keys[case.id]]
