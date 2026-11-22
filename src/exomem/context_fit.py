@@ -298,8 +298,8 @@ def select_methods(
     Each carrier is `{"name", "path", "kind", "description_of", "max_chars"}`: the name it is offered by, the page,
     and how to read the text its author wrote to say when it applies from the page's projection. Each description
     is read through `_released_for_model`, so an API placement sees only what its provider audience may see. Labels
-    are made unique among the admitted carriers only, so a withheld page changes no label. Carriers are offered in
-    order until the input allowance is reached; the rest are counted as `omitted`. The model may only return
+    are made unique among the admitted carriers only, so a withheld page changes no label. Each carrier is offered
+    when it fits the input allowance that is left, and counted as `omitted` when it does not. The model may only return
     supplied labels (a schema enum), so its answer is read through structure, never by matching words. Selection
     proposes; it grants no authority, and a failure, a timeout or a disabled placement selects nothing.
     """
@@ -338,6 +338,9 @@ def select_methods(
         # Each carrier is judged against the room left on its own, so one oversized description costs only itself;
         # the judgment deadline bounds how many are read.
         for carrier in carriers:
+            if len(json.dumps({"label": carrier["name"], "description": ""}, ensure_ascii=False)) + 2 > room:
+                omitted += 1  # not even its label fits, so its page is not read
+                continue
             judgment_timeout()
             released = _released_for_model(
                 root, carrier["path"], caller, provider, judgment_timeout, carrier["description_of"], sources,
