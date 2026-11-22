@@ -6,15 +6,25 @@ import asyncio
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
-from exomem import auth_sessions, server_auth, server_transfer, source_imports, upload_handoff, upload_sessions
+from exomem import (
+    auth_sessions,
+    server_auth,
+    server_transfer,
+    source_imports,
+    upload_handoff,
+    upload_sessions,
+)
 from exomem.governance import principal
+from exomem.state_paths import vault_state_dir
 
 _ISSUER = "https://capture.example"
 _SIGNER = "synthetic-private-signing-key"
@@ -98,6 +108,13 @@ _WORKER = dedent(
         os.environ["EXOMEM_MEDIA_STORE_CONFIG"] = str(config)
         # One byte above the floor: no commit of the held original fits.
         media_capacity.shutil.disk_usage = lambda _path: SimpleNamespace(total=100 * 1024**2, free=1024**2 + 1)
+        # The final part's reservation, which a parked session must not keep holding.
+        from contextlib import closing
+        from exomem.state_paths import vault_state_dir
+        credits = vault_state_dir(root) / "upload-commit-credit.sqlite"
+        credits.parent.mkdir(parents=True, exist_ok=True)
+        with closing(media_capacity._open_credits(credits, create=True)) as conn:
+            media_capacity._set_credit(conn, session_id, 4096)
     if cut in ("failed-sync", "uncertain-cleanup", "interrupted-seal"):
         witness = upload_sessions.file_commit_witness_path(root, session_id)
         sync_real = private_state.sync_directory
@@ -330,3 +347,6 @@ def test_a_source_resumed_at_the_space_floor_keeps_its_receipt_or_unknown_outcom
     else:
         assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
         assert upload.part.read_bytes() == data
+    credits = vault_state_dir(vault) / "upload-commit-credit.sqlite"
+    with closing(sqlite3.connect(credits)) as conn:
+        assert conn.execute("SELECT peak FROM credits WHERE session = ?", (upload.id,)).fetchone() is None

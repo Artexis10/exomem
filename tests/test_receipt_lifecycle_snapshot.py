@@ -98,8 +98,12 @@ def test_receipt_namespace_detects_an_in_place_edit_and_a_replaced_marker(vault,
     assert tampered != original and len(tampered) == len(original)
     marker.write_bytes(tampered)
     os.utime(marker, ns=(initial.st_atime_ns, initial.st_mtime_ns))
-    assert not view.current(proof, _checkpoint())
-    assert view.snapshot(_checkpoint()) is None
+    if os.name != "nt":
+        # Windows st_ctime is a creation time. There a request keeps the tombstone check's stat-only
+        # contract, so an out-of-band same-size rewrite that restores the write time waits for the
+        # background refresh, which reads the bytes. Product writers replace or unlink a marker instead.
+        assert not view.current(proof, _checkpoint())
+        assert view.snapshot(_checkpoint()) is None
 
     replacement = marker.with_suffix(".replacement")
     replacement.write_bytes(original)

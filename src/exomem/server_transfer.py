@@ -450,10 +450,8 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     # including retries in a fresh timer or process with no request context. Every commit runs under
     # the same transfer floor: the first attempt, a re-attempt by the server's own timer and startup
     # recovery alike.
-    from . import document_containers
+    from . import document_containers, source_imports
     from .cli_ops import OpError
-
-    from . import source_imports
 
     delegated = upload_sessions.delegated_source(record["id"])
     capture = source_imports.resumable_capture(vault_root, record) if delegated else None
@@ -483,7 +481,10 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
                 if capture is not None and capture.publication_may_have_started(vault_root):
                     # A space refusal must not hide a publication that may have started. The retry
                     # reserves again, so the parked session holds no room meanwhile.
-                    media_capacity.release_commit_credit(vault_root, record["id"])
+                    try:
+                        media_capacity.release_commit_credit(vault_root, record["id"])
+                    except Exception:  # Expiry retires the credit again; the unknown outcome must still surface.
+                        log.warning("upload session credit cleanup will retry at expiry", exc_info=True)
                     raise _source_outcome_unknown() from error
                 raise upload_sessions.CommitFailed(error.code, error.message, retryable=True) from error
             return _commit_session(vault_root, part, record)
