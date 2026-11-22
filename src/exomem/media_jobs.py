@@ -1354,7 +1354,12 @@ class MediaJobStore:
             return self._current_preview_claim(conn, job) and bool(install())
 
     def finish_preview(self, job: MediaJob, *, error: str | None = None) -> None:
-        """Keep the digest's terminal outcome so recovery cannot re-admit it indefinitely."""
+        """Retain the terminal outcome, honoring an install whose acknowledgement was interrupted."""
+        if error is not None:
+            from . import media_previews
+
+            if media_previews.confirm_install(self.vault_root, job):
+                error = None
         with contextlib.closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE jobs SET state = ?, pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, "
@@ -2538,26 +2543,39 @@ class MediaJobStore:
             )
 
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
+        from . import media_previews
+
         states = [RUNNING]
         if retry_blocked:
             states.append(BLOCKED)
         placeholders = ",".join("?" for _ in states)
         conn = self._connect()
         try:
+            capped = conn.execute(
+                "SELECT * FROM jobs WHERE state = 'running' AND media_type = ? AND attempts >= ?",
+                (PREVIEW_MEDIA_TYPE, MAX_PREVIEW_ATTEMPTS),
+            ).fetchall()
+            now = time.time()
+            outcomes = []
+            for row in capped:
+                job = self._row_to_job(row)
+                installed = media_previews.confirm_install(self.vault_root, job)
+                outcomes.append((COMPLETED, None if installed else "preview retry limit reached",
+                                 now, job.id, job.claim_revision))
             with conn:
-                finished = conn.execute(
+                finished = conn.executemany(
                     "UPDATE jobs SET state = ?, pinned = 0, hydrated = 0, object_key = NULL, retry_at = NULL, "
-                    "last_error = ?, updated_at = ? WHERE state = 'running' AND media_type = ? AND attempts >= ?",
-                    (COMPLETED, "preview retry limit reached", time.time(), PREVIEW_MEDIA_TYPE, MAX_PREVIEW_ATTEMPTS),
+                    "last_error = ?, updated_at = ? WHERE id = ? AND claim_revision = ? AND state = 'running'",
+                    outcomes,
                 ).rowcount
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', updated_at = ?, "
                     f"pinned = CASE WHEN {_ORDINARY_JOB} THEN pinned ELSE 0 END, "
                     f"hydrated = CASE WHEN {_ORDINARY_JOB} THEN hydrated ELSE 0 END "
-                    f"WHERE state IN ({placeholders}) "
+                    f"WHERE state IN ({placeholders}) AND ({_ORDINARY_JOB} OR attempts < ?) "
                     "AND NOT EXISTS (SELECT 1 FROM media_job_results "
                     "WHERE media_job_results.job_id = jobs.id)",
-                    (time.time(), *states),
+                    (now, *states, MAX_PREVIEW_ATTEMPTS),
                 ).rowcount
                 return int(changed + finished)
         finally:

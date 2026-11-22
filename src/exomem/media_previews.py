@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from contextlib import nullcontext
 from itertools import islice
 from pathlib import Path, PurePosixPath
@@ -80,7 +80,7 @@ def read(vault: Path, relative: str, digest: str) -> bytes | None:
 
 
 def stamp_intent(
-    content: str, relative: str, digest: str | None, *, previous: str | None = None, admit: bool = True,
+    content: str, relative: str, digest: str | None, *, previous: str | None = None,
 ) -> str:
     """Carry existing demand across media rewrites, and mark a new or rebound filing."""
     from . import preserve, vault
@@ -91,7 +91,7 @@ def stamp_intent(
     old_binding = originals.binary_binding(prior)
     changed = previous is None or (old_binding is not None and (old_binding.path, old_binding.sha256) != (relative, digest))
     carried = requested_digest(prior, relative) == digest
-    if not carried and not (admit and changed and media_engines.preview_generation_enabled()):
+    if not carried and not (changed and media_engines.preview_generation_enabled()):
         return content
 
     fields = vault.parse_frontmatter(content)[0]
@@ -153,13 +153,25 @@ def enqueue(vault: Path, binary: Path, *, expected_sha256: str | None) -> bool:
     return True
 
 
+def _canonical_companion_batch(vault: Path, relatives: Iterable[str]) -> dict[str, Mapping[str, bytes]]:
+    """Read the selected store companions from one live snapshot; file companions read normally."""
+    from .vault_store import read as store_read
+
+    paths = {relative: originals.companion_paths(relative) for relative in relatives}
+    served = store_read.serves_many(vault, {path for names in paths.values() for path in names})
+    if not any(served.values()):
+        return {}
+    with store_read.snapshot(vault, join_request=False) as view:
+        stored = view.bodies(path for path, owned in served.items() if owned)
+    return {relative: stored for relative, names in paths.items() if all(served[path] for path in names)}
+
+
 def recover(
     vault: Path, store: MediaJobStore | None, candidates: Sequence[tuple[Path, Path, str]],
 ) -> MediaJobStore | None:
     """Recover the marked candidates from one bounded discovery pass."""
     from . import media_jobs
     from .vault import MALFORMED_FRONTMATTER_ERRORS
-    from .vault_store import read as store_read
     from .writer_lease import get_manager
 
     root = state_paths.vault_state_dir(vault) / STORE
@@ -174,23 +186,13 @@ def recover(
         manager = get_manager()
         manager.yield_to_waiting_writes(vault)
         with manager.consistency_guard(vault, operation="media_preview_recover", holder_kind="background"):
-            paths = {
-                binary: originals.companion_paths(binary.relative_to(vault).as_posix())
-                for binary, _, _ in missing
-            }
-            served = store_read.serves_many(vault, {path for names in paths.values() for path in names})
-            stored = None
-            if any(served.values()):
-                with store_read.snapshot(vault, join_request=False) as view:
-                    stored = view.bodies(path for path, owned in served.items() if owned)
-
+            companions = _canonical_companion_batch(vault, (binary.relative_to(vault).as_posix() for binary, _, _ in missing))
             current = []
             rebuild = set()
             for binary, sidecar, digest in missing:
                 relative = binary.relative_to(vault).as_posix()
-                companions = stored if all(served[path] for path in paths[binary]) else None
                 try:
-                    intent = _current_intent(vault, relative, digest, companions=companions)
+                    intent = _current_intent(vault, relative, digest, companions=companions.get(relative))
                 except (*MALFORMED_FRONTMATTER_ERRORS, reserved_paths.ReservedPathLeafError):
                     continue
                 if intent is not None and intent[0] == sidecar:
@@ -231,6 +233,38 @@ def _decode(source: BinaryIO, kind: str, suffix: str, inline_bytes: int, deadlin
         if len(jpeg) > max_bytes or not (jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9")):
             raise ValueError("invalid preview codec output")
         return jpeg
+
+
+def _sync_record(path: Path, *, existing: bool) -> None:
+    if existing:
+        # A previous install may have stopped between rename and directory sync.
+        with path.open("rb") as cached:
+            os.fsync(cached.fileno())
+    shard = path.parent
+    root = shard.parent
+    private_state.sync_directory(shard)
+    private_state.sync_directory(root)
+    private_state.sync_directory(root.parent)
+
+
+def confirm_install(vault: Path, job: MediaJob) -> bool:
+    """A restart can acknowledge a matching record without opening or decoding the original."""
+    from .writer_lease import get_manager
+
+    relative = job.binary_path.relative_to(vault).as_posix()
+    if job.preview_sha256 is None or read(vault, relative, job.preview_sha256) is None:
+        return False
+    manager = get_manager()
+    manager.yield_to_waiting_writes(vault)
+    with manager.consistency_guard(vault, operation="media_preview_acknowledge", holder_kind="background"):
+        if read(vault, relative, job.preview_sha256) is None:
+            return False
+        try:
+            _sync_record(_record_path(state_paths.vault_state_dir(vault) / STORE, relative), existing=True)
+        except OSError as error:
+            log.warning("preview acknowledgement unavailable (%s)", type(error).__name__)
+            return False
+    return True
 
 
 def generate(
@@ -285,15 +319,10 @@ def generate(
             path.parent.mkdir(mode=0o700, exist_ok=True)
             if not stat.S_ISDIR(path.parent.lstat().st_mode):
                 return False
-            if read(vault, relative, held.sha256) is None:
+            existing = read(vault, relative, held.sha256) is not None
+            if not existing:
                 private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
-            else:
-                # The previous install may have stopped between rename and directory sync.
-                with path.open("rb") as cached:
-                    os.fsync(cached.fileno())
-            private_state.sync_directory(path.parent)
-            private_state.sync_directory(root)
-            private_state.sync_directory(root.parent)
+            _sync_record(path, existing=existing)
             return True
 
         manager.yield_to_waiting_writes(vault)
@@ -337,27 +366,62 @@ def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:
         return descriptor, jpeg
 
 
-def _obsolete(vault: Path, root: Path, path: Path) -> bool:
-    record = _load(path)
-    if record is None:
-        return True
-    relative = record.get("path")
-    if not isinstance(relative, str) or _record_path(root, relative) != path:
-        return True
-    current = originals.original_state(vault, relative)
-    return not current.present or current.binary_sha256 != record.get("sha256")
+def _obsolete_paths(vault: Path, root: Path, paths: Sequence[Path]) -> list[Path]:
+    """Select obsolete records from one bounded slice of private state."""
+    candidates = []
+    obsolete = []
+    for path in paths:
+        try:
+            if path.suffix == _TEMP_SUFFIX:
+                obsolete.append(path)
+                continue
+            if path.suffix != ".json":
+                continue
+            record = _load(path)
+            relative = record.get("path") if record is not None else None
+            if not isinstance(relative, str) or not supports(relative) or _record_path(root, relative) != path:
+                obsolete.append(path)
+                continue
+            candidates.append((path, relative, record.get("sha256")))
+        except OSError as error:
+            log.warning("preview cleanup deferred (%s)", type(error).__name__)
+
+    companions = _canonical_companion_batch(vault, (relative for _, relative, _ in candidates))
+    archive = originals.ArchiveReads(vault)
+    for path, relative, digest in candidates:
+        try:
+            try:
+                current = originals.original_state(vault, relative, companions=companions.get(relative), archive=archive)
+            except reserved_paths.ReservedPathLeafError as error:
+                if error.code != "UNSAFE_PATH" or reserved_paths.inspect_generic_path(vault, relative).kind != "directory":
+                    raise
+                # The exact leaf is now a directory; an old stored binding cannot file it.
+                obsolete.append(path)
+            else:
+                if current.binary_sha256 is None:
+                    # The display snapshot tolerates malformed companions. Cleanup needs a known absence.
+                    originals.bound_companion(vault, relative, companions=companions.get(relative))
+                if not current.present or current.binary_sha256 != digest:
+                    obsolete.append(path)
+        except Exception as error:  # noqa: BLE001 - unknown originals retain their records
+            log.warning("preview cleanup deferred (%s)", type(error).__name__)
+    return obsolete
 
 
-def _retire(vault: Path, root: Path, path: Path) -> None:
+def _retire(vault: Path, root: Path, paths: Sequence[Path]) -> None:
     from .writer_lease import get_manager
 
     manager = get_manager()
+    manager.yield_to_waiting_writes(vault)
     boundary = (nullcontext() if manager.holds_mutation_boundary(vault) else
                 manager.consistency_guard(vault, operation="media_preview_retire", holder_kind="background"))
     with boundary:
-        # The same mutation boundary guards installation. A delayed removal can see a new record here.
-        if path.suffix == _TEMP_SUFFIX or _obsolete(vault, root, path):
-            path.unlink(missing_ok=True)
+        # Delayed cleanup must re-read a record and its filing under the same guard as publication.
+        for path in _obsolete_paths(vault, root, paths):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                log.warning("preview cleanup deferred (%s)", type(error).__name__)
 
 
 def retire(vault: Path, relative: str) -> None:
@@ -365,7 +429,7 @@ def retire(vault: Path, relative: str) -> None:
     root = state_paths.vault_state_dir(vault) / STORE
     path = _record_path(root, relative)
     if path.exists():
-        _retire(vault, root, path)
+        _retire(vault, root, (path,))
 
 
 def _scan(root: Path) -> Generator[Path, None, None]:
@@ -392,9 +456,9 @@ def reconcile(vault: Path) -> None:
         paths = list(islice(_sweep[1], _SWEEP_LIMIT))
         if len(paths) < _SWEEP_LIMIT:
             _sweep = None
-    for path in paths:
-        try:
-            if path.suffix == _TEMP_SUFFIX or (path.suffix == ".json" and _obsolete(vault, root, path)):
-                _retire(vault, root, path)
-        except Exception as error:  # noqa: BLE001 - leave an unknown or contended record for the next pass
-            log.warning("preview reconciliation deferred (%s)", type(error).__name__)
+    try:
+        obsolete = _obsolete_paths(vault, root, paths)
+        if obsolete:
+            _retire(vault, root, obsolete)
+    except Exception as error:  # noqa: BLE001 - an unavailable batch will be checked on the next rotation
+        log.warning("preview reconciliation deferred (%s)", type(error).__name__)

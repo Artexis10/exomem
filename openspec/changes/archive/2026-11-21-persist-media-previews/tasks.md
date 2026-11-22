@@ -7,6 +7,9 @@
 - [x] 1.3 Wire preview retirement into existing media cleanup and prove that an interrupted cleanup exposes no stale output.
 - [x] 1.4 Prove cross-process publication and reconstruction of a missing successful preview in a store-mode vault.
 - [x] 1.5 Prove recovery after queue admission fails, terminal retry limits, the global disable and the absence of backfill.
+- [x] 1.6 Prove Source capture and first-time filing through startup and periodic discovery.
+- [x] 1.7 Prove bounded cleanup reads, confirmed directory replacement and revalidation before deletion.
+- [x] 1.8 Prove interrupted final-attempt acknowledgement and delayed return after hydration contention.
 
 ## 2. Preview read
 

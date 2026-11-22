@@ -336,7 +336,14 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
 
 
 def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selected_store, monkeypatch):
-    from test_governance_egress import _external, _reset_governance_caches, write_broken_policy, write_rule, write_scope
+    from test_governance_egress import (
+        _external,
+        _reset_governance_caches,
+        _verified_external_session,
+        write_broken_policy,
+        write_rule,
+        write_scope,
+    )
     from test_media_store import _offload
 
     from exomem import commands, index_sync, media_store, originals
@@ -371,6 +378,13 @@ def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selecte
     write_rule(vault, ceiling=5)
     _reset_governance_caches()
     with request_scope(_external()), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        commands.op_read_media(vault, media="preview", path=path)
+    assert originals.evicted(vault, path)
+
+    write_rule(vault, ceiling=5, extra="kind: org_cap\n")
+    _reset_governance_caches()
+    session, _ = _verified_external_session()
+    with request_scope(session), pytest.raises(artifact_recovery.RecoveryUnavailable):
         commands.op_read_media(vault, media="preview", path=path)
     assert originals.evicted(vault, path)
 

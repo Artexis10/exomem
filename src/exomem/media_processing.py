@@ -537,14 +537,15 @@ def reconcile_media(
     )
     from . import media_previews
 
+    preview_intent_written = False
     if pending is not None:
-        pending = media_previews.stamp_intent(
-            pending, rel_binary, provenance.sha256, previous=original, admit=enqueue_preview,
-        )
+        marked = media_previews.stamp_intent(pending, rel_binary, provenance.sha256, previous=original)
+        preview_intent_written = marked != pending
+        pending = marked
     if repaired is not None:
-        repaired = media_previews.stamp_intent(
-            repaired, rel_binary, provenance.sha256, previous=original, admit=enqueue_preview,
-        )
+        marked = media_previews.stamp_intent(repaired, rel_binary, provenance.sha256, previous=original)
+        preview_intent_written = marked != repaired
+        repaired = marked
     writes_sidecar = repaired is not None or (pending is not None and original != pending)
     queue_only = queue_guard is not None and commit_guard is not None and not writes_sidecar
 
@@ -779,7 +780,7 @@ def reconcile_media(
             vault, binary, explicit=explicit, commit_guard=commit_guard,
             defer_fanout_to_terminal=defer_fanout_to_terminal, request=request, enqueue_preview=enqueue_preview,
         )
-    if enqueue_preview and result is not None:
+    if result is not None and (enqueue_preview or preview_intent_written):
         media_previews.enqueue(vault, binary, expected_sha256=provenance.sha256)
     if early:
         return result

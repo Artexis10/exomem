@@ -893,6 +893,13 @@ def add(
             digest=artifact_digest,
         )
 
+    if artifact_path is not None:
+        from . import media_previews
+
+        source_md = media_previews.stamp_intent(
+            source_md, artifact_path.relative_to(vault_root).as_posix(), artifact_digest,
+        )
+
     rel_source_no_ext = source_path.relative_to(vault_root).with_suffix("").as_posix()
     count_errors: list[OSError] = []
     with call_spans.span("source.counts"):

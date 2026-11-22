@@ -39,11 +39,22 @@ When the install enables previews, the existing media worker SHALL queue a previ
 - **AND** a completed extraction stays completed
 - **AND** reconciliation leaves the terminal digest settled
 
+#### Scenario: The original store is temporarily busy
+
+- **WHEN** a retryable hydration refusal stops a preview claim
+- **THEN** the worker releases the pin and delays the next claim without spending a publication attempt
+
 #### Scenario: A process-mode worker publishes a preview
 
 - **WHEN** a worker has decoded an original and the claim, binding and held version remain current
 - **THEN** the worker installs the record under the cross-process consistency guard
 - **AND** it flushes the record and its directories through the external state root before acknowledging publication
+
+#### Scenario: The worker stops after installing the record
+
+- **WHEN** a worker stops before acknowledging its final publication attempt
+- **AND** the matching record is installed and ready
+- **THEN** recovery acknowledges publication and preserves the successful outcome
 
 #### Scenario: Processing is replayed
 
@@ -52,7 +63,7 @@ When the install enables previews, the existing media worker SHALL queue a previ
 
 ### Requirement: Preview demand survives queue and derived state loss
 
-When generation is enabled, the filing write SHALL record preview demand for an eligible new or rebound digest.
+When generation is enabled, Source capture, Evidence capture and discovery SHALL record preview demand when they write a new or rebound eligible filing.
 The bounded media reconciliation pass SHALL recover marked current demand that has no queue row or has lost its successful output.
 An unmarked historical filing and a marked digest with a terminal failure SHALL stay unqueued.
 
@@ -61,6 +72,11 @@ An unmarked historical filing and a marked digest with a terminal failure SHALL 
 - **WHEN** a filing commits while the preview queue is unavailable
 - **THEN** the filing succeeds and retains its preview demand for the exact digest
 - **AND** a later bounded reconciliation pass recovers that demand
+
+#### Scenario: Discovery first files a new original
+
+- **WHEN** startup or periodic discovery writes the first companion of an eligible image or video
+- **THEN** that write records preview demand for the digest of the original
 
 #### Scenario: A restore omits the preview record
 
@@ -82,6 +98,11 @@ Where `read_media` is offered, its preview action SHALL accept the canonical ori
 - **THEN** the preview request refuses without revealing whether the preview exists
 - **AND** a denial within the bounded precheck leaves the original evicted
 
+#### Scenario: An organization cap rules out full release
+
+- **WHEN** an applicable path-only organization cap limits a verified session below full release
+- **THEN** the preview request refuses before hydrating the original
+
 #### Scenario: The filing now names another original
 
 - **WHEN** the original changes and processing has yet to publish a matching preview
@@ -96,3 +117,8 @@ Media removal cleanup SHALL retire the associated preview record. A preview that
 - **WHEN** an original is removed from the vault or moved away from a filing
 - **THEN** the former filing's preview is no longer readable
 - **AND** media removal cleanup retires the record for the previous path
+
+#### Scenario: The original path becomes a directory
+
+- **WHEN** cleanup confirms a directory occupies the original file's exact path
+- **THEN** cleanup retires the obsolete record under the publication guard

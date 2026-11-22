@@ -8764,10 +8764,15 @@ def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) 
     boundary = connector_boundary.snapshot(vault_root, policy)
     if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
         return False
-    # A byte-bound grant can widen the path-only result. The held authorization checks it for this path.
-    return who.verified_authorization_session is not None or decide(
+    decision = decide(
         scopes, audience=who.audience_id, purpose=_declared_purpose(vault_root, who, None), policy=policy,
-    ).level >= LEVEL_FULL
+    )
+    if decision.level >= LEVEL_FULL:
+        return True
+    # A byte-bound grant can raise the standing floor. Organization caps still apply to it.
+    return who.verified_authorization_session is not None and all(
+        scope.organization_cap >= LEVEL_FULL for scope in decision.scope_contributions
+    )
 
 
 def release_allows_download(
