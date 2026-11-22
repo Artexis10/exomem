@@ -1346,3 +1346,18 @@ def test_full_package_receipt_contract_has_the_required_generator_checks() -> No
         "tests/test_plugin_sync.py::test_manifest_matches_apart_from_the_version",
         "tests/test_plugin_sync.py::test_plugin_version_matches_the_selected_release",
     } <= selectors
+
+
+@pytest.mark.parametrize(
+    "workflow_file,job",
+    [("cloud-cellctl.yml", "checks"), ("cloud-cellctl.yml", "live-k3s-scope"), ("frozen-verifier.yml", "exact-multilingual-pin")],
+)
+def test_metadata_only_release_branches_skip_source_suites(workflow_file: str, job: str) -> None:
+    """Catches a skip guard left on a release branch name the controller no longer uses."""
+    spec = importlib.util.spec_from_file_location("release_evidence", ROOT / "scripts" / "release_evidence.py")
+    release_evidence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(release_evidence)
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / workflow_file).read_text(encoding="utf-8"))
+    condition = workflow["jobs"][job]["if"]
+    for prefix in (release_evidence.RECONCILE_PREFIX, "release-please--branches--"):
+        assert f"!startsWith(github.head_ref, '{prefix}')" in condition

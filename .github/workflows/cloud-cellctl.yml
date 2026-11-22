@@ -46,8 +46,9 @@ concurrency:
 jobs:
   checks:
     name: cellctl tests, pinned ruff and platform chart
-    # Base-controlled release validation permits only version changes; full CI proves the base.
-    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
+    # Release and reconciliation PRs carry only metadata that ci.yml's release evidence checks
+    # from the base, and the Full run that qualified their source already ran this workflow.
+    if: &not-release-pr ${{ !startsWith(github.head_ref, 'release-please--branches--') && !startsWith(github.head_ref, 'release-reconcile/') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
