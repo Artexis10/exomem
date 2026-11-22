@@ -88,7 +88,7 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
     from . import embeddings
 
     try:
-        # These two read only memory, so they run before the scorer reads the store or starts a matrix load.
+        # These two are cheap and start no load, so they run before the scorer reads the store or loads a matrix.
         index = embeddings.peek_embedding_index(root)
         fingerprint = embeddings.activation_fingerprint()
         # The turn vector is the activation encoder's: a sidecar that another encoder wrote holds another space.

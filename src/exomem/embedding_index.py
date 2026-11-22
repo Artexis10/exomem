@@ -8,6 +8,7 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -303,10 +304,16 @@ class PageScorer:
     def __init__(self, resident: _EmbCache, withheld: frozenset[str]) -> None:
         self._resident = resident
         self._skip = withheld | (resident.stale_paths or frozenset())
+        self._withheld = withheld
+
+    @functools.cached_property
+    def token(self) -> tuple:
+        # Computed on first use: profile selection builds a scorer and never reads its token.
         digest = hashlib.blake2b(digest_size=16)
-        for path in sorted(withheld):
-            digest.update(path.encode() + b"\0")
-        self.token = (resident.epoch, resident.generation, resident.instance, resident.stale_paths, digest.digest())
+        for path in sorted(self._withheld):
+            digest.update(path.encode() + b"\0")  # NUL frames each path; a vault path cannot contain NUL
+        resident = self._resident
+        return (resident.epoch, resident.generation, resident.instance, resident.stale_paths, digest.digest())
 
     def rows(self, path: str) -> np.ndarray | None:
         if path in self._skip:
