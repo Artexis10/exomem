@@ -4,9 +4,10 @@ restore Jobs count as the current hold's."""
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 from urllib.parse import urlsplit
 
 import pytest
@@ -120,26 +121,32 @@ def _named(objects: list, field_selector: str) -> list:
 
 
 def _verification_job(namespace: str, uid: str, *, condition: str):
+    container = NS(
+        name=manifests.JOB_KIND_RESTIC_VERIFY, image="cell-image",
+        command=manifests.restic_verification_command(1, 2, 8192), args=None, env_from=None,
+        env=[NS(name="RESTIC_REPOSITORY", value="s3:https://fixture.invalid/backups", value_from=None)],
+    )
+    pod_spec = NS(containers=[container], init_containers=None, active_deadline_seconds=300)
     return NS(
         metadata=NS(namespace=namespace, name=manifests.restic_verification_job_name(uid), uid=uid,
-                    deletion_timestamp=None),
-        spec=NS(template=NS(metadata=NS(annotations={
-            manifests.RESTIC_VERIFICATION_REPOSITORY_ANNOTATION: "a" * 64,
-            manifests.RESTIC_VERIFICATION_SLICE_ANNOTATION: "1/2",
-        }))),
-        status=NS(conditions=[NS(type=condition, status="True", last_transition_time=CURRENT_HOLD)]),
+                    deletion_timestamp=None, creation_timestamp=CURRENT_HOLD,
+                    owner_references=[NS(api_version="apps/v1", kind="StatefulSet", name="cell", uid="statefulset-id")]),
+        spec=NS(template=NS(spec=pod_spec)),
+        status=NS(conditions=[NS(type=condition, status="True")]),
     )
 
 
-def _verification_pod(job, *, owner_uid=None, phase="Succeeded", exit_code=0, terminating=False):
+def _verification_pod(job, *, owner_uid=None, phase="Succeeded", terminating=False, finished=CURRENT_HOLD):
     labels = {"batch.kubernetes.io/job-name": job.metadata.name}
-    state = NS(terminated=NS(exit_code=exit_code, finished_at=CURRENT_HOLD))
+    state = NS(terminated=NS(exit_code=0 if phase == "Succeeded" else 1, finished_at=finished))
     return NS(
-        metadata=NS(namespace=job.metadata.namespace, labels=labels,
+        metadata=NS(namespace=job.metadata.namespace, uid="pod-" + job.metadata.uid, labels=labels,
+                    creation_timestamp=datetime.now(UTC),
                     deletion_timestamp=CURRENT_HOLD if terminating else None,
                     owner_references=[NS(kind="Job", controller=True, name=job.metadata.name,
                                          uid=job.metadata.uid if owner_uid is None else owner_uid)]),
-        status=NS(phase=phase, container_statuses=[NS(name=manifests.JOB_KIND_RESTIC_VERIFY, state=state)]),
+        spec=deepcopy(job.spec.template.spec),
+        status=NS(phase=phase, start_time=None, container_statuses=[NS(name=manifests.JOB_KIND_RESTIC_VERIFY, state=state)]),
     )
 
 
@@ -161,49 +168,68 @@ def test_verification_observes_both_fleet_pages_and_needs_the_exact_job_uid() ->
     observed = client.observe_restic_verifications()
 
     complete, = observed[NAMESPACE]
-    assert (complete.outcome, complete.uid, complete.part, complete.total, complete.repository) == (
-        "success", "current", 1, 2, "a" * 64,
+    assert (complete.outcome, complete.uid, complete.statefulset_uid, complete.pod_uid) == (
+        "success", "current", "statefulset-id", "pod-current",
     )
     assert complete.finished_at == datetime.fromisoformat(CURRENT_HOLD)
-    assert not complete.active
     unknown, = observed[other_namespace]
     assert unknown.outcome == "unknown" and not unknown.active
     selector = f"{JOB_KIND_LABEL}={manifests.JOB_KIND_RESTIC_VERIFY}"
-    assert (jobs.call_args_list, pods.call_args_list) == (
-        [call(label_selector=selector, limit=500, _continue=None),
-         call(label_selector=selector, limit=500, _continue="jobs-2")],
-        [call(label_selector=selector, limit=500, _continue=None),
-         call(label_selector=selector, limit=500, _continue="pods-2")],
-    )
+    for listing, token in ((jobs, "jobs-2"), (pods, "pods-2")):
+        assert [(call.kwargs["label_selector"], call.kwargs["limit"], call.kwargs["_continue"])
+                for call in listing.call_args_list] == [(selector, 64, None), (selector, 64, token)]
 
 
 @pytest.mark.parametrize(("phase", "terminating"), [("Pending", False), ("Succeeded", True)])
-def test_orphaned_verification_pod_keeps_the_repository_slot(phase, terminating) -> None:
+def test_orphaned_verification_pods_have_a_bounded_fate(phase, terminating) -> None:
     gone = _verification_job(NAMESPACE, "deleted-job", condition="Complete")
+    pod = _verification_pod(gone, phase=phase, terminating=terminating)
     client = ClusterClient.__new__(ClusterClient)
     client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([])))
-    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([
-        _verification_pod(gone, phase=phase, terminating=terminating),
-    ])))
+    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
 
     orphan, = client.observe_restic_verifications()[NAMESPACE]
+    assert orphan.name == gone.metadata.name and orphan.uid is None and orphan.active
+    pod.metadata.creation_timestamp -= timedelta(hours=1)
+    expired, = client.observe_restic_verifications()[NAMESPACE]
+    assert not expired.active
 
-    assert orphan.name == gone.metadata.name and orphan.uid is None
-    assert orphan.active and orphan.outcome is None
 
-
-def test_verification_observes_a_restic_lock_refusal_as_busy() -> None:
-    job = _verification_job(NAMESPACE, "busy-job", condition="Failed")
+@pytest.mark.parametrize("changed", ["command", "finished"])
+def test_a_zero_exit_needs_the_matching_effective_pod_command_and_finish(changed) -> None:
+    job = _verification_job(NAMESPACE, "completed-job", condition="Complete")
+    pod = _verification_pod(job, finished=None if changed == "finished" else CURRENT_HOLD)
+    if changed == "command":
+        pod.spec.containers[0].command = ["true"]
     client = ClusterClient.__new__(ClusterClient)
     client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([job])))
-    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([
-        _verification_pod(job, phase="Failed", exit_code=11),
-    ])))
+    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
 
-    busy, = client.observe_restic_verifications()[NAMESPACE]
+    result, = client.observe_restic_verifications()[NAMESPACE]
 
-    assert busy.outcome == "busy" and not busy.active
-    assert busy.finished_at == datetime.fromisoformat(CURRENT_HOLD)
+    assert result.outcome == "unknown" and result.pod_uid is None and result.finished_at is None
+
+
+def test_a_partial_verifier_census_cannot_mean_vacancy() -> None:
+    client = ClusterClient.__new__(ClusterClient)
+    jobs = Mock(return_value=_paged([], "another-page"))
+    client._batch = NS(list_job_for_all_namespaces=jobs)
+
+    with pytest.raises(ValueError, match="page budget"):
+        client.observe_restic_verifications()
+
+    assert jobs.call_count == 2
+
+
+def test_verifier_create_conflict_cannot_adopt_another_job() -> None:
+    client = ClusterClient.__new__(ClusterClient)
+    create = Mock(side_effect=[NS(metadata=NS(uid="server-uid")), ApiException(status=409)])
+    client._batch = NS(create_namespaced_job=create)
+    manifest = {"metadata": {"namespace": NAMESPACE, "name": "verification-job"}}
+
+    assert client.create_restic_verification_job(manifest) == "server-uid"
+    with pytest.raises(ApiException, match="409"):
+        client.create_restic_verification_job(manifest)
 
 
 def test_verification_foreground_delete_fences_same_name_replacement() -> None:

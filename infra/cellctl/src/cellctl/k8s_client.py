@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
-from datetime import UTC, datetime
+import time
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from kubernetes import client as k8s
@@ -63,10 +66,8 @@ from .manifests import (
     RENDER_DIGEST_ANNOTATION,
     RENDER_DIGEST_APPLIED_AT_ANNOTATION,
     RESTIC_VERIFICATION_ANNOTATION,
+    RESTIC_VERIFICATION_GRACE_SECONDS,
     RESTIC_VERIFICATION_JOB_NAME_RE,
-    RESTIC_VERIFICATION_MAX_PARTS,
-    RESTIC_VERIFICATION_REPOSITORY_ANNOTATION,
-    RESTIC_VERIFICATION_SLICE_ANNOTATION,
     RESTORE_JOB_NAME,
     RESTORED_SNAPSHOT_ANNOTATION,
     ROW_GENERATION_ANNOTATION,
@@ -81,6 +82,7 @@ from .manifests import (
     clone_claim_name,
     hold_job_name,
     namespace_name,
+    restic_verification_invocation,
     snapshot_backup_name,
 )
 from .media_edge import ACTIVE_SET_NAME, EdgeEvidence, read_edge_evidence
@@ -111,6 +113,10 @@ logger = logging.getLogger(__name__)
 # inside the 120 s liveness bound, instead of blocking the loop until
 # liveness restarts cellctl and discards its in-memory refusal parks.
 API_REQUEST_TIMEOUT = (5, 30)
+VERIFICATION_REQUEST_SECONDS = 2
+VERIFICATION_CENSUS_SECONDS = 5
+VERIFICATION_LIST_LIMIT = 64
+VERIFICATION_MAX_PAGES = 2
 
 # Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
 # pod (about 5 KB from node-exporter's mdadm collector, tens of KB from TopoLVM).
@@ -412,10 +418,12 @@ class ClusterClient:
         Kubernetes rejects a different UID, binding the patch to the observed object."""
 
         metadata: dict[str, object] = {"annotations": annotations}
+        options = {"field_manager": FIELD_MANAGER}
         if uid is not None:
             metadata["uid"] = uid
+            options["_request_timeout"] = VERIFICATION_REQUEST_SECONDS
         self._apps.patch_namespaced_stateful_set(
-            "cell", namespace, {"metadata": metadata}, field_manager=FIELD_MANAGER
+            "cell", namespace, {"metadata": metadata}, **options,
         )
 
     def observe_import_jobs(self, namespace: str, import_id: str):
@@ -546,14 +554,15 @@ class ClusterClient:
     def observe_restic_verifications(self) -> dict[str, tuple[ResticVerificationJob, ...]]:
         """Read only verifier Jobs and Pods across the fleet. A failed list is unknown."""
         selector = f"{JOB_KIND_LABEL}={JOB_KIND_RESTIC_VERIFY}"
+        deadline = time.monotonic() + VERIFICATION_CENSUS_SECONDS
         jobs = {
             (job.metadata.namespace, job.metadata.name): job
-            for job in _list_labelled_pages(self._batch.list_job_for_all_namespaces, selector)
+            for job in _verification_pages(self._batch.list_job_for_all_namespaces, selector, deadline)
             if cell_id_from_namespace(job.metadata.namespace)
             and RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(job.metadata.name)
         }
         pods_by_job: dict[tuple[str, str], list] = {}
-        for pod in _list_labelled_pages(self._core.list_pod_for_all_namespaces, selector):
+        for pod in _verification_pages(self._core.list_pod_for_all_namespaces, selector, deadline):
             name = (pod.metadata.labels or {}).get("batch.kubernetes.io/job-name", "")
             namespace = pod.metadata.namespace
             if cell_id_from_namespace(namespace) and RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(name):
@@ -565,6 +574,16 @@ class ClusterClient:
             observed.setdefault(namespace, []).append(observation)
         return {namespace: tuple(family) for namespace, family in observed.items()}
 
+    def create_restic_verification_job(self, manifest: dict) -> str:
+        """A create conflict never adopts the other Job as this attempt."""
+        job = self._batch.create_namespaced_job(
+            manifest["metadata"]["namespace"], manifest, _request_timeout=VERIFICATION_REQUEST_SECONDS,
+        )
+        uid = job.metadata.uid
+        if not uid:
+            raise ValueError("Kubernetes did not acknowledge a verifier Job UID")
+        return uid
+
     def delete_restic_verification_job(self, namespace: str, name: str, *, uid: str) -> None:
         """Drain the observed Job and its Pods, without deleting a same-name replacement."""
         try:
@@ -572,6 +591,7 @@ class ClusterClient:
                 name, namespace, body=k8s.V1DeleteOptions(
                     propagation_policy="Foreground", preconditions=k8s.V1Preconditions(uid=uid),
                 ),
+                _request_timeout=VERIFICATION_REQUEST_SECONDS,
             )
         except ApiException as error:
             if not _not_found(error):
@@ -1585,6 +1605,50 @@ def _list_labelled_pages(list_resources, selector: str):
             return
 
 
+def _verification_pages(list_resources, selector: str, deadline: float):
+    continuation = None
+    for _ in range(VERIFICATION_MAX_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("restic verification census exceeded its deadline")
+        response = list_resources(
+            label_selector=selector, limit=VERIFICATION_LIST_LIMIT,
+            _continue=continuation,
+            _request_timeout=min(VERIFICATION_REQUEST_SECONDS, remaining),
+        )
+        yield from response.items
+        continuation = response.metadata._continue if response.metadata else None
+        if not continuation:
+            return
+    raise ValueError("restic verification census exceeded its page budget")
+
+
+def _verification_invocation(pod_spec) -> str | None:
+    if pod_spec is None or len(pod_spec.containers) != 1 or pod_spec.init_containers:
+        return None
+    container, = pod_spec.containers
+    repositories = [entry for entry in (container.env or []) if entry.name == "RESTIC_REPOSITORY"]
+    if (container.name != JOB_KIND_RESTIC_VERIFY or not container.command or container.args
+            or container.env_from or len(repositories) != 1 or not repositories[0].value or repositories[0].value_from):
+        return None
+    fingerprint = hashlib.sha256(repositories[0].value.encode()).hexdigest()
+    return restic_verification_invocation(container.image, container.command, fingerprint)
+
+
+def _live_verification_pod(pod, *, orphan: bool) -> bool:
+    if pod.metadata.deletion_timestamp is None and pod.status and pod.status.phase in ("Succeeded", "Failed"):
+        return False
+    if not orphan:
+        return True
+    deadline = pod.spec.active_deadline_seconds if pod.spec else None
+    start = (pod.status.start_time if pod.status else None) or pod.metadata.creation_timestamp
+    # A Pod without its Job has only the Pod's deadline and Kubernetes grace.
+    # Its API object can linger after this fate bound even with no verifier lock.
+    return bool(start and deadline and datetime.now(UTC) < start + timedelta(
+        seconds=deadline + RESTIC_VERIFICATION_GRACE_SECONDS,
+    ))
+
+
 def _restic_verification_observation(name: str, job, pods: list) -> ResticVerificationJob:
     uid = job.metadata.uid if job is not None else None
     deleting = job is not None and job.metadata.deletion_timestamp is not None
@@ -1592,50 +1656,40 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
         condition for condition in (job.status.conditions or [])
         if condition.status == "True" and condition.type in ("Complete", "Failed")
     ] if job is not None and job.status is not None else []
-    # A Job with no Pods can still create one. A retiring Pod can still hold the lock.
+    owners = [
+        owner for owner in (job.metadata.owner_references or [])
+        if owner.api_version == "apps/v1" and owner.kind == "StatefulSet" and owner.name == "cell"
+    ] if job is not None else []
+    statefulset_uid = owners[0].uid if len(owners) == 1 else None
+    invocation = _verification_invocation(job.spec.template.spec) if job is not None else None
+    # A Job with no Pods can still create one.
     active = bool(job is not None and not deleting and not conditions) or any(
-        pod.metadata.deletion_timestamp is not None or pod.status is None
-        or pod.status.phase not in ("Succeeded", "Failed")
-        for pod in pods
+        _live_verification_pod(pod, orphan=job is None) for pod in pods
     )
-    template_metadata = job.spec.template.metadata if job is not None else None
-    annotations = (template_metadata.annotations or {}) if template_metadata is not None else {}
-    repository = annotations.get(RESTIC_VERIFICATION_REPOSITORY_ANNOTATION)
-    slice_value = annotations.get(RESTIC_VERIFICATION_SLICE_ANNOTATION, "")
-    part_text, _, total_text = slice_value.partition("/")
-    part = total = None
-    if 0 < len(part_text) <= 3 and 0 < len(total_text) <= 3 and part_text.isdecimal() and total_text.isdecimal():
-        n, count = int(part_text), int(total_text)
-        if 1 <= n <= count <= RESTIC_VERIFICATION_MAX_PARTS and slice_value == f"{n}/{count}":
-            part, total = n, count
-    if active:
-        return ResticVerificationJob(name, uid, repository, part, total, active, deleting, None, None)
-    if deleting or not uid or len(conditions) != 1 or not repository or part is None:
-        return ResticVerificationJob(name, uid, repository, part, total, active, deleting, "unknown", None)
-
+    observation = ResticVerificationJob(name, uid, statefulset_uid, invocation, active, deleting)
+    if active or deleting or not uid or len(conditions) != 1 or not invocation:
+        return observation
     condition, = conditions
-    # A Pod under the same Job name can survive a previous UID. It can keep the slot
-    # busy but cannot attest to this Job's result.
-    terminations = [
-        (pod.status.phase, container.state.terminated)
+    if condition.type == "Failed":
+        return replace(observation, outcome="failed")
+    owned_pods = [
+        pod
         for pod in pods
         if any(owner.kind == "Job" and owner.controller is True and owner.name == name and owner.uid == uid
                for owner in (pod.metadata.owner_references or []))
-        for container in (pod.status.container_statuses or [])
-        if container.name == JOB_KIND_RESTIC_VERIFY and container.state is not None
-        and container.state.terminated is not None
     ]
-    if len(terminations) == 1:
-        phase, termination = terminations[0]
-        finished = _parse_timestamp(termination.finished_at or condition.last_transition_time)
-        if condition.type == "Complete" and phase == "Succeeded" and termination.exit_code == 0:
-            return ResticVerificationJob(name, uid, repository, part, total, active, deleting, "success", finished)
-        # restic 0.19.1 documents exit code 11 as a repository lock conflict.
-        if condition.type == "Failed" and phase == "Failed" and termination.exit_code == 11:
-            return ResticVerificationJob(name, uid, repository, part, total, active, deleting, "busy", finished)
-    outcome = "failed" if condition.type == "Failed" else "unknown"
-    finished = _parse_timestamp(condition.last_transition_time)
-    return ResticVerificationJob(name, uid, repository, part, total, active, deleting, outcome, finished)
+    if len(owned_pods) == 1:
+        pod, = owned_pods
+        statuses = pod.status.container_statuses or []
+        if (pod.metadata.uid and pod.status.phase == "Succeeded" and len(statuses) == 1
+                and statuses[0].name == JOB_KIND_RESTIC_VERIFY and statuses[0].state
+                and _verification_invocation(pod.spec) == invocation):
+            terminal = statuses[0].state.terminated
+            if terminal and terminal.exit_code == 0 and terminal.finished_at and job.metadata.creation_timestamp:
+                finished = _parse_timestamp(terminal.finished_at)
+                if finished >= _parse_timestamp(job.metadata.creation_timestamp):
+                    return replace(observation, outcome="success", pod_uid=pod.metadata.uid, finished_at=finished)
+    return replace(observation, outcome="unknown")
 
 
 def _parse_timestamp(value) -> datetime | None:

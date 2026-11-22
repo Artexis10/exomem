@@ -7,7 +7,7 @@ Check retained Cloud backup packs for damage on a bounded schedule. Report repos
 
 ### Requirement: Verify enabled repositories in bounded idle windows
 
-The Cloud controller SHALL check a bounded, rotating subset of retained backup packs in an enabled cell's repository. It SHALL default to no enabled cells and permit at most one verification job across the fleet. It SHALL use a time and transfer-rate limit, keep the repository lock, and give managed repository operations priority.
+The Cloud controller SHALL check a bounded, rotating subset of retained backup packs in an enabled cell's repository. It SHALL default to no enabled cells and permit at most one verification job across the fleet. It SHALL use a time and transfer-rate limit and a read-only check that leaves managed repository operations free to proceed.
 
 #### Scenario: Verification is enabled for one idle cell
 
@@ -17,8 +17,8 @@ The Cloud controller SHALL check a bounded, rotating subset of retained backup p
 
 #### Scenario: A managed restore needs the repository
 
-- **WHEN** a verification job still owns the cell's repository slot
-- **THEN** the controller stops verification and waits until its process has ended before launching the restore
+- **WHEN** an already-started verification overlaps a restore
+- **THEN** the verification holds no repository lock and delays no managed restore
 
 ### Requirement: Retain the last observed verification and retry the same partition
 

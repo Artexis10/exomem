@@ -232,13 +232,13 @@ class PodPlacement:
 class ResticVerificationJob:
     name: str
     uid: str | None
-    repository: str | None
-    part: int | None
-    total: int | None
+    statefulset_uid: str | None
+    invocation: str | None
     active: bool
     deleting: bool
-    outcome: Literal["success", "failed", "busy", "unknown"] | None
-    finished_at: datetime | None
+    outcome: Literal["success", "failed", "unknown"] | None = None
+    pod_uid: str | None = None
+    finished_at: datetime | None = None
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@
 
 ## Context
 
-The controller starts backup and restore Jobs, then observes their results in fleet-wide Kubernetes reads. Restic 0.19.1 [takes an exclusive repository lock for a check](https://github.com/restic/restic/blob/v0.19.1/cmd/restic/cmd_check.go#L214-L233).
+The controller starts backup and restore Jobs, then observes their results in fleet-wide Kubernetes reads. Restic 0.19.1 allows a read-only check without a repository lock. An actual pinned-binary probe confirmed that it can verify while a backup holds its own lock. [Pinned restic implementation](https://github.com/restic/restic/blob/v0.19.1/cmd/restic/cmd_check.go#L214-L233)
 
 ## Decisions
 
@@ -10,13 +10,13 @@ The controller starts backup and restore Jobs, then observes their results in fl
 
 Run a distinct Job with the current cell image and existing restic repository selection. Mount temporary scratch, with no vault volume, Kubernetes API token, or media credentials. Validate the manifest under existing Job admission and network policies.
 
-Start at most one verification Job across the fleet, in an idle cell with a prior successful backup. Select the oldest due eligible cell. An empty allowlist disables new work. Settle or cancel existing verification when the allowlist changes. Give managed operations that need the same repository priority. Retain restic locking for independent repository clients.
+Start at most one verification Job across the fleet, in an idle cell with a prior successful backup. Select the oldest due eligible cell. An empty allowlist disables new work. Bound the observation and both workload lifetimes. Run the read-only check without a repository lock so independent and managed repository clients keep their ordinary priority.
 
 ### Record evidence before cleanup
 
 Store a versioned verification receipt on the cell StatefulSet. Bind it to the configured repository address, attempt, and exact slice. Patch the observed StatefulSet UID. Read Jobs and Pods with paged fleet-wide observation. Accept successful exit only from the matching Job and Pod. Persist the outcome before deleting the completed Job.
 
-An unavailable observation, missing attempt, deadline, failed check, or lock conflict preserves the next slice and triggers backoff. Preserve the last verified slice and its time. A replaced StatefulSet or changed repository address starts with unknown verification coverage.
+An unavailable observation, missing attempt, deadline, or failed check preserves the next slice and triggers backoff. Preserve the last verified slice and its time. Keep a successful receipt within its originating StatefulSet and configured repository address. A result covers the exact observed check and its time.
 
 ### Bound work and retain the existing backup contract
 

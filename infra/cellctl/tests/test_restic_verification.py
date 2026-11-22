@@ -1,4 +1,4 @@
-"""Restart and priority consequences of the controller's verifier annotation."""
+"""Restart, replacement and priority consequences of the Cloud verifier."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,6 +16,7 @@ from cellctl.manifests import (
 from cellctl.restic_verification import (
     VerificationConfig,
     VerificationReceipt,
+    VerificationRuntime,
     VerificationTarget,
     sync_verifications,
 )
@@ -49,6 +50,7 @@ class FakeVerifier:
         self.operations: list[tuple] = []
         self.calls = 0
         self.observe_error: Exception | None = None
+        self.runtime = VerificationRuntime()
 
     def observe_restic_verifications(self):
         self.calls += 1
@@ -59,8 +61,8 @@ class FakeVerifier:
     def receipt(self, namespace: str = NAMESPACE):
         return VerificationReceipt.parse(self.annotations.get(namespace))
 
-    def patch_statefulset_annotations(self, namespace, patch, *, uid=None):
-        if uid is not None and uid != self.statefulset_uids[namespace]:
+    def patch_statefulset_annotations(self, namespace, patch, *, uid):
+        if uid != self.statefulset_uids[namespace]:
             raise ValueError("metadata.uid is immutable")
         self.annotations[namespace] = patch[RESTIC_VERIFICATION_ANNOTATION]
         self.operations.append(("receipt", namespace, self.receipt(namespace).outcome))
@@ -69,16 +71,18 @@ class FakeVerifier:
         self.operations.append(("delete", namespace, name, uid))
 
     def start(self, namespace, receipt):
-        assert self.receipt(namespace) == receipt
+        assert self.receipt(namespace) == receipt and not receipt.job_uid
         self.operations.append(("start", namespace, receipt.part))
+        return "job-uid"
 
     async def sync(self, *, now=NOW, include=(), policy=POLICY, allow_start=True):
         repositories = {NAMESPACE: REPOSITORY, OTHER_NAMESPACE: OTHER_REPOSITORY}
         return await sync_verifications(
-            self, policy, now=now, allow_start=allow_start, start=self.start,
+            self, policy, now=now, allow_start=allow_start, start=self.start, runtime=self.runtime,
             targets={
                 namespace: VerificationTarget(
-                    repository, namespace in include, self.annotations.get(namespace), self.statefulset_uids[namespace],
+                    repository, namespace in include, self.annotations.get(namespace),
+                    self.statefulset_uids[namespace], "fixture-image",
                 )
                 for namespace, repository in repositories.items()
             },
@@ -87,7 +91,9 @@ class FakeVerifier:
 
 def observed(receipt, *, outcome=None, uid="job-uid", active=False, deleting=False):
     return ResticVerificationJob(
-        receipt.job_name, uid, receipt.repository, receipt.part, receipt.total, active, deleting, outcome, NOW,
+        receipt.job_name, uid, receipt.statefulset_uid, receipt.invocation, active, deleting, outcome,
+        pod_uid="pod-uid" if outcome == "success" else None,
+        finished_at=NOW if outcome == "success" else None,
     )
 
 
@@ -102,13 +108,11 @@ async def test_one_fleet_flight_blocks_a_second_eligible_cell():
     cluster = FakeVerifier()
     await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
     first = cluster.receipt()
+    assert first.job_uid == "job-uid"
     cluster.jobs[NAMESPACE] = (observed(first, active=True),)
 
-    busy, fast = await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
-
-    assert busy == {NAMESPACE} and fast
+    assert await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
     assert [operation for operation in cluster.operations if operation[0] == "start"] == [("start", NAMESPACE, 1)]
-    assert cluster.receipt().job_uid == "job-uid"
     assert cluster.receipt(OTHER_NAMESPACE) is None
 
 
@@ -121,13 +125,11 @@ async def test_restart_preserves_last_success_and_retries_the_failed_slice_befor
     assert cluster.operations[-2:] == [
         ("receipt", NAMESPACE, "success"), ("delete", NAMESPACE, first.job_name, "job-uid"),
     ]
-    cluster.jobs.clear()
-    await cluster.sync(include=(NAMESPACE,))
+    assert cluster.receipt().pod_uid == "pod-uid"
     await cluster.sync(now=NOW + POLICY.interval, include=(NAMESPACE,))
     second = cluster.receipt()
     assert second.part == 2 and second.last_success_at == NOW
 
-    # A fresh controller needs only the durable StatefulSet annotation and the live Job.
     restarted = FakeVerifier()
     restarted.annotations = cluster.annotations.copy()
     restarted.jobs[NAMESPACE] = (observed(second, outcome="failed"),)
@@ -135,8 +137,6 @@ async def test_restart_preserves_last_success_and_retries_the_failed_slice_befor
     await restarted.sync(now=failed_at, include=(NAMESPACE,))
     failed = restarted.receipt()
     assert (failed.outcome, failed.next_part, failed.last_success_part, failed.last_success_at) == ("failed", 2, 1, NOW)
-    restarted.jobs.clear()
-    await restarted.sync(now=failed_at, include=(NAMESPACE,))
     await restarted.sync(now=failed_at + POLICY.retry - timedelta(seconds=1), include=(NAMESPACE,))
     assert not any(operation[0] == "start" for operation in restarted.operations)
 
@@ -148,63 +148,112 @@ async def test_restart_preserves_last_success_and_retries_the_failed_slice_befor
     assert restarted.receipt().next_part == 1
 
 
-async def test_conflicting_work_evicts_the_verifier_and_waits_for_its_orphan_pod():
+async def test_disabled_controller_still_observes_orphans_without_deleting_them():
     cluster = FakeVerifier()
     await cluster.sync(include=(NAMESPACE,))
     first = cluster.receipt()
-    cluster.jobs[NAMESPACE] = (observed(first, active=True),)
     disabled = replace(POLICY, cell_ids=())
 
-    blocked, fast = await cluster.sync(policy=disabled)
+    restarted = FakeVerifier()
+    restarted.jobs[NAMESPACE] = (observed(first, uid=None, active=True),)
+    restarted.jobs[OTHER_NAMESPACE] = (observed(first, uid="foreign-job", outcome="success"),)
+    assert await restarted.sync(policy=disabled)
+    assert restarted.operations == []
+    assert restarted.calls == 1
 
-    assert blocked == {NAMESPACE} and fast
-    assert cluster.operations[-2:] == [
-        ("receipt", NAMESPACE, "unknown"), ("delete", NAMESPACE, first.job_name, "job-uid"),
-    ]
-    cluster.jobs[NAMESPACE] = (observed(first, uid=None, active=True),)
-    blocked, _ = await cluster.sync(policy=disabled)
-    assert blocked == {NAMESPACE}
-    assert cluster.receipt().cleanup_pending
-    cluster.jobs.clear()
-    await cluster.sync(policy=disabled)
-    assert not cluster.receipt().cleanup_pending
-    calls = cluster.calls
-    assert await cluster.sync(policy=disabled) == (frozenset(), False)
-    assert cluster.calls == calls
+    restarted.jobs.clear()
+    assert not await restarted.sync(policy=disabled)
+    assert not await restarted.sync(policy=disabled)
+    assert restarted.calls == 2
 
 
-async def test_an_unavailable_fleet_read_interlocks_only_the_known_flight():
+async def test_an_unavailable_fleet_read_starts_no_optional_work():
     cluster = FakeVerifier()
-    await cluster.sync(include=(NAMESPACE,))
     cluster.observe_error = OSError("fixture API timeout")
-    operations = list(cluster.operations)
 
-    blocked, fast = await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
-
-    assert blocked == {NAMESPACE} and fast
-    assert cluster.operations == operations
-
-    cluster.observe_error = None
-    cluster.jobs[NAMESPACE] = (observed(cluster.receipt(), outcome="success"),)
-    await cluster.sync(include=(NAMESPACE,))
-    cluster.observe_error = OSError("fixture API timeout after terminal receipt")
-    assert await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE)) == (frozenset(), True)
+    assert not await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    assert cluster.operations == []
 
 
 async def test_a_same_name_replacement_cannot_attest_to_a_fenced_receipt():
     cluster = FakeVerifier()
     await cluster.sync(include=(NAMESPACE,))
     attempt = cluster.receipt()
-    cluster.jobs[NAMESPACE] = (observed(attempt, uid="first-uid", active=True),)
-    await cluster.sync(include=(NAMESPACE,))
     cluster.jobs[NAMESPACE] = (observed(attempt, uid="wrong-uid", outcome="success"),)
 
     await cluster.sync(include=(NAMESPACE,))
 
     receipt = cluster.receipt()
-    assert (receipt.outcome, receipt.job_uid, receipt.next_part, receipt.last_success_at) == (
-        "unknown", "first-uid", 1, None,
-    )
+    assert (receipt.outcome, receipt.job_uid, receipt.next_part, receipt.last_success_at) == ("unknown", "job-uid", 1, None)
+    assert not any(operation[0] == "delete" for operation in cluster.operations)
+
+
+async def test_an_uncertain_create_never_adopts_its_job_on_restart():
+    class LostResponse(FakeVerifier):
+        def start(self, namespace, receipt):
+            self.jobs[namespace] = (observed(receipt, outcome="success"),)
+            raise OSError("the API response was lost")
+
+    original = LostResponse()
+    await original.sync(include=(NAMESPACE,))
+
+    restarted = FakeVerifier()
+    restarted.annotations = original.annotations.copy()
+    restarted.jobs = original.jobs.copy()
+    await restarted.sync(include=(NAMESPACE,))
+
+    receipt = restarted.receipt()
+    assert (receipt.outcome, receipt.job_uid, receipt.next_part) == ("unknown", None, 1)
+    assert not any(operation[0] == "delete" for operation in restarted.operations)
+
+
+async def test_a_refused_cell_does_not_starve_the_next_due_cell():
+    class Refusal(FakeVerifier):
+        def patch_statefulset_annotations(self, namespace, patch, *, uid):
+            if namespace == NAMESPACE:
+                raise OSError("the cell refuses receipt writes")
+            super().patch_statefulset_annotations(namespace, patch, uid=uid)
+
+    cluster = Refusal()
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+
+    assert cluster.receipt() is None
+    assert cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+async def test_a_refused_terminal_receipt_leaves_the_evidence_and_releases_the_slot():
+    class Refusal(FakeVerifier):
+        def patch_statefulset_annotations(self, namespace, patch, *, uid):
+            if namespace == NAMESPACE and VerificationReceipt.parse(patch[RESTIC_VERIFICATION_ANNOTATION]).outcome == "success":
+                raise OSError("the cell refuses terminal writes")
+            super().patch_statefulset_annotations(namespace, patch, uid=uid)
+
+    cluster = Refusal()
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    first = cluster.receipt()
+    cluster.jobs[NAMESPACE] = (observed(first, outcome="success"),)
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+
+    assert cluster.receipt() == first
+    assert not any(operation[0] == "delete" for operation in cluster.operations)
+    assert cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+async def test_copied_receipt_cannot_advance_the_replacement_statefulset():
+    cluster = FakeVerifier()
+    await cluster.sync(include=(NAMESPACE,))
+    first = cluster.receipt()
+    cluster.jobs[NAMESPACE] = (observed(first, outcome="success"),)
+    cluster.statefulset_uids[NAMESPACE] = "replacement-statefulset"  # The replacement retains the old annotation.
+
+    await cluster.sync(include=(NAMESPACE,))
+
+    latest = cluster.receipt()
+    assert latest.statefulset_uid == "replacement-statefulset" and latest.attempt_id != first.attempt_id
+    assert latest.part == 1 and latest.last_success_at is None
+    assert not any(operation[0] == "delete" for operation in cluster.operations)
 
 
 async def test_statefulset_replaced_during_observation_never_receives_the_old_success():
@@ -226,12 +275,10 @@ async def test_statefulset_replaced_during_observation_never_receives_the_old_su
 
     await cluster.sync(include=(NAMESPACE,))
 
-    assert cluster.receipt() is None
-    # Neither publish success to the replacement nor remove the old result after the refused write.
-    assert cluster.operations == before_replacement
+    assert cluster.receipt() is None and cluster.operations == before_replacement
 
 
-async def test_reconcile_drains_verification_before_entering_the_nightly_backup_hold(cell_db):
+async def test_reconcile_does_not_wait_for_a_verifier_before_nightly_backup(cell_db):
     class Cluster(FakeClusterGateway):
         verifiers = ()
 
@@ -250,6 +297,10 @@ async def test_reconcile_drains_verification_before_entering_the_nightly_backup_
 
         def observe_restic_verifications(self):
             return {NAMESPACE: self.verifiers}
+
+        def create_restic_verification_job(self, manifest):
+            self.run_job(manifest)
+            return "job-uid"
 
         def delete_restic_verification_job(self, namespace, name, *, uid):
             self.events.append(("delete_verifier", namespace, name, uid))
@@ -272,15 +323,10 @@ async def test_reconcile_drains_verification_before_entering_the_nightly_backup_
 
         await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=window)
         assert ("delete_verifier", NAMESPACE, attempt.job_name, "job-uid") in cluster.events
-        while_draining, = await db.select_all_rows(connection)
-        assert while_draining.ready and while_draining.hold_kind is None
-        assert while_draining.last_backup_snapshot == previous and while_draining.last_backup_at == NOW
-        cluster.verifiers = (observed(attempt, uid=None, active=True),)
-        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=window)
-        assert cluster.applied[(NAMESPACE, "StatefulSet", "cell")]["spec"]["replicas"] == 1
-
-        cluster.verifiers = ()
-        await reconcile.reconcile_once(connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=window)
+        starting, = await db.select_all_rows(connection)
+        assert starting.hold_kind == "backup"
+        assert starting.last_backup_snapshot == previous and starting.last_backup_at == NOW
+        assert cluster.applied[(NAMESPACE, "StatefulSet", "cell")]["spec"]["replicas"] == 0
         cluster.observations[CELL] = _observed_from_applied(cluster, CELL, pod_exists=False, pod_uses_volume=False, pod_ready=False)
         await reconcile.reconcile_once(
             connection, cluster, FakeHetznerVolumeProvider(), _secrets_config(), config, now=window + timedelta(minutes=1),

@@ -1296,9 +1296,8 @@ RESTORE_JOB_NAME = "cell-restore"
 # The closed Job attempt name and annotations shared by the renderer and observer.
 RESTIC_VERIFICATION_JOB_NAME_RE = re.compile(re.escape(JOB_KIND_RESTIC_VERIFY) + r"-[0-9a-f]{32}")
 RESTIC_VERIFICATION_ANNOTATION = "exomem.io/restic-verification"
-RESTIC_VERIFICATION_REPOSITORY_ANNOTATION = "exomem.io/restic-verification-repository"
-RESTIC_VERIFICATION_SLICE_ANNOTATION = "exomem.io/restic-verification-slice"
 RESTIC_VERIFICATION_MAX_PARTS = 256  # restic 0.19.1 bounds n/N by the first pack-ID byte.
+RESTIC_VERIFICATION_GRACE_SECONDS = 30
 # D3: an hourly hold's VolumeSnapshot and the read-only clone claim made from it.
 SNAPSHOT_NAME = "cell-snapshot"
 CLONE_CLAIM_NAME = "cell-clone"
@@ -1387,6 +1386,19 @@ def _restic_repo(cell_id: str, bucket_name: str, endpoint: str) -> str:
 def restic_verification_repository(cell_id: str, *, bucket_name: str, endpoint: str) -> str:
     """Identify the checked repository without copying its URL into the receipt."""
     return hashlib.sha256(_restic_repo(cell_id, bucket_name, endpoint).encode()).hexdigest()
+
+
+def restic_verification_command(part: int, total: int, download_kib_per_second: int) -> list[str]:
+    """One pinned restic command that reads the repository without taking a lock."""
+    return _cell_command([
+        "restic", "check", "--no-lock",
+        f"--read-data-subset={part}/{total}", f"--limit-download={download_kib_per_second}",
+    ], scratch=False)
+
+
+def restic_verification_invocation(image: str, command: list[str], repository: str) -> str:
+    """Bind the exact executable arguments, image, and repository fingerprint."""
+    return hashlib.sha256(json.dumps([image, command, repository], separators=(",", ":")).encode()).hexdigest()
 
 
 def restic_verification_job_name(attempt_id: str) -> str:
@@ -1693,7 +1705,7 @@ def render_backup_job(
 
 def render_restic_verify_job(
     spec: CellManifestSpec, *, bucket_name: str, endpoint: str, attempt_id: str, part: int, total: int,
-    download_kib_per_second: int, deadline_seconds: int,
+    download_kib_per_second: int, deadline_seconds: int, statefulset_uid: str,
 ) -> dict:
     """Check the repository in a bounded Job that needs no cell volume."""
     if not 1 <= part <= total <= RESTIC_VERIFICATION_MAX_PARTS:
@@ -1704,14 +1716,13 @@ def render_restic_verify_job(
     repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     pod = _job_pod_spec(spec, job_kind=JOB_KIND_RESTIC_VERIFY, command=[], data_read_only=True, repo=repo)
     container = pod["containers"][0]
-    # Restic receives SIGTERM directly and can release its exclusive repository lock.
-    container["command"] = _cell_command([
-        "restic", "check", f"--read-data-subset={part}/{total}", f"--limit-download={download_kib_per_second}",
-    ], scratch=False)
+    container["command"] = restic_verification_command(part, total, download_kib_per_second)
     container["volumeMounts"] = [{"name": "cache", "mountPath": "/cache"}, {"name": "tmp", "mountPath": "/tmp"}]
     pod["volumes"] = [{"name": mount["name"], "emptyDir": {"sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB)}}
                       for mount in container["volumeMounts"]]
-    pod["terminationGracePeriodSeconds"] = 30
+    pod["terminationGracePeriodSeconds"] = RESTIC_VERIFICATION_GRACE_SECONDS
+    # An orphaned Pod keeps its process deadline if its Job has disappeared.
+    pod["activeDeadlineSeconds"] = deadline_seconds
     labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY}
     return {
         "apiVersion": "batch/v1",
@@ -1719,17 +1730,14 @@ def render_restic_verify_job(
         "metadata": {
             "name": restic_verification_job_name(attempt_id), "namespace": spec.namespace,
             "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY},
+            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "cell", "uid": statefulset_uid}],
         },
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": deadline_seconds,
-            # The controller deletes the Job only after recording its terminal result.
-            "template": {"metadata": {"labels": labels, "annotations": {
-                RESTIC_VERIFICATION_REPOSITORY_ANNOTATION: restic_verification_repository(
-                    spec.cell_id, bucket_name=bucket_name, endpoint=endpoint,
-                ),
-                RESTIC_VERIFICATION_SLICE_ANNOTATION: f"{part}/{total}",
-            }}, "spec": pod},
+            # Kubernetes can clean up a terminal Job whose create acknowledgement was lost.
+            "ttlSecondsAfterFinished": 300,
+            "template": {"metadata": {"labels": labels}, "spec": pod},
         },
     }
 

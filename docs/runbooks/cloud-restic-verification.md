@@ -3,8 +3,9 @@
 The Cloud controller runs one restic verification Job at a time. It starts with an empty allowlist.
 An enabled cell can keep serving while its repository is checked.
 
-The default schedule checks one of 24 slices each day. The Job has a five-minute deadline and an 8 MiB/s download limit. A failed check retries the same slice after an hour.
-Backup, prune, restore, and cell maintenance take priority. The controller waits until a conflicting verifier finishes releasing its repository lock.
+Each enabled cell is due for its next slice after one day. The shared slot can extend that interval when cells queue for it. The Job and Pod have a five-minute deadline. The Job limits downloads to 8 MiB/s and checks one of 24 slices. A failed attempt leaves the same slice due after an hour.
+
+The controller schedules verification in idle windows. The pinned restic check reads without locking the repository, so backup, prune, restore, and maintenance can continue. An attempt interrupted by repository activity can fail and retry. A slice that consistently exceeds the deadline stays visibly unverified.
 
 ## Allowlist and rollback
 
@@ -16,14 +17,16 @@ Clear the allowlist to stop verification. Before downgrading the controller, wai
 
 ## Read the result
 
-The StatefulSet's `exomem.io/restic-verification` annotation shows the latest attempt. It records its configured repository fingerprint, slice, Job UID when observed, outcome, and timestamps.
+The StatefulSet's `exomem.io/restic-verification` annotation shows the latest attempt. It records its configured repository fingerprint, slice, originating StatefulSet, Job and Pod identity when known, outcome, and timestamps.
 `last_success_part` and `last_success_at` retain the last verified slice. A failed, busy, or unknown attempt keeps that slice due.
 
 The fingerprint identifies the configured repository address. A successful check covers the packs present in its slice when restic read them. Backup freshness and restore evidence remain in their respective records.
 
 ## Rehearsal
 
-The isolated k3s/MinIO rehearsal used the pinned restic 0.19.1 binary. It verified a real snapshot from a synthetic cell, corrupted one byte in a 4,194,795-byte data pack, and detected the damage.
+The isolated k3s/MinIO rehearsal used the pinned restic 0.19.1 binary. It verified a real snapshot from a synthetic cell and detected a one-byte change in a 4,194,792-byte data pack.
 After the original pack bytes returned, a new controller client used the durable receipt to retry the same slice and advance.
 
-The cell continued serving with its original successful backup record. The test observed the three results after 8.64, 11.26, and 7.89 seconds respectively. These are controller observation times from the disposable rehearsal. Total network transfer and production provider latency were unmeasured.
+The cell continued serving with its original successful backup record. The controller observed the two initial successes after 6.02 and 6.63 seconds. It observed the failed check after 6.90 seconds and the retry success after 6.76 seconds. Total network transfer and production provider latency were unmeasured.
+
+A separate pinned-binary probe checked a repository during a real backup. The default check exited with a lock conflict. The read-only check succeeded, left only the backup's existing lock, and the backup completed.

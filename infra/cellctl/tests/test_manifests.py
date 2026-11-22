@@ -68,23 +68,24 @@ def test_restic_verification_uses_existing_repository_access_without_the_cell_vo
                  media_collector_credential="fixture-collector")
     job = manifests.render_restic_verify_job(
         spec, bucket_name="backups", endpoint="https://s3.example", attempt_id="an-attempt",
-        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300,
+        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300, statefulset_uid="statefulset-id",
     )
 
     assert job["metadata"]["name"] == manifests.restic_verification_job_name("an-attempt")
+    assert job["metadata"]["ownerReferences"][0]["uid"] == "statefulset-id"
     assert job["spec"]["activeDeadlineSeconds"] == 300 and job["spec"]["backoffLimit"] == 0
-    # The controller owns terminal cleanup after it records the result.
-    assert "ttlSecondsAfterFinished" not in job["spec"]
+    assert job["spec"]["ttlSecondsAfterFinished"] > 0
     template = job["spec"]["template"]
     pod = template["spec"]
     assert pod["automountServiceAccountToken"] is False
     assert pod["nodeSelector"] == {"exomem.io/dedicated-cell": spec.cell_id}
     assert pod["terminationGracePeriodSeconds"] > 0
+    assert pod["activeDeadlineSeconds"] == job["spec"]["activeDeadlineSeconds"]
     assert all("emptyDir" in volume for volume in pod["volumes"])
     container, = pod["containers"]
     assert container["image"] == spec.image
     assert container["securityContext"]["readOnlyRootFilesystem"] is True
-    assert container["command"][-4:] == ["restic", "check", "--read-data-subset=3/24", "--limit-download=8192"]
+    assert container["command"][-5:] == ["restic", "check", "--no-lock", "--read-data-subset=3/24", "--limit-download=8192"]
     env = {entry["name"]: entry for entry in container["env"]}
     assert env["RESTIC_REPOSITORY"]["value"] == f"s3:https://s3.example/backups/cells/{spec.cell_id}"
     assert {entry["valueFrom"]["secretKeyRef"]["key"] for entry in env.values() if "valueFrom" in entry} == {
