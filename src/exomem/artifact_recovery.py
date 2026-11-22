@@ -360,6 +360,11 @@ def stage(
                 yield held, descriptor
                 if strict_exit:
                     stack.close()  # Translate a final custody refusal before the caller returns the response.
+                    try:
+                        if binding() != (path, metadata):
+                            raise RecoveryUnavailable
+                    except vault.MALFORMED_FRONTMATTER_ERRORS as error:
+                        raise RecoveryUnavailable from error
             except (
                 reserved_paths.ReservedPathLeafError,
                 media_store.MediaStoreError,

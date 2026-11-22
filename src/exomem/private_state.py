@@ -11,6 +11,8 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -41,6 +43,24 @@ def remove(*paths: Path) -> None:
             pass
 
 
+@contextmanager
+def stage_record(
+    store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False,
+) -> Iterator[Path]:
+    """Keep a whole record under a temporary name until the caller publishes it."""
+    descriptor, raw = tempfile.mkstemp(prefix=f"{stem}.", suffix=temp_suffix, dir=store)
+    temporary = Path(raw)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
+            json.dump(record, sink)
+            if durable:
+                sink.flush()
+                os.fsync(sink.fileno())
+        yield temporary
+    finally:
+        remove(temporary)
+
+
 def write_record(
     store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False,
     create_only: bool = False,
@@ -51,21 +71,12 @@ def write_record(
     the caller's to flush, once for a batch of records, with `sync_directory`. A `create_only` record is
     published by a hard link, so it never replaces one already there (`FileExistsError`).
     """
-    descriptor, raw = tempfile.mkstemp(prefix=f"{stem}.", suffix=temp_suffix, dir=store)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
-            json.dump(record, sink)
-            if durable:
-                sink.flush()
-                os.fsync(sink.fileno())
+    with stage_record(store, stem, record, temp_suffix=temp_suffix, durable=durable) as temporary:
+        path = store / f"{stem}.json"
         if create_only:
-            os.link(raw, store / f"{stem}.json")
-            remove(Path(raw))
+            os.link(temporary, path)
         else:
-            os.replace(raw, store / f"{stem}.json")
-    except BaseException:
-        remove(Path(raw))
-        raise
+            os.replace(temporary, path)
 
 
 def sync_directory(store: Path) -> None:

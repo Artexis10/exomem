@@ -142,8 +142,12 @@ def _current_intent(
     vault: Path, relative: str, digest: str | None, *, companions: Mapping[str, bytes] | None = None,
 ) -> tuple[Path, originals.BinaryBinding] | None:
     from . import recall_policy
+    from .vault import MALFORMED_FRONTMATTER_ERRORS
 
-    companion = originals.bound_companion(vault, relative, companions=companions)
+    try:
+        companion = originals.bound_companion(vault, relative, companions=companions)
+    except MALFORMED_FRONTMATTER_ERRORS:
+        return None
     if companion is None or digest is None or requested_digest(companion[1], relative) != digest:
         return None
     sidecar = vault / companion[0]
@@ -348,42 +352,36 @@ def generate(
             jpeg = _decode(opened.stream, kind, job.binary_path.suffix, inline_bytes, deadline)
         record["jpeg"] = base64.b64encode(jpeg).decode("ascii")
 
-        written = None
-
-        def install() -> bool:
-            nonlocal written
-            if _current_intent(vault, relative, job.preview_sha256) != (job.sidecar_path, expected):
-                return False
-            root = private_state.store(vault, STORE)
-            path = _record_path(root, relative)
-            path.parent.mkdir(mode=0o700, exist_ok=True)
-            if not stat.S_ISDIR(path.parent.lstat().st_mode):
-                return False
-            existing = _read_for_publication(path, relative, held.sha256) is not None
-            reserved_paths.require_generic_copy_source_version(held)
-            if not existing:
-                private_state.write_record(path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True)
-                written = path
-            _sync_record(path, existing=existing)
-            return True
-
         manager.yield_to_waiting_writes(vault)
-        with manager.consistency_guard(vault, operation="media_preview_publish", holder_kind="background"):
+        with (
+            manager.consistency_guard(vault, operation="media_preview_publish", holder_kind="background"),
+            ExitStack() as staged,
+        ):
+            temporary = None
             try:
-                try:
-                    return store.publish_preview(job, install)
-                finally:
-                    # Recheck custody even after a storage failure. Pin release writes the ledger after the transaction.
-                    original.close()
-            except reserved_paths.ReservedPathLeafError:
-                if written is not None:
-                    # This guard still excludes any other preview writer for the record this claim installed.
-                    try:
-                        written.unlink(missing_ok=True)
-                        _sync_record(written, existing=False)
-                    except OSError as error:
-                        log.warning("preview rollback deferred (%s)", type(error).__name__)
-                raise
+                root = private_state.store(vault, STORE)
+                path = _record_path(root, relative)
+                path.parent.mkdir(mode=0o700, exist_ok=True)
+                if not stat.S_ISDIR(path.parent.lstat().st_mode):
+                    return False
+                existing = _read_for_publication(path, relative, held.sha256) is not None
+                if not existing:
+                    temporary = staged.enter_context(private_state.stage_record(
+                        path.parent, path.stem, record, temp_suffix=_TEMP_SUFFIX, durable=True,
+                    ))
+            finally:
+                # Teardown rechecks custody and writes the pin ledger before the install transaction.
+                original.close()
+
+            def install() -> bool:
+                if _current_intent(vault, relative, job.preview_sha256) != (job.sidecar_path, expected):
+                    return False
+                if temporary is not None:
+                    os.replace(temporary, path)
+                _sync_record(path, existing=existing)
+                return True
+
+            return store.publish_preview(job, install)
 
 
 def show(vault: Path, selected: str) -> tuple[dict, bytes | None]:

@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -622,6 +623,8 @@ def clear_dead_reservations(vault: Path) -> int:
 @contextmanager
 def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None = None):
     """Keep an original on the volume; `read` marks an owner's playback, download or viewing (D3, M4)."""
+    from .cli_ops import OpError
+
     store = MediaJobStore(vault)
     relative = store._relative(path)
     token = uuid.uuid4().hex
@@ -639,9 +642,9 @@ def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None 
     try:
         yield store, token
     finally:
-        conn = store._connect()
+        custody_error = sys.exception()
         try:
-            with conn:
+            with closing(store._connect()) as conn, conn:
                 if read:
                     conn.execute("UPDATE media_cache SET owner_read = MAX(COALESCE(owner_read, :read_at), :read_at) "
                                  "WHERE binary_rel = "
@@ -652,8 +655,19 @@ def _pin(vault: Path, path: Path, *, read: bool = False, object_key: str | None 
                                  {"token": token, "read_at": time.time()})
                 # A row that still names a temporary keeps it reserved until a clear removes the file.
                 conn.execute("DELETE FROM media_access WHERE token = ? AND temporary_name IS NULL", (token,))
-        finally:
-            conn.close()
+        except (sqlite3.Error, OpError) as cleanup_error:
+            from .lexstore import classify_sqlite_error
+
+            if not isinstance(custody_error, reserved_paths.ReservedPathLeafError):
+                raise
+            if isinstance(cleanup_error, sqlite3.Error):
+                busy = classify_sqlite_error(cleanup_error) == "transient"
+            else:
+                busy = cleanup_error.code == "MUTATION_BUSY" and cleanup_error.details.get("committed") is False
+            if not busy:
+                raise
+            # The retained pin still protects the source. A later worker can clear it after this process stops.
+            log.warning("pin cleanup deferred after a custody refusal")
 
 
 def _bind_pin(store: MediaJobStore, token: str, snapshot: OriginalSnapshot,
@@ -2318,7 +2332,7 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
             yield source
         return
     from . import original_pool
-    from .vault import FrontmatterError
+    from .vault import MALFORMED_FRONTMATTER_ERRORS
 
     assert snapshot.binary_sha256 is not None and snapshot.binary_size is not None
     bound = originals.BinaryBinding(relative, snapshot.binary_sha256, snapshot.binary_size)
@@ -2328,7 +2342,7 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
         # extraction text that a pinned job writes, may change while the bytes are held.
         try:
             current = originals.bound_companion(vault, relative)
-        except (UnicodeError, FrontmatterError) as error:
+        except MALFORMED_FRONTMATTER_ERRORS as error:
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED") from error
         if (current is None or vault / current[0] != snapshot.sidecar_path
                 or originals.binary_binding(current[1]) != bound):

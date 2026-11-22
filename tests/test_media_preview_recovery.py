@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import errno
 import hashlib
 import io
@@ -10,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,7 +40,7 @@ from exomem import (
 )
 from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
-from exomem.vault import parse_frontmatter
+from exomem.vault import parse_frontmatter, render_frontmatter_document, serialize_frontmatter
 from exomem.vault_store import importer, read
 from exomem.vault_store import media as store_media
 from exomem.writer_lease import get_manager
@@ -253,7 +254,8 @@ def test_discovery_queues_a_first_companion_after_the_watcher_event_was_missed(v
         assert "A caption from the original filing." in body
 
 
-def test_restart_acknowledges_a_ready_record_on_the_final_attempt(vault):
+@pytest.mark.parametrize("ready", [False, True])
+def test_restart_acknowledges_only_a_ready_record_on_the_final_attempt(vault, monkeypatch, ready):
     original = _photo(910, 630)
     with library_scope():
         saved = preserve.preserve_stream(
@@ -268,19 +270,81 @@ def test_restart_acknowledges_a_ready_record_on_the_final_attempt(vault):
 
     claim = ledger.claim_next()
     assert claim is not None and claim.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
-    assert media_previews.generate(vault, claim, ledger, deadline=None)
-    # Stop after the private record is installed, before the worker's ledger acknowledgement.
+    if ready:
+        assert media_previews.generate(vault, claim, ledger, deadline=None)
+    else:
+        class WorkerStopped(BaseException):
+            pass
+
+        open_original = media_store.open_original
+
+        @contextmanager
+        def interrupted_on_close(*args, **kwargs):
+            with open_original(*args, **kwargs) as source:
+                yield source
+                raise WorkerStopped
+
+        monkeypatch.setattr(media_store, "open_original", interrupted_on_close)
+        with pytest.raises(WorkerStopped):
+            media_previews.generate(vault, claim, ledger, deadline=None)
+    # Recover before the worker acknowledged the outcome, with or without a ready record.
     assert ledger.recover_interrupted() == 1
     acknowledgement = ledger.claim_next()
     assert acknowledgement is not None and acknowledgement.id == claim.id
     assert acknowledgement.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
     media_worker.MediaWorker(vault, execution_mode="process")._process(acknowledgement)
     settled = ledger.get(claim.id)
-    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
-    assert media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None
+    assert settled is not None and settled.state == media_jobs.COMPLETED
+    assert (settled.last_error is None) == ready
+    assert (media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None) == ready
 
 
-@pytest.mark.parametrize("replacement_during", ["lookup", "existing_record", "lookup_fault", "after_install", "companion"])
+def test_preview_publication_requires_the_resident_binding_after_source_close(vault, monkeypatch):
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-resident-rebound-fixture.jpg",
+            stream=io.BytesIO(_photo(915, 633)),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    claim = ledger.claim_next()
+    assert claim is not None
+    prior_jpeg = _photo(300, 200)
+    prior_digest = hashlib.sha256(prior_jpeg).hexdigest()
+    record = media_previews._record_path(private_state.store(vault, media_previews.STORE), saved.path)
+    record.parent.mkdir()
+    private_state.write_record(
+        record.parent, record.stem,
+        {"version": 1, "path": saved.path, "sha256": prior_digest, "jpeg": base64.b64encode(prior_jpeg).decode("ascii")},
+        temp_suffix=".tmp",
+    )
+    open_original = media_store.open_original
+    replacement_digest = hashlib.sha256(b"new original").hexdigest()
+
+    @contextmanager
+    def rebind_on_close(*args, **kwargs):
+        with open_original(*args, **kwargs) as source:
+            yield source
+            fields, body, marker = parse_frontmatter(claim.sidecar_path.read_text(encoding="utf-8"))
+            assert marker is not None
+            fields["binary_sha256"] = replacement_digest
+            fields["governance_companion"]["artifact_sha256"] = replacement_digest
+            rebound = render_frontmatter_document(serialize_frontmatter(fields), body)
+            claim.sidecar_path.write_text(rebound, encoding="utf-8")
+
+    monkeypatch.setattr(media_store, "open_original", rebind_on_close)
+    media_worker.MediaWorker(vault, execution_mode="process")._process(claim)
+
+    assert originals.original_state(vault, saved.path).binary_sha256 == replacement_digest
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is not None
+    assert media_previews.read(vault, saved.path, prior_digest) == prior_jpeg
+    assert media_previews.read(vault, saved.path, claim.preview_sha256) is None
+
+
+@pytest.mark.parametrize("replacement_during", [
+    "lookup", "existing_record", "lookup_fault", "staging", "companion", "malformed_scalar",
+    "busy_pin_cleanup", "busy_pin_boundary",
+])
 def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkeypatch, replacement_during):
     from test_shared_originals import _pooled_capture
 
@@ -309,18 +373,54 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
                 assert claim is not None and claim.id == prior.id
 
     replacement = _photo(634, 914)
-    if replacement_during in {"after_install", "companion"}:
-        publish_preview = media_jobs.MediaJobStore.publish_preview
+    if replacement_during in {"busy_pin_cleanup", "busy_pin_boundary"}:
+        while claim.attempts < media_jobs.MAX_PREVIEW_ATTEMPTS:
+            assert ledger.recover_interrupted() == 1
+            claim = ledger.claim_next()
+            assert claim is not None
+        local_original = media_store._open_local_original
+        connect = media_jobs.MediaJobStore._connect
+        closing_pin = False
 
-        def replace_after_install(*args):
-            assert publish_preview(*args)
-            if replacement_during == "companion":
-                claim.sidecar_path.write_bytes(b"\xff")
-            else:
+        @contextmanager
+        def replace_before_pin_cleanup(*args, **kwargs):
+            nonlocal closing_pin
+            with local_original(*args, **kwargs) as source:
+                yield source
                 binary.write_bytes(replacement)
-            return True
+                closing_pin = True
 
-        monkeypatch.setattr(media_jobs.MediaJobStore, "publish_preview", replace_after_install)
+        def busy_pin_cleanup(*args, **kwargs):
+            nonlocal closing_pin
+            if closing_pin:
+                closing_pin = False
+                if replacement_during == "busy_pin_boundary":
+                    raise OpError("MUTATION_BUSY", "The mutation boundary is busy.", "Retry the operation.",
+                                  details={"status": "retryable", "committed": False})
+                # The retained pin encounters a real writer, with no wait so the test can release it.
+                with closing(sqlite3.connect(ledger.path, timeout=0)) as holder, holder:
+                    holder.execute("BEGIN IMMEDIATE")
+                    with closing(sqlite3.connect(ledger.path, timeout=0)) as contender, contender:
+                        contender.execute("BEGIN IMMEDIATE")
+            return connect(*args, **kwargs)
+
+        monkeypatch.setattr(media_store, "_open_local_original", replace_before_pin_cleanup)
+        monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", busy_pin_cleanup)
+    elif replacement_during in {"staging", "companion", "malformed_scalar"}:
+        stage_record = private_state.stage_record
+
+        @contextmanager
+        def replace_after_staging(*args, **kwargs):
+            with stage_record(*args, **kwargs) as provisional:
+                if replacement_during == "companion":
+                    claim.sidecar_path.write_bytes(b"\xff")
+                elif replacement_during == "malformed_scalar":
+                    claim.sidecar_path.write_text("---\ninvalid: !!bool unexpected\n---\n")
+                else:
+                    binary.write_bytes(replacement)
+                yield provisional
+
+        monkeypatch.setattr(private_state, "stage_record", replace_after_staging)
     else:
         read_for_publication = media_previews._read_for_publication
 
@@ -338,10 +438,13 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
 
     if replacement_during == "companion":
         assert claim.sidecar_path.read_bytes() == b"\xff"
+    elif replacement_during == "malformed_scalar":
+        assert claim.sidecar_path.read_text() == "---\ninvalid: !!bool unexpected\n---\n"
     else:
         assert binary.read_bytes() == replacement
     settled = ledger.get(claim.id)
-    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is not None
+    assert settled is not None and settled.state == media_jobs.COMPLETED
+    assert settled.last_error == "preview original unavailable"
     if existing is None:
         assert not list(media_previews.store_path(vault).glob("*/*.json"))
     else:
@@ -578,7 +681,7 @@ def test_generation_preserves_an_installed_preview_during_a_read_fault(vault, mo
         return inspect_original(root, path, *args, **kwargs)
 
     monkeypatch.setattr(media_previews, "_decode", unnecessary_codec)
-    monkeypatch.setattr(private_state, "write_record", unnecessary_replacement)
+    monkeypatch.setattr(private_state, "stage_record", unnecessary_replacement)
     with monkeypatch.context() as blocked:
         blocked.setattr(manager, "consistency_guard", guard)
         blocked.setattr(media_previews, "_load", load)

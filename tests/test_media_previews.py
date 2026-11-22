@@ -212,7 +212,7 @@ def test_a_raw_preview_denial_keeps_the_original_evicted(
     assert originals.evicted(vault, captured.path)
 
 
-@pytest.mark.parametrize("drift", ["access", "binding", "after_pixel_check"])
+@pytest.mark.parametrize("drift", ["access", "binding", "binding_teardown", "after_pixel_check"])
 def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch, drift):
     from test_access_read_paths import _write_cfg
 
@@ -226,6 +226,14 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
     reconciled = media_processing.reconcile_media(vault, path)
     assert _drain(vault) == ["complete", "complete"]
     read = media_previews.read
+
+    def rebind_companion():
+        sidecar = reconciled.sidecar_path
+        content = sidecar.read_text(encoding="utf-8")
+        digest = hashlib.sha256(original).hexdigest()
+        assert digest in content
+        sidecar.write_text(content.replace(digest, "0" * 64), encoding="utf-8")
+
     if drift == "after_pixel_check":
         from exomem import access
 
@@ -238,6 +246,16 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
             return answer
 
         monkeypatch.setattr(access, "refuse_if_excluded", change_after_check)
+    elif drift == "binding_teardown":
+        require_current = artifact_recovery.require_current
+
+        def rebind_after_release(*args, **kwargs):
+            result = require_current(*args, **kwargs)
+            if kwargs.get("selected") == path:
+                rebind_companion()
+            return result
+
+        monkeypatch.setattr(artifact_recovery, "require_current", rebind_after_release)
     reading_preview = False
 
     def drift_during_lookup(*args):
@@ -248,11 +266,7 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
         if drift == "access":
             _write_cfg(vault, 'excluded:\n  - "Evidence"\n')
         elif drift == "binding":
-            sidecar = reconciled.sidecar_path
-            content = sidecar.read_text(encoding="utf-8")
-            digest = hashlib.sha256(original).hexdigest()
-            assert digest in content
-            sidecar.write_text(content.replace(digest, "0" * 64), encoding="utf-8")
+            rebind_companion()
         return jpeg
 
     monkeypatch.setattr(media_previews, "read", drift_during_lookup)
