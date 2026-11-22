@@ -1267,3 +1267,33 @@ def test_a_leaf_batch_that_could_not_remove_its_witness_is_not_recorded_as_commi
     store = curation.CurationStore(vault)
     assert store.reconstruct(proposed["run_id"])["phase"] != "completed"
     assert [receipt["outcome"] for receipt in store._receipt_records(proposed["run_id"])] == []
+
+
+def test_a_leaf_that_commits_after_another_call_refused_its_step_leaves_the_step_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another process can refuse the step for good while this call's leaf is not yet at its
+    commit, for a blocker on a later binding. The leaf still commits: the run then stopped on that
+    refusal for every resume, and its undo left the committed step out."""
+    rel = "Knowledge Base/Notes/Insights/refused-elsewhere-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c5")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+
+    def another_process_refuses_the_step_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        return real_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_process_refuses_the_step_first)
+
+    applied = _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert applied["phase"] == "completed"
+    assert "Reworded." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    # The undo derives the steps to reverse from these receipts.
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "committed"]

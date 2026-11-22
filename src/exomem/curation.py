@@ -407,12 +407,18 @@ def _error(code: str, reason: str) -> CurationError:
 _RUN_BUSY_RETRY_AFTER_MS: Final[int] = 1000
 
 
+@dataclass
 class CurationRunBusy(CurationError):
-    """Another call is executing the same run, or settled this call's step first.
+    """Another call is executing the same run, or recorded this call's step as committed first.
 
-    Before the leaf this call wrote nothing. At the settle its leaf may have committed: the
-    receipt that the other call recorded accounts for the step.
+    Refused at the run claim, this call wrote nothing. Refused at the settle, the receipt that the
+    other call recorded accounts for the step, and this call's own leaf may have committed.
     """
+
+    #: Whether this call's leaf committed: true when this call saw its batch commit the witness,
+    #: null when it cannot tell. Not named `committed`: the dispatcher would store the refusal as
+    #: the call's terminal, and a retry with the same key would replay it instead of continuing.
+    leaf_committed: bool | None = False
 
     def as_public_dict(self) -> dict[str, Any]:
         return {
@@ -422,7 +428,7 @@ class CurationRunBusy(CurationError):
             "ok": False,
             "error_code": self.code,
             "status": "retryable",
-            "committed": False,
+            "committed": self.leaf_committed,
             "retry_after_ms": _RUN_BUSY_RETRY_AFTER_MS,
         }
 
@@ -4931,6 +4937,8 @@ def _execute_step(
         parent_compensation_plan_id=plan_identity if compensation else None,
     )
     settle_refusal: BaseException | None = None
+    # The leaf's witness context binds it; it stays None for a store step and before the leaf.
+    pending = None
 
     def settle() -> None:
         # A scoped leaf ran outside curation's hold; what settles it runs under one short hold.
@@ -4940,11 +4948,20 @@ def _execute_step(
             return
         try:
             seam.enter_context(_step_boundary(root, "curation_step_settle"))
-            # The run claim is per process. A receipt that another process recorded while this leaf
-            # ran means it settled the step: its own witness kept this leaf's batch out, or it
-            # recovered this leaf's witness.
-            if store._receipt_records(run_identity) != reconstructed.get("receipts"):
-                raise CurationRunBusy("CURATION_RUN_BUSY", "another call settled this step first")
+            # The run claim is per process, so another process can record this step while its leaf
+            # runs. A committed receipt settles it: that process's witness kept this leaf's batch
+            # out, or it recovered this leaf's witness. A refusal does not: it can predate this
+            # leaf's commit, so this call settles its own step after it.
+            if any(
+                receipt.get("step_id") == step["step_id"]
+                and receipt.get("outcome") in COMMITTED_OUTCOMES
+                for receipt in store._receipt_records(run_identity)
+            ):
+                raise CurationRunBusy(
+                    "CURATION_RUN_BUSY",
+                    "another call settled this step first",
+                    leaf_committed=True if pending is not None and pending.consumed else None,
+                )
         except BaseException as refusal:
             settle_refusal = refusal
             raise

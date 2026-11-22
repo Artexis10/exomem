@@ -16,6 +16,7 @@
 - [x] 2.6 A move with a `fields` patch refuses with `SOURCE_CHANGED` when another writer changed the source after the seal, and that writer's change survives.
 - [x] 2.7 A save to a step's page between its leaf commit and its settle hold leaves the step committed, and the undo proposal reports it as stale.
 - [x] 2.8 A witness that a failed batch's rollback could not remove is not taken as a commit: the run blocks as uncertain and holds no receipt.
+- [x] 2.9 Another process refuses a step while its leaf is in flight, and the leaf then commits. The step gets its committed receipt after the refusal, and the run completes.
 
 ## 3. Closure
 
@@ -26,3 +27,4 @@
 
 - The compensation seal compares receipts only. A forward step in another process, between its leaf commit and its settle hold, can then be left out of the undo. Under the seal hold, refuse with a retryable code while the forward evidence directory holds a witness with no receipt.
 - A store-mode move commits through `mutate_in_store`, which never calls the before-rename stage, so it does not recheck the source's sealed hash. Review reports that such a run already ends `CURATION_OUTCOME_UNCERTAIN` before this change. Pass the sealed hash as an explicit source expectation, as `_adopt_rename` does with `source_hash=binding["before_hash"]`.
+- Planning and Preservation steps recover a found witness with `live=False`. A witness that a failed batch's rollback could not remove can then be recovered as committed without a live check. This predates this change. Give that recovery a proof that the batch committed, as the live check gives the other kinds.

@@ -38,7 +38,9 @@ When the settle hold is refused, nothing more is written. A leaf that committed 
 
 Two calls on one run would otherwise both pass the probes and both run the leaf. `_run_claim` admits one thread per run in a process and never waits, so a caller that holds the boundary cannot deadlock on it. A refused caller gets `CURATION_RUN_BUSY`, retryable, with nothing written. The claim covers `apply`, `resume`, `apply-compensation`, the compensation proposal and an episode leaf's invocation. The compensation proposal takes it because a forward step between its leaf commit and its receipt would otherwise be missing from the undo. An episode leaf takes it before it marks its attempt, so a busy run marks no attempt and the episode reconciles from the receipt later.
 
-The claim is per process. Writers in two processes that share a vault serialise at the boundary. The settle hold therefore checks that the run's receipts are unchanged since the step's probe. When another process recorded one, it has settled the step: either its create-only witness kept this leaf's batch out, or it recovered this leaf's witness. The call reports `CURATION_RUN_BUSY`, and that receipt accounts for the step.
+The claim is per process. Writers in two processes that share a vault serialise at the boundary. The settle hold therefore checks whether another process recorded this step as committed since the step's probe. Such a receipt settles the step: either its create-only witness kept this leaf's batch out, or it recovered this leaf's witness. The call then reports `CURATION_RUN_BUSY`, and that receipt accounts for the step. Its `committed` field is true when the call saw its own leaf's batch commit, and null when the call cannot tell.
+
+A refusal that another process recorded does not settle the step. That process can refuse the step for a blocker on a later binding while this leaf is still before its commit. The call then settles its own step: a committed leaf gets its receipt after the refusal, and the run continues from it. A leaf that failed records its own failed attempt.
 
 ### D5. The dispatcher asks curation
 
