@@ -8,3 +8,4 @@
 
 - [x] 2.1 Tests: a compiled custody Source gives no finding; an uncompiled one gives one; a hidden derivative reports missing with nothing disclosed; a predecessor reached through `supersedes` counts; unmarked pages are never admitted or parsed; a mixed selection still parses the corpus; a budget that expires in the lookup reports `unknown`.
 - [x] 2.2 Equivalence and timing on a large vault snapshot: the custody-only findings equal those of the full-corpus check, coverage is complete, and the elapsed time under a 50 s allowance is recorded.
+- [ ] 2.3 After release, run one custody-only audit on the served personal vault through the live service and record complete coverage; then archive this change.
