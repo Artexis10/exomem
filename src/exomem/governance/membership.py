@@ -54,7 +54,7 @@ class MembershipUnresolved(Exception):
 
 @dataclass(frozen=True)
 class MembershipOutcome:
-    """Non-Markdown membership that is either proven or safely unresolved."""
+    """Non-Markdown membership with the proven scopes retained on an unresolved read."""
 
     state: Literal["classified", "unresolved"]
     scope_ids: frozenset[str]
@@ -426,10 +426,8 @@ def evaluate_path_only(
 
     dependency = None
     inherited = frozenset()
-    if not resolve_bytes:
-        if document_containers.in_payload_tree(rel_path):
-            return MembershipOutcome("unresolved", frozenset(), "metadata_required")
-    else:
+    missing_metadata = not resolve_bytes and document_containers.in_payload_tree(rel_path)
+    if resolve_bytes:
         try:
             dependency = document_containers.parent_for_path(vault_root, rel_path, artifact_copy=artifact_copy)
             inherited = frozenset() if dependency is None else _current_parent_scopes(
@@ -474,7 +472,8 @@ def evaluate_path_only(
                 )
             )
             if not positive or semantic_exclusion:
-                return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
+                missing_metadata = True
+                continue
             matched.add(scope_id)
             continue
         if _path_ref_matches(scope, rel_path):
@@ -482,6 +481,8 @@ def evaluate_path_only(
             continue
         if _needs_frontmatter(scope):
             undecided.append((scope_id, scope))
+    if missing_metadata:
+        return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
     if undecided:
         if assigned is not None and proposed_companion is None:
             try:

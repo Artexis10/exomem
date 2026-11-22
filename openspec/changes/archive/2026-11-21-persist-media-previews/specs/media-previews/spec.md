@@ -56,6 +56,12 @@ When the install enables previews, the existing media worker SHALL queue a previ
 - **AND** the matching record is installed and ready
 - **THEN** recovery acknowledges publication and preserves the successful outcome
 
+#### Scenario: Storage cannot confirm the installed record
+
+- **WHEN** publication acknowledgement cannot read or flush the matching record
+- **THEN** the worker delays acknowledgement and gives ordinary media jobs priority
+- **AND** acknowledgement retries without opening or decoding the original
+
 #### Scenario: Processing is replayed
 
 - **WHEN** processing runs again with the same original digest and preview format
@@ -75,8 +81,9 @@ An unmarked historical filing and a marked digest with a terminal failure SHALL 
 
 #### Scenario: Discovery first files a new original
 
-- **WHEN** startup or periodic discovery writes the first companion of an eligible image or video
+- **WHEN** startup or periodic discovery writes the first exact companion binding of an eligible image or video
 - **THEN** that write records preview demand for the digest of the original
+- **AND** the same rule applies when the companion already contains unbound prose
 
 #### Scenario: A restore omits the preview record
 
@@ -102,6 +109,7 @@ Where `read_media` is offered, its preview action SHALL accept the canonical ori
 
 - **WHEN** an applicable path-only organization cap limits a verified session below full release
 - **THEN** the preview request refuses before hydrating the original
+- **AND** another unresolved scope does not defer that known denial
 
 #### Scenario: The filing now names another original
 
@@ -122,3 +130,9 @@ Media removal cleanup SHALL retire the associated preview record. A preview that
 
 - **WHEN** cleanup confirms a directory occupies the original file's exact path
 - **THEN** cleanup retires the obsolete record under the publication guard
+
+#### Scenario: A deletion removes several original filings
+
+- **WHEN** removal fans out to several preview records
+- **THEN** cleanup reads their canonical companions in batches of at most 64 records
+- **AND** cleanup rechecks the current filing under the publication guard before deleting each obsolete record

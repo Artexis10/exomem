@@ -66,21 +66,28 @@ def _load(path: Path) -> dict | None:
     return None
 
 
+def _read_record(path: Path, relative: str, digest: str) -> bytes | None:
+    record = _load(path)
+    if record is None or record.get("version") != _FORMAT:
+        return None
+    if record.get("path") != relative or record.get("sha256") != digest:
+        return None
+    try:
+        jpeg = base64.b64decode(record.get("jpeg"), validate=True)
+    except (ValueError, TypeError):
+        return None
+    # SOI and EOI are fixed JPEG markers. Reading a preview never opens a codec.
+    if jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"):
+        return jpeg
+    return None
+
+
 def read(vault: Path, relative: str, digest: str) -> bytes | None:
     """Look up exactly one private record for a caller that has proved this original."""
     try:
-        record = _load(_record_path(store_path(vault), relative))
-        if record is None or record.get("version") != _FORMAT:
-            return None
-        if record.get("path") != relative or record.get("sha256") != digest:
-            return None
-        jpeg = base64.b64decode(record.get("jpeg"), validate=True)
-        # SOI and EOI are fixed JPEG markers. Reading a preview never opens a codec.
-        if jpeg.startswith(b"\xff\xd8") and jpeg.endswith(b"\xff\xd9"):
-            return jpeg
-    except (OSError, ValueError, TypeError):
-        pass
-    return None
+        return _read_record(_record_path(store_path(vault), relative), relative, digest)
+    except OSError:
+        return None
 
 
 def stamp_intent(
@@ -93,16 +100,15 @@ def stamp_intent(
         return content
     prior = vault.parse_frontmatter(previous)[0] if previous is not None else {}
     old_binding = originals.binary_binding(prior)
-    changed = previous is None or (old_binding is not None and (old_binding.path, old_binding.sha256) != (relative, digest))
     carried = requested_digest(prior, relative) == digest
-    if not carried and not (changed and media_engines.preview_generation_enabled()):
+    if not carried and not media_engines.preview_generation_enabled():
         return content
 
     fields = vault.parse_frontmatter(content)[0]
     binding = originals.binary_binding(fields)
     if fields.get("parent_media") or binding is None or (binding.path, binding.sha256) != (relative, digest):
         return content
-    if fields.get(_INTENT_DIGEST) != digest:
+    if (carried or old_binding != binding) and fields.get(_INTENT_DIGEST) != digest:
         return preserve._set_frontmatter_field(content, _INTENT_DIGEST, f'"{digest}"')
     return content
 
@@ -256,18 +262,16 @@ def confirm_install(vault: Path, job: MediaJob) -> bool:
     from .writer_lease import get_manager
 
     relative = job.binary_path.relative_to(vault).as_posix()
-    if job.preview_sha256 is None or read(vault, relative, job.preview_sha256) is None:
+    digest = job.preview_sha256
+    path = _record_path(store_path(vault), relative)
+    if digest is None or _read_record(path, relative, digest) is None:
         return False
     manager = get_manager()
     manager.yield_to_waiting_writes(vault)
     with manager.consistency_guard(vault, operation="media_preview_acknowledge", holder_kind="background"):
-        if read(vault, relative, job.preview_sha256) is None:
+        if _read_record(path, relative, digest) is None:
             return False
-        try:
-            _sync_record(_record_path(store_path(vault), relative), existing=True)
-        except OSError as error:
-            log.warning("preview acknowledgement unavailable (%s)", type(error).__name__)
-            return False
+        _sync_record(path, existing=True)
     return True
 
 
@@ -428,12 +432,16 @@ def _retire(vault: Path, root: Path, paths: Sequence[Path]) -> None:
                 log.warning("preview cleanup deferred (%s)", type(error).__name__)
 
 
-def retire(vault: Path, relative: str) -> None:
-    """Retire the old preview after removal, unless its filing still holds the recorded original."""
+def retire(vault: Path, relatives: Iterable[str]) -> None:
+    """Retire previews after removal in guarded batches, retaining current filings."""
     root = store_path(vault)
-    path = _record_path(root, relative)
-    if path.exists():
-        _retire(vault, root, (path,))
+    records = (_record_path(root, relative) for relative in relatives if supports(relative))
+    present = (path for path in records if os.path.lexists(path))
+    while paths := list(islice(present, _SWEEP_LIMIT)):
+        try:
+            _retire(vault, root, paths)
+        except Exception as error:  # noqa: BLE001 - periodic cleanup can retry a deferred batch
+            log.warning("preview cleanup deferred (%s)", type(error).__name__)
 
 
 def _scan(root: Path) -> Generator[Path, None, None]:

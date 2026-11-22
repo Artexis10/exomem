@@ -338,6 +338,7 @@ def test_busy_preview_retries_by_itself_after_extraction(vault, served, monkeypa
 def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selected_store, monkeypatch):
     from test_governance_egress import (
         _external,
+        _gov_dir,
         _reset_governance_caches,
         _verified_external_session,
         write_broken_policy,
@@ -384,6 +385,14 @@ def test_eviction_preserves_the_preview_for_a_proved_read(vault, served, selecte
     write_rule(vault, ceiling=5, extra="kind: org_cap\n")
     _reset_governance_caches()
     session, _ = _verified_external_session()
+    with request_scope(session), pytest.raises(artifact_recovery.RecoveryUnavailable):
+        commands.op_read_media(vault, media="preview", path=path)
+    assert originals.evicted(vault, path)
+
+    (_gov_dir(vault) / "scopes" / "00-semantic.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FC2\ntypes: ["source"]\n', encoding="utf-8",
+    )
+    _reset_governance_caches()
     with request_scope(session), pytest.raises(artifact_recovery.RecoveryUnavailable):
         commands.op_read_media(vault, media="preview", path=path)
     assert originals.evicted(vault, path)

@@ -10,6 +10,7 @@
 - [x] 1.6 Prove Source capture and first-time filing through startup and periodic discovery.
 - [x] 1.7 Prove bounded cleanup reads, confirmed directory replacement and revalidation before deletion.
 - [x] 1.8 Prove interrupted final-attempt acknowledgement and delayed return after hydration contention.
+- [x] 1.9 Prove first bindings in prose companions, delayed acknowledgement after storage faults, and batched immediate removal.
 
 ## 2. Preview read
 

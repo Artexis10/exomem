@@ -57,7 +57,7 @@ On personal installs, include `previews` in `EXOMEM_MEDIA_ENGINES` with the othe
 Preview generation is off by default. The existing worker claims due preview jobs after ordinary media work.
 Previews can run with the text and CLIP engines off. `EXOMEM_DISABLE_MEDIA_EXTRACTION` disables the whole worker, including preview generation.
 Enabling previews adds no backfill for existing companions. Source and Evidence capture record preview demand for the exact original digest.
-Startup and periodic discovery record demand if they first file an original or rebind its companion.
+Startup and periodic discovery record demand when they first bind an original or change its binding. A first binding can use an existing prose companion.
 If queue admission fails, media reconciliation can recover that demand while retaining the filing.
 After a restore omits preview records, reconciliation can rebuild previously successful previews for current marked versions.
 The codec child needs POSIX resource limits. Its wall time is at most 15 seconds within the remaining job budget.
@@ -65,7 +65,8 @@ Preview generation is unavailable in the inline debug worker. Stored previews re
 The preview engine uses the existing memory brakes. The video decoder caps input frames at 16 million pixels.
 The worker yields to foreground writers before publishing. It retries a busy publication at most twice after the first attempt.
 A temporary hydration refusal delays the job without spending an attempt.
-If the worker stops after installing the final attempt, recovery acknowledges the matching record.
+If the worker stops at the attempt limit, it queues a check of the installed record. Ordinary media jobs run first.
+A read or flush refusal delays the check. The check opens only the private record.
 The worker retains the outcome for that digest so reconciliation does not replay an exhausted preview.
 A retry leaves extraction results intact.
 The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.

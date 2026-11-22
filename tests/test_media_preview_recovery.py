@@ -29,6 +29,7 @@ from exomem import (
     media_worker,
     originals,
     preserve,
+    private_state,
     schema,
     server_runtime,
     state_paths,
@@ -37,6 +38,7 @@ from exomem.cli_ops import OpError
 from exomem.governance.principal import library_scope
 from exomem.vault import parse_frontmatter
 from exomem.vault_store import importer, read
+from exomem.vault_store import media as store_media
 from exomem.writer_lease import get_manager
 
 coordinator_url = store_suite.coordinator_url
@@ -218,14 +220,16 @@ def test_source_capture_commits_preview_demand_before_queueing(vault, tmp_path, 
     assert claimed is not None and claimed.binary_path == vault / relative and claimed.preview_sha256 == digest
 
 
-@pytest.mark.parametrize("sweep", ["startup", "periodic"])
-def test_discovery_queues_a_first_companion_after_the_watcher_event_was_missed(vault, monkeypatch, sweep):
+@pytest.mark.parametrize(("sweep", "prose"), [("startup", False), ("periodic", False), ("periodic", True)])
+def test_discovery_queues_a_first_companion_after_the_watcher_event_was_missed(vault, monkeypatch, sweep, prose):
     watcher = file_watcher.FileWatcher(vault)
     if sweep == "periodic":
         watcher._reconcile_once(seed=True)
     original = _photo(950, 650)
     binary = vault / NOTES / "preview-first-companion-fixture.jpg"
     binary.write_bytes(original)
+    if prose:
+        binary.with_suffix(".jpg.md").write_text("A caption from the original filing.\n", encoding="utf-8")
     assert originals.bound_companion(vault, binary.relative_to(vault).as_posix()) is None
 
     if sweep == "startup":
@@ -240,8 +244,10 @@ def test_discovery_queues_a_first_companion_after_the_watcher_event_was_missed(v
     assert claimed is not None and claimed.binary_path == binary
     digest = hashlib.sha256(original).hexdigest()
     assert claimed.preview_sha256 == digest
-    fields = parse_frontmatter(claimed.sidecar_path.read_text(encoding="utf-8"))[0]
+    fields, body, _ = parse_frontmatter(claimed.sidecar_path.read_text(encoding="utf-8"))
     assert media_previews.requested_digest(fields, binary.relative_to(vault).as_posix()) == digest
+    if prose:
+        assert "A caption from the original filing." in body
 
 
 def test_restart_acknowledges_a_ready_record_on_the_final_attempt(vault):
@@ -262,6 +268,10 @@ def test_restart_acknowledges_a_ready_record_on_the_final_attempt(vault):
     assert media_previews.generate(vault, claim, ledger, deadline=None)
     # Stop after the private record is installed, before the worker's ledger acknowledgement.
     assert ledger.recover_interrupted() == 1
+    acknowledgement = ledger.claim_next()
+    assert acknowledgement is not None and acknowledgement.id == claim.id
+    assert acknowledgement.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    media_worker.MediaWorker(vault, execution_mode="process")._process(acknowledgement)
     settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
     assert media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None
@@ -297,7 +307,8 @@ def test_retryable_hydration_contention_keeps_preview_pending(vault, monkeypatch
     assert media_previews.read(vault, saved.path, hashlib.sha256(original).hexdigest()) is not None
 
 
-def test_cleanup_batches_store_companions_and_preserves_uncertain_or_replaced_paths(stored, store_thread, monkeypatch):
+@pytest.mark.parametrize("cleanup", ["sweep", "removal"])
+def test_cleanup_batches_store_companions_and_preserves_uncertain_or_replaced_paths(stored, store_thread, monkeypatch, cleanup):
     samples = {
         f"{NOTES}/preview-healthy-cleanup-fixture.jpg": _photo(900, 600),
         f"{NOTES}/preview-directory-cleanup-fixture.jpg": _photo(901, 600),
@@ -350,11 +361,86 @@ def test_cleanup_batches_store_companions_and_preserves_uncertain_or_replaced_pa
     monkeypatch.setattr(read.StoreSnapshot, "bodies", bodies)
     monkeypatch.setattr(read, "owned_page", owned_page)
     monkeypatch.setattr(manager, "consistency_guard", guard)
-    media_previews.reconcile(stored)
-    assert [batch & expected_companions for batch in batches] == [
-        expected_companions,
-        {f"{directory}.md", f"{restored}.md"},
-    ]
+    if cleanup == "sweep":
+        media_previews.reconcile(stored)
+    else:
+        store_media.after_removal(stored, samples)
+    expected = [expected_companions]
+    if cleanup == "sweep":
+        expected.append({f"{directory}.md", f"{restored}.md"})
+    assert [batch & expected_companions for batch in batches] == expected
     assert media_previews.read(stored, directory, hashlib.sha256(samples[directory]).hexdigest()) is None
     for relative in (healthy, restored):
         assert media_previews.read(stored, relative, hashlib.sha256(samples[relative]).hexdigest()) is not None
+
+
+@pytest.mark.parametrize("fault", ["read", "flush"])
+def test_uncertain_final_acknowledgement_retries_without_new_codec_work(vault, monkeypatch, fault):
+    original = _photo(911, 631)
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-ack-retry-fixture.jpg",
+            stream=io.BytesIO(original),
+        )
+    ledger = media_jobs.MediaJobStore(vault, create=False)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    for _ in range(media_jobs.MAX_PREVIEW_ATTEMPTS - 1):
+        assert ledger.claim_next() is not None
+        assert ledger.recover_interrupted() == 1
+    claim = ledger.claim_next()
+    assert claim is not None and claim.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    assert media_previews.generate(vault, claim, ledger, deadline=None)
+    now = time.time()
+    monkeypatch.setattr(media_jobs, "time", SimpleNamespace(time=lambda: now))
+
+    failures = []
+
+    def unavailable(*_args, **_kwargs):
+        failures.append(fault)
+        raise OSError("temporary preview storage fault")
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("receipt recovery must not open, hydrate or decode the original")
+
+    monkeypatch.setattr(media_store, "open_original", unexpected_open)
+    with monkeypatch.context() as blocked:
+        if fault == "read":
+            blocked.setattr(media_previews, "_load", unavailable)
+        else:
+            blocked.setattr(private_state, "sync_directory", unavailable)
+        assert ledger.recover_interrupted() == 1
+        waiting = ledger.get(claim.id)
+        assert waiting is not None and waiting.state == media_jobs.PENDING
+
+        ordinary_id = ledger.enqueue(media_jobs.MediaJob(
+            claim.binary_path, claim.sidecar_path, "image", do_ocr=False, do_clip=True,
+        ))
+        ordinary = ledger.claim_next()
+        assert ordinary is not None and ordinary.id == ordinary_id
+        ledger.complete(ordinary)
+        assert not failures
+
+        acknowledgement = ledger.claim_next()
+        assert acknowledgement is not None and acknowledgement.id == claim.id
+        worker._process(acknowledgement)
+        assert failures == [fault]
+        waiting = ledger.get(claim.id)
+        assert waiting is not None and waiting.state == media_jobs.PENDING
+        assert waiting.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+        assert ledger.claim_next() is None
+
+    now += media_jobs.RETRY_FIRST_SECONDS
+    retry = ledger.claim_next()
+    assert retry is not None and retry.id == claim.id
+    worker._process(retry)
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED and settled.last_error is None
+    assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    digest = hashlib.sha256(original).hexdigest()
+    assert media_previews.read(vault, saved.path, digest) is not None
+
+    record, = media_previews.store_path(vault).glob("*/*.json")
+    record.unlink()
+    media_processing.reconcile_all_media(vault)
+    rebuild = ledger.get(claim.id)
+    assert rebuild is not None and rebuild.state == media_jobs.PENDING and rebuild.preview_sha256 == digest

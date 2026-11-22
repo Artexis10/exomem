@@ -8758,9 +8758,10 @@ def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) 
     if policy.empty or bound_writer(vault_root) is not None:
         return True
     try:
-        scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).require_classified()
+        # Unresolved scopes can only narrow the result. Known scopes still supply their applicable ceilings.
+        scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).scope_ids
     except membership_module.MembershipUnresolved:
-        return True
+        return False
     boundary = connector_boundary.snapshot(vault_root, policy)
     if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
         return False

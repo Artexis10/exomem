@@ -2148,13 +2148,12 @@ def drop_media_residue(vault_root: Path, removed_rel_paths: list[str]) -> None:
     """
     from . import media_previews, media_types, scene_frames
 
+    try:
+        media_previews.retire(vault_root, removed_rel_paths)
+    except Exception as error:  # noqa: BLE001 - preview cleanup is best-effort
+        log.warning("preview cleanup deferred (%s)", type(error).__name__)
     for rel in removed_rel_paths:
         media_type = media_types.media_type_for(rel)
-        if media_previews.supports(rel):
-            try:
-                media_previews.retire(vault_root, rel)
-            except Exception as error:  # noqa: BLE001 - preview cleanup is best-effort
-                log.warning("preview cleanup deferred (%s)", type(error).__name__)
         if media_type in {"audio", "video"}:
             # A removed recording must not leave its partial transcript in vault state.
             from . import onnx_asr_runtime

@@ -54,7 +54,9 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
     job_id = store.enqueue(_job(vault))
     with sqlite3.connect(store.path) as connection:
         connection.execute("DROP INDEX jobs_preview_due")
+        connection.execute("DROP INDEX jobs_preview_receipt_due")
         connection.execute("DROP INDEX jobs_ordinary_state_id")
+        connection.execute("ALTER TABLE jobs DROP COLUMN preview_finish_error")
         connection.execute("ALTER TABLE jobs DROP COLUMN preview_sha256")
         connection.execute("ALTER TABLE jobs DROP COLUMN offload_generation")
         connection.execute("ALTER TABLE jobs DROP COLUMN do_offload")
@@ -65,9 +67,11 @@ def test_old_ledger_read_stays_pure_and_the_next_write_adds_the_missing_columns(
     assert pending.id == job_id and not pending.do_offload and pending.offload_generation == 0
     with sqlite3.connect(store.path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
-        assert not {"do_offload", "offload_generation", "retry_at"} & columns
+        assert not {"do_offload", "offload_generation", "retry_at", "preview_finish_error"} & columns
     claimed = retained.claim_next()
     assert claimed.id == job_id and claimed.do_ocr and not claimed.do_offload
+    with sqlite3.connect(store.path) as connection:
+        assert "preview_finish_error" in {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
 
 
 def test_a_replaced_preview_claim_cannot_publish_or_acknowledge_its_replacement(vault, monkeypatch):
