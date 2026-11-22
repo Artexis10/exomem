@@ -211,8 +211,8 @@ dense 2000-note vault, warms the lanes, and asserts NO lane exceeds a ceiling
 (`graph < 1000ms`, `total < 5000ms`). The ceilings sit in the wide gap between the
 warm baseline (graph ~226ms, total ~805ms) and a resolver-rebuild regression (graph
 ~1.9s), so a 14s-style regression fails CI while ordinary CI-speed variance does
-not. It is model-free, so it runs in the lean matrix on every PR and is pinned in
-the `retrieval-eval` job next to the golden quality gate.
+not. It is model-free; it runs nightly and on demand in the `retrieval-latency` job of
+`.github/workflows/latency-measurements.yml`, and gates neither pull requests nor releases.
 
 Reproduce the curve:
 
