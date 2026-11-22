@@ -145,13 +145,16 @@ def _preserve_under_guard(
     *,
     stream: Any,
     **kwargs: Any,
-) -> Any:
-    """Copy an upload into a private stage, then plan and install it under vault authority.
+) -> dict:
+    """Copy an upload into a private stage, then plan and install it under vault authority; return its receipt.
 
     The bytes are copied, hashed and fsynced once, before the boundary, so a large upload never holds
     it while it moves. The commit then renames the stage into place. Only the acquire waits out
-    contention, and the commit body runs once.
+    contention, and the commit body runs once. The derived fan-out runs after the release, before the
+    receipt returns, and the receipt says whether it completed.
     """
+    from . import writer_lease
+
     preserve_module = _preserve_module()
     artifact, _protected = preserve_module.evidence_artifact(
         vault_root, scope=kwargs["scope"], category=kwargs["category"], filename=kwargs["filename"],
@@ -165,9 +168,11 @@ def _preserve_under_guard(
             pooled=preserve_module.pools_evidence_original(vault_root, artifact.name),
         ) as staged:
             with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
-                return preserve_stream(vault_root, staged=staged, **kwargs)
+                return preserve_stream(vault_root, staged=staged, defer_fanout_to_terminal=True, **kwargs)
 
-    return _restaged_once(attempt, stream)
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        result = _restaged_once(attempt, stream)
+    return {**result.as_dict(), "derived_sync": fanout.derived_sync}
 
 
 def _restaged_once(attempt: Any, stream: Any) -> Any:
@@ -185,15 +190,18 @@ def _restaged_once(attempt: Any, stream: Any) -> Any:
         return attempt()
 
 
-def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
-    """Expand an archive's members outside the guard; commit its manifest under it."""
-    from . import archive_members
+def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> tuple[dict, bool]:
+    """Expand an archive's members outside the guard; commit its manifest under it, and fan it out after."""
+    from . import archive_members, writer_lease
 
-    return archive_members.preserve_members(
-        vault_root,
-        guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
-        **kwargs,
-    )
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        receipt, stored = archive_members.preserve_members(
+            vault_root,
+            guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
+            defer_fanout_to_terminal=True,
+            **kwargs,
+        )
+    return {**receipt, "derived_sync": fanout.derived_sync}, stored
 
 
 def _capture_source_under_guard(
@@ -211,16 +219,19 @@ def _capture_source_under_guard(
     max_bytes: int,
     raw_protection: bool = False,
     diarize: bool | None = None,
-) -> Any:
-    """Capture an out-of-band upload as a Source, under vault authority.
+) -> dict:
+    """Capture an out-of-band upload as a Source, under vault authority; return its upload receipt.
 
     The bytes are copied into a private stage first, before the boundary: `add` writes the artifact
     and its page in one operation, and a half-consumed request stream cannot be replayed if that
-    operation refuses. The capture takes the boundary only to plan and install the stage.
+    operation refuses. The capture takes the boundary only to plan and install the stage. Its derived
+    fan-out runs after the release, before the receipt returns.
 
     A person may post from the upload form with no agent to ask, so a missing
     kind is recorded as `unclassified` rather than refused.
     """
+    from . import writer_lease
+
     source_type = add_module.capture_kind(vault_root, source_type, unattended=True)
 
     def attempt() -> Any:
@@ -245,9 +256,12 @@ def _capture_source_under_guard(
                         diarize=diarize,
                     ),
                     raw_protection=raw_protection,
+                    defer_fanout_to_terminal=True, custody_before_commit=True, corpus_advisories=False,
                 )
 
-    return _restaged_once(attempt, stream)
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        result = _restaged_once(attempt, stream)
+    return {**_source_upload_receipt(vault_root, result.as_dict()), "derived_sync": fanout.derived_sync}
 
 
 def _source_pools_original(add_module: Any, vault_root: Path, filename: str) -> bool:
@@ -305,7 +319,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     from .cli_ops import OpError
     from .command_surface import Command
     from .vault import BatchWriteError
-    from .writer_lease import _PostCommitOutcomeUncertain, invoke_command
+    from .writer_lease import _PostCommitOutcomeUncertain, fanout_after_release, invoke_command
 
     def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
         if _source_session_destination(root, target, size=length, sha256=sha256) != target["destination"]:
@@ -313,8 +327,10 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 "SOURCE_DESTINATION_CHANGED", "the Source destination changed; uploaded bytes remain held", retryable=True,
             )
         try:
+            # The command drains this deferred fan-out after its own boundary release, before it returns.
             result = add.add(
-                root, schema.load_source_schema(root), content="", title=target["title"],
+                root, schema.load_source_schema(root), defer_fanout_to_terminal=True, custody_before_commit=True,
+                corpus_advisories=False, content="", title=target["title"],
                 source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
                 artifact=add.SourceArtifact(
                     part, target["filename"], target.get("content_type"),
@@ -332,7 +348,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     # The session's bytes are copied into a private stage before `invoke_command` takes the boundary, so the
     # commit plans and installs without moving them. A replay that finds its result stored discards the stage.
     try:
-        with part.open("rb") as stream, upload_stage.stage(
+        with fanout_after_release(vault_root) as fanout, part.open("rb") as stream, upload_stage.stage(
             vault_root, stream, limit=int(record["length"]),
             too_large=lambda: upload_sessions.CommitFailed("SOURCE_BYTES_CHANGED", "the held Source bytes grew; upload again"),
             pooled=_source_pools_original(add, vault_root, record["target"]["filename"]),
@@ -355,7 +371,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
         )
     # Also project older cached results before they leave the transfer principal's scope.
-    return _source_upload_receipt(vault_root, result)
+    return {**_source_upload_receipt(vault_root, result), "derived_sync": fanout.derived_sync}
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -442,9 +458,10 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
                 stored = _stored_already(vault_root, record) if exc.code == "ARTIFACT_EXISTS" else None
                 if stored is None:
                     raise
-                receipt = stored
+                # This door did not run the stored page's fan-out, so it cannot say that it completed.
+                receipt = {**stored, "derived_sync": "pending"}
             else:
-                receipt = result.as_dict()
+                receipt = result
     except preserve_module.PreserveError as exc:
         raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
     return receipt
@@ -1252,18 +1269,15 @@ def register_transfer_routes(
                 _reconcile_under_guard,
                 manager,
                 vault_root,
-                vault_root / (getattr(result, "artifact_path", None) or result.path),
+                vault_root / (result.get("artifact_path") or result["path"]),
             )
         except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
             log.warning(
                 "media reconciliation failed for %s; evidence remains recoverable",
-                result.path,
+                result["path"],
                 exc_info=True,
             )
-        receipt = result.as_dict()
-        if lane == "source":
-            receipt = _source_upload_receipt(vault_root, receipt)
-        return JSONResponse(receipt, status_code=201)
+        return JSONResponse(result, status_code=201)
 
     def _credential_binding(request: Request) -> str:
         """Which credential opened a session, for its per-binding quota; never the credential."""
