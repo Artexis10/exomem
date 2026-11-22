@@ -142,8 +142,9 @@ class Card:
 class Lane:
     """What the lane found and, when it could not search everything, why.
 
-    `warming` names the lane while datasets are still being indexed; `failed` names it when
-    the sidecar could not answer. Both are visible states, never an empty result.
+    `warming` names the lane while datasets are still being indexed, or while a card or original
+    read gave nothing before the private-identity inventory existed; `failed` names it when the
+    sidecar could not answer. Both are visible states, never an empty result.
     """
 
     hits: list[Hit] = field(default_factory=list)
@@ -347,7 +348,7 @@ def _qualify(vault_root: Path, paths: Iterable[str]) -> tuple[list[Card], list[s
 
 
 def _cards_in_scope(
-    vault_root: Path, scope: str, admit_path: Callable[[str], bool] | None
+    vault_root: Path, scope: str, admit_path: Callable[[str], bool] | None, *, settled: bool
 ) -> tuple[dict[str, Card], frozenset[str], str, bool]:
     """`(cards by original path, the scope's recall paths, scope prefix, cards unread)`.
 
@@ -355,7 +356,8 @@ def _cards_in_scope(
     recall (Records and Planning descendants, access tiers) apply to the card before it is
     read, and the access tier applies to the original. The caller's content admission then
     applies to the card and to the original, so a dataset the caller may not read never
-    reaches the pool. The last value says that some projected card gave no page.
+    reaches the pool. The last value says that some projected card gave no page. `settled` says
+    whether the private-identity inventory existed before any read of this request.
     """
     from . import find as find_module
 
@@ -371,7 +373,6 @@ def _cards_in_scope(
     # remembering it as absent would hide its dataset for the life of the process. Once the
     # inventory existed before the read, no wait explains a missing page (a linked, refused or
     # unparsable card), so it is not read again until the projection key moves.
-    settled = reserved_paths.identity_catalogue_ready(vault_root)
     if known is None or known[0] != version:
         # Reading every card on every search would cost more than the lane. The projection key
         # moves whenever a card is added, changed or removed, or the access policy changes, so
@@ -829,7 +830,9 @@ def search(
     if not fts5_available():
         return Lane(failed=(LANE,))
     try:
-        cards, projected, prefix, unread = _cards_in_scope(vault_root, scope, admit_path)
+        # Read once, before any read: an inventory that finishes during the reads explains them.
+        settled = reserved_paths.identity_catalogue_ready(vault_root)
+        cards, projected, prefix, unread = _cards_in_scope(vault_root, scope, admit_path, settled=settled)
         missed = False
         if cards:
             conn = _connect(vault_root)
@@ -839,7 +842,7 @@ def search(
             finally:
                 conn.close()
         if not cards:
-            return Lane(warming=_loading(vault_root, unread))
+            return Lane(warming=_loading(settled, unread))
     except (sqlite3.Error, OSError) as error:
         log.warning("dataset value search unavailable: %s", error)
         return Lane(failed=(LANE,))
@@ -863,18 +866,18 @@ def search(
         if (hit := _hit(vault_root, cards[original], match, needles)) is not None
     ]
     # A hit drops when its original reads nothing at this point, as a build read can.
-    loading = _loading(vault_root, unread or missed or len(hits) < len(ordered))
+    loading = _loading(settled, unread or missed or len(hits) < len(ordered))
     return Lane(hits, warming=(LANE,) if unindexed else loading)
 
 
-def _loading(vault_root: Path, read_nothing: bool) -> tuple[str, ...]:
+def _loading(settled: bool, read_nothing: bool) -> tuple[str, ...]:
     """The lane as warming when a card or original read gave nothing while it may still load.
 
     Those reads wait on the private-identity inventory; until it exists, a read that gave nothing
     is still loading. Once it exists, it is a card that does not parse or an original that is not
     the recorded bytes, which no wait changes.
     """
-    return (LANE,) if read_nothing and not reserved_paths.identity_catalogue_ready(vault_root) else ()
+    return (LANE,) if read_nothing and not settled else ()
 
 
 def fuse(pages: list[Hit], values: Iterable[Hit], *, limit: int, rrf_k: int) -> list[Hit]:
