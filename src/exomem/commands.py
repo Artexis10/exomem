@@ -10858,10 +10858,9 @@ def op_review_memory(
     if mode == "queued-write":
         from . import write_intake
         from .cli_ops import OpError
-        from .governance.raw_protection import is_owner
 
-        if not is_owner(principal_module.effective_principal()):
-            # Queued saves hold the owner's unpublished arguments; only the owner's saves queue.
+        if write_intake.principal_record(principal_module.effective_principal()) is None:
+            # Queued saves hold the owner's unpublished arguments: only a caller whose saves may queue reads them.
             raise OpError(
                 "QUEUED_WRITE_OWNER_ONLY",
                 "queued saves are visible to the vault owner only",
@@ -14844,13 +14843,12 @@ def op_erase_captured_source(
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
+    from . import write_intake
     from .governance.raw_protection import is_owner
     from .writer_lease import coordination_status
 
     status = coordination_status(vault_root)
-    if is_owner(principal_module.effective_principal()):
-        from . import write_intake
-
+    if write_intake.principal_record(principal_module.effective_principal()) is not None:
         # Saves held because the boundary was busy; `unknown` when the store cannot be read.
         status = {**status, "write_intake": write_intake.status(vault_root)}
     boundary = status.get("mutation_boundary")
