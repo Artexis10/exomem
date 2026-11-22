@@ -2650,7 +2650,7 @@ def _format_positions_block(block: object) -> str:
     the rest always renders, so a full block never reads as the whole. A partial or unavailable block ends with a
     line that says so, beside the bound, even when it carries no position.
     """
-    # nosemgrep: ep-word-set -- the positions block's closed states that render
+    # nosemgrep: ep-word-set, ep-word-membership -- the positions block's closed states that render
     if not isinstance(block, dict) or block.get("state") not in ("ready", "partial", "unavailable"):
         return ""
     note = _positions_state_line(block)
