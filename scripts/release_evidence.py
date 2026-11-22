@@ -35,11 +35,18 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
         raise ValueError("pull request scope requires the GitHub PR schema")
     base = pr.get("base", {}).get("ref", "")
     head = pr.get("head", {}).get("ref", "")
-    release = event_name == "pull_request" and (
-        head == RELEASE_BRANCH
-        or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+    # The cut controller pushes its post-release metadata from this branch family to main.
+    reconcile = event_name == "pull_request" and base == "main" and head.startswith(
+        "release-reconcile/"
     )
-    return {"full": event_name in FULL_EVENTS, "release": release}
+    release = reconcile or (
+        event_name == "pull_request"
+        and (
+            head == RELEASE_BRANCH
+            or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+        )
+    )
+    return {"full": event_name in FULL_EVENTS, "release": release, "reconcile": reconcile}
 
 
 def event_payload() -> dict:

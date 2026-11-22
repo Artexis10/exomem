@@ -1019,3 +1019,99 @@ def test_native_mutation_guard_rejects_changed_body_and_resumes_matching_tag(tmp
     )
     assert "error" not in resumed, resumed
     assert git(tmp_path, "rev-parse", record["tag"]) == release
+
+
+def test_generated_push_waits_until_the_proposal_reports_the_pushed_head(tmp_path, monkeypatch):
+    """GitHub moves a PR head seconds after a push; the evidence step must not read the old one."""
+    remote = tmp_path / "remote.git"
+    subprocess.check_call(("git", "init", "--quiet", "--bare", str(remote)))
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    repository(candidate)
+    for package in ("plugins/claude-code", "plugins/cloud/generated"):
+        (candidate / package).mkdir(parents=True)
+        (candidate / package / "plugin.json").write_text('{"version": "1.0.0"}\n')
+    head = commit(candidate, "chore: release 1.1.0")
+    branch = "release-please--branches--release-cuts/" + "a" * 40
+    git(candidate, "remote", "add", "origin", str(remote))
+    git(candidate, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
+    (candidate / "plugins/claude-code/plugin.json").write_text('{"version": "1.1.0"}\n')
+    reads = []
+
+    def release_pull(cut_branch):
+        reads.append(cut_branch)
+        # The first two reads still report the head from before the push.
+        pushed = git(candidate, "rev-parse", "HEAD")
+        return {"number": 7, "head": {"sha": head if len(reads) < 3 else pushed}}
+
+    monkeypatch.setattr(cuts, "release_pull", release_pull)
+    monkeypatch.setattr(cuts.time, "sleep", lambda seconds: None)
+    cuts.push_generated(
+        {"branch": "release-cuts/" + "a" * 40, "proposal_head": head}, candidate
+    )
+    pushed = git(candidate, "rev-parse", "HEAD")
+    assert pushed != head
+    assert git(remote, "rev-parse", branch) == pushed
+    assert len(reads) == 3
+
+    monkeypatch.setattr(cuts, "release_pull", lambda cut_branch: {"head": {"sha": head}})
+    (candidate / "plugins/claude-code/plugin.json").write_text('{"version": "1.2.0"}\n')
+    with pytest.raises(ValueError, match="head is pending"):
+        cuts.push_generated(
+            {"branch": "release-cuts/" + "a" * 40, "proposal_head": pushed}, candidate
+        )
+
+
+@pytest.mark.parametrize("extra", [None, "code", "merge"])
+def test_reconciliation_pr_skips_tests_only_as_the_exact_projection(tmp_path, monkeypatch, extra):
+    """A reconciliation-named PR that carries anything beyond the projection must run the test jobs."""
+    repository(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.py").write_text("VALUE = 1\n")
+    (tmp_path / ".release-please-manifest.json").write_text('{".": "1.0.0"}\n')
+    main = commit(tmp_path, "feat: ship")
+    record = {"tag": "v1.1.0", "source": main}
+    origin = tmp_path / cuts.origin_path("v1.1.0")
+    origin.parent.mkdir(parents=True)
+    origin.write_text(json.dumps(record))
+    (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
+    projection = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
+    head = projection
+    if extra == "code":
+        # The same metadata and one code line, as one commit on the same main parent.
+        git(tmp_path, "checkout", "--quiet", "-b", "forged", main)
+        git(tmp_path, "checkout", "--quiet", projection, "--", ".")
+        (tmp_path / "src/app.py").write_text("VALUE = 2\n")
+        head = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
+        git(tmp_path, "checkout", "--quiet", "main")
+    elif extra == "merge":
+        git(tmp_path, "checkout", "--quiet", "-b", "side", main)
+        (tmp_path / "src/other.py").write_text("OTHER = 1\n")
+        side = commit(tmp_path, "feat: side")
+        git(tmp_path, "checkout", "--quiet", "main")
+        git(tmp_path, "merge", "--quiet", "--no-edit", side)
+        head = git(tmp_path, "rev-parse", "HEAD")
+    git(tmp_path, "update-ref", "refs/remotes/origin/main", main)
+    verified = []
+
+    class Projection:
+        def __init__(self, base, origin_record, notes):
+            assert (base, origin_record, notes) == (main, record, "notes")
+
+        def __enter__(self):
+            return tmp_path, git(tmp_path, "rev-parse", f"{projection}^{{tree}}")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "" if args[0] == "fetch" else git(tmp_path, *args))
+    monkeypatch.setattr(cuts, "verify_origin", lambda *args, **kwargs: verified.append(args))
+    monkeypatch.setattr(cuts.evidence, "api", lambda path: {"body": "notes"})
+    monkeypatch.setattr(cuts, "reconciliation_tree", Projection)
+    if extra is None:
+        assert cuts.check_reconciliation(head, main) == "v1.1.0"
+        assert verified == [(record, main)]
+    else:
+        with pytest.raises(ValueError, match="projection|one commit|main commit"):
+            cuts.check_reconciliation(head, main)

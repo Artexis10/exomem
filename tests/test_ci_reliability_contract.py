@@ -907,12 +907,17 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-    report, checkout, install, scope, step = job["steps"]
+    report, checkout, install, scope, step, reconcile_checkout, *_, reconcile = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
     assert "scripts/check_release_pr_files.py" in scope["run"]
-    assert step["if"] == "needs.scope.outputs.release == 'true'"
+    assert step["if"] == (
+        "needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'"
+    )
+    # A reconciliation PR is checked by code from its base, never from its own head.
+    assert reconcile_checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert "release_cuts.py check-reconciliation" in reconcile["run"]
     assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert step["env"]["GH_REPO"] == "${{ github.repository }}"
     assert step["run"] == 'python3 scripts/release_evidence.py select --source "$BASE_SHA"'

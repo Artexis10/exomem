@@ -299,6 +299,7 @@ def push_generated(cut: dict, candidate: Path) -> None:
         "chore: regenerate packages for the selected version",
         cwd=candidate,
     )
+    pushed = git("rev-parse", "HEAD", cwd=candidate)
     git(
         "-c",
         "credential.helper=",
@@ -310,6 +311,13 @@ def push_generated(cut: dict, candidate: Path) -> None:
         f"HEAD:refs/heads/{branch}",
         cwd=candidate,
     )
+    # GitHub moves the PR head seconds after the push; the next step must read the new head.
+    for _ in range(24):
+        pr = release_pull(cut["branch"])
+        if pr and pr["head"]["sha"] == pushed:
+            return
+        time.sleep(5)
+    raise ValueError("release proposal head is pending after the generated push; retry this cut")
 
 
 def child_environment(root: Path) -> dict:
@@ -746,6 +754,35 @@ def reconcile(record: dict) -> None:
     raise ValueError("reconciliation refresh is pending after bounded retries; resume the same cut")
 
 
+def check_reconciliation(head: str, main: str) -> str:
+    """A reconciliation PR runs no CI test job, sound only while it is the controller's projection.
+
+    The head must be one commit on a main commit whose tree equals what reconcile() writes
+    there for an accepted release origin. Anything else lands through an ordinary PR.
+    """
+    git("fetch", "--quiet", "origin", head)
+    parents = git("rev-list", "--parents", "-n", "1", head).split()[1:]
+    if len(parents) != 1:
+        raise ValueError("a reconciliation must be one commit on a main commit")
+    parent = parents[0]
+    if subprocess.run(("git", "merge-base", "--is-ancestor", parent, main), timeout=30).returncode:
+        raise ValueError("a reconciliation must build on a main commit")
+    added = git(
+        "diff", "--name-only", "--diff-filter=A", parent, head, "--", ORIGIN_DIRECTORY
+    ).splitlines()
+    if len(added) != 1:
+        raise ValueError("a reconciliation adds exactly one release origin")
+    record = read_json(head, added[0])
+    if added[0] != origin_path(record["tag"]):
+        raise ValueError("release origin path differs from its tag")
+    verify_origin(record, main, require_evidence=False)
+    notes = evidence.api(f"releases/tags/{record['tag']}")["body"]
+    with reconciliation_tree(parent, record, notes) as (_, tree):
+        if tree != git("rev-parse", f"{head}^{{tree}}"):
+            raise ValueError("reconciliation differs from the projection of its main commit")
+    return record["tag"]
+
+
 def verify_origin(record: dict, main: str, *, require_evidence: bool) -> None:
     """Check immutable graph and source binding; accepted records survive artifact expiry."""
     source, head, release = record["source"], record["head"], record["release"]
@@ -819,6 +856,7 @@ def main() -> None:
             "publish",
             "reconcile",
             "verify-tag",
+            "check-reconciliation",
         ),
     )
     parser.add_argument("--source")
@@ -826,6 +864,7 @@ def main() -> None:
     parser.add_argument("--tag")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--trusted-main")
+    parser.add_argument("--head")
     args = parser.parse_args()
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     if args.operation == "prepare":
@@ -885,6 +924,11 @@ def main() -> None:
                 return
             time.sleep(5)
         raise ValueError("accepted origin is pending on main; retry this cut before publication")
+    elif args.operation == "check-reconciliation":
+        if not args.head or not args.trusted_main:
+            parser.error("check-reconciliation requires --head and --trusted-main")
+        tag = check_reconciliation(args.head, args.trusted_main)
+        print(f"the reconciliation PR is the controller's projection for {tag}")
     else:
         if not args.tag or not args.trusted_main:
             parser.error("verify-tag requires --tag and --trusted-main")

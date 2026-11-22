@@ -37,6 +37,7 @@ jobs:
     outputs:
       full: ${{ steps.scope.outputs.full }}
       release: ${{ steps.scope.outputs.release }}
+      reconcile: ${{ steps.scope.outputs.reconcile }}
       docs_only: ${{ steps.docs-scope.outputs.docs_only }}
       pytest_args: ${{ steps.docs-scope.outputs.pytest_args }}
       changed_tests: ${{ steps.docs-scope.outputs.changed_tests }}
@@ -1211,7 +1212,8 @@ jobs:
     needs: scope
     name: release evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # A reconciliation check syncs the project and runs the package generators.
+    timeout-minutes: 15
     # Release metadata validates its source; every other context succeeds here
     # while the selected ordinary and Full jobs supply their own evidence.
     steps:
@@ -1222,7 +1224,7 @@ jobs:
         run: echo "Full source scope is $FULL_CI"
       - name: Check out the release checker at the release base
         # The base revision, so a release PR cannot edit its own check.
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
@@ -1233,13 +1235,13 @@ jobs:
             release-please-config.json
           sparse-checkout-cone-mode: false
       - name: Install the pinned release metadata updaters
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
       - name: Require that the release PR changes only what release-please writes
         # The release PR runs no test job, which is sound only while its diff
         # is release-please's own work (scripts/check_release_pr_files.py).
         # `shell: bash` adds pipefail; a failed API call must refuse.
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1259,12 +1261,46 @@ jobs:
           git fetch --quiet origin "$BASE_SHA" "$HEAD_SHA"
           python3 scripts/check_release_pr_files.py release-please-config.json "$RUNNER_TEMP/pr-files.jsonl" --base "$BASE_SHA" --head "$HEAD_SHA"
       - name: Require complete Full evidence for the release source tree
-        if: needs.scope.outputs.release == 'true'
+        if: needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/release_evidence.py select --source "$BASE_SHA"
+      # A reconciliation PR runs no test job, which is sound only while its
+      # commit is exactly what the cut controller projects onto its main parent
+      # (release_cuts.py check-reconciliation). The checker runs from the base.
+      - name: Check out the reconciliation checker at the PR base
+        if: needs.scope.outputs.reconcile == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the reconciliation generators
+        if: needs.scope.outputs.reconcile == 'true'
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          prune-cache: true
+      - name: Install the pinned release metadata updaters for the reconciliation
+        if: needs.scope.outputs.reconcile == 'true'
+        run: npm install --prefix "$RUNNER_TEMP/release-please" --ignore-scripts --no-audit --no-fund release-please@17.6.0
+      - name: Require that the reconciliation PR is the controller's projection
+        if: needs.scope.outputs.reconcile == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NODE_PATH: ${{ runner.temp }}/release-please/node_modules
+        run: |
+          if test "$HEAD_REPO" != "$GH_REPO"; then
+            echo "a reconciliation PR must come from $GH_REPO, not $HEAD_REPO" >&2
+            exit 1
+          fi
+          python3 scripts/release_cuts.py check-reconciliation --head "$HEAD_SHA" --trusted-main "$BASE_SHA"
 
   # A dispatched or scheduled full run is a superset of the push run at the
   # same revision: the same jobs plus the full tier and py3.13. The push run is
@@ -1382,9 +1418,9 @@ jobs:
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
   # run signals its own evidence: after its gate passes it dispatches that
   # workflow, which waits for this run's recorded completion and then re-runs
-  # the waiting release PR's failed checks. Known bound: a release PR run still
-  # in progress then has nothing to re-run; the PR tier normally finishes well
-  # inside the full tier's duration.
+  # the waiting release PR's failed checks; on a cut branch it also resumes the
+  # cut. Known bound: a release PR run still in progress then has nothing to
+  # re-run; the PR tier normally finishes well inside the full tier's duration.
   release-evidence-landed:
     name: signal release evidence landed
     needs: gate
@@ -1401,3 +1437,13 @@ jobs:
           EVIDENCE_RUN: ${{ github.run_id }}
           EVIDENCE_ATTEMPT: ${{ github.run_attempt }}
         run: gh workflow run release-evidence-automation.yml --ref main -f evidence_run="$EVIDENCE_RUN" -f evidence_attempt="$EVIDENCE_ATTEMPT"
+      # A cut gives up polling before a Full run that queued behind other work
+      # finishes. Resuming the same source is the cut's own retry path, and an
+      # already finished cut re-checks its accepted origin and publishes nothing new.
+      - name: Resume the release cut this Full run qualifies
+        if: startsWith(github.ref, 'refs/heads/release-cuts/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CUT_BRANCH: ${{ github.ref_name }}
+        run: gh workflow run release-evidence-automation.yml --ref main -f source="${CUT_BRANCH#release-cuts/}"
