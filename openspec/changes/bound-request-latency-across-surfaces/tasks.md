@@ -141,6 +141,9 @@
   - Verify: `tests/test_derived_drain_turns.py` ends a turn beside a request and keeps a loan to one unit.
 - [ ] 3.22 Make the bulk-pass wait share the setting `EXOMEM_BULK_WAIT_SHARE`, with 0.5 unchanged as the default.
   - Verify: `tests/test_foreground_priority.py` reads the setting, and an unset or invalid value keeps the default allowance.
+- [ ] 3.23 After installation, compare canary recalls with nothing else in flight on the release with incremental corpus statistics (design decision 11) and on the release before it.
+  - Verify: the own-CPU gap between a recall after a write and one with no write since the last recall, with a bootstrap interval.
+  - Verify: `lexical.query` CPU per query in recalls that rebuilt their statistics, with a bootstrap interval.
 
 ## 4. Verify installed behavior and deliver
 
