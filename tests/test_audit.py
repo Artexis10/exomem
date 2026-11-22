@@ -1184,3 +1184,206 @@ def test_attention_lists_a_custody_source_only_when_asked_by_name(vault: Path) -
 
     assert rel not in {item.path for item in by_default.items}
     assert [(item.path, item.categories) for item in asked_for.items] == [(rel, ["custody_source"])]
+
+
+# --- a custody-only audit selects its corpus from the frontmatter mark ------------------------------
+
+
+def _unmarked_source(vault: Path, name: str, captured: str) -> str:
+    rel = f"Knowledge Base/Sources/Articles/{name}"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nsource_type: article\n"
+        f"captured: {captured}\ningested_into: []\n---\n\nOrdinary bytes.\n",
+        encoding="utf-8",
+    )
+    return rel
+
+
+def test_a_custody_only_audit_keeps_a_compiled_custody_source_off_the_list(vault: Path) -> None:
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    _cite_source(vault, rel)
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert report.findings == []
+
+
+def test_a_custody_only_audit_lists_an_uncompiled_custody_source(vault: Path) -> None:
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    _unmarked_source(vault, "2026-11-01-ordinary-file.md", "2026-11-01")
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert [(f.category, f.path) for f in report.findings] == [("custody_source", rel)]
+
+
+def test_a_custody_only_audit_reports_a_hidden_derivative_missing_without_naming_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    note_rel = "Knowledge Base/Notes/Private/hidden-derivative.md"
+    note = vault / note_rel
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\ntitle: Secret Derivative Title\nstatus: active\n"
+        "created: 2026-11-02\nupdated: 2026-11-02\n"
+        f'sources:\n  - "[[{rel.removesuffix(".md")}]]"\n---\n\nSecret derivative body.\n',
+        encoding="utf-8",
+    )
+    source = vault / rel
+    source.write_text(
+        source.read_text(encoding="utf-8").replace(
+            "ingested_into: []", 'ingested_into:\n  - "[[hidden-derivative]]"'
+        ),
+        encoding="utf-8",
+    )
+
+    # Governance refuses the derivative to this caller, so it reports as missing
+    # and lends the finding nothing of itself.
+    from exomem.governance import egress as egress_module
+
+    permits = egress_module.content_permits
+
+    def refuse_hidden(root, path, who, **kwargs):
+        if path == note_rel:
+            return False
+        return permits(root, path, who, **kwargs)
+
+    monkeypatch.setattr(egress_module, "content_permits", refuse_hidden)
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    (finding,) = [f for f in report.findings if f.path == rel]
+    blob = json.dumps(finding.meta or {}) + finding.detail + (finding.proposed_fix or "")
+    assert "Secret Derivative Title" not in blob
+    assert "Secret derivative body" not in blob
+    assert note_rel not in blob
+
+
+def test_a_custody_only_audit_counts_a_predecessor_reached_through_supersedes(vault: Path) -> None:
+    predecessor = _unmarked_source(vault, "2026-10-01-earlier-file.md", "2026-10-01")
+    rel = "Knowledge Base/Sources/Articles/2026-11-01-kept-file.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nsource_type: article\ncaptured: 2026-11-01\ncustody_only: true\n"
+        f'supersedes: "[[{predecessor.removesuffix(".md")}]]"\n'
+        'ingested_into:\n  - "[[uses-earlier]]"\n---\n\nKept bytes.\n',
+        encoding="utf-8",
+    )
+    note = vault / "Knowledge Base/Notes/Insights/uses-earlier.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\ntitle: Uses the earlier file\nstatus: active\n"
+        "created: 2026-11-02\nupdated: 2026-11-02\n"
+        f'sources:\n  - "[[{predecessor.removesuffix(".md")}]]"\n---\n\nCompiled.\n',
+        encoding="utf-8",
+    )
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert report.findings == []
+
+
+def test_a_custody_only_audit_never_admits_or_parses_an_unmarked_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    ordinary = _unmarked_source(vault, "2026-11-01-ordinary-file.md", "2026-11-01")
+    note_rel = "Knowledge Base/Notes/Insights/plain-note.md"
+    note = vault / note_rel
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\ntitle: A plain note\nstatus: active\n"
+        "created: 2026-11-02\nupdated: 2026-11-02\n---\n\nA note.\n",
+        encoding="utf-8",
+    )
+
+    from exomem.governance import egress as egress_module
+
+    permitted: list[str] = []
+    permits = egress_module.content_permits
+
+    def spy_permits(root, rel, who, **kwargs):
+        permitted.append(rel)
+        return permits(root, rel, who, **kwargs)
+
+    monkeypatch.setattr(egress_module, "content_permits", spy_permits)
+    parsed: list[Path] = []
+    parse = audit_module.find_module._parse_page
+
+    def spy_parse(path, *args, **kwargs):
+        parsed.append(Path(path))
+        return parse(path, *args, **kwargs)
+
+    monkeypatch.setattr(audit_module.find_module, "_parse_page", spy_parse)
+
+    with library_scope():
+        audit_module.audit(vault, categories=["custody_source"])
+
+    assert permitted == [kept]
+    assert [p for p in parsed if p == vault / kept]
+    assert not [p for p in parsed if p in {vault / ordinary, note}]
+
+
+def test_a_mixed_selection_still_parses_the_corpus(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kept = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    ordinary = _unmarked_source(vault, "2026-11-01-ordinary-file.md", "2026-11-01")
+    note_rel = "Knowledge Base/Notes/Insights/plain-note.md"
+    note = vault / note_rel
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(
+        "---\ntype: insight\ntitle: A plain note\nstatus: active\n"
+        "created: 2026-11-02\nupdated: 2026-11-02\n---\n\nA note.\n",
+        encoding="utf-8",
+    )
+
+    parsed: set[Path] = set()
+    parse = audit_module.find_module._parse_page
+
+    def spy_parse(path, *args, **kwargs):
+        parsed.add(Path(path))
+        return parse(path, *args, **kwargs)
+
+    monkeypatch.setattr(audit_module.find_module, "_parse_page", spy_parse)
+
+    with library_scope():
+        report = audit_module.audit(
+            vault, categories=["custody_source", "unprocessed_source"]
+        )
+
+    assert {vault / kept, vault / ordinary, note} <= parsed
+    categories = {(f.category, f.path) for f in report.findings}
+    assert ("custody_source", kept) in categories
+    assert ("unprocessed_source", ordinary) in categories
+
+
+def test_a_budget_that_expires_inside_the_lookup_reports_unknown(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import request_budget
+
+    rel = _custody_source(vault, "2026-11-01-kept-file.md", "2026-11-01")
+    _cite_source(vault, rel)
+    budget = request_budget.RequestBudget(seconds=50)
+    parse = audit_module.find_module._parse_page
+
+    def expire(path, *args, **kwargs):
+        page = parse(path, *args, **kwargs)
+        if Path(path).name == "uses-kept.md":
+            request_budget.current().deadline = 0
+        return page
+
+    monkeypatch.setattr(audit_module.find_module, "_parse_page", expire)
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"], budget=budget)
+
+    assert report.metadata["coverage"]["custody_source"] == "unknown"
+    assert not [f for f in report.findings if f.category == "custody_source"]
