@@ -3604,11 +3604,17 @@ class CollectionWriter:
             )
             self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
-            # A retracted row is not validated again; its history is judged on the revised projects.
-            self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
-                ((governance.reprojected(captured, metadata), row_id) for row_id, captured in self.connection.execute(
-                    "SELECT row_id,governance_json FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
-                    (current.collection_id,)).fetchall()), many=True)
+            # A retracted row is not validated again; its history is judged on the revised projects. Rows share a
+            # few distinct captured values, so work per distinct value, never per retained row, and skip unchanged.
+            for (captured,) in self.connection.execute(
+                    "SELECT DISTINCT governance_json FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
+                    (current.collection_id,)).fetchall():
+                revised = governance.reprojected(captured, metadata)
+                if revised != captured:
+                    self._execute(
+                        "UPDATE item_rows SET governance_json=? "
+                        "WHERE collection_id=? AND retracted_txn IS NOT NULL AND governance_json=?",
+                        (revised, current.collection_id, captured))
             for held_id, kind, encoded, captured, path in self.connection.execute(
                 "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id,),

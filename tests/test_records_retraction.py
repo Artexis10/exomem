@@ -208,6 +208,32 @@ def test_a_retracted_rows_history_opens_after_the_collection_joins_a_project(sto
     assert [event["operation"] for event in agent["events"]] == ["revise", "retract", "append", "create"]
 
 
+def test_revising_a_collection_never_walks_its_retracted_rows_one_by_one(store):
+    """A collection that retracted many rows revises in work bounded by distinct metadata, and not at all if its projects are unchanged."""
+    create(store)
+    keys = [append(store, f"row-{n}") for n in range(30)]
+    for key in keys:
+        retract(store, key)
+    writes = []
+    store.connection.set_trace_callback(writes.append)
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.revise_collection(CID, manifest_text=summary_text().replace("title: Work", "title: Renamed"),
+                            why="rename only", **guards)
+    renamed = [q for q in writes if q.startswith("UPDATE item_rows SET governance_json=")]
+    writes.clear()
+    guards = store.inspect_collection(CID)["lifecycle_guards"]
+    store.revise_collection(CID, manifest_text=summary_text().replace("title: Work", "title: Renamed\nprojects: [Alpha]"),
+                            why="file under a project", **guards)
+    store.connection.set_trace_callback(None)
+    projected = [q for q in writes if q.startswith("UPDATE item_rows SET governance_json=")]
+    assert renamed == []
+    # Per-row updates differ in their bound row id; the per-value update is one statement however many rows it reaches.
+    assert len(set(projected)) == 1
+    assert store.connection.execute(
+        "SELECT count(DISTINCT governance_json) FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
+        (CID,)).fetchone()[0] == 1
+
+
 def test_a_cold_reopen_verifies_the_chain_and_a_later_write_commits(store):
     """A chain whose hash omits the retract effect verifies on the writer's connection and fails on a fresh one."""
     create(store)
