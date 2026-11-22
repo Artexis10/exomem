@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -29,6 +32,9 @@ if TYPE_CHECKING:
 
 CONFLICT = "VAULT_STORE_CONFLICT"
 NOT_OWNED = "VAULT_STORE_NOT_OWNED"
+# Exact per-page audit reason for a preserve write whose projection allocates original bytes.
+MEDIA_PAYLOAD_WRITE_REASON = "preserve original Markdown"
+log = logging.getLogger(__name__)
 
 
 class Origin(StrEnum):
@@ -106,6 +112,7 @@ class PagePut:
     rel: str
     body: bytes
     on_disk_mtime_ns: int | None = None
+    media_allocation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +316,58 @@ def _text_keyed(value):
     return value
 
 
+@contextmanager
+def _reserve_payload_pages(
+    writer: CollectionWriter, puts: tuple[tuple[PagePut, str | None], ...],
+) -> Iterator[None]:
+    """Protect original payload allocation and its direct write metadata on the vault device."""
+    from .. import media_capacity
+
+    originals = tuple((put, fields) for put, fields in puts if put.media_allocation)
+    if not originals:
+        yield
+        return
+    database = writer.handle.path
+    with media_capacity.upload_room(writer.root, device=database.stat().st_dev, reserve=True) as room:
+        if room is None or not room.floor:
+            yield
+            return
+        conn = writer.connection
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        before = conn.execute("PRAGMA page_count").fetchone()[0]
+        # SQLite file format: an overflow page reserves four bytes for the next page and up
+        # to 255 reserved bytes. WAL stores a 32-byte header and 24 bytes per frame.
+        usable = page_size - 4 - 255
+        # The tables that write one direct record per PagePut. Their real indexes carry the
+        # path too. SQLite's balance_nonroot uses one parent and up to five result pages.
+        tables = ("store_pages", "store_audit", "store_projection_queue")
+        trees = len(tables) + sum(conn.execute("SELECT count(*) FROM pragma_index_list(?)", (table,)).fetchone()[0]
+                                  for table in tables)
+        levels = max(1, (before + len(originals)).bit_length())
+        overflow_pages = 0
+        for put, fields in originals:
+            record_size = len(put.body) + len((fields or "").encode()) + trees * len(put.rel.encode())
+            overflow_pages += (record_size + usable - 1) // usable
+        btree_paths = len(originals) * levels * trees
+        # A split can add two siblings. The WAL also rewrites the existing siblings and parent.
+        database_pages = overflow_pages + 2 * btree_paths
+        wal_pages = overflow_pages + 6 * btree_paths + 1  # Includes the store revision row.
+        room.reserve_store_pages(
+            database, target_bytes=(before + database_pages) * page_size,
+            wal_bytes=32 + wal_pages * (page_size + 24),
+            upload_size=sum(len(put.body) for put, _ in originals),
+        )
+        try:
+            yield
+        finally:
+            try:
+                target = conn.execute("PRAGMA page_count").fetchone()[0] * page_size
+                room.set_store_pages(database, target)
+            except (sqlite3.Error, OSError) as error:
+                # Keep the previous reservation through a failed refresh or process cut.
+                log.warning("could not refresh the store checkpoint allocation (%s)", type(error).__name__)
+
+
 def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     """Apply ``change`` in one transaction on the store thread's writer, and return its revision.
 
@@ -320,7 +379,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     changed or went meanwhile rolls the whole commit back.
     """
     _require_owned(change)
-    with writer.handle.transaction() as tx:
+    puts = tuple((put, frontmatter_json(put.body)) for put in change.puts)
+    with _reserve_payload_pages(writer, puts), writer.handle.transaction() as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
         if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
@@ -336,8 +396,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         existing = _held_pages(tx, change)
         now = timestamp()
         audit = _Trail(tx, revision, change, now)
-        for put in change.puts:
-            _put_page(tx, put, revision, audit)
+        for put, fields in puts:
+            _put_page(tx, put, fields, revision, audit)
         for page in change.deletes:
             _delete_page(tx, page, audit)
         for move in change.moves:
@@ -581,18 +641,20 @@ class _Trail:
         self.deleted: list[str] = []
 
     def record(
-        self, rel: str, operation: str, sha256: str | None, from_path: str | None = None
+        self, rel: str, operation: str, sha256: str | None, from_path: str | None = None,
+        *, reason: str | None = None,
     ) -> None:
         self._tx.execute(
             "INSERT INTO store_audit("
             "revision, path, operation, origin, sha256, reason, at, from_path) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (self._revision, rel, operation, self._origin.value, sha256, self._reason, self._now,
+            (self._revision, rel, operation, self._origin.value, sha256,
+             self._reason if reason is None else reason, self._now,
              from_path),
         )
 
-    def wrote(self, rel: str, sha256: str, *, queue: bool = True) -> None:
-        self.record(rel, self._entry, sha256)
+    def wrote(self, rel: str, sha256: str, *, queue: bool = True, reason: str | None = None) -> None:
+        self.record(rel, self._entry, sha256, reason=reason)
         self.written.append(rel)
         if queue:
             self.intents[rel] = ("write", None)
@@ -623,7 +685,7 @@ class _Trail:
             self.intents[move.dst] = ("move", move.src)
 
 
-def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> None:
+def _put_page(tx: Connection, put: PagePut, fields: str | None, revision: int, audit: _Trail) -> None:
     digest = hashlib.sha256(put.body).hexdigest()
     on_disk = put.on_disk_mtime_ns is not None
     mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
@@ -633,12 +695,13 @@ def _put_page(tx: Connection, put: PagePut, revision: int, audit: _Trail) -> Non
         "sha256 = excluded.sha256, size = excluded.size, "
         "frontmatter_json = excluded.frontmatter_json, "
         "revision = excluded.revision, mtime_ns = excluded.mtime_ns",
-        (put.rel, put.body, digest, len(put.body), frontmatter_json(put.body), revision, mtime_ns),
+        (put.rel, put.body, digest, len(put.body), fields, revision, mtime_ns),
     )
     if on_disk:
         record_manifest(tx, put.rel, digest, len(put.body), mtime_ns, revision)
         _clear_queued(tx, put.rel)
-    audit.wrote(put.rel, digest, queue=not on_disk)
+    audit.wrote(put.rel, digest, queue=not on_disk,
+                reason=MEDIA_PAYLOAD_WRITE_REASON if put.media_allocation else None)
 
 
 def _clear_queued(tx: Connection, *paths: str) -> None:

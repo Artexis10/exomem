@@ -825,16 +825,28 @@ def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]]
     return rows()
 
 
-def object_facts(conn: sqlite3.Connection, key: str, *, reference_limit: int = -1) -> ObjectFacts | None:
+class ObjectBindingProofLimit(Exception):
+    """The allowed input cannot establish every binding of this object."""
+
+
+def object_facts(conn: sqlite3.Connection, key: str, *, binding_limit: int | None = None) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)
     if not state.complete:
         return None
+    parameters: dict[str, str | int] = {"key": key}
+    bindings = "media_bindings"
+    if binding_limit is not None:
+        # The indexed seek and sentinel precede both aggregation and deduplication.
+        bindings = "(SELECT * FROM media_bindings WHERE object_key = :key ORDER BY binary_rel LIMIT :limit)"
+        parameters["limit"] = binding_limit + 1
     row = conn.execute(
         "SELECT COUNT(*), MIN(b.sha256), MAX(b.sha256), MIN(b.size), MAX(b.size), "
         "MAX(b.resident_only), MIN(b.reference IS NOT NULL), MAX(c.owner_read) "
-        "FROM media_bindings b LEFT JOIN media_cache c ON c.binary_rel = b.object_key WHERE b.object_key = ?",
-        (key,)).fetchone()
+        f"FROM {bindings} b LEFT JOIN media_cache c ON c.binary_rel = b.object_key WHERE b.object_key = :key",
+        parameters).fetchone()
+    if binding_limit is not None and row[0] > binding_limit:
+        raise ObjectBindingProofLimit()
     if row[0] == 0 or row[1] != row[2] or row[3] != row[4]:
         return None
     # Legacy NULL pins retain bytes until startup recovery resolves them. A claimed
@@ -845,8 +857,8 @@ def object_facts(conn: sqlite3.Connection, key: str, *, reference_limit: int = -
         "AND (object_key = ? OR object_key IS NULL)) "
         "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1)", (key, key)).fetchone()[0])
     pointers = conn.execute(
-        "SELECT reference, MIN(binary_rel) FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL "
-        "GROUP BY reference ORDER BY reference LIMIT ?", (key, reference_limit)).fetchall()
+        f"SELECT reference, MIN(binary_rel) FROM {bindings} b WHERE object_key = :key AND reference IS NOT NULL "
+        "GROUP BY reference ORDER BY reference", parameters).fetchall()
     references = tuple(originals.stored_reference(json.loads(item[0])) for item in pointers)
     if any(reference is None for reference in references):
         return None

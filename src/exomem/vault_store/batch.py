@@ -432,7 +432,8 @@ def _commit(
         change = StoreChange(
             origin=Origin.GOVERNED,
             reason=_reason(),
-            puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
+            puts=tuple(PagePut(rel, _page_bytes(write), media_allocation=write.media_allocation)
+                       for rel, write in plan.pages),
             deletes=plan.lifecycle.deletes,
             moves=plan.lifecycle.moves,
             binaries=tuple(_record(rel, write) for rel, write in plan.binaries),

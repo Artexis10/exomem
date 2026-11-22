@@ -375,7 +375,7 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
     if prepared is None:
         prepared = stack.enter_context(original_pool.prepare(
             vault_root, digest, size, held_fs.Chunks(chunks),
-            meter_allocation=media_capacity.upload_floor(vault_root) is not None,
+            meter_allocation=media_capacity.managed_allocations(vault_root),
         ))
 
     def publish() -> None:

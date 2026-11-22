@@ -114,7 +114,6 @@ def _remove(path: Path) -> None:
 
 def _copy(
     vault_root: Path, part: Path, stream: BinaryIO, *, limit: int, too_large: Callable[[], BaseException],
-    room: media_capacity.UploadRoom | None = None,
 ) -> StagedUpload:
     """Copy `stream` into `part` once, hashing as it goes, and fsync it."""
     try:
@@ -124,18 +123,20 @@ def _copy(
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(part, flags, 0o600)
     try:
+        device = os.fstat(descriptor).st_dev
         digest = hashlib.sha256()
         written = 0
         while chunk := stream.read(_CHUNK):
             written += len(chunk)
             if written > limit:
                 raise too_large()
-            if room is not None:
-                room.require(written)
             digest.update(chunk)
             view = memoryview(chunk)
-            while view:
-                view = view[os.write(descriptor, view):]
+            with media_capacity.upload_room(vault_root, device=device) as room:
+                if room is not None:
+                    room.require(len(chunk), offset=written - len(chunk), upload_size=written)
+                while view:
+                    view = view[os.write(descriptor, view):]
         os.fsync(descriptor)
         info = os.fstat(descriptor)
     except BaseException:
@@ -176,8 +177,7 @@ def stage(
     lock = FileLock(lock_path, timeout=_LOCK_WAIT_SECONDS, thread_local=False)
     try:
         lock.acquire()
-        with media_capacity.upload_room(vault_root, device=root.stat().st_dev) as room:
-            staged = _copy(vault_root, part, stream, limit=limit, too_large=too_large, room=room)
+        staged = _copy(vault_root, part, stream, limit=limit, too_large=too_large)
         with contextlib.ExitStack() as held:
             if pooled:
                 def chunks() -> Iterator[bytes]:
@@ -187,7 +187,7 @@ def stage(
 
                 staged.pool = held.enter_context(original_pool.prepare(
                     vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks),
-                    meter_allocation=media_capacity.upload_floor(vault_root) is not None,
+                    meter_allocation=media_capacity.managed_allocations(vault_root),
                 ))
             yield staged
     finally:

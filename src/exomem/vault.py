@@ -3077,7 +3077,7 @@ class _BatchWorkspace:
             os.ftruncate(descriptor, 0)
             from . import media_capacity
 
-            meter = allocation_vault is not None and media_capacity.upload_floor(allocation_vault) is not None
+            meter = allocation_vault is not None and media_capacity.managed_allocations(allocation_vault)
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -3447,7 +3447,7 @@ class _BatchWorkspace:
                             if artifact.allocation_vault is not None:
                                 from . import media_capacity
 
-                                if media_capacity.upload_floor(artifact.allocation_vault) is not None:
+                                if media_capacity.managed_allocations(artifact.allocation_vault):
                                     device = os.fstat(parent.descriptor).st_dev
                                     chunks = copied.enter_context(contextlib.closing(media_capacity.metered_chunks(
                                         artifact.allocation_vault, device, chunks,

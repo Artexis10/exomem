@@ -44,6 +44,7 @@ class UploadRoom:
     allocation_unit: int
     credits: sqlite3.Connection | None = None
     reserved: int = 0
+    store_pages: tuple[Path, int] | None = None
 
     def allocated(self, size: int) -> int:
         return -(-size // self.allocation_unit) * self.allocation_unit
@@ -62,6 +63,27 @@ class UploadRoom:
         growth = self.allocated(offset + incoming) - self.allocated(offset)
         self._require_physical(peak + growth, length)
         _set_credit(self.credits, session, peak)
+
+    def reserve_store_pages(
+        self, database: Path, *, target_bytes: int, wal_bytes: int, upload_size: int,
+    ) -> None:
+        """Fence the WAL append and the database growth it can require at checkpoint."""
+        prior = self.store_pages[1] if self.store_pages is not None and self.store_pages[0] == database else 0
+        target = max(target_bytes, prior)
+        current = _file_size(database)
+        extra = max(0, target - max(prior, current))
+        self._require_physical(self.allocated(wal_bytes) + self.allocated(extra), upload_size)
+        self.set_store_pages(database, target)
+
+    def set_store_pages(self, database: Path, target_bytes: int) -> None:
+        """Remember checkpoint growth even when a reader keeps the WAL after commit."""
+        assert self.credits is not None
+        with self.credits:
+            self.credits.execute(
+                "INSERT INTO store_pages VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE "
+                "SET database_path = excluded.database_path, target_bytes = excluded.target_bytes",
+                (str(database), target_bytes),
+            )
 
     def _require_physical(self, physical: int, size: int) -> None:
         if physical > 0 and self.free - self.reserved - physical < self.floor:
@@ -85,27 +107,51 @@ def upload_floor(vault: Path) -> int | None:
     return floor
 
 
+def managed_allocations(vault: Path) -> bool:
+    """Keep allocations in the gate when an owner can set a floor while they run."""
+    from . import originals
+
+    return originals.uses_local_configuration() or upload_floor(vault) is not None
+
+
 @contextmanager
 def upload_room(vault: Path, *, device: int | None = None, reserve: bool = False) -> Iterator[UploadRoom | None]:
-    """Serialize configured vault-volume allocations while checking the actual free space."""
-    floor = upload_floor(vault)
-    if floor is None or device is not None and device != vault.stat().st_dev:
+    """Serialize managed vault-volume allocations with the current owner policy."""
+    if device is not None and device != vault.stat().st_dev or not managed_allocations(vault):
         yield None
         return
-
-    from .state_paths import ensure_vault_state_dir
-
-    directory = ensure_vault_state_dir(vault)
-    credits_path = directory / "upload-commit-credit.sqlite"
-    with _allocation_lock(directory):
+    with allocation_policy(vault) as directory:
+        floor = upload_floor(vault)
+        if floor is None:
+            yield None
+            return
+        credits_path = directory / "upload-commit-credit.sqlite"
         store = closing(_open_credits(credits_path, create=reserve)) if reserve or credits_path.exists() else nullcontext()
         with store as credits:
             reserved = 0
+            store_pages = None
             if credits is not None:
                 reserved = credits.execute("SELECT peak FROM credit_total").fetchone()[0]
-                own = _credit_for(credits, _COMMIT_CREDIT.get())
-                reserved -= own
-            yield UploadRoom(shutil.disk_usage(vault).free, floor, _allocation_unit(vault), credits, reserved)
+                reserved -= _credit_for(credits, _COMMIT_CREDIT.get())
+                store_pages = _store_pages(credits)
+            allocation_unit = _allocation_unit(vault)
+            if store_pages is not None:
+                database, target = store_pages
+                # Read the pending growth before free space. An intervening checkpoint can
+                # over-reserve this sample, but cannot make both its unspent credit and its bytes available.
+                pending = max(0, target - _file_size(database))
+                reserved += -(-pending // allocation_unit) * allocation_unit
+            yield UploadRoom(shutil.disk_usage(vault).free, floor, allocation_unit, credits, reserved, store_pages)
+
+
+@contextmanager
+def allocation_policy(vault: Path) -> Iterator[Path]:
+    """Hold the same short lock for an allocation or a local policy change."""
+    from .state_paths import ensure_vault_state_dir
+
+    directory = ensure_vault_state_dir(vault)
+    with _allocation_lock(directory):
+        yield directory
 
 
 @contextmanager
@@ -130,10 +176,26 @@ def _open_credits(path: Path, *, create: bool = False) -> sqlite3.Connection:
                 conn.execute("CREATE TABLE IF NOT EXISTS credits (session TEXT PRIMARY KEY, peak INTEGER NOT NULL)")
                 conn.execute("CREATE TABLE IF NOT EXISTS credit_total (id INTEGER PRIMARY KEY CHECK(id=1), peak INTEGER NOT NULL)")
                 conn.execute("INSERT OR IGNORE INTO credit_total VALUES (1, 0)")
+                conn.execute("CREATE TABLE IF NOT EXISTS store_pages ("
+                             "id INTEGER PRIMARY KEY CHECK(id=1), database_path TEXT NOT NULL, target_bytes INTEGER NOT NULL)")
         except BaseException:
             conn.close()
             raise
     return conn
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _store_pages(conn: sqlite3.Connection) -> tuple[Path, int] | None:
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'store_pages'").fetchone() is None:
+        return None  # Earlier upload-credit ledgers acquired the table on their next reservation.
+    row = conn.execute("SELECT database_path, target_bytes FROM store_pages WHERE id=1").fetchone()
+    return (Path(row[0]), row[1]) if row is not None else None
 
 
 def _credit_for(conn: sqlite3.Connection, session: str | None) -> int:
@@ -202,6 +264,17 @@ def metered_chunks(vault: Path, device: int, chunks: Iterator[bytes], *, upload_
         offset += len(chunk)
 
 
+def append_disk_spool(vault: Path, sink: BinaryIO, chunk: bytes, *, device: int, rolling: bool) -> None:
+    """Account for the in-memory prefix when the spool first moves to disk."""
+    offset = sink.tell()
+    needs = offset + len(chunk) if rolling else len(chunk)
+    with upload_room(vault, device=device) as room:
+        if room is not None:
+            room.require(needs, offset=0 if rolling else offset, upload_size=offset + len(chunk))
+        sink.write(chunk)
+        sink.flush()
+
+
 class MeteredSink:
     def __init__(self, vault: Path, sink: BinaryIO, *, device: int, size: int) -> None:
         self.vault = vault
@@ -215,8 +288,7 @@ class MeteredSink:
             if room is not None:
                 room.require(len(chunk), offset=self.offset, upload_size=self.size)
             count = self.sink.write(chunk)
-            if room is not None:
-                self.sink.flush()
+            self.sink.flush()
         self.offset += count
         return count
 

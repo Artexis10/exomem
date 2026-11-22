@@ -89,7 +89,7 @@ The owner status SHALL report the count and plaintext bytes of local and evicted
 - **WHEN** a bounded eviction pass encounters retained candidates while there is still storage pressure
 - **THEN** later passes continue to other candidates and retain the original low-water target
 
-#### Scenario: An import requests extra space
+#### Scenario: A personal import requests extra space
 
-- **WHEN** current custody and allocation checks cannot prove that an import request can free enough space on the vault device
-- **THEN** the request alone does not authorize eviction
+- **WHEN** an import requests extra space below the personal eviction target
+- **THEN** the worker waits for the vault to reach its configured eviction target

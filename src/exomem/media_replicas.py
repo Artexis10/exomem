@@ -219,12 +219,11 @@ def _health_key(replica: originals.StoredObject) -> tuple[str, str, str, str, in
 
 # A reused version need not have a timestamp on every filing. Read the latest exact time in index order.
 _HEALTH_JSON_COLUMNS = tuple(f"json_extract(wanted.value, '$[{index}]')" for index in range(len(_HEALTH_FIELDS)))
-_EVICTION_SETTLING = (
-    f"((SELECT verified_at FROM media_replicas INDEXED BY {_PUBLICATION_TIME_INDEX} "
+_EVICTION_EVIDENCE = (
+    "SELECT MAX(exports.key_version IS NULL), "
+    f"MAX(((SELECT verified_at FROM media_replicas INDEXED BY {_PUBLICATION_TIME_INDEX} "
     f"WHERE ({_HEALTH_COLUMNS}) = ({', '.join(_HEALTH_JSON_COLUMNS)}) AND verified_at IS NOT NULL "
-    "AND verified_at > 0 ORDER BY verified_at DESC LIMIT 1) <= :settled_before) IS NOT TRUE"
-)
-_EVICTION_EVIDENCE_FROM = (
+    "AND verified_at > 0 ORDER BY verified_at DESC LIMIT 1) <= :settled_before) IS NOT TRUE) "
     "FROM json_each(:replicas) AS wanted LEFT JOIN media_key_exports AS exports "
     f"ON exports.key_version = {_HEALTH_JSON_COLUMNS[_HEALTH_FIELDS.index('key_version')]}"
 )
@@ -236,30 +235,13 @@ def eviction_custody_wait(
     conn: sqlite3.Connection, references: Iterable[originals.StoredObject], *, settled_before: float,
 ) -> str | None:
     """Return the wait reason if any recovery version lacks its key export or settled publication."""
-    missing_key, settling = conn.execute(
-        f"SELECT MAX(exports.key_version IS NULL), MAX({_EVICTION_SETTLING}) {_EVICTION_EVIDENCE_FROM}", {
+    missing_key, settling = conn.execute(_EVICTION_EVIDENCE, {
         "replicas": json.dumps([_health_key(reference) for reference in references]),
         "settled_before": settled_before,
     }).fetchone()
     if missing_key:
         return KEY_NOT_EXPORTED
     return SETTLING if settling else None
-
-
-def eviction_custody_waits(
-    conn: sqlite3.Connection, references: list[originals.StoredObject], *, settled_before: float,
-) -> dict[originals.StoredObject, str]:
-    """Read each blocked recovery version from the same ledger snapshot."""
-    blocked = {}
-    for index, missing_key, settling in conn.execute(
-        f"SELECT wanted.key, exports.key_version IS NULL, {_EVICTION_SETTLING} {_EVICTION_EVIDENCE_FROM}", {
-            "replicas": json.dumps([_health_key(reference) for reference in references]),
-            "settled_before": settled_before,
-        },
-    ):
-        if missing_key or settling:
-            blocked[references[index]] = KEY_NOT_EXPORTED if missing_key else SETTLING
-    return blocked
 
 
 _PROVED_EXACT_UPLOAD = _KNOWN_EXACT_UPLOAD + f" AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS}) LIMIT 1"
@@ -932,13 +914,6 @@ def damaged_among(vault: Path, references: Iterable[originals.StoredObject]) -> 
         return frozenset()
     with closing(MediaJobStore(vault)._connect(readonly=True)) as conn:
         return frozenset(tuple(row) for row in conn.execute(_DAMAGED_AMONG, (wanted,)))
-
-
-def damaged_in(
-    conn: sqlite3.Connection, references: Iterable[originals.StoredObject],
-) -> frozenset[tuple[str, str, str]]:
-    """Return damaged names within the caller's existing ledger snapshot."""
-    return frozenset(tuple(row) for row in conn.execute(_DAMAGED_AMONG, (_quadruples(references),)))
 
 
 def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -> bool:

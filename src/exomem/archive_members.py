@@ -310,7 +310,7 @@ def _write_blob(
                 packed = _packed_chunks(zip_file, entry, sha256)
                 guarded = (media_capacity.metered_chunks(
                     vault_root, os.fstat(writable.descriptor).st_dev, packed, upload_size=upload_size,
-                ) if floor_enabled else packed)
+                ) if media_capacity.managed_allocations(vault_root) else packed)
                 with closing(packed), closing(guarded) as parts:
                     filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
                 with filesystem.file(parent, temporary, access="mutate").require() as staged:

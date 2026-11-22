@@ -2460,7 +2460,7 @@ def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Pat
     path = _preserved(vault, category="archive-duplicate")
     config.write_text(json.dumps({"vaults": {str(vault): {**values, "allowance_bytes": len(path.read_bytes())}}}))
     ledger = media_jobs.MediaJobStore(vault)
-    head = media_store.FilesystemStore.head
+    head = media_store.FilesystemStore._head_held
     changed = []
 
     def change_during_protected_confirmation(*args, **kwargs):
@@ -2475,7 +2475,7 @@ def test_archive_reuse_rechecks_the_last_reference_after_confirmation(vault: Pat
             changed.append(True)
         return result
 
-    monkeypatch.setattr(media_store.FilesystemStore, "head", change_during_protected_confirmation)
+    monkeypatch.setattr(media_store.FilesystemStore, "_head_held", change_during_protected_confirmation)
     with pytest.raises(media_store.MediaStoreError) as refused:
         media_store.offload(vault, path)
     assert changed and refused.value.code == "MEDIA_ALLOWANCE_EXCEEDED"
@@ -2629,6 +2629,7 @@ def test_eviction_takes_unread_originals_first_and_among_them_those_with_no_pend
         return head(store, file, before, name, version, **options)
 
     monkeypatch.setattr(media_store.FilesystemStore, "_head_held", read)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     media_store.evict_to_target(vault)
 
@@ -2683,6 +2684,7 @@ def test_a_demand_evicts_below_the_everyday_stop_point_until_the_budget_covers_i
 
     large, middle, small = _stored(vault, "large", 3_000), _stored(vault, "middle", 2_000), _stored(vault, "small", 1_000)
     monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, middle, small))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     assert media_store.evict_to_target(vault) == 0
 
     assert media_store.record_demand(vault, "series-a", 4_000, budget=0, reachable_budget=6_000)
@@ -2702,6 +2704,7 @@ def test_a_lapsed_demand_evicts_nothing(vault: Path, selected_store, monkeypatch
     assert media_store.record_demand(vault, "series-a", 2_000, budget=0, reachable_budget=6_000)
     renewed = time.time()
     monkeypatch.setattr(media_store.time, "time", lambda: renewed + media_store.DEMAND_LEASE_SECONDS + 1)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.evict_to_target(vault) == 0
     assert path.exists()
@@ -2713,6 +2716,7 @@ def test_a_demand_that_eviction_cannot_meet_and_one_above_the_reachable_budget_e
 
     first, second = _stored(vault, "first", 2_000), _stored(vault, "second", 1_000)
     monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, first, second))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.record_demand(vault, "short", 4_000, budget=500, reachable_budget=6_000)
     assert media_store.evict_to_target(vault) == 0
@@ -2727,6 +2731,7 @@ def test_two_series_keep_separate_demands_and_eviction_serves_the_larger(vault: 
 
     large, middle, small = _stored(vault, "large", 2_000), _stored(vault, "middle", 1_000), _stored(vault, "small", 500)
     monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, middle, small))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.record_demand(vault, "series-b", 2_500, budget=0, reachable_budget=6_000)
     assert media_store.record_demand(vault, "series-a", 1_500, budget=0, reachable_budget=6_000)
@@ -2756,6 +2761,7 @@ def test_rows_of_moved_originals_neither_stop_eviction_nor_stay(vault: Path, sel
     _rows_of_moved_originals(vault, *[100] * 200)
     monkeypatch.setattr(media_store, "bound_originals", lambda *a, **k: pytest.fail("eviction walks no sidecars"))
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, real))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.evict_to_target(vault) == 1
 
@@ -2773,6 +2779,7 @@ def test_eviction_reads_past_a_candidate_it_keeps(vault: Path, selected_store, m
     (Path(selected_store[0]["root"]) / reference.object / reference.version).write_bytes(b"corrupt")
     monkeypatch.setattr(media_store, "_EVICTION_BATCH", 1)
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, damaged, sound))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.evict_to_target(vault) == 1
 
@@ -2828,6 +2835,7 @@ def test_a_demand_that_only_rows_of_moved_originals_could_meet_evicts_nothing(va
     large, small = _stored(vault, "large", 1_000), _stored(vault, "small", 500)
     _rows_of_moved_originals(vault, 3_000)
     monkeypatch.setattr(shutil, "disk_usage", _volume(100_000, 20_000, large, small))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     assert media_store.record_demand(vault, "series-a", 4_000, budget=0, reachable_budget=6_000)
     assert media_store.evict_to_target(vault) == 0
@@ -3528,6 +3536,7 @@ def test_a_status_call_records_and_renews_a_demand_for_each_series_and_ignores_o
     held = [_stored(vault, "large", 3_000), _stored(vault, "middle", 2_000), _stored(vault, "small", 1_000)]
     base = 779_000_000 - 1_000 - 6_000  # A window budget of 1 000 bytes, and 6 000 bytes that eviction can free.
     monkeypatch.setattr(shutil, "disk_usage", _volume(_WINDOW_VOLUME, base, *held))
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     ledger = media_jobs.MediaJobStore(vault)
 
     def leases() -> dict[str, tuple[int, int, float]]:
@@ -3593,6 +3602,7 @@ def test_a_status_that_carries_a_demand_takes_one_census_when_none_is_recorded(v
     """Catches a series that starts with no figure for the room it needs, because only offload ever recorded one."""
     path = _stored(vault, "recording", 300)  # A stored original; its offload was not a batch, so no census is recorded.
     censuses = _count_censuses(monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     allowance = _window_status(vault, series_id="series-a", next_window_bytes=1)["media_allowance"]
 
@@ -3732,6 +3742,7 @@ def test_a_status_with_a_demand_counts_afresh_once_the_recorded_census_is_older_
     with sqlite3.connect(media_jobs.MediaJobStore(vault).path) as connection:
         connection.execute("UPDATE media_owner_census SET observed_at = ?", (old,))
     censuses = _count_censuses(monkeypatch)
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
 
     plain = _window_status(vault)["media_allowance"]
     assert censuses == [] and plain["observed_at"] == old and plain["used_bytes"] == used

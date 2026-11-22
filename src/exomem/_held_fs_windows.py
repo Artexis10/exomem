@@ -75,6 +75,7 @@ FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_READ_DATA = 0x00000001
 FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
+_DIRECTORY_ACCESS = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES
 FILE_WRITE_ATTRIBUTES = 0x00000100
 GENERIC_WRITE = 0x40000000
 READ_CONTROL = 0x00020000
@@ -188,6 +189,7 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     GetFileInformationByHandleEx = ctypes.windll.kernel32.GetFileInformationByHandleEx
     GetFileInformationByHandle = ctypes.windll.kernel32.GetFileInformationByHandle
     CreateFileW = ctypes.windll.kernel32.CreateFileW
+    ReOpenFile = ctypes.WinDLL("kernel32", use_last_error=True).ReOpenFile
     CloseHandle = ctypes.windll.kernel32.CloseHandle
     FlushFileBuffers = ctypes.windll.kernel32.FlushFileBuffers
 
@@ -245,6 +247,8 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
         c_void_p,
     ]
     CreateFileW.restype = c_void_p
+    ReOpenFile.argtypes = [c_void_p, c_ulong, c_ulong, c_ulong]
+    ReOpenFile.restype = c_void_p
     CloseHandle.argtypes = [c_void_p]
     CloseHandle.restype = wintypes.BOOL
     FlushFileBuffers.argtypes = [c_void_p]
@@ -258,6 +262,7 @@ else:  # pragma: no cover - keeps Linux imports syntactically safe
     GetFileInformationByHandleEx = None
     GetFileInformationByHandle = None
     CreateFileW = None
+    ReOpenFile = None
     CloseHandle = None
     FlushFileBuffers = None
 
@@ -497,7 +502,7 @@ def _open_root(root: Path) -> int | None:
     assert CreateFileW is not None
     handle = CreateFileW(
         str(root),
-        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES,
+        _DIRECTORY_ACCESS,
         FILE_SHARE_ALL,
         None,
         3,
@@ -515,6 +520,27 @@ def _open_root(root: Path) -> int | None:
         assert CloseHandle is not None
         CloseHandle(c_void_p(handle))
         return None
+
+
+def _reopen_root_for_flush(descriptor: int, expected: StableIdentity) -> int:
+    """Acquire publication and flush rights on the exact retained root."""
+    assert ReOpenFile is not None
+    handle = ReOpenFile(
+        c_void_p(_native(descriptor)),
+        _DIRECTORY_ACCESS | GENERIC_WRITE,
+        FILE_SHARE_ALL,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_OPEN_REPARSE_POINT,
+    )
+    if handle in {None, INVALID_HANDLE_VALUE}:
+        raise OSError(ctypes.get_last_error(), "held root could not be opened for flush")
+    try:
+        if not _same_object(_identity(int(handle)), expected):
+            raise OSError(errno.ESTALE, "held root identity changed")
+    except BaseException:
+        assert CloseHandle is not None
+        CloseHandle(c_void_p(handle))
+        raise
+    return _fd(int(handle))
 
 
 class WindowsHeldDirectory(HeldDirectory):
@@ -694,23 +720,21 @@ class WindowsHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_invalid())
         if self.closed:
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
-        if not parts and access != "read":
+        if not parts and access == "mutate":
             return HeldResult(
                 error=HeldFsError(
-                    "INVALID_INPUT", "elevated root directory access is unsupported"
+                    "INVALID_INPUT", "held root directory mutation is unsupported"
                 )
             )
         descriptor: int | None = None
         parent_descriptor: int | None = None
         try:
-            descriptor = os.dup(self.descriptor)
+            if not parts and access == "flush":
+                descriptor = _reopen_root_for_flush(self.descriptor, self.root_identity)
+            else:
+                descriptor = os.dup(self.descriptor)
             for index, part in enumerate(parts):
-                desired = (
-                    FILE_LIST_DIRECTORY
-                    | FILE_ADD_FILE
-                    | FILE_ADD_SUBDIRECTORY
-                    | FILE_READ_ATTRIBUTES
-                )
+                desired = _DIRECTORY_ACCESS
                 if index == len(parts) - 1 and access in {"flush", "mutate"}:
                     desired |= GENERIC_WRITE
                 if index == len(parts) - 1 and access == "mutate":

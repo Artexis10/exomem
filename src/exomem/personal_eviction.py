@@ -25,9 +25,13 @@ def _policy(vault: Path) -> dict[str, object]:
 
 def _replace(vault: Path, expected: dict[str, object], policy: dict[str, object]) -> None:
     """Replace the held state file with one changed entry, preserving any other entries."""
+    from .cli_ops import OpError
+
     path = originals.local_configuration_path(vault)
-    with held_fs.acquire(path.parent).require() as filesystem:
-        with filesystem.parent(".", access="mutate").require() as parent:
+    try:
+        with (media_capacity.allocation_policy(vault),
+              held_fs.acquire(path.parent).require() as filesystem,
+              filesystem.parent(".", access="flush").require() as parent):
             with filesystem.file(parent, path.name).require() as file:
                 raw = filesystem.read(file).require()
                 identity = file.identity
@@ -39,6 +43,10 @@ def _replace(vault: Path, expected: dict[str, object], policy: dict[str, object]
             held_fs.publish_bytes(filesystem, parent, path.name, data, expected_identity=identity,
                                   expected_sha256=hashlib.sha256(raw).hexdigest()).require()
             filesystem.flush_directory(parent).require()
+    except OpError as error:
+        if error.code != media_capacity.UPLOAD_SPACE_BUSY:
+            raise
+        raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE, "vault storage is allocating space; retry") from error
 
 
 def _select(config: dict[str, object], entry: originals.StoreEntry) -> dict[str, object]:

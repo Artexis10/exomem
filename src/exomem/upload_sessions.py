@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import shutil
 import threading
 import time
@@ -280,10 +281,10 @@ def sweep(vault_root: Path) -> None:
             _remove(leftover)
 
 
-def _expire(store: Path, session_id: str, vault_root: Path, now: float) -> None:
+def _expire(store: Path, session_id: str, vault_root: Path | None, now: float) -> bool:
     running = _running(session_id)
     if not running.lock.acquire(blocking=False):
-        return
+        return False
     try:
         with _commit_lock(store, session_id):
             record = _read_record(store, session_id)
@@ -293,8 +294,9 @@ def _expire(store: Path, session_id: str, vault_root: Path, now: float) -> None:
                 expired = True
             if expired:
                 _drop(store, session_id, vault_root)
+            return True
     except Timeout:
-        return
+        return False
     finally:
         running.lock.release()
 
@@ -578,7 +580,7 @@ class Patch:
         offset = self.offset + self.written
         same_volume = vault is not None and self.session.store.stat().st_dev == vault.stat().st_dev
         reserve = (vault is not None and offset + len(chunk) == self.session.length
-                   and media_capacity.upload_floor(vault) is not None)
+                   and media_capacity.managed_allocations(vault))
         copies = commit_copy_count(vault, self.session.record["target"]) if reserve and vault is not None else 0
         if vault is not None and (same_volume or copies):
             with media_capacity.commit_credit(self.session.id), _vault_upload_room(vault, reserve=bool(copies)) as room:
@@ -589,7 +591,7 @@ class Patch:
                     else:
                         room.require(incoming, offset=offset, upload_size=self.session.length)
                 self._sink.write(chunk)
-                if room is not None and same_volume:
+                if same_volume:
                     # The next allocator must see these bytes in the volume's free-space accounting.
                     self._sink.flush()
         else:
@@ -663,6 +665,12 @@ def _schedule_reattempt(store: Path, session_id: str, committer: Committer, vaul
             return
         wait = running.reattempt_wait
         running.reattempt_wait = min(wait * 2, REATTEMPT_MAX_SECONDS)
+        try:
+            remaining = float(record["expires"]) - _now()
+        except (KeyError, TypeError, ValueError):
+            remaining = 0
+        if remaining > 0:
+            wait = min(wait, remaining)
         timer = threading.Timer(wait, _reattempt, args=(store, session_id, committer, vault_root))
         timer.name = f"upload-session-reattempt-{session_id[:8]}"
         timer.daemon = True
@@ -681,7 +689,17 @@ def _reattempt(store: Path, session_id: str, committer: Committer, vault_root: P
         expired = record is None or float(record["expires"]) <= _now()
     except (KeyError, TypeError, ValueError):
         expired = True
-    if expired or record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if expired:
+        from .cli_ops import OpError
+
+        try:
+            if _expire(store, session_id, vault_root, _now()):
+                return
+        except (OpError, OSError, sqlite3.Error):
+            log.warning("expired upload session cleanup will retry", exc_info=True)
+        _schedule_reattempt(store, session_id, committer, vault_root)
+        return
+    if record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
         return
     # An empty context: nothing of the request that began the session, its principal included,
     # reaches the commit, which binds the transfer principal itself.

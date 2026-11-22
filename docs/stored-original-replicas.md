@@ -32,8 +32,7 @@ Hydration, signed-container extraction and each final storage copy use the same 
 
 After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
 Eviction confirms the configured path still reaches that same copy immediately before removal.
-An import request for extra space counts only originals that can free space on the vault device.
-A bounded walk carries candidates into later passes and checks them again before it counts their space.
+On personal installs, eviction follows the vault's free-space target. A bounded walk continues across passes.
 Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
 Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
 
@@ -44,7 +43,7 @@ The owner’s `process_media` status has a `replicas.eviction` section. It repor
 The inventory counts a shared object once. Its `observed_at` field gives the time of the count.
 If the latest walk cannot prove a count, `inventory_state` reports `failed` at `inventory_attempted_at` and retains the preceding counts.
 The `waiting` field gives the last eviction pass's reason and `waiting_observed_at` gives its time.
-If a shared original has too many distinct versions to check in one pass, `binding_proof_limit` reports why its local bytes stay.
+If a shared original has too many bindings or distinct versions to check in one pass, `binding_proof_limit` reports why its local bytes stay.
 Unknown inventory counts and wait reasons appear as null.
 
 ## What each check proves

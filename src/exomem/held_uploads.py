@@ -218,11 +218,11 @@ def _write_record(store: Path, key: str, record: dict) -> None:
 
 
 @contextmanager
-def _hold_upload_room(vault_root: Path):
+def _hold_upload_room(vault_root: Path, *, device: int):
     from .cli_ops import OpError
 
     try:
-        with media_capacity.upload_room(vault_root) as room:
+        with media_capacity.upload_room(vault_root, device=device) as room:
             yield room
     except OpError as error:
         raise HeldUploadError(error.code, error.message) from error
@@ -255,7 +255,7 @@ def hold(
     kind = (content_type or "").split(";", 1)[0].strip()[:255] or None
 
     store = _store(vault_root)
-    with FileLock(store / ".lock"), _hold_upload_room(vault_root) as room:
+    with FileLock(store / ".lock"), _hold_upload_room(vault_root, device=store.stat().st_dev) as room:
         now = _now()
         _sweep(store, now)
         held_count, held_bytes = _usage(store, binding)

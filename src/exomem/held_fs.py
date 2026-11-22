@@ -323,6 +323,9 @@ class HeldFilesystem:
         creator can split a folder by case or Unicode form. `scratch=True` marks
         a randomly named working folder that the caller removes again: it cannot
         collide, so it skips the parent listing that the check costs.
+
+        `access="flush"` lets the caller publish a child and flush this
+        directory, including the held root at `.`.
         """
         raise NotImplementedError
 

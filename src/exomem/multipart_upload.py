@@ -43,15 +43,7 @@ class _UploadFile(UploadFile):
             # Starlette leaves the spool's directory at the tempfile default. After
             # rollover the open file identifies the device even if its path changes.
             device = os.stat(tempfile.gettempdir()).st_dev if rolling else os.fstat(self.file.fileno()).st_dev
-            offset = self.file.tell()
-            needed = len(data) + (offset if rolling else 0)
-            with media_capacity.upload_room(self._vault, device=device) as room:
-                if room is not None:
-                    room.require(needed, offset=0 if rolling else offset, upload_size=offset + len(data))
-                self.file.write(data)
-                if room is not None:
-                    # The next request must see these bytes in the free-space sample.
-                    self.file.flush()
+            media_capacity.append_disk_spool(self._vault, self.file, data, device=device, rolling=rolling)
 
     async def close(self) -> None:
         if self._in_memory and self._write_lock.acquire(blocking=False):

@@ -59,6 +59,33 @@ def test_cloud_without_explicit_store_does_not_read_personal_configuration(vault
     assert originals.configuration(vault) is None
 
 
+def test_offload_carries_the_admitted_filesystem_route_through_publication(vault, selected_store, tmp_path, monkeypatch):
+    values, config_path = selected_store
+    admitted = Path(values["root"])
+    replacement = tmp_path / "another-store"
+    replacement.mkdir()
+    marker = media_store.STORE_MARKER
+    (replacement / marker).write_bytes((admitted / marker).read_bytes())
+    original_config = config_path.read_bytes()
+    open_store = media_store.store_for
+
+    def route_during_a_second_read(root, name=None):
+        _configure(selected_store, vault, root=str(replacement))
+        try:
+            return open_store(root, name)
+        finally:
+            config_path.write_bytes(original_config)
+
+    original = _stored(vault, "one configuration snapshot")
+    with monkeypatch.context() as changed_route:
+        changed_route.setattr(media_store, "store_for", route_during_a_second_read)
+        reference = _offload(vault, original)
+    assert reference is not None
+    head = open_store(vault).head(reference.object, reference.version)
+    assert head is not None and head.sha256 == reference.ciphertext_sha256
+    assert list(replacement.iterdir()) == [replacement / marker]
+
+
 def test_eviction_keeps_the_original_until_its_key_and_publication_are_ready(vault, selected_store):
     _configure(selected_store, vault, key_version="2", eviction_settle_seconds=600)
     original = _stored(vault, "recordings")
@@ -291,6 +318,87 @@ def test_resumable_commit_retries_space_pressure_without_another_upload_request(
         assert time.monotonic() < limit, observed
         time.sleep(0.02)
     assert (vault / observed["receipt"]["path"]).read_bytes() == data
+
+
+def test_an_expired_parked_commit_releases_space_without_another_upload(vault, selected_store, monkeypatch):
+    from exomem import media_capacity
+
+    _configure(selected_store, vault, upload_floor_bytes=1_000)
+    unit = media_capacity._allocation_unit(vault)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=1_000 + 8 * unit))
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 0.02)
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_MAX_SECONDS", 0.12)
+    data = b"An acknowledged original parks until its session expires."
+    target = {"lane": "evidence", "scope": "field", "category": "samples", "filename": "recording.bin"}
+    session, _secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=hashlib.sha256(data).hexdigest(), target=target, max_bytes=1024,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    monkeypatch.setattr(upload_sessions, "TTL_SECONDS", 1.5)
+    assert part.close() == (len(data), True)
+    with media_capacity.upload_room(vault) as room:
+        assert room.reserved >= unit
+
+    def busy(_part, _record):
+        raise upload_sessions.CommitFailed("MEDIA_SPACE_BUSY", "vault storage is busy", retryable=True)
+
+    upload_sessions.start_commit(session, busy)
+    record = session.store / f"{session.id}.json"
+    deadline = time.monotonic() + 8
+    while record.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.025)
+    assert not session.part.exists()
+    with media_capacity.upload_room(vault) as room:
+        assert room.reserved == 0
+
+
+def test_a_new_owner_floor_applies_to_the_next_chunk_of_an_open_stage(vault, local_store, monkeypatch):
+    from exomem import media_capacity
+
+    store, _path = local_store
+    floor = 1024**2
+    unit = media_capacity._allocation_unit(vault)
+    assert media_capacity.upload_floor(vault) is None
+    free = [floor * 3]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=8 * floor, free=free[0]))
+
+    class PartInterruptedByPolicy(io.BytesIO):
+        def read(self, _length):
+            if self.tell() == unit:
+                personal_eviction.enable(vault, store, free_bytes=2 * floor, upload_floor_bytes=floor)
+                free[0] = floor
+            return super().read(unit)
+
+    stream = PartInterruptedByPolicy(b"a" * unit + b"b" * unit)
+    with pytest.raises(OpError, match="floor") as refused:
+        with upload_stage.stage(vault, stream, limit=2 * unit, too_large=ValueError):
+            pytest.fail("the open stage consumed space protected by the newly set floor")
+    assert refused.value.code == "MEDIA_SPACE_BUSY"
+    assert not list(upload_stage.stage_root(vault).glob("*.part"))
+
+
+def test_an_old_policy_inventory_failure_keeps_the_current_measurement(vault, local_store, monkeypatch):
+    _store, path = local_store
+    inventory = media_store._physical_drain_census
+
+    def obsolete_attempt(root, _conn):
+        document = json.loads(path.read_bytes())
+        document["vaults"][str(vault)]["upload_floor_bytes"] = 0
+        path.write_text(json.dumps(document), encoding="utf-8")
+        with monkeypatch.context() as current_policy:
+            current_policy.setattr(media_store, "_physical_drain_census", inventory)
+            assert media_store.drain_census(root, inventory_only=True) == (0, 0)
+        raise ValueError("the earlier policy's inventory lost its binding frontier")
+
+    monkeypatch.setattr(media_store, "_physical_drain_census", obsolete_attempt)
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_CENSUS_UNKNOWN"):
+        media_store.drain_census(vault, inventory_only=True)
+    config = originals.configuration(vault)
+    with closing(media_jobs.MediaJobStore(vault)._connect(readonly=True)) as conn:
+        status = media_store.personal_eviction_status(conn, config)
+    assert status["inventory_state"] == "complete" and status["local"] == {"count": 0, "bytes": 0}
 
 
 @pytest.mark.parametrize("pooled", [False, True])

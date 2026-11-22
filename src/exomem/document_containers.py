@@ -97,7 +97,7 @@ def inspect(stream: BinaryIO, *, vault_root: Path | None = None) -> Iterator[Ins
 
     position = stream.tell()
     result = Inspection()
-    if vault_root is not None and media_capacity.upload_floor(vault_root) is None:
+    if vault_root is not None and not media_capacity.managed_allocations(vault_root):
         vault_root = None
     with ExitStack() as held:
         try:

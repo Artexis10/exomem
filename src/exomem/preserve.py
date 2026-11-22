@@ -38,7 +38,7 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from . import (
     capture_metadata,
@@ -698,41 +698,38 @@ def preserve(
 
     container_stack = ExitStack()
     container_metadata = None
+    spool_limit = min(max(max_decoded_bytes, 1), 8 * 1024 * 1024)
     artifact_stage = (
         staged.open()
         if staged is not None
-        else tempfile.SpooledTemporaryFile(
-            max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
-            mode="w+b",
-        )
+        else tempfile.SpooledTemporaryFile(max_size=spool_limit, mode="w+b")
     )
+
+    def spool(chunk: bytes) -> None:
+        offset = artifact_stage.tell()
+        if offset + len(chunk) <= spool_limit:
+            artifact_stage.write(chunk)
+            return
+        rolling = offset <= spool_limit
+        device = os.stat(tempfile.gettempdir()).st_dev if rolling else os.fstat(artifact_stage.fileno()).st_dev
+        media_capacity.append_disk_spool(vault_root, artifact_stage, chunk, device=device, rolling=rolling)
+
     try:
-        spool_device = os.stat(tempfile.gettempdir()).st_dev if staged is None else None
         if staged is not None:
             artifact_size, artifact_hash = staged.size, staged.sha256
         elif content_stream is not None:
             # Stream into a process-private spool first. It spills to disk above
             # 8 MiB, so large uploads stay bounded in RAM while no canonical path
             # becomes visible before governance preflight succeeds.
-            with media_capacity.upload_room(vault_root, device=spool_device) as room:
-                artifact_size, artifact_hash = _copy_stream(
-                    content_stream, artifact_stage, limit=max_stream_bytes, room=room,
-                )
+            artifact_size, artifact_hash = _copy_stream(content_stream, spool, limit=max_stream_bytes)
         elif artifact_bytes is not None:
             artifact_size = len(artifact_bytes)
-            with media_capacity.upload_room(vault_root, device=spool_device) as room:
-                if room is not None:
-                    room.require(artifact_size)
-                artifact_stage.write(artifact_bytes)
+            spool(artifact_bytes)
             artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
         else:
             artifact_text_bytes = (artifact_text or "").encode("utf-8")
             artifact_size = len(artifact_text_bytes)
-            with media_capacity.upload_room(vault_root, device=spool_device) as room:
-                if room is not None and artifact_size > min(max(max_decoded_bytes, 1), 8 * 1024 * 1024):
-                    room.require(artifact_size)
-                artifact_stage.write(artifact_text_bytes)
-                artifact_stage.flush()
+            spool(artifact_text_bytes)
             artifact_hash = hashlib.sha256(artifact_text_bytes).hexdigest()
         artifact_stage.seek(0)
 
@@ -1173,10 +1170,9 @@ _STREAM_CHUNK = 1024 * 1024  # 1 MiB copy buffer
 
 def _copy_stream(
     stream: BinaryIO,
-    destination: IO[bytes],
+    write: Callable[[bytes], None],
     *,
     limit: int,
-    room: media_capacity.UploadRoom | None = None,
 ) -> tuple[int, str]:
     """Copy a binary stream into a private destination under an exact cap."""
 
@@ -1193,10 +1189,8 @@ def _copy_stream(
         written += len(buf)
         if written > limit:
             raise too_large(limit)
-        if room is not None:
-            room.require(written)
         digest.update(buf)
-        destination.write(buf)
+        write(buf)
     return written, digest.hexdigest()
 
 
