@@ -1,0 +1,11 @@
+{
+  "id": "m03-library",
+  "title": "A faster library for a slow import is discussed with doubts",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "Random thought about the Pebble Ledger import. Forty seconds for five years of statements on the old laptop is longer than I'd like. There's a Rust crate for reading CSV that uses SIMD instructions and claims several times the throughput of the csv crate I use now. I'm not sure the parse is even the slow part, and a new dependency has a cost, but it's the first thing I've seen that goes straight at the problem.",
+    "Anyway. Thanks for listening."
+  ]
+}

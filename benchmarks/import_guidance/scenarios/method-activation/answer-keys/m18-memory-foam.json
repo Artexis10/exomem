@@ -1,0 +1,12 @@
+{
+  "reference": "Negative twin of the memory-failure cases. Memory foam is a mattress material and has nothing to do with the assistant's memory. The memory-incident method does not apply and nothing belongs in Memory Incidents. No method in the vault covers mattress shopping. A correct assistant selects no method and answers from the existing mattress note: pocket-sprung and hybrid mattresses sleep cooler, memory foam relieves pressure but often sleeps warm, and a long home trial matters. It may add the hotel experience to that note, which is optional.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [],
+  "destination": null,
+  "trigger_turn": 0
+}

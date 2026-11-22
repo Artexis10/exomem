@@ -1,0 +1,15 @@
+{
+  "reference": "Negative twin of the approval cases: the person approves something, but it is a trip, not a technology trial. Serving the technology-signal method is wrong and no signal item or Planning item belongs here. What fits is the user's trip-planning method. A correct assistant serves trip-planning only, finds the existing Marrow Coast weekend note and updates it instead of creating a second one, marks the itinerary approved, keeps Sunday morning free, and lists what is still to book in order of least slack, with the return ferry first. It books nothing itself. The key is the distractor method, not an empty list, because approving an itinerary is exactly the situation that method describes.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Skills/trip-planning/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/trip-planning/SKILL.md"
+  ],
+  "destination": null,
+  "trigger_turn": 1
+}

@@ -1,0 +1,11 @@
+{
+  "id": "m01-database-feature",
+  "title": "A database feature seen for a side project is discussed",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I spent part of the weekend reading the release notes for the newest SQLite. It can now store JSON in a binary form, so reading a field back skips the parsing step entirely. That could matter for Pebble Ledger, because the importer keeps each raw bank row as JSON and re-parses it every time I rebuild the totals.",
+    "That's all for now, thanks."
+  ]
+}
