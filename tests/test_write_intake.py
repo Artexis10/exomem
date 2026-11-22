@@ -8,17 +8,29 @@ holds, with the serving process's drainer running.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from _public_call import public_call
+from conftest import _drain_background_threads
+from fastmcp import Client
 
-from exomem import commands, write_intake, writer_lease
+from exomem import auth_sessions, call_ledger, commands, write_intake, writer_lease
+from exomem import schema as schema_module
+from exomem import server as server_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember
-from exomem.governance.principal import RequestPrincipal, local_owner_principal, request_scope
+from exomem.edit_operations import ReplaceStringOperation
+from exomem.governance.principal import (
+    OriginSessionBinding,
+    RequestPrincipal,
+    local_owner_principal,
+    request_scope,
+)
 
 _HOLD_SECONDS = 30.0
 _LAND_SECONDS = 30.0
@@ -98,10 +110,12 @@ def _remember_kwargs(vault: Path, number: int) -> dict:
     return kwargs
 
 
-def _send(command, vault: Path, kwargs: dict, *, scope: str = "principal:session-a",
-          principal: RequestPrincipal | None = None):
+def _send(command, vault: Path, kwargs: dict, *, scope: str | None = "principal:session-a",
+          principal: RequestPrincipal | None = None, injected: tuple = ()):
     with request_scope(principal or local_owner_principal(surface="mcp")):
-        return writer_lease.invoke_command(command, vault, implicit_idempotency_scope=scope, **kwargs)
+        return writer_lease.invoke_command(
+            command, vault, *injected, implicit_idempotency_scope=scope, **kwargs
+        )
 
 
 def _wait_for_state(vault: Path, ref: str, state: str) -> dict:
@@ -248,7 +262,7 @@ def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(
         assert refused.value.code == "MUTATION_BUSY"
         with pytest.raises(OpError) as refused_delegate:
             _send(_command("remember"), vault, _remember_kwargs(vault, 7), principal=delegated)
-        assert refused_delegate.value.code != "MUTATION_QUEUED"
+        assert refused_delegate.value.code == "MUTATION_BUSY"
     assert write_intake.read(vault)["items"] == []
 
 
@@ -273,16 +287,20 @@ def test_only_the_owner_can_read_queued_saves(vault: Path, managers, drainer) ->
         ref = _send(_command("remember"), vault, _remember_kwargs(vault, 9))["queued_write"]["ref"]
     other = RequestPrincipal(audience_id="oauth:someone-else", surface="mcp", resolved=True,
                              issuer_family="mcp-oauth:test")
-    with request_scope(other):
-        for arguments in ({"mode": "queued-write"}, {"mode": "queued-write", "ref": ref}):
-            with pytest.raises(OpError) as refused:
-                commands.op_review_memory(vault, **arguments)
-            assert refused.value.code == "QUEUED_WRITE_OWNER_ONLY"
+    # A delegated session of the owner is refused too: its saves never queue, so it reads none.
+    delegated = replace(local_owner_principal(surface="mcp"), authorization_session_id="delegated-session")
+    for caller in (other, delegated):
+        with request_scope(caller):
+            for arguments in ({"mode": "queued-write"}, {"mode": "queued-write", "ref": ref}):
+                with pytest.raises(OpError) as refused:
+                    commands.op_review_memory(vault, **arguments)
+                assert refused.value.code == "QUEUED_WRITE_OWNER_ONLY"
+            assert "write_intake" not in commands.op_coordination_status(vault)
     with request_scope(local_owner_principal(surface="mcp")):
         assert commands.op_review_memory(vault, mode="queued-write", ref=ref)["queued_write"]["ref"] == ref
 
 
-def test_a_replay_that_stopped_before_the_boundary_lands_once_under_a_fresh_identity(
+def test_a_replay_that_stopped_before_its_commit_gate_lands_once_under_a_fresh_identity(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _writer, holder = managers
@@ -296,7 +314,7 @@ def test_a_replay_that_stopped_before_the_boundary_lands_once_under_a_fresh_iden
         def stopped_while_waiting(*_args, **_kwargs):
             raise SystemExit("service stopped while the replay waited for the boundary")
 
-        # The replay dies in line, before it ever holds the boundary.
+        # The replay dies in line, before it reaches the commit gate.
         monkeypatch.setattr(writer_lease, "invoke_command", stopped_while_waiting)
         with pytest.raises(SystemExit):
             write_intake._apply(vault, real_claim(vault))
@@ -305,3 +323,209 @@ def test_a_replay_that_stopped_before_the_boundary_lands_once_under_a_fresh_iden
     applied = _wait_for_state(vault, ref, "applied")
     assert applied["attempts"] == 2
     assert len(_pages_titled(vault, "Queued save 10")) == 1
+
+
+def _hold_and_queue(holder, vault: Path, *sends, monkeypatch=None, then=None) -> list[dict]:
+    """Queue each save while another manager holds the boundary; return the receipts.
+
+    With `then`, the drainer claims nothing until the saves are queued and `then` has run,
+    so a fault that `then` installs meets each save's first replay.
+    """
+    resume = threading.Event()
+    if then is not None:
+        real_claim = write_intake._claim_head
+        monkeypatch.setattr(write_intake, "_claim_head", lambda root: real_claim(root) if resume.is_set() else 0.05)
+    with _Hold(holder, vault):
+        receipts = [send() for send in sends]
+    if then is not None:
+        then()
+        resume.set()
+    assert all(receipt["state"] == "queued" for receipt in receipts), receipts
+    return receipts
+
+
+def test_a_typed_mcp_edit_during_a_hold_is_queued_and_applied_after_it(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _writer, holder = managers
+    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
+    monkeypatch.delenv("EXOMEM_MCP_TOOL_SHAPE", raising=False)
+    call_ledger.reset_chain_cache()
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    edit = {"note": page, "action": "replace_text", "old_text": "1%, 5%, 25%, 100%",
+            "new_text": "1%, 10%, 50%, 100%", "why": "A source corrected the cohort steps."}
+
+    async def send() -> dict:
+        async with Client(server_module.build_server(require_auth=False)) as client:
+            result = await client.call_tool(*public_call("edit_note", edit), raise_on_error=False)
+            assert result.structured_content is not None
+            return result.structured_content
+
+    with _Hold(holder, vault):
+        receipt = asyncio.run(send())
+    assert receipt["state"] == "queued", receipt
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert "1%, 10%, 50%, 100%" in (vault / page).read_text(encoding="utf-8")
+
+
+def test_a_typed_edit_operation_is_stored_as_json_and_replayed(vault: Path, managers, drainer) -> None:
+    _writer, holder = managers
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    operation = ReplaceStringOperation(kind="replace_string", old_string="1%, 5%, 25%, 100%",
+                                       new_string="1%, 10%, 50%, 100%")
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(
+        _command("edit_memory"), vault, {"path": page, "why": "A source corrected it.", "operation": operation}))
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert "1%, 10%, 50%, 100%" in (vault / page).read_text(encoding="utf-8")
+
+
+def test_the_same_explicit_identity_with_a_different_payload_lands_two_pages(
+    vault: Path, managers, drainer
+) -> None:
+    _writer, holder = managers
+    remember = _command("remember")
+    first, second = _remember_kwargs(vault, 11), _remember_kwargs(vault, 12)
+    receipts = _hold_and_queue(
+        holder, vault,
+        lambda: _send(remember, vault, {**first, "idempotency_key": "one-key"}, scope=None),
+        lambda: _send(remember, vault, {**second, "idempotency_key": "one-key"}, scope=None),
+    )
+    assert receipts[0]["queued_write"]["ref"] != receipts[1]["queued_write"]["ref"]
+    for receipt in receipts:
+        _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 11")) == 1
+    assert len(_pages_titled(vault, "Queued save 12")) == 1
+
+
+def test_a_commit_marker_that_cannot_be_written_commits_nothing_and_the_save_lands_once(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    real_mark = write_intake._mark_commit_reached
+    pages_when_refused: list[int] = []
+
+    def fail_once(root, claim):
+        if not pages_when_refused:
+            pages_when_refused.append(len(_pages_titled(vault, "Queued save 13")))
+            raise OSError("disk full while marking the commit")
+        return real_mark(root, claim)
+
+    monkeypatch.setattr(write_intake, "_mark_commit_reached", fail_once)
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 13)))
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert pages_when_refused == [0]
+    assert len(_pages_titled(vault, "Queued save 13")) == 1
+
+
+def test_a_replay_whose_outcome_is_unknown_fails_visibly_and_the_queue_moves_on(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    remember = _command("remember")
+    real_invoke = writer_lease.invoke_command
+
+    def unknown_for_the_first(command, *injected, **kwargs):
+        if kwargs.get("slug") == "queued-save-14":
+            # What the idempotency store answers for an identity a stopped owner left pending.
+            raise OpError("MUTATION_OUTCOME_UNKNOWN", "the earlier attempt's outcome is unknown",
+                          details={"status": "unknown", "committed": None})
+        return real_invoke(command, *injected, **kwargs)
+
+    receipts = _hold_and_queue(
+        holder, vault,
+        lambda: _send(remember, vault, _remember_kwargs(vault, 14)),
+        lambda: _send(remember, vault, _remember_kwargs(vault, 15), scope="principal:session-b"),
+        monkeypatch=monkeypatch,
+        then=lambda: monkeypatch.setattr(writer_lease, "invoke_command", unknown_for_the_first),
+    )
+    failed = _wait_for_state(vault, receipts[0]["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == "MUTATION_OUTCOME_UNKNOWN"
+    assert failed["arguments"]["slug"] == "queued-save-14"
+    read = write_intake.read(vault, ref=receipts[0]["queued_write"]["ref"])
+    assert "may have landed" in read["user_summary"]
+    _wait_for_state(vault, receipts[1]["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 15")) == 1
+
+
+def test_a_replay_that_faults_before_the_dispatcher_fails_and_the_save_behind_it_lands(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    schema = schema_module.load_source_schema(vault)
+    episode = {"action": "record", "episode": "ep-" + "b2" * 16, "subject": "Harbor Lamp purchase",
+               "summary": "Chose the brass lamp; delivery date still open.", "decided": ["Buy the brass lamp"]}
+    real_load = schema_module.load_source_schema
+    faults: list[Path] = []
+
+    def schema_fault_once(root):
+        # The first load after the saves are queued is the episode replay's own.
+        if not faults:
+            faults.append(root)
+            raise RuntimeError("schema file vanished")
+        return real_load(root)
+
+    receipts = _hold_and_queue(
+        holder, vault,
+        lambda: _send(_command("episode_memory"), vault, episode, injected=(schema,)),
+        lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 16), scope="principal:session-b"),
+        monkeypatch=monkeypatch,
+        then=lambda: monkeypatch.setattr(schema_module, "load_source_schema", schema_fault_once),
+    )
+    failed = _wait_for_state(vault, receipts[0]["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == "INTERNAL"
+    assert failed["arguments"]["episode"] == episode["episode"]
+    _wait_for_state(vault, receipts[1]["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 16")) == 1
+
+
+def test_a_save_that_meets_no_contention_commits_when_the_intake_store_is_unreadable(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(*_args, **_kwargs):
+        raise OSError("disk read failed")
+
+    monkeypatch.setattr(write_intake, "_store", unreadable)
+    result = _send(_command("remember"), vault, _remember_kwargs(vault, 17))
+    assert result.get("state") != "queued"
+    assert result["user_summary"].startswith("Saved")
+    assert len(_pages_titled(vault, "Queued save 17")) == 1
+
+
+def test_an_idle_drainer_leaves_the_vault_identity_generation_alone(vault: Path, managers, drainer) -> None:
+    writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 18)))
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    # The save's own background work (a graph rebuild) changes identities; let it finish first.
+    _drain_background_threads()
+    before = writer_lease._read_reserved_identity_generation(writer.config.state_dir, vault)
+    # A restarted drainer reads its existing store and then waits; nothing it does may change an identity.
+    write_intake.stop(vault)
+    restarted = write_intake.start(vault)
+    restarted.notify()
+    time.sleep(0.5)
+    assert restarted.backlog() == 0
+    assert writer_lease._read_reserved_identity_generation(writer.config.state_dir, vault) == before
+
+
+def test_a_queued_save_whose_login_has_ended_fails_with_its_arguments(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    signed_in = replace(
+        local_owner_principal(surface="mcp"),
+        origin_session=OriginSessionBinding(session_id="login-1", generation="1", audience="mcp"),
+    )
+    (receipt,) = _hold_and_queue(
+        holder, vault,
+        lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 19), principal=signed_in),
+        monkeypatch=monkeypatch,
+        then=lambda: monkeypatch.setattr(
+            auth_sessions, "origin_login_state_sync", lambda _who: auth_sessions.OriginLogin.NOT_VALID
+        ),
+    )
+    failed = _wait_for_state(vault, receipt["queued_write"]["ref"], "failed")
+    assert failed["error"]["code"] == write_intake.LOGIN_REVOKED
+    assert failed["arguments"]["slug"] == "queued-save-19"
+    assert _pages_titled(vault, "Queued save 19") == []
