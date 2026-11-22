@@ -33,6 +33,15 @@ print("written", flush=True)
 sys.stdin.readline()
 patch.close()
 """
+_HOLD_LOCK = """
+import sys
+
+from filelock import FileLock
+
+with FileLock(sys.argv[1], timeout=5):
+    print("locked", flush=True)
+    sys.stdin.readline()
+"""
 # A single write must exceed Python's maximum automatic file buffer.
 _PART = b"a" * (8 * 1024 * 1024 + 1)
 
@@ -256,3 +265,60 @@ def test_serving_runtime_reclaims_abandoned_parts_and_receipts_without_a_request
         finally:
             release.set()
         assert _committed(vault, active, secret) == {"hash": hashlib.sha256(data).hexdigest()}
+
+
+def test_sweep_reclaims_an_idle_terminal_lock_without_removing_a_peer_lock(vault):
+    data = b"sample"
+    session, secret = _create(vault, data)
+    patch = upload_sessions.Patch(session, 0, len(data))
+    patch.write(data)
+    patch.close()
+    upload_sessions.start_commit(session, lambda part, record: {"hash": record["sha256"]})
+    receipt = _committed(vault, session, secret)
+    lock_path = session.store / f"{session.id}.lock"
+    # Simulate a release that left its name, as supported filelock versions do.
+    lock_path.touch()
+
+    with subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(lock_path)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    ) as peer:
+        try:
+            assert peer.stdout.readline().strip() == "locked"
+            held = lock_path.stat()
+            upload_sessions.sweep(vault)
+            assert os.path.samestat(held, lock_path.stat())
+        finally:
+            _, errors = peer.communicate(input="continue\n", timeout=10)
+        assert peer.returncode == 0, errors
+
+    lock_path.touch()
+    upload_sessions.sweep(vault)
+    assert not lock_path.exists()
+    assert upload_sessions.open_session(vault, session.id, secret).view()["receipt"] == receipt
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Windows disallows replacing an open lock pathname")
+def test_sweep_leaves_a_replacement_lock_when_the_opened_inode_has_moved(vault, monkeypatch):
+    session, _ = _create(vault, b"sample")
+    upload_sessions.delete(session)
+    lock_path = session.store / f"{session.id}.lock"
+    lock_path.touch()
+    replacement = session.store / "replacement"
+    replacement.write_bytes(b"replacement")
+    expected = replacement.stat()
+    real_open = os.open
+    swapped = []
+
+    def open_then_replace(path, *args, **kwargs):
+        descriptor = real_open(path, *args, **kwargs)
+        if os.fspath(path) in (lock_path.name, os.fspath(lock_path)) and not swapped:
+            os.replace(replacement, lock_path)
+            swapped.append(True)
+        return descriptor
+
+    monkeypatch.setattr(os, "open", open_then_replace)
+    upload_sessions.sweep(vault)
+    assert swapped
+    assert os.path.samestat(expected, lock_path.stat())
+    assert lock_path.read_bytes() == b"replacement"

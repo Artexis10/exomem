@@ -2000,15 +2000,24 @@ def unregister_state_resolver(operation: str) -> None:
     _STATE_RESOLVERS.pop(operation, None)
 
 
-def event_records(vault_root: Path) -> list[dict[str, Any]]:
+def event_records(
+    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> list[dict[str, Any]]:
     """Return verified content-free records without mutating chain or sidecar."""
     root = _events_root(Path(vault_root))
     if not root.exists():
         return []
     records: list[dict[str, Any]] = []
-    for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+    candidates = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if checkpoint is not None:
+                checkpoint()
+            if entry.is_dir():
+                candidates.append(Path(entry.path))
+    for candidate in sorted(candidates):
         instance_dir = _instance_dir(vault_root, candidate.name)
-        instance_records, issues = _chain_state(instance_dir)
+        instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
         if issues:
             raise ReceiptError("receipt chain requires reconciliation")
         records.extend(

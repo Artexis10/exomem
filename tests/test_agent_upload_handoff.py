@@ -338,21 +338,46 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
         transport=_ASGISyncTransport(upload_env[-1]),
     ) == 0
     assert json.loads(capsys.readouterr().out) == receipt
+    from exomem import reserved_paths, source_imports
     from exomem.governance import lifecycle
+    from test_governance_receipts import _write_restricting_policy
 
     location, secret = transport.locator
+    vault = upload_env[0]
+    _write_restricting_policy(vault, receipt["path"].removeprefix("Knowledge Base/"))
     with httpx.Client(transport=_ASGISyncTransport(upload_env[-1]), base_url="https://capture.example") as client:
         headers = {upload_sessions.SECRET_HEADER: secret}
-        original_tombstone = lifecycle.is_tombstoned
+        deletion = lifecycle.begin_deletion(vault, source_rel=receipt["path"],
+                                            trash_rel="Knowledge Base/_trash/test-receipt.md")
+        assert deletion.tombstone_path is not None
+        hidden = client.get(location, headers=headers)
+        assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+        session = upload_sessions.open_session(vault, location.rsplit("/", 1)[-1], secret)
+        assert session.record["state"] == upload_sessions.COMMITTED
+        lifecycle.abort_deletion(deletion)
+        assert client.get(location, headers=headers).json()["receipt"] == receipt
+
         with monkeypatch.context() as withheld:
-            withheld.setattr(lifecycle, "is_tombstoned", lambda root, path: (
-                path == receipt["path"] or original_tombstone(root, path)
-            ))
+            withheld.setattr(source_imports, "_RECEIPT_READ_SECONDS", 0)
             hidden = client.get(location, headers=headers)
             assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
-            session = upload_sessions.open_session(upload_env[0], location.rsplit("/", 1)[-1], secret)
-            assert session.record["state"] == upload_sessions.COMMITTED
         assert client.get(location, headers=headers).json()["receipt"] == receipt
+
+        scope = vault / "Knowledge Base/_Governance/scopes/lifecycle.yaml"
+        path_scope = scope.read_text(encoding="utf-8")
+        scope.write_text(path_scope + "tags: [requires-artifact-metadata]\n", encoding="utf-8")
+        read = reserved_paths.read_generic_bytes
+
+        def no_payload_read(root, path, **kwargs):
+            assert path != receipt["artifact_path"], "receipt GET read the accepted original"
+            return read(root, path, **kwargs)
+
+        with monkeypatch.context() as metadata_only:
+            metadata_only.setattr(reserved_paths, "read_generic_bytes", no_payload_read)
+            hidden = client.get(location, headers=headers)
+            assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+            scope.write_text(path_scope, encoding="utf-8")
+            assert client.get(location, headers=headers).json()["receipt"] == receipt
 
 
 @pytest.mark.parametrize(("field", "value"), [

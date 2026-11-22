@@ -18,6 +18,10 @@ from .governance.principal import effective_principal, owner_local_producer
 OWNER = "source_imports"
 _MAX_ID_CHARS = 256
 _MAX_RECEIPT_BYTES = 8192
+# A receipt needs one generated Source companion. An oversized edit stays available through ordinary reads.
+_MAX_RECEIPT_PAGE_BYTES = 1 << 20
+# Bound request work on a large audit history. An incomplete gate cannot expose custody identifiers.
+_RECEIPT_READ_SECONDS = 0.25
 _PREPARED_STORE = "source-import-intents"
 _UNAVAILABLE = "The imported Source could not be verified. Keep the same import ID when retrying."
 
@@ -299,45 +303,56 @@ class ResumableCapture(ImportCapture):
         # The upload cannot retry an ambiguous writer claim. Only this batch's commit can prove the receipt.
         return None
 
-    def seal_file_commit(self, receipt: Receipt) -> None:
+    def file_commit_witness(self, receipt: Receipt) -> vault._BatchFileWitness | None:
         from .upload_sessions import pending_file_commit_witness
         from .writer_lease import _PostCommitOutcomeUncertain
 
         path = self.file_witness
-        assert path is not None
+        if path is None:
+            return None
         pending = pending_file_commit_witness(path)
         receipt_hash = vault.content_hash(receipt.model_dump_json() + "\n")
-        # The session owns this private directory and keeps its lock through publication.
-        with private_state.stage_record(path.parent, path.stem, {"receipt_sha256": receipt_hash},
-                                        temp_suffix=".tmp", durable=True) as temporary:
-            try:
-                os.link(temporary, pending)
-            except OSError as error:
-                if _publication_path_possible(pending):
-                    raise _PostCommitOutcomeUncertain() from error
-                raise
-            linked = False
-            try:
-                # A crash during a failed seal must leave the pending name whenever the commit link survives.
-                private_state.sync_directory(path.parent)
-                os.link(temporary, path)
-                linked = True
-                private_state.sync_directory(path.parent)
-            except OSError as error:
-                if not linked and _publication_path_possible(path):
-                    raise _PostCommitOutcomeUncertain() from error
+        pending_created = False
+        proof_linked = False
+
+        def begin() -> None:
+            # The session lock covers every file install. Persist the intent before the first one.
+            nonlocal pending_created
+            with private_state.stage_record(path.parent, path.stem, {"receipt_sha256": receipt_hash},
+                                            temp_suffix=".tmp", durable=True) as temporary:
                 try:
-                    if linked:
-                        path.unlink()
-                        private_state.sync_directory(path.parent)
-                    pending.unlink()
-                    private_state.sync_directory(path.parent)
-                except OSError as cleanup:
-                    raise _PostCommitOutcomeUncertain() from cleanup
-                raise
+                    os.link(temporary, pending)
+                except OSError as error:
+                    if _publication_path_possible(pending):
+                        raise _PostCommitOutcomeUncertain() from error
+                    raise
+                pending_created = True
+            private_state.sync_directory(path.parent)
+
+        def seal() -> None:
+            nonlocal proof_linked
+            os.link(pending, path)
+            proof_linked = True
+            private_state.sync_directory(path.parent)
             # The commit link is durable. A failed retirement leaves the latch blocking recovery
             # until terminal cleanup. It cannot make the writer roll back those proven bytes.
             private_state.remove(pending)
+
+        def retire_rolled_back() -> None:
+            if not pending_created:
+                return
+            try:
+                if proof_linked:
+                    path.unlink()
+                    private_state.sync_directory(path.parent)
+                elif _publication_path_possible(path):
+                    raise _PostCommitOutcomeUncertain()
+                pending.unlink()
+                private_state.sync_directory(path.parent)
+            except OSError as error:
+                raise _PostCommitOutcomeUncertain() from error
+
+        return vault._BatchFileWitness(begin, seal, retire_rolled_back)
 
     def publication_may_have_started(self, root: Path) -> bool:
         """Retain the upload if its exact publication left any evidence or cannot be checked."""
@@ -429,9 +444,43 @@ def _released_upload_payload(
 
 def upload_receipt_releasable(root: Path, *, page: object, ref: object, artifact: object, sha256: object) -> bool:
     """Decide release against current Source metadata without reading the original."""
+    from . import document_containers, request_budget
+    from .collection_store.connection import CollectionStoreError
+    from .governance import egress, lifecycle, policy
+
     if not (isinstance(page, str) and isinstance(ref, str) and isinstance(artifact, str) and isinstance(sha256, str)):
         return False
-    return _released_upload_payload(root, page=page, ref=ref, artifact=artifact, sha256=sha256) is not None
+    if any(reserved_paths.classify_logical(path).blocked or document_containers.in_payload_tree(path)
+           for path in (page, artifact)):
+        return False  # Container members need their separate parent proof.
+    checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=_RECEIPT_READ_SECONDS))
+    try:
+        with request_budget.checking(checkpoint), policy.request_policy_snapshot():
+            checkpoint()
+            tombstones = lifecycle.tombstoned_paths(root, checkpoint=checkpoint)
+            if any(lifecycle.is_tombstoned_in(tombstones, value) for value in (page, ref, artifact)):
+                return False
+            compiled = policy.load(root)
+            raw, guard = vault.read_bounded_guarded_bytes(root, page, limit=_MAX_RECEIPT_PAGE_BYTES)
+            payload = duplicates.derive_page_payload(page, raw)
+            if (payload is None or payload.lane != duplicates.SOURCES or payload.ref != ref
+                    or payload.artifact_path != artifact or payload.sha256 != sha256
+                    or duplicates.binding_unproven(root, page, payload, page_snapshot=raw)):
+                return False
+            checkpoint()
+            if egress.release_level_for(root, page, record=False, policy=compiled, tombstones=tombstones,
+                                        page_snapshot=raw) != policy.DISCLOSURE_MAX:
+                return False
+            if egress._release_level_for_path_only_snapshot(
+                root, artifact, policy=compiled, tombstones=tombstones, resolve_bytes=False,
+            ) != policy.DISCLOSURE_MAX:
+                return False
+            guard.recheck(root)
+            checkpoint()
+            return True
+    except (request_budget.ReadBudgetExhausted, OSError, ValueError, CollectionStoreError,
+            reserved_paths.ReservedPathLeafError, lifecycle.LifecycleError):
+        return False
 
 
 def resumable_capture(root: Path, record: dict) -> ResumableCapture:

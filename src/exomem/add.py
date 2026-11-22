@@ -23,7 +23,6 @@ import os
 import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
 from pathlib import Path
 from typing import IO, Any
 
@@ -1078,8 +1077,8 @@ def add(
             receipt_write = import_capture.planned_write(vault_root, receipt)
             if _import_resume is None:
                 import_capture.prepare(vault_root, receipt)
-            if isinstance(import_capture, source_imports.ResumableCapture) and import_capture.file_witness is not None:
-                file_commit_witness = partial(import_capture.seal_file_commit, receipt)
+            if isinstance(import_capture, source_imports.ResumableCapture):
+                file_commit_witness = import_capture.file_commit_witness(receipt)
             writes.append(receipt_write)
             bound_receipts.append((vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT, receipt_write))
             from . import reserved_paths
@@ -1132,7 +1131,7 @@ def add(
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
                 _publish_originals=publish_original,
-                _seal_file_commit=file_commit_witness,
+                _file_commit_witness=file_commit_witness,
                 **({"_payload_custody": payload_custody} if payload_custody is not None else {}),
             )
         else:
@@ -1142,7 +1141,7 @@ def add(
                                _prepare=prepare_final if _prepare is not None else None,
                                _publish_originals=publish_original,
                                _retained_original=retained_original,
-                               _seal_file_commit=file_commit_witness,
+                               _file_commit_witness=file_commit_witness,
                                **({"_payload_custody": payload_custody} if payload_custody is not None else {}))
     except _NativePrepared:
         raise

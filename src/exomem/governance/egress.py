@@ -2391,6 +2391,7 @@ def _decide_path(
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
     tombstones: frozenset[str] | None = None,
     principal: RequestPrincipal | None = None,
+    page_snapshot: bytes | None = None,
 ) -> Decision | None:
     """Decide one path, memoized per request identity AND page identity.
 
@@ -2420,7 +2421,7 @@ def _decide_path(
     who = principal if principal is not None else effective_principal()
     if who.audience_id != audience:
         who = RequestPrincipal(audience_id=audience)
-    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
+    if not content_permits(vault_root, rel_path, who, snapshot=page_snapshot, artifact_copy=artifact_copy):
         return Decision(DISCLOSURE_MIN)
     from ..collection_store.connection import CollectionStoreError
 
@@ -2441,7 +2442,7 @@ def _decide_path(
     live_content_hash: str | None = artifact_copy.sha256 if artifact_copy is not None else None
     if _is_markdown_path(rel_path) and artifact_copy is None:
         try:
-            raw = _page_bytes(vault_root, rel_path)
+            raw = _page_bytes(vault_root, rel_path) if page_snapshot is None else page_snapshot
         except OSError:
             return None
         live_content_hash = hashlib.sha256(raw).hexdigest()
@@ -7367,6 +7368,9 @@ def release_level_for(
     receipt_decision: str | None = None,
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
     record: bool = True,
+    policy: Policy | None = None,
+    tombstones: frozenset[str] | None = None,
+    page_snapshot: bytes | None = None,
 ) -> int | None:
     """The disclosure ceiling for one item, or `None` when it cannot be decided.
 
@@ -7380,12 +7384,14 @@ def release_level_for(
     may show and hands nothing from the item itself to anyone.
     """
     vault_root = Path(vault_root)
-    if lifecycle.is_tombstoned(vault_root, rel_path):
+    if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
+            else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
+    if not content_permits(vault_root, rel_path, who, snapshot=page_snapshot, artifact_copy=artifact_copy):
         return DISCLOSURE_MIN
-    policy = policy_module.load(vault_root)
+    if policy is None:
+        policy = policy_module.load(vault_root)
     from ..collection_store.connection import CollectionStoreError
 
     try:
@@ -7410,6 +7416,8 @@ def release_level_for(
         authorization_session=who.authorization_session_id,
         authorization_context=who.verified_authorization_session,
         artifact_copy=artifact_copy,
+        tombstones=tombstones,
+        page_snapshot=page_snapshot,
     )
     level = None if decision is None else decision.level
     if not record:
@@ -7548,7 +7556,8 @@ _CURRENT_PATH_FINGERPRINT = object()
 def _path_only_stands_alone(kwargs: Mapping[str, Any]) -> bool:
     """A receipt records its effect when the read runs, and a captured fingerprint is one page's."""
     return (kwargs.get("receipt_decision") is not None
-            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT)
+            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT
+            or kwargs.get("resolve_bytes") is False)
 
 
 @canonical_read(
@@ -7565,6 +7574,7 @@ def _release_level_for_path_only_snapshot(
     policy: Any | None = None,
     tombstones: frozenset[str] | None = None,
     content_fingerprint: str | None | object = _CURRENT_PATH_FINGERPRINT,
+    resolve_bytes: bool = True,
 ) -> int:
     """Continue internal publication admission against its verified raw preimage.
 
@@ -7580,8 +7590,16 @@ def _release_level_for_path_only_snapshot(
     if policy is None:
         policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who):
-        return DISCLOSURE_MIN
+    if resolve_bytes:
+        if not content_permits(vault_root, rel_path, who):
+            return DISCLOSURE_MIN
+    else:
+        from .. import document_containers
+
+        if (document_containers.in_payload_tree(rel_path)
+                or raw_protection.permits(vault_root, rel_path, who, resolve_bytes=False) is not True
+                or not connector_boundary.permits(vault_root, rel_path, who, resolve_bytes=False)):
+            return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose):
         return DISCLOSURE_MIN
@@ -7603,7 +7621,7 @@ def _release_level_for_path_only_snapshot(
         return DISCLOSURE_MIN
     try:
         scope_ids = membership_module.evaluate_path_only(
-            vault_root, rel_path, policy
+            vault_root, rel_path, policy, resolve_bytes=resolve_bytes
         ).require_classified()
     except membership_module.MembershipUnresolved:
         if receipt_decision is not None:
@@ -7619,7 +7637,7 @@ def _release_level_for_path_only_snapshot(
         return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     content_hash: str | None = None
-    if who.verified_authorization_session is not None:
+    if resolve_bytes and who.verified_authorization_session is not None:
         try:
             content_hash = (
                 hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()

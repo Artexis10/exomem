@@ -27,6 +27,7 @@ from .. import (
     index_paths,
     media_types,
     memory_refs,
+    request_budget,
     reserved_paths,
     semantic_index,
 )
@@ -930,7 +931,21 @@ def _marker_shape_valid(
     )
 
 
-def _lifecycle_state_unavailable(vault_root: Path) -> bool:
+def _marker_paths(root: Path, checkpoint: request_budget.ReadCheckpoint | None) -> list[Path]:
+    if checkpoint is None:
+        return sorted(root.glob("*.json"))
+    paths = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            checkpoint()
+            if entry.name.endswith(".json"):
+                paths.append(Path(entry.path))
+    return sorted(paths)
+
+
+def _validated_lifecycle_markers(
+    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> list[dict[str, Any]] | None:
     roots = (
         (_tombstone_root(vault_root), frozenset({"deletion", "recovery_guard"})),
         (_recovery_root(vault_root), frozenset({"recovery"})),
@@ -941,25 +956,43 @@ def _lifecycle_state_unavailable(vault_root: Path) -> bool:
             root = _validated_operational_directory(
                 vault_root, candidate, create=False
             )
-            paths = sorted(root.glob("*.json")) if root.exists() else []
+            paths = _marker_paths(root, checkpoint) if root.exists() else []
         except (LifecycleError, OSError):
-            return True
+            return None
         marker_sets.append((paths, allowed))
     if not any(paths for paths, _allowed in marker_sets):
-        return False
+        return []
     try:
-        records = receipts.event_records(vault_root)
+        records = (receipts.event_records(vault_root) if checkpoint is None
+                   else receipts.event_records(vault_root, checkpoint=checkpoint))
     except Exception:  # noqa: BLE001 - unverifiable guard evidence must fail closed
-        return True
+        return None
+    by_intent: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if checkpoint is not None:
+            checkpoint()
+        event_id = record.get("event_id")
+        if isinstance(event_id, str) and record.get("phase") == "intent":
+            by_intent.setdefault(event_id, []).append(record)
+    markers = []
     for paths, allowed in marker_sets:
         for path in paths:
+            if checkpoint is not None:
+                checkpoint()
             try:
                 marker = _read_json(vault_root, path)
             except LifecycleError:
-                return True
-            if marker is None or not _marker_shape_valid(marker, allowed, records):
-                return True
-    return False
+                return None
+            event_id = marker.get("event_id") if marker is not None else None
+            if (marker is None or not isinstance(event_id, str)
+                    or not _marker_shape_valid(marker, allowed, by_intent.get(event_id, []))):
+                return None
+            markers.append(marker)
+    return markers
+
+
+def _lifecycle_state_unavailable(vault_root: Path) -> bool:
+    return _validated_lifecycle_markers(vault_root) is None
 
 
 def _operation_from_marker(vault_root: Path, path: Path, marker: Mapping[str, Any]) -> LifecycleOperation | None:
@@ -1781,13 +1814,17 @@ def _cached_tombstoned_paths(
     return _compute_tombstoned_paths(Path(vault_root))
 
 
-def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
-    if _lifecycle_state_unavailable(vault_root):
+def _compute_tombstoned_paths(
+    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> frozenset[str]:
+    markers = _validated_lifecycle_markers(vault_root, checkpoint=checkpoint)
+    if markers is None:
         return frozenset({FAIL_CLOSED_TOMBSTONE})
     values: set[str] = set()
-    markers = [*_iter_tombstones(vault_root), *_iter_recovery_markers(vault_root)]
-    for _path, marker in markers:
+    for marker in markers:
         for item in marker.get("manifest", []):
+            if checkpoint is not None:
+                checkpoint()
             if not isinstance(item, Mapping):
                 continue
             for field in ("source_path", "trash_path", "affected_ref"):
@@ -1797,12 +1834,16 @@ def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
                 ):
                     values.add(_normalize_rel(value))
         for value in marker.get("residue_paths", []):
+            if checkpoint is not None:
+                checkpoint()
             if isinstance(value, str):
                 values.add(_normalize_rel(value))
     return frozenset(values)
 
 
-def tombstoned_paths(vault_root: Path) -> frozenset[str]:
+def tombstoned_paths(
+    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> frozenset[str]:
     # Only the path resolution is memoised for the request. The generation
     # below stats the marker directories and every marker file on each call
     # (and, while a marker exists, the event files that validate it) and must
@@ -1811,6 +1852,8 @@ def tombstoned_paths(vault_root: Path) -> frozenset[str]:
     from .. import state_paths
 
     root = state_paths.resolved_vault_path(vault_root, expanduser=False)
+    if checkpoint is not None:
+        return _compute_tombstoned_paths(root, checkpoint=checkpoint)
     return _cached_tombstoned_paths(str(root), _tombstone_generation(root))
 
 

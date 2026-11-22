@@ -42,6 +42,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Generator, Iterator
@@ -61,6 +62,7 @@ STORE_DIRNAME = "upload-sessions"
 SOURCE_STORE_DIRNAME = "source-upload-sessions"
 SOURCE_ID_PREFIX = "source-"
 _RECEIPTS_DIRNAME = "receipts"
+_SESSION_LOCK_SUFFIX = ".lock"
 _COMMIT_WITNESS_SUFFIX = ".commit"
 _PENDING_COMMIT_WITNESS_SUFFIX = ".commit-pending"
 #: A session lives this long after its last accepted part.
@@ -305,9 +307,9 @@ def _finish(store: Path, record: dict) -> None:
 
 
 def _session_lock(store: Path, session_id: str, *, timeout: float = 0) -> FileLock:
-    """Use one lock for all writers, including cleanup, and let FileLock own its inode."""
+    """Use one native lock for all writers and cleanup of a live session."""
     # A handler and its worker may use the same instance from different threads.
-    return FileLock(store / f"{session_id}.lock", timeout=timeout, thread_local=False)
+    return FileLock(store / f"{session_id}{_SESSION_LOCK_SUFFIX}", timeout=timeout, thread_local=False)
 
 
 def _read_record_at(store: Path, session_id: str) -> dict | None:
@@ -395,19 +397,67 @@ def _sweep_entries(vault_root: Path) -> Generator[tuple[Path, Path], None, None]
                 continue
 
 
-def _session_record_absent(store: Path, session_id: str) -> bool:
-    # A corrupt or unreadable record is not proof that the bytes are abandoned.
-    leaf = f"{session_id}.json"
-    for directory in (store, store / _RECEIPTS_DIRNAME):
+def _absent(*paths: Path | str, dir_fd: int | None = None) -> bool:
+    for path in paths:
         try:
-            (directory / leaf).lstat()
+            os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
         except FileNotFoundError:
             continue
         return False
     return True
 
 
+def _reap_unix_lock(store: Path, leaf: str, live_names: tuple[str, str]) -> None:
+    import fcntl
+
+    root = os.open(store, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        observed = os.stat(leaf, dir_fd=root, follow_symlinks=False)
+        if not stat.S_ISREG(observed.st_mode):
+            return
+        held = os.open(leaf, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+        try:
+            opened = os.fstat(held)
+            if not os.path.samestat(observed, opened):
+                return
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if _absent(*live_names, dir_fd=root) and os.path.samestat(
+                opened, os.stat(leaf, dir_fd=root, follow_symlinks=False)
+            ):
+                os.unlink(leaf, dir_fd=root)
+        finally:
+            os.close(held)
+    finally:
+        os.close(root)
+
+
+def _reap_orphan_lock(store: Path, path: Path) -> None:
+    sid = path.stem
+    # Released workers may still use the legacy namespace. Only this protocol
+    # owns the lock names of delegated sessions.
+    if path.parent != store or not delegated_source(sid) or not valid_session_id(sid):
+        return
+    live_names = (f"{sid}.json", f"{sid}.part")
+    # A Source receipt may outlive its lock. There is no live record or part to
+    # mutate, and a retired ID cannot be used to create another session.
+    try:
+        if not _absent(*(store / name for name in live_names)):
+            return
+        if os.name == "nt":
+            # Its native release attempts removal after closing the handle.
+            if stat.S_ISREG(path.lstat().st_mode):
+                with _session_lock(store, sid):
+                    pass
+        elif hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY"):
+            _reap_unix_lock(store, path.name, live_names)
+    except (ImportError, OSError, Timeout):
+        pass
+
+
 def _sweep_entry(store: Path, path: Path, now: float) -> None:
+    if path.suffix == _SESSION_LOCK_SUFFIX:
+        _reap_orphan_lock(store, path)
+        return
     if path.suffix == ".json":
         if valid_session_id(path.stem):
             record = _read_record_at(path.parent, path.stem)
@@ -428,8 +478,11 @@ def _sweep_entry(store: Path, path: Path, now: float) -> None:
             record = _read_record(store, session_id)
             if path.suffix == ".tmp" or (record is not None and record.get("state") in (COMMITTED, FAILED)):
                 _remove(path)
-            elif record is None and _session_record_absent(store, session_id):
-                _remove(path)
+            elif record is None:
+                # An unreadable record is not proof that its bytes are abandoned.
+                leaf = f"{session_id}.json"
+                if _absent(store / leaf, store / _RECEIPTS_DIRNAME / leaf):
+                    _remove(path)
     except (OSError, Timeout):
         pass
 

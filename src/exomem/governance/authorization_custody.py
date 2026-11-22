@@ -344,7 +344,6 @@ def standalone_attachment_id(vault_root: Path) -> str:
     """
 
     root = Path(vault_root)
-    acquired: held_fs.HeldResult[held_fs.HeldFilesystem] | None = None
     try:
         before = os.lstat(root)
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -354,10 +353,7 @@ def standalone_attachment_id(vault_root: Path) -> str:
             or getattr(before, "st_file_attributes", 0) & reparse
         ):
             raise AuthorizationCustodyUnavailable
-        acquired = held_fs.acquire(root)
-        if not acquired.ok:
-            raise AuthorizationCustodyUnavailable
-        with acquired.require() as filesystem:
+        with held_fs.acquire(root).require() as filesystem:
             identity = filesystem.root_identity
             after = os.lstat(root)
             if (
@@ -392,7 +388,11 @@ def standalone_attachment_id(vault_root: Path) -> str:
         raise
     except OSError:
         raise AuthorizationCustodyUnreadable from None
-    except (RuntimeError, UnicodeError, ValueError, held_fs.HeldFsError):
+    except held_fs.HeldFsError as error:
+        if error.code == "IO_REFUSED":
+            raise AuthorizationCustodyUnreadable from None
+        raise AuthorizationCustodyUnavailable from None
+    except (RuntimeError, UnicodeError, ValueError):
         raise AuthorizationCustodyUnavailable from None
 
 

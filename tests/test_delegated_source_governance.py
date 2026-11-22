@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
+import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -15,7 +17,7 @@ import pytest
 from test_agent_upload_handoff import upload_env as upload_env
 from test_authorization_session_lifecycle import NOW, _custody, _file_connection
 
-from exomem import server_transfer, upload_handoff, upload_sessions
+from exomem import held_fs, server_transfer, upload_handoff, upload_sessions
 from exomem.governance import (
     authorization_custody,
     authorization_session_lifecycle,
@@ -35,8 +37,29 @@ def _settled(vault, session, secret):
     pytest.fail("the Source commit did not settle")
 
 
+def _refuse_native_attachment_read(monkeypatch):
+    identify = authorization_custody.standalone_attachment_id
+    backend = held_fs._backend()
+
+    def failed_open(*_args, **_kwargs):
+        if os.name == "nt":
+            return None
+        raise OSError(errno.EIO, "attachment root could not be opened")
+
+    def identify_during_outage(root):
+        # The checkout and upload store stay readable while the native root open fails.
+        with monkeypatch.context() as fault:
+            fault.setattr(backend, "_open_root" if os.name == "nt" else "_open", failed_open)
+            refused = held_fs.acquire(root)
+            assert refused.error is not None and refused.error.code == "IO_REFUSED"
+            return identify(root)
+
+    monkeypatch.setattr(authorization_custody, "standalone_attachment_id", identify_during_outage)
+
+
+@pytest.mark.parametrize("read_failure", ["sqlite", "attachment"])
 def test_governance_read_outage_keeps_a_ticket_and_accepted_bytes_until_authority_is_known(
-    upload_env, tmp_path, monkeypatch,
+    upload_env, tmp_path, monkeypatch, read_failure,
 ):
     vault, who, authority, bearer, _ = upload_env
     database = tmp_path / "governance.sqlite"
@@ -50,7 +73,13 @@ def test_governance_read_outage_keeps_a_ticket_and_accepted_bytes_until_authorit
     who = replace(who, authorization_session_id=verified.session_id, verified_authorization_session=verified)
     monkeypatch.setattr(raw_protection, "time", SimpleNamespace(time=lambda: NOW))
     monkeypatch.setattr(store, "open_authorization_session_connection", lambda _: sqlite3.connect(database, timeout=0))
-    monkeypatch.setattr(authorization_custody, "load_authorization_custody", lambda *_, **__: custody)
+    attachment = authorization_custody.standalone_attachment_id(vault)
+
+    def load_custody(root, **_):
+        authorization_custody._verify_registered_attachment(root, attachment)
+        return custody
+
+    monkeypatch.setattr(authorization_custody, "load_authorization_custody", load_custody)
     monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 30.0)
     monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
     original = b"Accepted Source original"
@@ -75,8 +104,12 @@ def test_governance_read_outage_keeps_a_ticket_and_accepted_bytes_until_authorit
     assert patch.close() == (len(original), True)
     committer = partial(server_transfer.commit_session, vault)
 
-    with closing(sqlite3.connect(database)) as exclusive:
-        exclusive.execute("BEGIN EXCLUSIVE")
+    with ExitStack() as outage:
+        if read_failure == "sqlite":
+            exclusive = outage.enter_context(closing(sqlite3.connect(database)))
+            exclusive.execute("BEGIN EXCLUSIVE")
+        else:
+            _refuse_native_attachment_read(outage.enter_context(monkeypatch.context()))
         upload_sessions.start_commit(session, committer)
         parked = _settled(vault, session, secret)
         assert parked["state"] == upload_sessions.RETRYABLE

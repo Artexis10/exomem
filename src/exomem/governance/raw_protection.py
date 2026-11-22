@@ -96,11 +96,13 @@ def _binding_candidates(path: str, *, artifact_copy: reserved_paths.GenericFileC
     return candidates
 
 
-def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[dict, str, str] | None:
+def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None,
+            page_snapshot: bytes | None = None) -> tuple[dict, str, str] | None:
     """Resolve only the named pair; an orphan never acquires a release."""
-    for candidate in _binding_candidates(path, artifact_copy=artifact_copy):
+    candidates = (path,) if page_snapshot is not None else _binding_candidates(path, artifact_copy=artifact_copy)
+    for candidate in candidates:
         try:
-            raw = reserved_paths.read_generic_bytes(root, candidate).data
+            raw = reserved_paths.read_generic_bytes(root, candidate).data if page_snapshot is None else page_snapshot
             fm, _, _ = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
             block = fm.get("raw_protection")
             if not isinstance(block, dict) or set(block) != {

@@ -46,6 +46,13 @@ _WORKER = dedent(
             if Path(path).parent == source_imports.receipt_root(root):
                 os._exit(71)
         vault._after_batch_destination_published = stop_before_validation
+    if cut == "first":
+        after_real = vault._after_batch_destination_published
+        def stop_after_first_source_file(path):
+            after_real(path)
+            if Path(path).is_relative_to(vault.kb_root(root) / "Sources"):
+                os._exit(74)
+        vault._after_batch_destination_published = stop_after_first_source_file
     if cut == "after":
         log_real = writer_lease.log_active_mutation_phase
         def stop_after_commit(phase, **fields):
@@ -81,7 +88,7 @@ _WORKER = dedent(
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         status = upload_sessions.open_session(root, session_id, secret).view()
-        if status["state"] == upload_sessions.COMMITTED and session.part.exists():
+        if status["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED) and session.part.exists():
             # The receipt is durable before the daemon removes its staged bytes. Let it finish.
             time.sleep(0.05)
             continue
@@ -183,6 +190,8 @@ def test_witness_sync_failure_allows_retry_only_after_proven_cleanup(vault, sent
     assert set(sources.rglob("*.md")) == earlier_paths
     assert not list(source_imports.receipt_root(vault).glob("*.json"))
     assert upload.part.read_bytes() == data
+    capture = source_imports.resumable_capture(vault, upload.record)
+    assert capture.publication_may_have_started(vault) == (fault == "uncertain-cleanup")
     retried = worker("resume")
     assert retried.returncode == 0, retried.stdout + retried.stderr
     status = json.loads(retried.stdout)
@@ -218,3 +227,39 @@ def test_displaced_owner_binding_does_not_destroy_the_pending_receipt(vault, sen
     assert status["receipt"]["path"] == receipt["page"]
     assert (vault / status["receipt"]["artifact_path"]).read_bytes() == data
     assert list(source_imports.receipt_root(vault).glob("*.json")) == [canonical]
+
+
+def test_owner_removal_after_first_native_install_keeps_the_bytes(vault, sent_source):
+    upload, data, worker = sent_source
+    sources = vault / "Knowledge Base" / "Sources"
+    earlier_paths = set(sources.rglob("*.md"))
+    stopped = worker("first")
+    assert stopped.returncode == 74, stopped.stdout + stopped.stderr
+    installed, = set(sources.rglob("*.md")) - earlier_paths
+    assert not list(source_imports.receipt_root(vault).glob("*.json"))
+
+    displaced = worker("revoked")
+    assert displaced.returncode == 0, displaced.stdout + displaced.stderr
+    status = json.loads(displaced.stdout)
+    assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
+    assert "receipt" not in status and upload.part.read_bytes() == data
+
+    restored = worker("resume")
+    assert restored.returncode == 0, restored.stdout + restored.stderr
+    status = json.loads(restored.stdout)
+    assert status["state"] == upload_sessions.RETRYABLE and status["code"] == "SOURCE_OUTCOME_UNKNOWN"
+    assert "receipt" not in status and upload.part.read_bytes() == data
+    assert set(sources.rglob("*.md")) - earlier_paths == {installed}
+    assert not list(source_imports.receipt_root(vault).glob("*.json"))
+
+
+def test_owner_removal_before_native_publication_is_a_definitive_failure(vault, sent_source):
+    upload, _data, worker = sent_source
+    sources = vault / "Knowledge Base" / "Sources"
+    earlier_paths = set(sources.rglob("*.md"))
+    refused = worker("revoked")
+    assert refused.returncode == 0, refused.stdout + refused.stderr
+    status = json.loads(refused.stdout)
+    assert status["state"] == upload_sessions.FAILED and status["code"] == "UPLOAD_HANDOFF_UNAVAILABLE"
+    assert "receipt" not in status and not upload.part.exists()
+    assert set(sources.rglob("*.md")) == earlier_paths
