@@ -519,13 +519,13 @@ class _CellPages:
     def run_rewrites(self, depth: int, pages: int) -> int:
         """Existing pages that the runs of these cells and their balances can dirty.
 
-        Each run of adjacent cells dirties the leaf it lands in or leaves, and its balances rewrite at
-        most two existing siblings (SQLite's balance_nonroot) and the run's path to the root. The
-        runs of one tree share their ancestors: since an interior page holds at least four cells,
-        the level `j` steps above the leaves holds at most `pages / 4**j` pages. The bound follows
-        the runs, never the size of the database.
+        Each run of adjacent cells dirties the leaf it lands in or leaves, and a balance there or at
+        any ancestor rewrites that page and at most two existing siblings (SQLite's balance_nonroot).
+        The runs of one tree share their ancestors: since an interior page holds at least four
+        cells, the level `j` steps above the leaves holds at most `pages / 4**j` pages. The bound
+        follows the runs, never the size of the database.
         """
-        return sum(3 * runs + sum(min(runs, pages // 4**level + 1) for level in range(1, depth))
+        return sum(3 * (runs + sum(min(runs, pages // 4**level + 1) for level in range(1, depth)))
                    for runs in self.runs.values())
 
     def deleted_rewrites(self, usable: int, depth: int, pages: int) -> int:

@@ -386,6 +386,8 @@ class _Derivation:
                     prepared_structure=structure,
                 )
         if rows is None:
+            if self.reserve_graph is not None:
+                self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
             epistemic_graph.write_page_graph_rows(

@@ -60,7 +60,7 @@ Before a filesystem version authorizes eviction, the service SHALL flush its con
 
 The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume. This includes multipart spools, resumable parts, final storage copies, signed-container extraction, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
 
-The floor SHALL cover the database, search and graph writes derived directly from a stored Markdown original. A move that updates lineage SHALL keep the original's floor protection for later projection.
+The floor SHALL cover the database, search and graph writes derived directly from a stored Markdown original, including the graph rows of pages that re-derive because they link to it and the rows that a move deletes at its source. Other pages that the same commit writes or deletes are outside the floor, as they are in a commit that carries no original. A move that updates lineage SHALL keep the original's floor protection for later projection.
 
 #### Scenario: An upload that would cross the floor
 
