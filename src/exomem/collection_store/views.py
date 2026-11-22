@@ -20,6 +20,7 @@ from . import (
     governance,
     held_sources,
     log_view,
+    schema,
     summary,
     typed_storage,
 )
@@ -944,6 +945,17 @@ def stamp(identity: Mapping[str, str], version: int, payload_hash: str) -> dict[
         "v": version,
         "h": payload_hash[:12],
     }
+
+
+def instance_to_stamp(conn: sqlite3.Connection) -> str | None:
+    """The store's instance when the views were last queued under another one or never, else None.
+
+    An adoption or a takeover starts a new instance, which every view's stamp must then name.
+    """
+    ids = dict(conn.execute("SELECT key,value FROM store_meta WHERE key IN (?,?)",
+                            (schema.META_INSTANCE_ID, schema.META_VIEWS_INSTANCE)))
+    instance = ids.get(schema.META_INSTANCE_ID)
+    return None if ids.get(schema.META_VIEWS_INSTANCE) == instance else instance
 
 
 def manifest_view(text: str, view_stamp: Mapping[str, str | int]) -> str:

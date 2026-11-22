@@ -1939,6 +1939,26 @@ class CollectionWriter:
             self._execute("UPDATE projection_state SET state='pending' WHERE kind='history' AND state!='pending'")
             return inputs
 
+    def queue_views_for_instance(self):
+        """Queue every current view again when the store's instance is not the one they carry.
+
+        A view's stamp names the instance that rendered it (`views.stamp`). An adoption or a takeover
+        starts a new instance and rewrites no view, and the publisher counts a file that still holds
+        its published bytes as current. The release proof wants the exact current render, so each
+        such view stayed withheld, from the owner too, until something else changed it. Queued here,
+        the normal drain renders and publishes each one under the new instance. A store that never
+        recorded an instance queues them once, which repairs views an earlier adoption left stale.
+        A held view keeps the owner's bytes until its hold resolves, so it is not queued.
+        """
+        with self._mutation(reconcile=True):
+            instance = views.instance_to_stamp(self.connection)
+            if instance is None:
+                return
+            self._execute("UPDATE projection_state SET state='pending' WHERE state='current'")
+            self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) "
+                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                          (schema.META_VIEWS_INSTANCE, instance))
+
     def apply_view_edit(self, observation, found):
         """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.
 
