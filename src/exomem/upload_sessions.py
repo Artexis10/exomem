@@ -520,8 +520,10 @@ def commit_copy_count(vault_root: Path, target: dict) -> int:
         pooled = add.pools_named_original(vault_root, f"artifact{add.source_artifact_suffix(target['filename'])}")
     else:
         pooled = preserve.pools_evidence_original(vault_root, target["filename"])
-    # Without a trustworthy generation the native writer copies instead of adopting the stage.
-    return 2 if pooled or not vault.STAT_GENERATION_TRUSTED else 1
+    if pooled:
+        return 2
+    # Without a trustworthy generation, the workspace and final publication both copy.
+    return 1 if vault.STAT_GENERATION_TRUSTED else 3
 
 
 class Patch:

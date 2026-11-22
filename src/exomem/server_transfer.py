@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import tempfile
 from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
@@ -349,6 +350,7 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     """
     # A lane token carries no caller identity. Every commit runs under the same transfer floor:
     # the first attempt, a re-attempt by the server's own timer and startup recovery alike.
+    from . import document_containers
     from .cli_ops import OpError
 
     with (principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")),
@@ -357,9 +359,15 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
             if media_capacity.upload_floor(vault_root) is not None:
                 copies = upload_sessions.commit_copy_count(vault_root, record["target"])
                 if copies:
+                    extra_sizes = ()
+                    if document_containers.is_container(record["target"]["filename"]):
+                        with part.open("rb") as stream:
+                            sizes = document_containers.commit_payload_sizes(stream)
+                        spool_here = Path(tempfile.gettempdir()).stat().st_dev == vault_root.stat().st_dev
+                        extra_sizes = sizes * (3 if spool_here else 2)
                     with media_capacity.upload_room(vault_root, reserve=True) as room:
                         if room is not None:
-                            room.reserve_commit(record["length"], copies, incoming=0, offset=0)
+                            room.reserve_commit(record["length"], copies, incoming=0, offset=0, extra_sizes=extra_sizes)
         except OpError as error:
             raise upload_sessions.CommitFailed(error.code, error.message, retryable=True) from error
         return _commit_session(vault_root, part, record)

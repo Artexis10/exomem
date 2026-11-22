@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import json
 import shutil
@@ -13,7 +14,10 @@ from test_agent_upload_handoff import _post, _prepare
 from test_agent_upload_handoff import upload_env as upload_env
 from test_upload_endpoint import _client
 
-from exomem import held_uploads, multipart_upload, originals, upload_handoff, upload_stage
+from exomem import (held_uploads, media_capacity, multipart_upload, original_pool, originals, preserve,
+                    server_transfer, upload_handoff, upload_sessions, upload_stage, vault as vault_files)
+from exomem.cli_ops import OpError
+from exomem.governance.principal import library_scope
 
 
 @pytest.fixture
@@ -84,6 +88,67 @@ def test_upload_refuses_before_a_spool_write_crosses_the_floor(vault, monkeypatc
     assert not list(vault.rglob("recording.bin"))
     assert not list(upload_stage.stage_root(vault).glob("*.part"))
     assert not list(held_uploads._store(vault).glob("*.bin"))
+
+
+def test_direct_original_checks_the_floor_at_final_install(vault, monkeypatch):
+    floor = 1024**2
+    config = originals.local_configuration_path(vault)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"vaults": {str(vault): {"store": "test", "upload_floor_bytes": floor}}}))
+    assert not original_pool.enabled(vault)
+    unit = media_capacity._allocation_unit(vault)
+    free = [floor + 8 * unit]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    before = vault_files._before_batch_destination_published
+
+    def load_from_another_process(final, *, restoring):
+        before(final, restoring=restoring)
+        if final.name == "recording.bin" and not restoring:
+            free[0] = floor
+
+    monkeypatch.setattr(vault_files, "_before_batch_destination_published", load_from_another_process)
+    with library_scope(), pytest.raises(OpError, match="floor") as refused:
+        preserve.preserve_stream(vault, scope="test", category="samples", filename="recording.bin",
+                                 stream=io.BytesIO(b"synthetic capture"))
+    assert refused.value.code == "MEDIA_SPACE_BUSY"
+    assert not list(vault.rglob("recording.bin*"))
+
+
+def test_complete_container_keeps_its_part_until_its_payloads_fit(vault, tmp_path, monkeypatch):
+    from test_document_containers import container_bytes
+
+    floor = 1024**2
+    config = originals.local_configuration_path(vault)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps({"vaults": {str(vault): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    payload = b"document content\n" * 1200
+    data = container_bytes([("receipt.pdf", payload)])
+    unit = media_capacity._allocation_unit(vault)
+    free = [floor + 64 * unit]
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    target = {"lane": "evidence", "scope": "test", "category": "samples", "filename": "bundle.asice"}
+    session, secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=hashlib.sha256(data).hexdigest(),
+        target=target, max_bytes=100_000,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    assert part.close() == (len(data), True)
+    session = upload_sessions.open_session(vault, session.record["id"], secret)
+
+    free[0] = floor + (-(-len(data) // unit) * unit * upload_sessions.commit_copy_count(vault, target))
+    with pytest.raises(upload_sessions.CommitFailed) as parked:
+        server_transfer.commit_session(vault, session.part, session.record)
+    assert parked.value.code == "MEDIA_SPACE_BUSY" and parked.value.retryable
+    assert session.part.read_bytes() == data
+    assert not list(vault.rglob("bundle.asice"))
+
+    free[0] = floor + 64 * unit
+    result = server_transfer.commit_session(vault, session.part, session.record)
+    original = vault / result["path"]
+    assert original.read_bytes() == data
+    assert [child.read_bytes() for child in original.parent.rglob("*.pdf")] == [payload]
 
 
 @pytest.mark.parametrize("interruption", [ClientDisconnect, asyncio.CancelledError])

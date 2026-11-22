@@ -444,3 +444,26 @@ def test_inventory_keeps_its_last_complete_count_when_a_shared_filing_loses_reco
     assert failed["observed_at"] == complete["observed_at"]
     assert failed["local"] == complete["local"] == {"count": 0, "bytes": 0}
     assert failed["evicted"] == complete["evicted"] == {"count": 1, "bytes": len(content)}
+
+
+def test_first_declaration_cannot_claim_a_replacement_directory(vault, selected_store, monkeypatch):
+    values, config = selected_store
+    root = Path(values["root"])
+    initial = root.with_name("detached-store")
+    (root / media_store.STORE_MARKER).unlink()
+    # Both test names are on the test device. The subsequent directory exchange is real.
+    monkeypatch.setattr(media_store, "_require_distinct_device", lambda *_: None)
+
+    def disconnect(_vault, _store):
+        root.rename(initial)
+        root.mkdir()
+        return False
+
+    monkeypatch.setattr(media_bindings, "store_is_bound", disconnect)
+    assert config.is_file()
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+        media_store.declare_store(vault, values["store"])
+
+    assert initial.is_dir()
+    assert not (root / media_store.STORE_MARKER).exists()
+    assert media_replicas.declared_store_id(vault, values["store"]) is None

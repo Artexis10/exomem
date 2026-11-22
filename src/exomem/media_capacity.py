@@ -53,11 +53,12 @@ class UploadRoom:
         physical = self.allocated(offset + needed) - self.allocated(offset)
         self._require_physical(physical, needed if upload_size is None else upload_size)
 
-    def reserve_commit(self, length: int, copies: int, *, incoming: int, offset: int) -> None:
+    def reserve_commit(self, length: int, copies: int, *, incoming: int, offset: int,
+                       extra_sizes: tuple[int, ...] = ()) -> None:
         """Reserve this session's known simultaneous commit copies before its last part grows."""
         session = _COMMIT_CREDIT.get()
         assert self.credits is not None and session is not None
-        peak = self.allocated(length) * copies
+        peak = self.allocated(length) * copies + sum(self.allocated(size) for size in extra_sizes)
         growth = self.allocated(offset + incoming) - self.allocated(offset)
         self._require_physical(peak + growth, length)
         _set_credit(self.credits, session, peak)

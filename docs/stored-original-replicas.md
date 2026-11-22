@@ -23,13 +23,17 @@ The following commands use the example vault `/srv/archive` and a configured sto
 4. Run `exomem media-replicas enable-eviction disk --vault /srv/archive --free-bytes 10737418240`. Eviction targets 10 GiB of free space.
 
 The store must have no replica entries. A switch also requires the previous store to have no remaining pointers, including pointers in Trash.
+The store must be on a different device from the vault. Declaration writes its marker through the open store directory.
+If the store disappears, put the original volume and marker back before retrying.
 The default margin frees an extra tenth of the requested space. The upload floor reserves half of the requested space.
 Use `--margin-bytes` and `--upload-floor-bytes` to set those values. An upload at the floor returns `MEDIA_SPACE_BUSY` with a retry hint.
-The final part of a resumable upload reserves space for its commit stages. The service keeps earlier accepted parts if that space is unavailable.
-Hydration and disk-backed upload staging use the same vault-volume budget.
+The final part of a resumable upload reserves space for its commit stages. The service keeps accepted parts if commit must wait.
+Hydration, signed-container extraction and each final storage copy use the same vault-volume budget.
 
 After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
 Eviction confirms the configured path still reaches that same copy immediately before removal.
+An import request for extra space counts only originals that can free space on the vault device.
+A bounded walk carries candidates into later passes and checks them again before it counts their space.
 Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
 Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
 
@@ -40,6 +44,7 @@ The owner’s `process_media` status has a `replicas.eviction` section. It repor
 The inventory counts a shared object once. Its `observed_at` field gives the time of the count.
 If the latest walk cannot prove a count, `inventory_state` reports `failed` at `inventory_attempted_at` and retains the preceding counts.
 The `waiting` field gives the last eviction pass's reason and `waiting_observed_at` gives its time.
+If a shared original has too many distinct versions to check in one pass, `binding_proof_limit` reports why its local bytes stay.
 Unknown inventory counts and wait reasons appear as null.
 
 ## What each check proves

@@ -825,7 +825,7 @@ def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]]
     return rows()
 
 
-def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
+def object_facts(conn: sqlite3.Connection, key: str, *, reference_limit: int = -1) -> ObjectFacts | None:
     """Aggregate one object's bindings and captured pins with indexed ledger reads."""
     state = checkpoint(conn)
     if not state.complete:
@@ -846,7 +846,7 @@ def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
         "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1)", (key, key)).fetchone()[0])
     pointers = conn.execute(
         "SELECT reference, MIN(binary_rel) FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL "
-        "GROUP BY reference ORDER BY reference", (key,)).fetchall()
+        "GROUP BY reference ORDER BY reference LIMIT ?", (key, reference_limit)).fetchall()
     references = tuple(originals.stored_reference(json.loads(item[0])) for item in pointers)
     if any(reference is None for reference in references):
         return None

@@ -2187,9 +2187,10 @@ def _verified_chunks(artifact: _WorkspaceArtifact) -> Iterator[bytes]:
     and nothing reaches the destination.
     """
     digest = hashlib.sha256()
-    for chunk in _descriptor_chunks(artifact.descriptor, artifact.identity):
-        digest.update(chunk)
-        yield chunk
+    with contextlib.closing(_descriptor_chunks(artifact.descriptor, artifact.identity)) as chunks:
+        for chunk in chunks:
+            digest.update(chunk)
+            yield chunk
     if digest.hexdigest() != artifact.content_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
 
@@ -2320,6 +2321,7 @@ class _WorkspaceArtifact:
     installation_witness: held_fs.InstallationWitness | None = None
     requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
+    allocation_vault: Path | None = None
     #: Renamed in from an upload stage: installing it renames it again and copies nothing.
     adopted: bool = False
 
@@ -3329,8 +3331,6 @@ class _BatchWorkspace:
                 return self.install_adopted_artifact(
                     artifact, final, relative.as_posix(), inverse_recheck=inverse_recheck
                 )
-            # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
-            content = held_fs.Chunks(functools.partial(_verified_chunks, artifact))
             acquired = held_fs.acquire(root)
             if not acquired.ok:
                 raise PathGuardError(
@@ -3441,19 +3441,30 @@ class _BatchWorkspace:
                         )
                         if inverse_recheck is not None:
                             inverse_recheck()
-                        published = held_fs.publish_bytes(
-                            filesystem,
-                            parent,
-                            relative.name,
-                            content,
-                            expected_identity=expected_stable,
-                            expected_sha256=expected_content_hash,
-                            prepare=prepare_published,
-                            custody=attempt_custody.temporary if attempt_custody is not None else None,
-                            before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
-                            after_install=after_install if attempt_custody is not None else None,
-                            after_retire=attempt_custody.retired if attempt_custody is not None else None,
-                        )
+                        # Close the allocation iterator even if native publication rejects the temporary.
+                        with ExitStack() as copied:
+                            chunks = copied.enter_context(contextlib.closing(_verified_chunks(artifact)))
+                            if artifact.allocation_vault is not None:
+                                from . import media_capacity
+
+                                if media_capacity.upload_floor(artifact.allocation_vault) is not None:
+                                    device = os.fstat(parent.descriptor).st_dev
+                                    chunks = copied.enter_context(contextlib.closing(media_capacity.metered_chunks(
+                                        artifact.allocation_vault, device, chunks,
+                                    )))
+                            published = held_fs.publish_bytes(
+                                filesystem,
+                                parent,
+                                relative.name,
+                                held_fs.Chunks(lambda: chunks),
+                                expected_identity=expected_stable,
+                                expected_sha256=expected_content_hash,
+                                prepare=prepare_published,
+                                custody=attempt_custody.temporary if attempt_custody is not None else None,
+                                before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
+                                after_install=after_install if attempt_custody is not None else None,
+                                after_retire=attempt_custody.retired if attempt_custody is not None else None,
+                            )
                         if (
                             not published.ok
                             and published.error is not None
@@ -6714,6 +6725,7 @@ def _batch_atomic_write_locked(
                 raise PathGuardError(
                     "PATH_GUARD_INVALID", "batch content type is unsupported"
                 )
+            artifact.allocation_vault = allocation_vault
             staged.append((write.path, workspace, artifact))
         for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):

@@ -11,6 +11,8 @@ An owner command SHALL make one declared `filesystem` store serve eviction on a 
 
 When `EXOMEM_MEDIA_STORE_CONFIG` is unset, a personal install SHALL read its media store configuration from a file under its state root, and the owner command SHALL write the vault's entry there. A set variable SHALL take precedence.
 
+A filesystem store declared for personal eviction SHALL reside on a different device from the vault. Declaration SHALL retain that device's open directory through marker publication and confirm the configured path still reaches it before recording the declaration.
+
 #### Scenario: The owner turns eviction on
 
 - **WHEN** the owner runs the command with a declared `filesystem` store and a free-space floor, and the variable is unset
@@ -54,7 +56,7 @@ On a personal install, eviction SHALL NOT drop an original's local bytes unless 
 
 ### Requirement: Uploads keep a free-space floor on the vault disk
 
-The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume for multipart spooling, resumable parts and commit stages, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
+The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume. This includes multipart spools, resumable parts, final storage copies, signed-container extraction, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
 
 #### Scenario: An upload that would cross the floor
 
@@ -86,3 +88,8 @@ The owner status SHALL report the count and plaintext bytes of local and evicted
 
 - **WHEN** a bounded eviction pass encounters retained candidates while there is still storage pressure
 - **THEN** later passes continue to other candidates and retain the original low-water target
+
+#### Scenario: An import requests extra space
+
+- **WHEN** current custody and allocation checks cannot prove that an import request can free enough space on the vault device
+- **THEN** the request alone does not authorize eviction

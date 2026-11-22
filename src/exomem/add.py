@@ -330,6 +330,7 @@ def artifact_binary_write(
             content=PreparedBinaryContent(stream, size, digest, staged=staged),
             create_only=True,
             expected_hash=MISSING_CONTENT_HASH,
+            media_allocation=True,
         ),
         stream,
     )
