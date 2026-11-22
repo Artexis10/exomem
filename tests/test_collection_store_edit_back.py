@@ -2236,6 +2236,36 @@ def test_a_view_the_store_rendered_since_its_stat_was_recorded_is_not_an_owner_e
         assert manifest_path() in edit_back.changed_views(reader, store.root)[0]
 
 
+def test_a_view_held_through_an_adoption_publishes_under_the_new_instance_once_restored(store):
+    """Defect: a view held while an adoption started a new instance kept the old stamp. When the
+    owner put the published bytes back, the hold resolved straight to current, and the release
+    proof withheld that view from every caller until its rows changed."""
+    _, path = appended(store, count=1)
+    store.reconcile_views()
+    published = path.read_bytes()
+    path.write_bytes(published.replace(b"count: 1", b"count: broken"))
+    store.reconcile_views()
+    view = path.relative_to(store.root).as_posix()
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (view,)).fetchone() == ("held",)
+
+    old = store.connection.execute("SELECT value FROM store_meta WHERE key='instance_id'").fetchone()[0]
+    assert old.encode() in published
+    new = "00000000-0000-4000-8000-00000000ad09"
+    # An adoption starts a new instance; here only its identity matters.
+    store.connection.execute("UPDATE store_meta SET value=? WHERE key='instance_id'", (new,))
+    store.connection.commit()
+    store.queue_views_for_instance()
+
+    path.write_bytes(published)  # the owner restores the published view
+    store.reconcile_views()  # resolves the hold
+    store.reconcile_views()  # installs the new render
+    store.reconcile_views()  # confirms it
+
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (view,)).fetchone() == ("current",)
+    restamped = path.read_bytes()
+    assert new.encode() in restamped and old.encode() not in restamped
+
+
 def test_an_owner_restoring_a_held_views_published_bytes_is_found_by_the_sweep(store):
     """Defect: a held view whose owner put the published bytes back is skipped by the lease-free
     sweep, so a released store keeps the hold until something else takes the lease."""

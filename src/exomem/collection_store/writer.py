@@ -1858,9 +1858,11 @@ class CollectionWriter:
                             self._execute("UPDATE projection_state SET state='current',pending_row_version=NULL,"
                                           "pending_sha256=NULL WHERE path=?", (projection["path"],))
                         if projection["state"] == "held":
-                            # The owner restored the published view, which resolves its in-place hold.
+                            # The owner restored the published view, which resolves its in-place hold. Those
+                            # bytes may carry the stamp of an instance an adoption replaced while the view was
+                            # held, so the drain renders it again instead of trusting them as current.
                             self._resolve_in_place(projection["path"], edit_back.current_version(self.connection, projection))
-                            self._execute("UPDATE projection_state SET state='current' WHERE path=?", (projection["path"],))
+                            self._execute("UPDATE projection_state SET state='pending' WHERE path=?", (projection["path"],))
                         continue
                     source = {
                         "source_pairs": projection["source_pairs"],
@@ -1954,7 +1956,8 @@ class CollectionWriter:
             instance = views.instance_to_stamp(self.connection)
             if instance is None:
                 return
-            self._execute("UPDATE projection_state SET state='pending' WHERE state='current'")
+            # History pages carry no instance stamp, so an adoption leaves them current.
+            self._execute("UPDATE projection_state SET state='pending' WHERE state='current' AND kind!='history'")
             self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) "
                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                           (schema.META_VIEWS_INSTANCE, instance))
@@ -2047,6 +2050,10 @@ class CollectionWriter:
                 if row[1] == "held":
                     self._resolve_in_place(observation.path,
                                            edit_back.current_version(self.connection, observation.projection))
+                    # Restored published bytes may name an instance an adoption replaced: render them again.
+                    self._execute("UPDATE projection_state SET stat_identity=?,state='pending' WHERE path=?",
+                                  (observation.stat, observation.path))
+                    continue
                 self._execute("UPDATE projection_state SET stat_identity=?,state='current' WHERE path=?",
                               (observation.stat, observation.path))
 
