@@ -2563,11 +2563,21 @@ class FileWatcher:
             observed_rels = {
                 path: freshness.registry_rel(self._vault_root, path) for path in observed
             }
+            # The queue owns a path's repair only while a graph drain can
+            # actually commit it. With the index disabled or its sidecar
+            # absent every receipt is unowned dead work — the same
+            # `rebuild_graph` gate `_recover_external_pending` applies — so
+            # retaining those marks would fence reads until the next periodic
+            # reconcile for no repair that can ever run.
+            drain_owns_repair = (
+                epistemic_graph.graph_enabled()
+                and epistemic_graph.EpistemicGraphIndex(self._vault_root).path.exists()
+            )
             queued = {
                 receipt.rel_path for receipt in deferred_index.snapshot_graph(
                     self._vault_root, paths={rel for rel in observed_rels.values() if rel is not None},
                 )
-            } if observed_rels else set()
+            } if observed_rels and drain_owns_repair else set()
             freshness.retire_external_pending_paths(
                 self._vault_root,
                 {path: epoch for path, epoch in observed.items()
