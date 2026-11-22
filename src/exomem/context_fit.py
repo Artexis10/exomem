@@ -337,9 +337,16 @@ def select_methods(
         omitted = 0
         # Each carrier is judged against the room left on its own, so one oversized description costs only itself;
         # the judgment deadline bounds how many are read.
+        def cost(entry: dict[str, str]) -> int:
+            return len(json.dumps(entry, ensure_ascii=False)) + 2
+
         for carrier in carriers:
-            if len(json.dumps({"label": carrier["name"], "description": ""}, ensure_ascii=False)) + 2 > room:
-                omitted += 1  # not even its label fits, so its page is not read
+            # Labels depend only on carriers already admitted, so a withheld page changes none.
+            label = carrier["name"] if carrier["name"] not in by_label else f"{carrier['name']} ({carrier['path']})"
+            if cost({"label": label, "description": ""}) > room:
+                # Not even its label fits, so its page is not read. Counted before admission, a withheld carrier past
+                # the allowance is counted too; only the owner reads this count.
+                omitted += 1
                 continue
             judgment_timeout()
             released = _released_for_model(
@@ -347,14 +354,11 @@ def select_methods(
             )
             if released is None:
                 continue
-            description = " ".join(egress.without_wikilinks(released[2]).split())[: carrier["max_chars"]]
-            label = carrier["name"] if carrier["name"] not in by_label else f"{carrier['name']} ({carrier['path']})"
-            entry = {"label": label, "description": description}
-            cost = len(json.dumps(entry, ensure_ascii=False)) + 2
-            if cost > room:
+            entry = {"label": label, "description": " ".join(egress.without_wikilinks(released[2]).split())[: carrier["max_chars"]]}
+            if cost(entry) > room:
                 omitted += 1
                 continue
-            room -= cost
+            room -= cost(entry)
             by_label[label] = {**carrier, "label": label}
             listed.append(entry)
         if not listed:
