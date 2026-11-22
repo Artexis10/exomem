@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.197.0](https://github.com/Artexis10/exomem/compare/v0.196.0...v0.197.0) (2026-11-22)
+
+
+### Features
+
+* **exomem:** retrieve timed Source passages and replay file imports ([#3003](https://github.com/Artexis10/exomem/issues/3003)) ([9e2a0ee](https://github.com/Artexis10/exomem/commit/9e2a0eeda7ad5483a5213e1ee0ffea404110cc82))
+
+
+### Bug Fixes
+
+* **rehearsal:** require a triggered kill on a warm writer ([#3014](https://github.com/Artexis10/exomem/issues/3014)) ([c6009d9](https://github.com/Artexis10/exomem/commit/c6009d94af505cb5bbdc81df57c92720056d6fd1))
+
+
+### Performance
+
+* **vault-store:** reduce served save overhead ([#3013](https://github.com/Artexis10/exomem/issues/3013)) ([52f58c6](https://github.com/Artexis10/exomem/commit/52f58c658184745512e100e405f38ba3b51055c0))
+
 ## [0.196.0](https://github.com/Artexis10/exomem/compare/v0.195.0...v0.196.0) (2026-11-21)
 
 
