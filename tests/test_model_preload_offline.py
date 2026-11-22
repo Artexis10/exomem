@@ -12,12 +12,23 @@ the models are plain sentinels.
 from __future__ import annotations
 
 import sys
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from exomem import accel, embedding_backend, embeddings, mode, model_cache, model_reaper, warmup
+from exomem import (
+    accel,
+    embedding_backend,
+    embeddings,
+    mode,
+    model_cache,
+    model_reaper,
+    runtime_resources,
+    warmup,
+)
 
 # --------------------------------------------------------------------- fixtures
 
@@ -221,6 +232,61 @@ def test_reranker_loads_cached_weights_offline(
     assert spy.offline_flags == [True]
     assert spy.args == [(embeddings.RERANKER_NAME,)]
     assert spy.calls == [{"device": "cpu", "backend": "torch", "local_files_only": True}]
+
+
+def test_a_cold_reranker_prepares_its_imports_outside_the_shared_model_turn(
+    hub: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm-up's cold reranker import must not hold every query encode behind it."""
+    _cache(hub, embeddings.RERANKER_NAME)
+    monkeypatch.setattr(embeddings, "RERANKER_BACKEND", "torch")
+    monkeypatch.setitem(sys.modules, "sentence_transformers", _fake_sentence_transformers(_Spy()))
+    monkeypatch.setattr(accel, "select_device", lambda **_: "cpu")
+    monkeypatch.setattr(runtime_resources, "configure_torch", lambda: None)
+    gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    preparing, prepared = threading.Event(), threading.Event()
+
+    def slow_tokenizer_guard(_name):
+        preparing.set()
+        assert prepared.wait(10)
+        return "tokenizer.json"
+
+    monkeypatch.setattr(embedding_backend, "require_tokenizer", slow_tokenizer_guard)
+    loader = threading.Thread(target=embeddings.get_reranker)
+    loader.start()
+    try:
+        assert preparing.wait(5)
+        with runtime_resources.model_execution(wait=False):
+            pass  # a query encode takes the turn while the loader is still preparing
+    finally:
+        prepared.set()
+        loader.join(10)
+    assert embeddings._RERANKER == "MODEL"
+
+
+def test_a_resident_reranker_is_returned_without_waiting_for_the_shared_model_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each rerank looked its model up under the shared turn, so it queued behind a bulk batch first."""
+    gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    embeddings._RERANKER = resident = object()
+    holding, release = threading.Event(), threading.Event()
+
+    def bulk_batch():
+        with gate.admission(), gate.execution():
+            holding.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        batch = pool.submit(bulk_batch)
+        assert holding.wait(5)
+        try:
+            assert pool.submit(embeddings.get_reranker).result(timeout=5) is resident
+        finally:
+            release.set()
+        batch.result()
 
 
 @pytest.mark.parametrize(

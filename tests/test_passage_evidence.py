@@ -1522,6 +1522,47 @@ def test_a_capture_encode_does_not_hold_up_a_passage_query_on_a_concurrent_encod
     assert shared.admitted_count() == 0
 
 
+def test_a_capture_encode_does_not_hold_up_a_page_query_on_a_concurrent_encoder(
+    vault, passage_tools, monkeypatch
+):
+    """Page search encodes its query on the query lane too, not behind a capture's turn on the shared slot."""
+    call, encoder = passage_tools
+    saved = call("save_source", {"title": "Survey", "source_kind": "session", "tags": ["readers"],
+                                 "content": "The lantern burns oil."})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    concurrent = SimpleNamespace(
+        texts_fit=lambda _texts: True,
+        concurrent_encodes=True,
+        encode=lambda texts, **_options: encoder(texts),
+    )
+    monkeypatch.setattr(embeddings, "_MODEL", concurrent)
+    monkeypatch.setattr(embeddings, "get_model", lambda: concurrent)
+    monkeypatch.setattr(embeddings, "embed_texts", REAL_EMBED_TEXTS)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    shared = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
+    inferring, release = threading.Event(), threading.Event()
+
+    def capture_inference():
+        with shared.admission(), shared.execution():
+            inferring.set()
+            assert release.wait(10)
+
+    before = len(encoder.texts)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capture = pool.submit(capture_inference)
+        assert inferring.wait(5)
+        try:
+            reply = pool.submit(call, "search_memory", {"query": "lantern", "tags": ["readers"]}).result(timeout=5)
+        finally:
+            release.set()
+        capture.result()
+    assert any("lantern" in text for text in encoder.texts[before:]), "the page query never reached the encoder"
+    assert [hit["title"] for hit in reply["hits"]] == ["Survey"], reply
+    assert shared.admitted_count() == 0
+
+
 def test_abandoned_passage_search_leaves_its_model_turn_queue_at_once(vault, passage_tools, monkeypatch):
     """A search queued behind another encode must free its admission when its caller leaves, not after that encode."""
     call, encoder = passage_tools

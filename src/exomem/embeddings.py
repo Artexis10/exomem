@@ -332,23 +332,28 @@ def get_model():
 def get_reranker():
     """Load the configured CrossEncoder backend lazily."""
     global _RERANKER
+    resident = _RERANKER
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        return resident
+    backend = RERANKER_BACKEND
+    if backend not in _RERANKER_BACKENDS:
+        raise ValueError(
+            f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
+            f"valid: {sorted(_RERANKER_BACKENDS)}"
+        )
+    # The tokenizer guard first, before any import a lean install lacks. Both run before the
+    # model slot: a cold import under it held every query encode behind it for tens of seconds.
+    embedding_backend.require_tokenizer(RERANKER_NAME)
+    from sentence_transformers import CrossEncoder
+
     with runtime_resources.model_execution():
         if _RERANKER is not None:
             return _RERANKER
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
-            backend = RERANKER_BACKEND
-            if backend not in _RERANKER_BACKENDS:
-                raise ValueError(
-                    f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
-                    f"valid: {sorted(_RERANKER_BACKENDS)}"
-                )
-            # The tokenizer guard first, before any import a lean install lacks.
-            embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
-            from sentence_transformers import CrossEncoder
-
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s with %s", RERANKER_NAME, backend)
 

@@ -93,7 +93,9 @@ def prepare_query_inputs(
     def encode(index: Any) -> PreparedQuery:
         identity = getattr(index, "identity", None)
         try:
-            with _span(timings, "vector.embed"), recall_space.encoding_for(index):
+            # On an encoder that runs inferences side by side, the query's turn is on its own lane,
+            # so it never queues behind a bulk batch or a model load on the shared slot.
+            with _span(timings, "vector.embed"), embeddings.query_turn(), recall_space.encoding_for(index):
                 vector = embeddings.embed_texts([query], is_query=True)[0]
             return PreparedQuery(index, identity, vector)
         except Exception as error:  # noqa: BLE001 - the existing lane classifies this failure.
@@ -461,7 +463,7 @@ def collect_candidates(
                             encoded_for, query_vec = query_vector_provider()
                         else:
                             encoded_for = getattr(idx, "identity", None)
-                            with recall_space.encoding_for(idx):
+                            with embeddings.query_turn(), recall_space.encoding_for(idx):
                                 query_vec = embeddings.embed_texts([query], is_query=True)[0]
                 recall_space.require_same_space(idx, encoded_for, query_vec)
                 sources = [idx]

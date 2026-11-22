@@ -468,6 +468,14 @@ When the proof fails after a successful catch-up, the worker re-reads the lag th
 
 Proof: `tests/test_lexical_deferred_upsert.py` injects a save between the catch-up and its proof and checks that no whole-corpus pass runs and that the catalogue ends exactly current. A sibling test refuses the proof with nothing lagging and checks that the pass still runs. The installed comparison belongs to task 3.24.
 
+### 13. A search query does not queue behind the shared model turn
+
+Every model call takes one process-wide execution turn. A bulk encode takes it one batch at a time, and a model load takes it for the whole load. Page search encoded its query on that turn, so the query waited out whatever held it. On an installed service on 2026-11-22, a page search waited p50 1.5 s and up to 4.7 s for its turn, for an encode of about 0.1 s. One search, a minute after a worker promotion, waited 31.4 s while the warm-up loaded the reranker. The reranker loader held the turn across its tokenizer guard and its framework import, and it took the turn even to return a resident model.
+
+A page search now encodes its query inside `embeddings.query_turn()`, as passage search does. On an encoder that runs inferences side by side (an ONNX Runtime session), the query's turn is on its own lane and waits only for other queries. Any other encoder still takes the shared turn, as before. The reranker loader returns a resident model without the turn, and it runs its guard and imports before the turn, so the turn covers only the load, as in `get_model`.
+
+Proof: `tests/test_passage_evidence.py` holds the shared turn with a capture inference and checks that a page search on a concurrent encoder still answers. Two tests in `tests/test_model_preload_offline.py` check that a query takes the turn while a cold reranker prepares, and that a resident reranker returns while a batch holds the turn. Each fails without the change. The installed comparison belongs to task 3.25.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.
