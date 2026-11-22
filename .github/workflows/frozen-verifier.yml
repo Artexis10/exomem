@@ -53,9 +53,9 @@ concurrency:
 jobs:
   exact-multilingual-pin:
     name: exact multilingual pin
-    # Release and reconciliation branches carry only metadata that ci.yml's release evidence
-    # checks from the base; the Full run that qualified their source already ran this check.
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') && !startsWith(github.head_ref, 'release-reconcile/') && !(github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release-please--branches--') || startsWith(github.ref, 'refs/heads/release-reconcile/') || startsWith(github.ref, 'refs/heads/release-cuts/'))) }}
+    # Skips exactly the PRs scripts/release_evidence.py ci_scope treats as release metadata
+    # (keep identical), and pushes to release branches, which no evidence reads.
+    if: ${{ !(github.event_name == 'pull_request' && ((github.base_ref == 'main' && startsWith(github.head_ref, 'release-reconcile/')) || github.head_ref == 'release-please--branches--main' || (startsWith(github.base_ref, 'release-cuts/') && github.head_ref == format('release-please--branches--{0}', github.base_ref)))) && !(github.event_name == 'push' && (startsWith(github.ref, 'refs/heads/release-please--branches--') || startsWith(github.ref, 'refs/heads/release-reconcile/') || startsWith(github.ref, 'refs/heads/release-cuts/'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
