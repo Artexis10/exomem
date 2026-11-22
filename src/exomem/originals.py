@@ -583,6 +583,7 @@ class ArchiveReads:
 def original_state(
     vault: Path, path: str | Path, *, binding: StoreBinding | None = None,
     companions: Mapping[str, bytes] | None = None, archive: ArchiveReads | None = None,
+    strict_companion: bool = False,
 ) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
@@ -590,6 +591,7 @@ def original_state(
     Foreign references deliberately confer no presence in the selected vault.
     ``companions`` is ``companion_candidates``'s: pages that the caller has already read. A walk passes one
     ``archive`` for all its bindings, so it reads the store binding and the pool marker once.
+    Strict companion readers refuse a malformed binding even when the original is resident.
     """
     from . import reserved_paths
     from .vault import FrontmatterError
@@ -620,6 +622,8 @@ def original_state(
     try:
         found = bound_companion(vault, relative, companions=companions)
     except (UnicodeError, FrontmatterError):
+        if strict_companion:
+            raise
         found = None
     if found is None:
         from .governance.raw_protection import marked

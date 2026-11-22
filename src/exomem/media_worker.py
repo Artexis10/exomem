@@ -124,6 +124,7 @@ def _is_canonical_sidecar(sidecar: Path, binary: Path) -> bool:
 _COMPLETE = "complete"
 _HANDOFF = "handoff"
 _STALE = "stale"
+_PREVIEW_SETTLEMENT = "preview_settlement"
 # A hydration failure that returns the job to the queue with no attempt spent (D3, M4).
 _RETURNED = "returned"
 _RENDERER_ACTION = "check the timestamp renderer, then retry"
@@ -302,6 +303,17 @@ class _ProcessOutcome:
     state: str
     error: str | None = None
     blocked_reason: str | None = None
+
+
+def _settle_known_preview(store: MediaJobStore, job: _Job, error: str | None) -> _ProcessOutcome:
+    """Keep a known preview outcome when the exact-claim write has to wait."""
+    try:
+        store.finish_preview(job, error=error, recover_install=False)
+    except (sqlite3.Error, OpError) as refusal:
+        if not _ledger_busy(refusal):
+            raise
+        return _ProcessOutcome(_PREVIEW_SETTLEMENT, error)
+    return _ProcessOutcome(_COMPLETE)
 
 
 def _hydration_outcome(error: Exception) -> _ProcessOutcome:
@@ -703,12 +715,12 @@ class MediaWorker:
                     elif (isinstance(error, (reserved_paths.ReservedPathLeafError, originals.RetirementUnconfirmed))
                           or (isinstance(error, media_store.MediaStoreError)
                               and error.code in {"MEDIA_ORIGINAL_CHANGED", "MEDIA_ORIGINAL_UNVERIFIED"})):
-                        store.finish_preview(job, error="preview original unavailable", recover_install=False)
+                        return _settle_known_preview(store, job, "preview original unavailable")
                     else:
                         log.warning("media preview unavailable (%s)", type(error).__name__)
                         store.finish_preview(job, error="preview unavailable")
                 else:
-                    store.finish_preview(job, error=None if installed else "preview unavailable", recover_install=False)
+                    return _settle_known_preview(store, job, None if installed else "preview unavailable")
             else:
                 store.retry_preview(job)
             return _ProcessOutcome(_COMPLETE)
@@ -3461,7 +3473,15 @@ def run_child(
                     if brakes:
                         return 0  # one job per child under the brakes
                     continue
-                if outcome.state == BLOCKED:
+                if outcome.state == _PREVIEW_SETTLEMENT:
+                    # Keep this outcome in the child until the exact claim settles. A prior record proves no result
+                    # for this attempt, and re-entering the codec would risk replacing that record.
+                    while outcome.state == _PREVIEW_SETTLEMENT:
+                        if not _parent_alive(parent_pid):
+                            return 0
+                        time.sleep(0.25)
+                        outcome = _settle_known_preview(store, job, outcome.error)
+                elif outcome.state == BLOCKED:
                     store.mark(job, BLOCKED, outcome.error, blocked_reason=outcome.blocked_reason)
                 elif outcome.state == FAILED:
                     fail(job, outcome.error)

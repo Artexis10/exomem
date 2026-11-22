@@ -19,6 +19,7 @@ import pytest
 import test_vault_store_media as store_suite
 from test_client_artifacts import _staged
 from test_image_view import _photo
+from test_media_store import selected_store as selected_store
 from test_vault_store_projector import NOTES
 
 from exomem import (
@@ -526,6 +527,100 @@ def test_pooled_preview_publication_refuses_lost_custody(vault, tmp_path, monkey
         assert not list(media_previews.store_path(vault).glob("*/*.json"))
     else:
         assert (record.read_bytes(), record.stat().st_ino) == existing
+
+
+@pytest.mark.parametrize("malformed", [b"\xff", b"---\nfields: [unterminated\n---\n"])
+def test_resident_preview_refuses_malformed_companion_at_acquisition(vault, selected_store, monkeypatch, malformed):
+    with library_scope():
+        saved = preserve.preserve_stream(
+            vault, scope="Test", category="Images", filename="preview-malformed-resident.jpg",
+            stream=io.BytesIO(_photo(915, 633)),
+        )
+    ledger = media_jobs.MediaJobStore(vault)
+    offload = ledger.claim_next()
+    assert offload is not None and offload.media_type == media_jobs.OFFLOAD_MEDIA_TYPE
+    assert ledger.complete_offload(offload)
+    ledger.complete(offload)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.media_type == media_jobs.PREVIEW_MEDIA_TYPE
+    assert (vault / saved.path).is_file()
+    open_original = media_store.open_original
+
+    def malform_before_open(*args, **kwargs):
+        claim.sidecar_path.write_bytes(malformed)
+        return open_original(*args, **kwargs)
+
+    monkeypatch.setattr(media_store, "open_original", malform_before_open)
+    media_worker.MediaWorker(vault, execution_mode="process")._process(claim)
+
+    assert claim.sidecar_path.read_bytes() == malformed
+    settled = ledger.get(claim.id)
+    assert settled is not None and settled.state == media_jobs.COMPLETED
+    assert settled.last_error == "preview original unavailable"
+    assert originals.original_state(vault, saved.path).present
+
+
+def test_process_worker_retries_definitive_preview_settlement_without_accepting_old_record(
+    vault, tmp_path, monkeypatch,
+):
+    from test_shared_originals import _pooled_capture
+
+    original = _photo(915, 633)
+    captured = _pooled_capture(vault, tmp_path, monkeypatch, "preview-busy-settlement.jpg", original)
+    relative = captured.artifact_path
+    binary = vault / relative
+    assert not binary.exists()
+    media_processing.reconcile_media(vault, relative)
+    ledger = media_jobs.MediaJobStore(vault)
+    claim = ledger.claim_next()
+    assert claim is not None and claim.preview_sha256 is not None
+    assert media_previews.generate(vault, claim, ledger, deadline=None)
+    previous_jpeg = media_previews.read(vault, relative, claim.preview_sha256)
+    assert previous_jpeg is not None
+    while claim.attempts < media_jobs.MAX_PREVIEW_ATTEMPTS - 1:
+        assert ledger.recover_interrupted() == 1
+        claim = ledger.claim_next()
+        assert claim is not None
+
+    local_original = media_store._open_local_original
+    connect = media_jobs.MediaJobStore._connect
+    refused_writes = []
+
+    with closing(sqlite3.connect(ledger.path, timeout=0)) as holder:
+        @contextmanager
+        def replace_then_hold_ledger(*args, **kwargs):
+            with local_original(*args, **kwargs) as source:
+                yield source
+                binary.write_bytes(_photo(633, 915))
+                holder.execute("BEGIN IMMEDIATE")
+
+        def connect_until_holder_clears(*args, **kwargs):
+            if holder.in_transaction:
+                with closing(sqlite3.connect(ledger.path, timeout=0)) as contender:
+                    try:
+                        contender.execute("BEGIN IMMEDIATE")
+                    except sqlite3.OperationalError as error:
+                        refused_writes.append(error.sqlite_errorcode)
+                        # Hold through both the pin deletion and the first exact-claim settlement.
+                        if len(refused_writes) == 2:
+                            holder.rollback()
+                        raise
+            return connect(*args, **kwargs)
+
+        def unexpected_decode(*args, **kwargs):
+            pytest.fail("settling a definitive refusal must not run the codec again")
+
+        monkeypatch.setattr(media_store, "_open_local_original", replace_then_hold_ledger)
+        monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", connect_until_holder_clears)
+        monkeypatch.setattr(media_previews, "_decode", unexpected_decode)
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01) == 0
+        assert refused_writes == [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_BUSY]
+        settled = ledger.get(claim.id)
+
+    assert settled is not None and settled.state == media_jobs.COMPLETED
+    assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
+    assert settled.last_error == "preview original unavailable"
+    assert media_previews.read(vault, relative, claim.preview_sha256) == previous_jpeg
 
 
 def test_retryable_hydration_contention_keeps_preview_pending(vault, monkeypatch):

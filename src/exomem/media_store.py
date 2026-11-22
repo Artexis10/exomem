@@ -2388,7 +2388,7 @@ def _read_state(vault: Path, target: str | Path, *, strict_custody: bool = False
     from .vault import MALFORMED_FRONTMATTER_ERRORS
 
     try:
-        return original_state(vault, target)
+        return original_state(vault, target, strict_companion=strict_custody)
     except originals.RetirementUnconfirmed as error:
         raise MediaStoreError("MEDIA_ORIGINAL_UNVERIFIED", error.reason) from error
     except MALFORMED_FRONTMATTER_ERRORS as error:
@@ -2424,6 +2424,8 @@ def open_original(vault: Path, path: str | Path, *, physical: bool = False, read
                     raise error
             else:
                 if job is not None:
+                    if strict_custody:
+                        _read_state(vault, target, strict_custody=True)
                     source.require_current()
                     # The claimed job proves the ledger exists, so this store skips the schema setup.
                     if not MediaJobStore(vault, create=False).bind_original(job, relative):
