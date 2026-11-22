@@ -42,7 +42,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # door enums on 2026-11-20 (index-capture-metadata).
 # The per-file `diarize` speaker-label choice on the `save_source` and `save_evidence` file handles added 212 B on
 # 2026-11-22 (add-media-processing-policy).
-TOTAL_BUDGET = 29_600
+# The door operation `review.queued_write`, reading a save the service queued while it was busy, added 22 B to the
+# `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
+TOTAL_BUDGET = 29_650
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
