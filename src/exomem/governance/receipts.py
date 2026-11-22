@@ -989,6 +989,11 @@ def _tail(records: list[dict[str, Any]]) -> tuple[int, str]:
     return record["seq"], record["hash"]
 
 
+def _disclosure_checkpoint() -> request_budget.ReadCheckpoint | None:
+    check = request_budget.current_checkpoint()
+    return check if check is not None and check.bound_disclosure else None
+
+
 @contextmanager
 def _receipt_lock(vault_root: Path):
     """Lean process/thread append lock acquired before sidecar bootstrap.
@@ -999,9 +1004,7 @@ def _receipt_lock(vault_root: Path):
     machine writer-state root and keeps the same canonical identity/path as the
     former ``VaultMutationCoordinator.hold`` implementation.
     """
-    check = request_budget.current_checkpoint()
-    if check is not None and not check.bound_disclosure:
-        check = None
+    check = _disclosure_checkpoint()
     if check is not None:
         check()
     root = Path(vault_root).resolve()
@@ -1015,7 +1018,7 @@ def _receipt_lock(vault_root: Path):
         f"receipt:{root}",
     )
     lock_path = coordinator.lock_path
-    with _RECEIPT_LOCAL_LOCKS_GUARD:
+    with request_budget.checking(check), request_budget.locked(_RECEIPT_LOCAL_LOCKS_GUARD):
         local_lock = _RECEIPT_LOCAL_LOCKS.setdefault(lock_path, threading.RLock())
     deadline = time.monotonic() + _RECEIPT_LOCK_TIMEOUT_SECONDS
     if check is not None:
@@ -1053,7 +1056,7 @@ def _receipt_lock(vault_root: Path):
                 handle.write(b"\0")
                 handle.flush()
             handle.seek(0)
-            with _RECEIPT_LOCAL_LOCKS_GUARD:
+            with request_budget.checking(check), request_budget.locked(_RECEIPT_LOCAL_LOCKS_GUARD):
                 _RECEIPT_LOCK_HANDLES.add(handle)
             while not _try_os_lock(handle):
                 remaining = deadline - time.monotonic()
@@ -1095,11 +1098,31 @@ def _receipt_lock(vault_root: Path):
 
 
 @contextmanager
-def _receipt_connection(vault_root: Path, *, durable: bool = True):
+def _receipt_sqlite_timeout(
+    connection: sqlite3.Connection, check: request_budget.ReadCheckpoint | None,
+):
+    if check is None:
+        yield
+        return
+    (timeout_ms,) = connection.execute("PRAGMA busy_timeout").fetchone()
+    connection.execute("PRAGMA busy_timeout=0")
+    try:
+        yield
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
+
+
+@contextmanager
+def _receipt_connection(
+    vault_root: Path, *, durable: bool = True, check: request_budget.ReadCheckpoint | None = None,
+):
     """Yield a validated process-local writer while the receipt lock is held."""
     global _RECEIPT_ACTIVE_CONNECTIONS
     path = store.sidecar_path(Path(vault_root)).resolve()
-    with _RECEIPT_CONNECTIONS_CONDITION:
+    with request_budget.checking(check), request_budget.locked(_RECEIPT_CONNECTIONS_CONDITION):
+        if check is not None and _RECEIPT_CONNECTIONS_FORKING:
+            # Condition.wait reacquires the lock even after a timed wait.
+            raise request_budget.ReadBudgetExhausted()
         while _RECEIPT_CONNECTIONS_FORKING:
             _RECEIPT_CONNECTIONS_CONDITION.wait()
         entry = _RECEIPT_CONNECTIONS.get(path)
@@ -1114,8 +1137,11 @@ def _receipt_connection(vault_root: Path, *, durable: bool = True):
                     "receipt sidecar changed while active; quiesce before replacement"
                 )
             try:
-                current_state = store._connection_state(entry.connection, path)
-            except (OSError, sqlite3.Error):
+                with _receipt_sqlite_timeout(entry.connection, check):
+                    current_state = store._connection_state(entry.connection, path)
+            except (OSError, sqlite3.Error) as exc:
+                if check is not None:
+                    store._stop_contended_read(exc, check.budget.deadline)
                 _RECEIPT_CONNECTIONS.pop(path, None)
                 try:
                     entry.connection.close()
@@ -1132,24 +1158,36 @@ def _receipt_connection(vault_root: Path, *, durable: bool = True):
                     entry = None
         if entry is None:
             connection = store.open_connection(
-                Path(vault_root), check_same_thread=False
+                Path(vault_root), check_same_thread=False, check=check,
             )
             try:
-                state = store._connection_state(connection, path)
-            except BaseException:
+                with _receipt_sqlite_timeout(connection, check):
+                    state = store._connection_state(connection, path)
+            except BaseException as exc:
                 connection.close()
+                if check is not None and isinstance(exc, Exception):
+                    store._stop_contended_read(exc, check.budget.deadline)
                 raise
             entry = _ReceiptConnectionEntry(connection=connection, state=state)
             _RECEIPT_CONNECTIONS[path] = entry
-        entry.connection.execute(
-            "PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=NORMAL"
-        )
+        try:
+            with _receipt_sqlite_timeout(entry.connection, check):
+                entry.connection.execute(
+                    "PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=NORMAL"
+                )
+        except sqlite3.Error as exc:
+            if check is not None:
+                store._stop_contended_read(exc, check.budget.deadline)
+            raise
         entry.users += 1
         _RECEIPT_ACTIVE_CONNECTIONS += 1
         _RECEIPT_CONNECTIONS.move_to_end(path)
         _evict_idle_receipt_connections_locked()
     try:
-        yield entry.connection
+        with _receipt_sqlite_timeout(entry.connection, check):
+            yield entry.connection
+            if check is not None and entry.connection.in_transaction:
+                entry.connection.rollback()
     except BaseException:
         with _RECEIPT_CONNECTIONS_CONDITION:
             if _RECEIPT_CONNECTIONS.get(path) is entry:
@@ -1320,6 +1358,19 @@ def _matching_existing_event(
     raise ReceiptError("event id already has a different receipt")
 
 
+def _admit_disclosure_write(conn: sqlite3.Connection, check: request_budget.ReadCheckpoint) -> None:
+    check()
+    if not conn.in_transaction:
+        try:
+            # EXCLUSIVE is equivalent to IMMEDIATE in WAL and also secures
+            # commit admission if the database uses a rollback journal.
+            conn.execute("BEGIN EXCLUSIVE")
+        except sqlite3.Error as exc:
+            store._stop_contended_read(exc, check.budget.deadline)
+            raise
+    check()
+
+
 def append_event(
     vault_root: Path,
     *,
@@ -1337,9 +1388,19 @@ def append_event(
     if event_type == "critical" and event_id is None:
         raise ReceiptError("critical receipts require a deterministic event id")
     timestamp, _parsed = _timestamp(timestamp or _now())
+    # These two event types are the final disclosure boundary.
+    check = (
+        _disclosure_checkpoint()
+        if not critical and event_type in ("disclosure", "credential_block")
+        else None
+    )
     with _receipt_lock(vault_root):
-        with _receipt_connection(vault_root, durable=critical) as conn:
+        with _receipt_connection(vault_root, durable=critical, check=check) as conn:
+            if check is not None:
+                _admit_disclosure_write(conn, check)
             instance_id = _instance_id(conn)
+            if check is not None:
+                _admit_disclosure_write(conn, check)
             instance_dir = _instance_dir(vault_root, instance_id)
             _ensure_receipt_instance_directory(instance_dir)
             instance_dir = _instance_dir(vault_root, instance_id)
@@ -1353,6 +1414,10 @@ def append_event(
                 locator,
                 durable_offset,
             ) = _head(conn, instance_id)
+            if check is not None:
+                # Bootstrap commits keep the instance recoverable if an
+                # append crashes. Reacquire if bootstrap released the lock.
+                _admit_disclosure_write(conn, check)
             eid = event_id or uuid.uuid4().hex
             tail = _read_tail_record(instance_dir)
             actual_seq, actual_hash = (0, GENESIS_HASH) if tail is None else (tail["seq"], tail["hash"])
@@ -1422,6 +1487,8 @@ def append_event(
             encoded = _canonical_json(record)
             if len(encoded) + 1 > MAX_RECORD_BYTES:
                 raise ReceiptError("receipt record exceeds the bounded tail window")
+            if check is not None:
+                check()
             with _open_month_fd(instance_dir, path.name, write=True, create=True) as fd:
                 output = os.fdopen(fd, "ab", closefd=False)
                 try:
@@ -1460,21 +1527,29 @@ def critical_event_id(operation_identity: Any) -> str:
 
 def label_digest(vault_root: Path, label: str) -> str:
     """Digest a human label with a machine-local secret, never the raw label."""
+    check = _disclosure_checkpoint()
     with _receipt_lock(vault_root):
-        with _receipt_connection(vault_root) as conn:
-            row = conn.execute(
-                "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
-            ).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO receipt_secrets (name, value) VALUES ('label_hmac', ?) "
-                    "ON CONFLICT(name) DO NOTHING",
-                    (os.urandom(32),),
-                )
-                conn.commit()
+        with _receipt_connection(vault_root, check=check) as conn:
+            try:
                 row = conn.execute(
                     "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
                 ).fetchone()
+                if row is None:
+                    if check is not None:
+                        _admit_disclosure_write(conn, check)
+                    conn.execute(
+                        "INSERT INTO receipt_secrets (name, value) VALUES ('label_hmac', ?) "
+                        "ON CONFLICT(name) DO NOTHING",
+                        (os.urandom(32),),
+                    )
+                    conn.commit()
+                    row = conn.execute(
+                        "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
+                    ).fetchone()
+            except sqlite3.Error as exc:
+                if check is not None:
+                    store._stop_contended_read(exc, check.budget.deadline)
+                raise
             if row is None:
                 raise ReceiptError("label digest secret initialization failed")
             secret = bytes(row[0])

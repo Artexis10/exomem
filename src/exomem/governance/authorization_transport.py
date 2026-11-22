@@ -728,6 +728,10 @@ class AuthorizationSessionMiddleware(Middleware):
                     limited = not unrestricted or not final_unrestricted
                     if not await auth_sessions.origin_session_active(bound) or changed and limited:
                         raise AuthorizationContextUnavailable
+                    if check is not None and await anyio.to_thread.run_sync(
+                        managed_preview_stop, self.vault_root, bound,
+                    ) is None:
+                        raise AuthorizationContextUnavailable
                     request_budget.checkpoint()
                 except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
                     raise ToolError("request authority changed before result consumption") from None

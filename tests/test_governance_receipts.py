@@ -32,6 +32,7 @@ from exomem import (
     lexstore,
     memory_refs,
     recover_from_trash,
+    request_budget,
     reserved_paths,
     state_paths,
 )
@@ -540,6 +541,71 @@ def test_receipt_connection_uses_normal_for_buffered_append_and_full_for_critica
     )
 
     assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["fresh-handle", "cached-handle"])
+def test_bounded_disclosure_busy_writer_leaves_receipt_untouched_and_can_retry(
+    vault: Path, cached: bool,
+) -> None:
+    first = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    path = receipts._month_path(vault, first["instance_id"], first["timestamp"])
+    before = path.read_bytes()
+    if not cached:
+        receipts._close_receipt_connections()
+    with contextlib.closing(sqlite3.connect(store.sidecar_path(vault))) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        budget = request_budget.RequestBudget(seconds=0.5)
+        check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+        started = time.monotonic()
+        with request_budget.checking(check), pytest.raises(
+            (request_budget.ReadBudgetExhausted, sqlite3.Error)
+        ) as refused:
+            receipts.append_event(
+                vault, event_type="disclosure", payload={"outcomes": []}, timestamp=first["timestamp"],
+            )
+        assert path.read_bytes() == before
+        assert isinstance(refused.value, request_budget.ReadBudgetExhausted)
+        assert time.monotonic() - started < 1.0
+        holder.rollback()
+
+    retry_check = request_budget.ReadCheckpoint(
+        request_budget.RequestBudget(seconds=5), bound_disclosure=True,
+    )
+    with request_budget.checking(retry_check):
+        second = receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []}, timestamp=first["timestamp"],
+        )
+    assert (second["seq"], second["prev"]) == (2, first["hash"])
+    assert receipts.verify_chain(vault)["valid"]
+    cached_conn = receipts._RECEIPT_CONNECTIONS[store.sidecar_path(vault).resolve()].connection
+    assert cached_conn.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+
+
+def test_audit_checkpoint_does_not_cancel_receipt_append_or_verification(vault: Path) -> None:
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0))
+    with request_budget.checking(check):
+        record = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+        assert record["seq"] == 1
+        assert receipts.verify_chain(vault)["valid"]
+
+
+def test_bounded_disclosure_settles_the_anchor_after_append_starts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budget = request_budget.RequestBudget(seconds=5)
+    check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+
+    def expire_after_flush(point: str) -> None:
+        if point == "after_jsonl_flush":
+            budget.deadline = time.monotonic()
+
+    monkeypatch.setattr(receipts, "_crash_point", expire_after_flush)
+    with request_budget.checking(check):
+        record = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert check.remaining() == 0
+    tail = receipts._read_sidecar_head(vault, record["instance_id"])
+    assert tail is not None and (tail[2], tail[3]) == (record["seq"], record["hash"])
+    assert receipts.verify_chain(vault)["valid"]
 
 
 def test_warmed_receipt_connection_preserves_an_in_place_future_schema(

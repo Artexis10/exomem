@@ -15,8 +15,10 @@ from typing import Any
 from . import (
     auth_sessions,
     capabilities,
+    freshness,
     maintenance_jobs,
     query_data,
+    recall_policy,
     reclassify_source,
     request_budget,
 )
@@ -49,14 +51,19 @@ def _not_found() -> OpError:
     )
 
 
-def _binding(root: Path, who: RequestPrincipal) -> str:
+def _authority_binding(root: Path, who: RequestPrincipal) -> str:
     if reclassify_source.managed_preview_stop(root, who) is None:
         raise _not_found()
-    generation, policy = reclassify_source._preview_generation(root)
-    if generation[1] is None or generation[3] is not None:
-        raise reclassify_source.preview_warming()
-    # Bind release to the current watcher, policy, connector and bearer-free caller identity.
-    return _digest((generation, policy, connector_boundary.cache_identity(root, who)[-1], asdict(who)))
+    policy = recall_policy.recall_policy_identity(root)
+    # Page delivery follows the same caller and current authority across corpus changes.
+    return _digest((policy, connector_boundary.cache_identity(root, who)[-1], asdict(who)))
+
+
+def _snapshot_key(root: Path) -> str | None:
+    generation = freshness.preview_reference_generation(root)
+    if generation is None or generation[1] is None or generation[3] is not None:
+        return None
+    return _digest(generation)
 
 
 def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]:
@@ -73,7 +80,7 @@ def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]
 
 def _build(
     root: Path, args: Mapping[str, Any], who: RequestPrincipal,
-    surface: capabilities.ActiveSurfaceDescriptor | None, binding: str, stop: Event,
+    surface: capabilities.ActiveSurfaceDescriptor | None, binding: str, snapshot_key: str, stop: Event,
 ) -> tuple[dict[str, Any], Iterator[tuple[str, str, str | None]]]:
     from .command_surface import resolve_command
     from .commands import PRODUCT_COMMANDS
@@ -96,12 +103,16 @@ def _build(
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
-            if stop.is_set() or _binding(root, who) != binding:
+            if stop.is_set() or _authority_binding(root, who) != binding:
                 raise _not_found()
+            if _snapshot_key(root) != snapshot_key:
+                raise reclassify_source.preview_warming()
             result = invoke_command(command, root, operation="propose-reclassification", **args)
             if (not original or _digest({key: result.get(key) for key in original["keys"]}) != original["digest"]
-                    or stop.is_set() or _binding(root, who) != binding):
+                    or stop.is_set() or _authority_binding(root, who) != binding):
                 raise _not_found()
+            if _snapshot_key(root) != snapshot_key:
+                raise reclassify_source.preview_warming()
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()
@@ -141,24 +152,34 @@ def report(
     if not managed:
         raise _not_found()
     who = effective_principal()
-    binding = _binding(root, who)
+    binding = _authority_binding(root, who)
+    snapshot_key = _snapshot_key(root)
     args = {"path": path, "source_kind": source_kind, "domain": domain}
     request_key = _digest(args)
+    follow = {"operation": "propose-reclassification",
+              **{key: value for key, value in args.items() if value is not None}}
     if preview_run_id is not None:
         result = maintenance_jobs.source_preview_status(
-            root, binding=binding, request_key=request_key, run_id=preview_run_id, cursor=cursor,
+            root, binding=binding, request_key=request_key, snapshot_key=snapshot_key,
+            run_id=preview_run_id, cursor=cursor,
         )
+        if result.get("error_code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE":
+            raise reclassify_source.preview_unavailable()
+        if result.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING":
+            result["retry_after_ms"] = reclassify_source.preview_warming().details["retry_after_ms"]
+            result["next"] = capabilities.active_call_route("manage_memory_file", follow)
     else:
+        if snapshot_key is None:
+            raise reclassify_source.preview_warming()
         surface = capabilities.current_active_surface()
         result = maintenance_jobs.start_source_preview(
-            root, binding=binding, request_key=request_key,
-            build=lambda stop: _build(root, args, who, surface, binding, stop),
+            root, binding=binding, request_key=request_key, snapshot_key=snapshot_key,
+            build=lambda stop: _build(root, args, who, surface, binding, snapshot_key, stop),
         )
-    if _binding(root, who) != binding:
+    if _authority_binding(root, who) != binding:
         raise _not_found()
     if preview_run_id is None or result.get("state") == maintenance_jobs.RUNNING or result.get("next_cursor") is not None:
-        follow = {"operation": "propose-reclassification", "preview_run_id": result["run_id"],
-                  **{key: value for key, value in args.items() if value is not None}}
+        follow["preview_run_id"] = result["run_id"]
         if result.get("next_cursor") is not None:
             follow["cursor"] = result["next_cursor"]
         result["next"] = capabilities.active_call_route("manage_memory_file", follow)

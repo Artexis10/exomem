@@ -79,6 +79,11 @@ MODE_STATUS = "maintenance-job"
 MODE_CANCEL = "maintenance-job-cancel"
 # Internal job mode. Access is bound to the Source preview admission proof.
 _SOURCE_PREVIEW = "source-preview"
+# Closed read-only Source preview error codes that may cross the job boundary.
+_SOURCE_PREVIEW_PUBLIC_ERRORS = frozenset({
+    "RECLASSIFICATION_PREVIEW_WARMING", "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+})
+_SOURCE_PREVIEW_FAILED = "RECLASSIFICATION_PREVIEW_FAILED"
 _SOURCE_PREVIEW_PAGE_ROWS = 128
 _ENTRY_INSERT = "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)"
 
@@ -125,6 +130,7 @@ class _Live:
 
     run_id: str
     vault_root: Path
+    mode: str
     stop: threading.Event = field(default_factory=foreground_priority.StopEvent)
     #: Why ``stop`` was set: ``CANCEL_CODE`` or ``SHUTDOWN_CODE``.
     reason: str | None = None
@@ -230,7 +236,7 @@ def _open(
             )
             conn.execute("CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, started_at)")
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS jobs_source_preview ON jobs(flags, seq DESC) "
+                "CREATE INDEX IF NOT EXISTS jobs_source_preview_snapshot ON jobs(flags, plan_id, seq DESC) "
                 f"WHERE mode = '{_SOURCE_PREVIEW}' AND state = '{COMPLETED}'"
             )
             # One row per page a job wrote or tried to write, in the order the job reached it.
@@ -528,7 +534,8 @@ def _page(
         after = int(cursor)
     except ValueError:
         after = -1
-    if after < 0 or (source_preview and after > (1 << 63) - 1):
+    sqlite_max_rowid = (1 << 63) - 1
+    if after < 0 or (source_preview and after > sqlite_max_rowid):
         raise OpError(
             "INVALID_ARGUMENTS",
             "cursor is not a next_cursor of this job's receipt",
@@ -540,10 +547,18 @@ def _page(
     last = after
     more = False
     statement = "SELECT seq, chunk, kind, path, value FROM entries WHERE run_id = ? AND seq > ? ORDER BY seq"
-    params = (view["run_id"], after)
+    run_id = view["run_id"]
+    ordinal_base = 0
+    params = (run_id, after)
     if source_preview:
+        # Private entries occupy one contiguous range. Keep its global allocation out of the cursor.
+        first = conn.execute(
+            "SELECT seq FROM entries WHERE run_id = ? ORDER BY seq LIMIT 1", (run_id,),
+        ).fetchone()
+        if first is not None:
+            ordinal_base = int(first["seq"]) - 1
         statement += " LIMIT ?"
-        params = (*params, _SOURCE_PREVIEW_PAGE_ROWS + 1)
+        params = (run_id, min(after + ordinal_base, sqlite_max_rowid), _SOURCE_PREVIEW_PAGE_ROWS + 1)
     for row in conn.execute(statement, params):
         if source_preview:
             request_budget.checkpoint()
@@ -568,7 +583,7 @@ def _page(
         "run_id": view["run_id"],
         "state": view["state"],
         "entries": entries,
-        "next_cursor": str(last) if more else None,
+        "next_cursor": str(last - ordinal_base) if more else None,
     }
 
 
@@ -628,6 +643,7 @@ def start_source_preview(
     *,
     binding: str,
     request_key: str,
+    snapshot_key: str,
     build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]]]],
 ) -> dict[str, Any]:
     """Start or join a private read job after the caller proves Source preview access."""
@@ -635,7 +651,8 @@ def start_source_preview(
         vault_root,
         mode=_SOURCE_PREVIEW,
         flags={"binding": binding, "request": request_key},
-        plan_id="",
+        # The plan identity is the snapshot this private preview records. It grants no read access.
+        plan_id=snapshot_key,
         why="",
         surface=SURFACE,
         audience="",
@@ -649,6 +666,7 @@ def source_preview_status(
     *,
     binding: str,
     request_key: str,
+    snapshot_key: str | None,
     run_id: str,
     cursor: str | None = None,
 ) -> dict[str, Any]:
@@ -664,12 +682,18 @@ def source_preview_status(
                 raise FileNotFoundError
             state = _effective_state(row, *_owner())
             view = {"run_id": run_id, "state": state}
+            if state == FAILED:
+                return {**view, "error_code": _source_preview_error_code(row["error_code"])}
             if state != COMPLETED:
                 return view
+            snapshot_current = None if snapshot_key is None else row["plan_id"] == snapshot_key
             if cursor is not None:
-                return _page(conn, view, cursor, source_preview=True)
+                return {**_page(conn, view, cursor, source_preview=True), "snapshot_current": snapshot_current}
             outcome = json.loads(row["outcome"])
-            return {**view, "result": outcome["result"], "next_cursor": "0" if outcome["has_entries"] else None}
+            return {
+                **view, "snapshot_current": snapshot_current, "result": outcome["result"],
+                "next_cursor": "0" if outcome["has_entries"] else None,
+            }
     except FileNotFoundError:
         raise OpError("NOT_FOUND", "No Source preview matches this request.") from None
 
@@ -769,8 +793,8 @@ def _claim(
             if source_preview:
                 previous = conn.execute(
                     "SELECT run_id, state FROM jobs "
-                    f"WHERE mode = '{_SOURCE_PREVIEW}' AND state = '{COMPLETED}' AND flags = ? "
-                    "ORDER BY seq DESC LIMIT 1", (flags_json,),
+                    f"WHERE mode = '{_SOURCE_PREVIEW}' AND state = '{COMPLETED}' AND flags = ? AND plan_id = ? "
+                    "ORDER BY seq DESC LIMIT 1", (flags_json, plan_id),
                 ).fetchone()
                 if previous is not None:
                     conn.commit()
@@ -811,7 +835,7 @@ def _claim(
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, mode, flags_json, plan_id, why, surface, audience, mine, RUNNING, time.time()),
             )
-            live = _Live(run_id=run_id, vault_root=Path(vault_root).resolve())
+            live = _Live(run_id=run_id, vault_root=Path(vault_root).resolve(), mode=mode)
             _LIVE[run_id] = live
             conn.commit()
         except BaseException:
@@ -877,7 +901,7 @@ def _run_source_preview(
 ) -> None:
     from . import query_data
 
-    state, error_code, outcome = FAILED, "INTERNAL", {}
+    state, error_code, outcome = FAILED, _SOURCE_PREVIEW_FAILED, {}
     published = None
     try:
         with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
@@ -902,7 +926,8 @@ def _run_source_preview(
     except foreground_priority.BulkCancelled:
         state, error_code = _stopped(live)
     except (Exception, request_budget.ReadBudgetExhausted) as error:  # noqa: BLE001 - worker terminal
-        state, error_code = FAILED, _error_code(error)
+        state = FAILED
+        error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
     finally:
         _finish(live, state, error_code, outcome, preview_entries=published)
 
@@ -911,6 +936,10 @@ def _stopped(live: _Live) -> tuple[str, str]:
     if live.reason == SHUTDOWN_CODE:
         return INTERRUPTED, SHUTDOWN_CODE
     return CANCELLED, CANCEL_CODE
+
+
+def _source_preview_error_code(code: str | None) -> str:
+    return code if code is not None and code in _SOURCE_PREVIEW_PUBLIC_ERRORS else _SOURCE_PREVIEW_FAILED
 
 
 def _run(
@@ -1004,11 +1033,11 @@ def _finish(
     """Record the terminal, then leave the live registry, so a sweep never sees a finished job as an orphan."""
     try:
         with _write(live.vault_root) as conn:
-            if preview_entries is not None:
+            if live.mode == _SOURCE_PREVIEW:
                 _prune(conn)
-                if live.stop.is_set():
-                    state, error_code = _stopped(live)
-                    outcome, preview_entries = {}, None
+            if preview_entries is not None and live.stop.is_set():
+                state, error_code = _stopped(live)
+                outcome, preview_entries = {}, None
             saved = conn.execute(
                 "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
                 (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),

@@ -512,7 +512,7 @@ class InboundRewrite:
 ReferrerProof = Callable[[
     Sequence[InboundLink], Sequence[str], Sequence[InboundRewrite],
     Callable[[str], bool] | None, Callable[[str], bool], bool,
-], None]
+], Callable[[], None]]
 
 
 #: The outcome a move preview gives each referrer; the command-surface specification fixes the set.
@@ -571,6 +571,7 @@ def iter_inbound_rewrites(
     undo: bool = False,
     check: Callable[[], None] | None = None,
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
+    read_text: Callable[[Path, Path], tuple[str, PathGuard]] | None = None,
 ) -> Iterator[InboundRewrite]:
     """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
@@ -586,6 +587,7 @@ def iter_inbound_rewrites(
     """
     from . import page_fields, pointer_write
 
+    reader = read_text or read_guarded_text
     pages = sorted({hit.path for hit in inbound} | set(named_in))
     moves = path_mentions.renames(
         vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
@@ -612,7 +614,7 @@ def iter_inbound_rewrites(
         except (ValueError, OSError):
             continue
         try:
-            text, guard = read_guarded_text(vault_root, abs_file)
+            text, guard = reader(vault_root, abs_file)
         except (OSError, UnicodeDecodeError, PathGuardError):
             continue
         new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
@@ -1352,13 +1354,16 @@ def _move_file_local(
     repoints: list[Any] = []
     restored: list[Any] = []
     refused: list[MoveFileError] = []
+    recheck_referrers = None
     if update_wikilinks:
         plans = plan_inbound_rewrites(
             vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary, undo=undo_lineage,
         ) if inbound or named_in else []
         if _verify_referrers is not None:
-            _verify_referrers(inbound, named_in, plans, visible, writable_page,
-                              mention_lookup is not None and mention_lookup.complete)
+            recheck_referrers = _verify_referrers(
+                inbound, named_in, plans, visible, writable_page,
+                mention_lookup is not None and mention_lookup.complete,
+            )
         for item in plans:
             rel = item.path
             shown = visible is None or visible(rel)
@@ -1769,6 +1774,8 @@ def _move_file_local(
                 try:
                     if _stage is not None:
                         _stage("before-rename")
+                    if recheck_referrers is not None:
+                        recheck_referrers()
                     _held_rename(vault_root, old_rel, new_rel)
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
@@ -1937,6 +1944,8 @@ def _move_file_local(
 
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
             reading.close()
+            if recheck_referrers is not None:
+                recheck_referrers()
             pointer_writes = record_pointer_writes()
             committed = semantic_writes.commit_move(
                 vault_root,

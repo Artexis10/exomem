@@ -131,19 +131,37 @@ def _open_existing_read_connection(
 
 
 def open_connection(
-    vault_root: Path, *, check_same_thread: bool = True
+    vault_root: Path, *, check_same_thread: bool = True,
+    check: request_budget.ReadCheckpoint | None = None,
 ) -> sqlite3.Connection:
     """Open (creating if absent) the governance sidecar with its schema in place."""
-
-    with reserved_paths._subsystem_authority_scope("governance.store"):
-        with reserved_paths._identity_coordination_scope(
-            vault_root,
-            descriptor_ids=("governance-store",),
+    if check is not None:
+        check()
+    deadline = check.budget.deadline if check is not None else None
+    conn: sqlite3.Connection | None = None
+    try:
+        with (
+            reserved_paths._subsystem_authority_scope("governance.store"),
+            reserved_paths._identity_coordination_scope(
+                vault_root, descriptor_ids=("governance-store",), deadline=deadline,
+            ),
         ):
-            return _open_connection_owned(
-                vault_root,
-                check_same_thread=check_same_thread,
-            )
+            path = sidecar_path(vault_root)
+            with reserved_paths._sqlite_owner_target_scope(
+                vault_root, path, "governance-store", create=True,
+            ) as retained_path:
+                conn = _open_connection_retained(
+                    vault_root, retained_path, check_same_thread=check_same_thread, check=check,
+                )
+        if check is not None:
+            check()
+        return conn
+    except BaseException as exc:
+        if conn is not None:
+            conn.close()
+        if isinstance(exc, Exception):
+            _stop_contended_read(exc, deadline)
+        raise
 
 
 def open_authorization_session_connection(
@@ -700,45 +718,32 @@ def migrate_enrolled_v3_store(
     return active
 
 
-def _open_connection_owned(
-    vault_root: Path, *, check_same_thread: bool
-) -> sqlite3.Connection:
-    path = sidecar_path(vault_root)
-    with reserved_paths._sqlite_owner_target_scope(
-        vault_root,
-        path,
-        "governance-store",
-        create=True,
-    ) as retained_path:
-        return _open_connection_retained(
-            vault_root,
-            retained_path,
-            check_same_thread=check_same_thread,
-        )
-
-
 def _open_connection_retained(
     vault_root: Path,
     path: Path,
     *,
     check_same_thread: bool,
+    check: request_budget.ReadCheckpoint | None,
 ) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+    conn = sqlite3.connect(
+        path, check_same_thread=check_same_thread, timeout=0 if check is not None else 5,
+    )
     try:
-        with _INITIALIZED_SIDECARS_LOCK:
+        with request_budget.checking(check), request_budget.locked(_INITIALIZED_SIDECARS_LOCK):
             state = _connection_state(conn, path)
             cached = _INITIALIZED_SIDECARS.get(path)
             if cached == state:
-                # WAL mode persists in the database. These two pragmas are
-                # connection-local and cheap, so every new handle still gets
-                # the production timeout/durability settings without rerunning
-                # journal negotiation and idempotent DDL on every receipt.
+                # WAL mode persists. Apply handle-local settings without
+                # repeating journal negotiation or DDL on each receipt.
                 conn.execute("PRAGMA synchronous=FULL")
-                conn.execute("PRAGMA busy_timeout=5000")
+                if check is None:
+                    conn.execute("PRAGMA busy_timeout=5000")
                 _INITIALIZED_SIDECARS.move_to_end(path)
             else:
                 sidecar_store.apply_sidecar_pragmas(conn)
+                if check is not None:
+                    conn.execute("PRAGMA busy_timeout=0")
                 conn.execute("PRAGMA synchronous=FULL")
                 _migrate(conn)
                 if int(conn.execute("PRAGMA user_version").fetchone()[0]) <= SCHEMA_USER_VERSION:
@@ -754,6 +759,8 @@ def _open_connection_retained(
             "governance-store",
             conn,
         )
+        if check is not None:
+            conn.execute("PRAGMA busy_timeout=5000")
         return conn
     except BaseException:
         conn.close()

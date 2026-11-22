@@ -162,7 +162,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
                     assert resumed.get("preview_digest") == warm["preview_digest"]
 
             expired = threading.Event()
-            plan = move_file.plan_inbound_rewrites
+            plan = move_file.iter_inbound_rewrites
 
             class Budget(request_budget.RequestBudget):
                 def remaining(self):
@@ -173,7 +173,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
                 return plan(*args, **kwargs)
 
             monkeypatch.setattr(request_budget, "RequestBudget", Budget)
-            monkeypatch.setattr(move_file, "plan_inbound_rewrites", expire_during_planning)
+            monkeypatch.setattr(move_file, "iter_inbound_rewrites", expire_during_planning)
             timed_out = await call("manage_memory_file", **preview)
             assert timed_out["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
             assert "references" not in timed_out and "preview_digest" not in timed_out
@@ -197,7 +197,14 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     from record_fixtures import copy_dataset_fixture
     from test_agent_tool_surface import _call
 
-    from exomem import file_watcher, freshness, maintenance_jobs, reclassification_preview, server
+    from exomem import (
+        file_watcher,
+        freshness,
+        maintenance_jobs,
+        reclassification_preview,
+        semantic_writes,
+        server,
+    )
     from exomem import vault as vault_module
 
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
@@ -268,6 +275,16 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             seen = set()
             while cursor is not None:
                 page = await preview(preview_run_id=run_id, cursor=cursor)
+                if not seen:
+                    assert page["snapshot_current"]
+                    unrelated = vault / KB / "Notes" / "unrelated.md"
+                    unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
+                    freshness.on_files_changed(vault, changed=[unrelated])
+                    vault_module.on_inbound_files_changed(
+                        vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
+                    )
+                else:
+                    assert not page["snapshot_current"]
                 seen.update((entry["kind"], entry["path"]) for entry in page["entries"])
                 cursor = page["next_cursor"]
             assert {("rewritten", path) for path in paths}.issubset(seen)
@@ -287,6 +304,27 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
             refreshed = await ready((await preview())["run_id"])
+            preflight = semantic_writes.preflight_move
+            late = vault / KB / "Notes" / "late-referrer.md"
+
+            def add_a_referrer_during_preflight(*args, **kwargs):
+                result = preflight(*args, **kwargs)
+                late.write_text(f"See `{source}`.\n", encoding="utf-8")
+                freshness.on_files_changed(vault, changed=[late])
+                return result
+
+            with monkeypatch.context() as edit:
+                edit.setattr(semantic_writes, "preflight_move", add_a_referrer_during_preflight)
+                refused = await call("manage_memory_file", operation="reclassify", **args, reason="Correct Source kind",
+                                     preview_digest=refreshed["result"]["preview_digest"])
+            assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
+            assert (vault / source).is_file() and source in (vault / evidence).read_text()
+
+            vault_module.on_inbound_files_changed(vault, changed_rels=[late.relative_to(vault).as_posix()], deleted_rels=[])
+            lexstore.ensure_fresh(vault)
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            refreshed = await ready((await preview())["run_id"])
             corrected = await call("manage_memory_file", operation="reclassify", **args,
                                    reason="Correct the Source kind", preview_digest=refreshed["result"]["preview_digest"])
             destination = refreshed["result"]["destination"]
@@ -301,7 +339,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         maintenance_jobs.stop_all(vault)
 
 
-@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning", "policy-release", "receipt-release"])
+@pytest.mark.parametrize("hold_at", [
+    "after-verification", "after-planning", "policy-release", "receipt-release", "session-closed",
+])
 def test_rest_preview_retries_while_verified_session_authority_is_busy(
     vault, source_schema, monkeypatch, hold_at,
 ):
@@ -342,8 +382,31 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
             principal_id=who.audience_id, issuer_family=who.issuer_family, now=now, ttl_seconds=600,
         )
     stop = threading.Event()
-    locked, release = threading.Event(), threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
+    headers = _headers(credential.bearer)
+
+    if hold_at == "session-closed":
+        emit = egress.emit_boundary_receipt
+
+        def close_after_receipt(*args, **kwargs):
+            emit(*args, **kwargs)
+            closed_at = int(time.time())
+            with closing(store.open_authorization_session_connection(vault)) as connection:
+                authorization_session_lifecycle.close_verified_session(
+                    connection, custody=authorization_custody.load_authorization_custody(vault, now=closed_at),
+                    context=credential.context, now=closed_at,
+                )
+
+        monkeypatch.setattr(egress, "emit_boundary_receipt", close_after_receipt)
+        terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
+        assert "preview_digest" not in terminal and "references" not in terminal
+        retry = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert retry["error"]["code"] == "AUTHORIZATION_SESSION_UNAVAILABLE"
+        return
+
+    locked, release = threading.Event(), threading.Event()
 
     def hold_authority():
         lock = (
@@ -386,8 +449,6 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
     # Keep a real governance or receipt lock held through the response.
     monkeypatch.setattr(target, name, interleave_hold)
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
-    body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}
-    headers = _headers(credential.bearer)
     try:
         started = time.monotonic()
         terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
@@ -406,7 +467,8 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
 
 @pytest.mark.parametrize("fault", [
     "release", "render", "cold-resolver", "uncertified-resolver", "removed-link", "changed-source", "catalogue-link",
-    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "inbound-freshness-lock",
+    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "catalogue-unsupported-overflow",
+    "inbound-freshness-lock",
 ])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
@@ -420,6 +482,7 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         freshness,
         move_file,
         path_mentions,
+        reclassification_preview,
         request_budget,
         server,
     )
@@ -474,7 +537,7 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
 
         monkeypatch.setattr(target, name, expire)
     elif fault in ("removed-link", "changed-source", "catalogue-link"):
-        plan = move_file.plan_inbound_rewrites
+        plan = move_file.iter_inbound_rewrites
 
         def edit_during_planning(*args, **kwargs):
             # Hold watcher delivery back, so the planner sees the edit before the cache does.
@@ -483,12 +546,14 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             (vault / changed).write_text(f"{body}\n", encoding="utf-8")
             return plan(*args, **kwargs)
 
-        monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
+        monkeypatch.setattr(move_file, "iter_inbound_rewrites", edit_during_planning)
     elif fault == "catalogue-unavailable":
         # Current inbound links cannot prove that the catalogue checked prose references.
         monkeypatch.setattr(path_mentions, "find_pages", lambda *a, **kw: path_mentions.Lookup((), False))
-    elif fault == "catalogue-unsupported":
+    elif fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):
         monkeypatch.setattr(lexstore, "_usable", lambda: False)
+        if fault == "catalogue-unsupported-overflow":
+            monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 0)
     elif fault == "inbound-freshness-lock":
         lookup_inbound = vault_module.cached_inbound_wikilinks
         held = threading.Event()
@@ -531,8 +596,17 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
                 "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
             })
             retry = await _call(client, *call)
+            if fault == "catalogue-unsupported-overflow":
+                run_id = retry["run_id"]
+                status = public_call("manage_memory_file", {
+                    "operation": "propose-reclassification", "path": source,
+                    "source_kind": "dataset-export", "preview_run_id": run_id,
+                })
+                async with asyncio.timeout(5):
+                    while (retry := await _call(client, *status)).get("state") == "running":
+                        await asyncio.sleep(0.1)
             error = retry.get("error", {})
-            if fault == "catalogue-unsupported":
+            if fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):
                 assert error.get("code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", retry
                 assert "retry" not in error
             else:

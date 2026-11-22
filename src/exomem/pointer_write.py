@@ -433,9 +433,14 @@ def preview_digest(moves: Mapping[str, str], writes: Iterable[PointerWrite]) -> 
     It covers each move and each write's page with its before and after hash, so a commit whose
     writes differ from the listed ones, or whose pages changed since, has another digest.
     """
+    return preview_digest_from_hashes(moves, ((write.path, write.before_hash, write.after_hash) for write in writes))
+
+
+def preview_digest_from_hashes(moves: Mapping[str, str], writes: Iterable[tuple[str, str, str]]) -> str:
+    """Bind the same approval without keeping the full before and after texts."""
     payload = {
         "moves": sorted(moves.items()),
-        "writes": sorted((write.path, write.before_hash, write.after_hash) for write in writes),
+        "writes": sorted(writes),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 

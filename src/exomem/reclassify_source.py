@@ -649,7 +649,8 @@ def _propose(
     candidate_limit: int | None = None, paged: bool = False,
 ) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
-    text, source_guard = read_guarded_text(vault_root, absolute)
+    read_text = _read_inline_text if candidate_limit is not None else read_guarded_text
+    text, source_guard = read_text(vault_root, absolute)
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
 
@@ -762,7 +763,8 @@ def _propose(
         refusals=outcome.refusals,
         warnings=() if outcome.mentions_checked else (path_mentions.NOT_CHECKED,),
         preview_digest=(
-            (outcome.paged_digest if paged else pointer_write.preview_digest({rel: destination}, outcome.repoints))
+            (outcome.paged_digest if paged else
+             pointer_write.preview_digest_from_hashes({rel: destination}, outcome.repoint_hashes))
             if destination is not None and destination != rel and not outcome.refusals
             else None
         ),
@@ -805,8 +807,8 @@ def _preview_generation(vault_root: Path) -> tuple:
 class _ReferrerOutcome:
     rewritten: tuple[str, ...] = ()
     repointed: tuple[str, ...] = ()
-    #: The pointer writes behind `repointed`, which the preview digest binds.
-    repoints: tuple[Any, ...] = ()
+    #: Keep only the pointer proofs behind `repointed`, independent of page body size.
+    repoint_hashes: tuple[tuple[str, str, str], ...] = ()
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     refusals: tuple[Mapping[str, str], ...] = ()
     #: False when the catalogue could not say which pages cite the source's path in prose.
@@ -865,11 +867,30 @@ def preview_warming() -> OpError:
     )
 
 
+def preview_unavailable() -> OpError:
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+        "The current search backend cannot check prose references to the source.",
+        remediation="Use a server with the maintained lexical index to preview the move.",
+    )
+
+
 class PreviewNeedsJob(Exception):
     """Current evidence exceeds the interactive admission bound."""
 
 
+# Keep one large parse out of the interactive request even when it has few candidates.
+_INLINE_MARKDOWN_BYTES = 1024 * 1024
 _PAGED_APPROVAL_PREFIX = "reclassification-report-v1:"
+
+
+def _read_inline_text(root: Path, path: Path) -> tuple[str, PathGuard]:
+    if path.lstat().st_size > _INLINE_MARKDOWN_BYTES:
+        raise PreviewNeedsJob()
+    absolute_root = root.resolve()
+    rel = path.relative_to(absolute_root).as_posix()
+    raw, guard = vault.read_bounded_guarded_bytes(absolute_root, rel, limit=_INLINE_MARKDOWN_BYTES)
+    return raw.decode("utf-8"), guard
 
 
 class _PagedPlanProof:
@@ -955,11 +976,7 @@ def _referrer_outcome(
             if lookup.overflow:
                 raise PreviewNeedsJob()
             if lookup.unsupported:
-                raise OpError(
-                    "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
-                    "The current search backend cannot check prose references to the source.",
-                    remediation="Use a server with the maintained lexical index to preview the move.",
-                )
+                raise preview_unavailable()
             if not lookup.complete:
                 raise preview_warming()
     named_in = [
@@ -972,18 +989,18 @@ def _referrer_outcome(
         forms.setdefault(hit.path, set()).add(_link_form(hit.raw_target))
     rewritten: list[str] = []
     repointed: list[str] = []
-    repoints: list[Any] = []
+    repoint_hashes: list[tuple[str, str, str]] = []
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
     proof = (
         _PagedPlanProof(rel, destination, text, inbound, paged_classification)
         if paged_classification is not None else None
     )
-    planner = move_file_module.iter_inbound_rewrites if proof is not None else move_file_module.plan_inbound_rewrites
-    plans = planner(
+    plans = move_file_module.iter_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
         check=foreground_priority.check_cancelled if read_hashes is not None else None,
         resolver_factory=borrow_resolver if read_hashes is not None else None,
+        read_text=_read_inline_text if candidate_limit is not None else None,
     )
     for item in plans:
         if read_hashes is not None:
@@ -1002,7 +1019,8 @@ def _referrer_outcome(
             refusals.append({"code": code, "path": item.path, "reason": reason})
         elif changes and item.repoint is not None:
             repointed.append(item.path)
-            repoints.append(item.repoint)
+            if proof is None:
+                repoint_hashes.append((item.repoint.path, item.repoint.before_hash, item.repoint.after_hash))
         elif changes or item.mentions:
             rewritten.append(item.path)
         elif item.append_only:
@@ -1030,7 +1048,7 @@ def _referrer_outcome(
     return _ReferrerOutcome(
         rewritten=tuple(rewritten),
         repointed=tuple(repointed),
-        repoints=tuple(repoints),
+        repoint_hashes=tuple(repoint_hashes),
         append_only_unchanged={form: tuple(paths) for form, paths in sorted(unchanged.items())},
         refusals=tuple(refusals),
         mentions_checked=lookup is None or lookup.complete,
@@ -1086,6 +1104,14 @@ def _write_correction(
             refusal = outcome.refusals[0]
             raise ReclassifyError(refusal["code"], refusal["reason"])
 
+    def current_reference_generation() -> tuple:
+        generation = freshness.preview_reference_generation(vault_root)
+        if generation is None or generation[1] is None or generation[3] is not None:
+            raise _stale_paged_approval()
+        return generation
+
+    approved_generation = current_reference_generation() if paged else None
+
     def verify_referrers(inbound, named_in, plans, visible, writable, complete):
         candidates = {hit.path for hit in inbound}.union(named_in)
         planned = {rel, *(item.path for item in plans)}
@@ -1096,6 +1122,20 @@ def _write_correction(
             proof.examine(item, visible=visible is None or visible(item.path), writable=writable(item.path))
         if proof.digest() != preview_digest:
             raise _stale_paged_approval()
+        guards = (source_guard, *(item.guard for item in plans))
+
+        def recheck():
+            if current_reference_generation() != approved_generation:
+                raise _stale_paged_approval()
+            try:
+                for guard in guards:
+                    guard.recheck(vault_root)
+            except (OSError, PathGuardError):
+                raise _stale_paged_approval() from None
+            if current_reference_generation() != approved_generation:
+                raise _stale_paged_approval()
+
+        return recheck
 
     def bound_transform(current: str) -> str:
         # Refuse stale history instead of overwriting an external metadata edit.

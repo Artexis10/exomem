@@ -527,6 +527,9 @@ def register_rest_facade(
                             raise authorization_request.AuthorizationContextUnavailable
                         preview_response = None
                         if check is not None:
+                            with request_budget.checking(check):
+                                if await run_in_threadpool(managed_preview_stop, vault_root, bound_principal) is None:
+                                    raise authorization_request.AuthorizationContextUnavailable
                             check()
                             preview_response = RestJSONResponse(cli_ops.envelope(True, data=result))
                             check()
