@@ -18,6 +18,9 @@ run stores per-shard durations with `--store-durations` and uploads each as a
     gh run download <run-id> --pattern 'test-durations-*' --dir durations/
     uv run python scripts/refresh_test_durations.py apply durations/**/*.json
 
+The retrieval latency shards run in `.github/workflows/latency-measurements.yml`,
+so their `test-durations-latency-*` artifacts come from that workflow's runs.
+
 Neither route runs in CI against the repository: durations refresh is a
 reviewed local change, never an auto-commit from a workflow.
 

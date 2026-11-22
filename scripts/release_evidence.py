@@ -19,6 +19,8 @@ WORKFLOW = ".github/workflows/ci.yml"
 AUTOMATION = ".github/workflows/release-evidence-automation.yml"
 RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
+# The cut controller pushes a release's post-release metadata to main from this branch family.
+RECONCILE_PREFIX = "release-reconcile/"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
 # Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
@@ -35,11 +37,17 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
         raise ValueError("pull request scope requires the GitHub PR schema")
     base = pr.get("base", {}).get("ref", "")
     head = pr.get("head", {}).get("ref", "")
-    release = event_name == "pull_request" and (
-        head == RELEASE_BRANCH
-        or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+    reconcile = event_name == "pull_request" and base == "main" and head.startswith(
+        RECONCILE_PREFIX
     )
-    return {"full": event_name in FULL_EVENTS, "release": release}
+    release = reconcile or (
+        event_name == "pull_request"
+        and (
+            head == RELEASE_BRANCH
+            or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+        )
+    )
+    return {"full": event_name in FULL_EVENTS, "release": release, "reconcile": reconcile}
 
 
 def event_payload() -> dict:
@@ -279,6 +287,12 @@ def cut_branch(source: str) -> str:
     if len(source) != 40 or any(char not in "0123456789abcdef" for char in source):
         raise ValueError("select a full lowercase source commit SHA")
     return f"release-cuts/{source}"
+
+
+def reconcile_branch(source: str) -> str:
+    """The branch from which the cut controller proposes a release's metadata to main."""
+    cut_branch(source)
+    return RECONCILE_PREFIX + source
 
 
 def optional_api(path: str):
