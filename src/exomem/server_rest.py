@@ -487,6 +487,7 @@ def register_rest_facade(
                             capabilities.active_surface(surface_descriptor),
                             principal_module.request_scope(bound_principal),
                             request_budget.checking(check) if check is not None else nullcontext(),
+                            retained_report_admission(retained_identity) if retained_identity is not None else nullcontext(),
                         ):
                             if check is not None:
                                 check()
@@ -516,7 +517,10 @@ def register_rest_facade(
                                 if stop is None:
                                     check = None
                                 elif kwargs.get("preview_run_id") is not None:
-                                    from .reclassification_preview import retained_report_identity
+                                    from .reclassification_preview import (
+                                        retained_report_admission,
+                                        retained_report_identity,
+                                    )
 
                                     with request_budget.checking(check):
                                         retained_identity = await run_in_threadpool(

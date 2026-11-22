@@ -691,13 +691,17 @@ class AuthorizationSessionMiddleware(Middleware):
                                 check = None
                     scopes.enter_context(request_budget.checking(check))
                     if check is not None and arguments.get("preview_run_id") is not None:
-                        from ..reclassification_preview import retained_report_identity
+                        from ..reclassification_preview import (
+                            retained_report_admission,
+                            retained_report_identity,
+                        )
 
                         retained_identity = await anyio.to_thread.run_sync(
                             retained_report_identity, self.vault_root, bound,
                         )
                         if retained_identity is None:
                             raise AuthorizationContextUnavailable
+                        scopes.enter_context(retained_report_admission(retained_identity))
 
                     def boundary_view() -> tuple[tuple, bool]:
                         request_budget.checkpoint()

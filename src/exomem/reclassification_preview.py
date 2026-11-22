@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -36,6 +36,9 @@ from .governance.principal import (
 # Bound work before reading candidates' bodies. Results also meet the normal response-byte bound.
 _INLINE_CANDIDATES = 256
 _JOB_REPORT: ContextVar[dict[str, Any] | None] = ContextVar("source_reclassification_job_report", default=None)
+_RETAINED_ADMISSION: ContextVar[tuple[str, str | None] | None] = ContextVar(
+    "source_reclassification_report_admission", default=None,
+)
 
 
 def _bytes(value: Any) -> bytes:
@@ -118,6 +121,16 @@ def retained_report_identity(root: Path, who: RequestPrincipal) -> tuple[str, st
     if authority.depends_on_membership and snapshot is None:
         raise request_budget.ReadBudgetExhausted()
     return authority.key, snapshot
+
+
+@contextmanager
+def retained_report_admission(identity: tuple[str, str | None]) -> Iterator[None]:
+    """Bind the authority the transport will recheck before releasing this report."""
+    token = _RETAINED_ADMISSION.set(identity)
+    try:
+        yield
+    finally:
+        _RETAINED_ADMISSION.reset(token)
 
 
 def _entries(report: Mapping[str, Any]) -> Iterator[tuple[str, str, str | None]]:
@@ -213,6 +226,9 @@ def report(
     follow = {"operation": "propose-reclassification",
               **{key: value for key, value in args.items() if value is not None}}
     if preview_run_id is not None:
+        current = (authority.key, snapshot_key if authority.depends_on_membership else None)
+        if _RETAINED_ADMISSION.get() != current:
+            raise _not_found()
         result = maintenance_jobs.source_preview_status(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,

@@ -273,6 +273,14 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             terminal = await ready(run_id)
             digest = terminal["result"]["preview_digest"]
             cursor = terminal["next_cursor"]
+            with monkeypatch.context() as changed_admission:
+                changed_admission.setattr(
+                    reclassification_preview, "retained_report_identity", lambda *_: ("other-authority", None),
+                )
+                refused = await preview(preview_run_id=run_id, cursor=cursor)
+            assert refused["error"]["code"] == "NOT_FOUND", refused
+            assert "entries" not in refused and "next_cursor" not in refused
+
             postfilter = egress._postfilter
 
             def withhold_one_entry(*args, **kwargs):
