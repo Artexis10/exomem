@@ -30,6 +30,7 @@ from test_vault_store_migration import (
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
+from test_vault_store_served import call
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
@@ -1194,6 +1195,25 @@ def test_the_owner_deletes_a_stored_folder_that_the_projector_has_not_written_ye
 PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
     surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
 )
+
+
+def test_read_page_does_not_scan_its_parent_to_resolve_the_version_id(stored, monkeypatch):  # noqa: F811
+    parent = (stored / ALPHA).parent
+    scanned = []
+    scandir = os.scandir
+
+    def record(path):
+        if path == parent:
+            scanned.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", record)
+    with capabilities.active_surface(PUBLIC_SHAPE):
+        result = call(stored, "read_memory", path=ALPHA)
+
+    assert result["path"] == ALPHA
+    assert result["id"]
+    assert scanned == []
 
 
 @pytest.mark.timeout(300)
