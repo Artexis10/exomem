@@ -1600,11 +1600,14 @@ def task_candidates(
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
             with find_types.timing_span(timings, "working_set.task_context_routing"):
-                targets = _routing_targets(
+                targets = _routing_targets_or_none(
                     vault_root, index_token[1], index_token=index_token,
                     visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
                 )
-                route = collection_claims.route(working_set_index.terms_of(query), targets)
+                if targets is None:
+                    # A collection the turn routes to is a lead; an unread manifest index is a failed lane, not no route.
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                route = collection_claims.route(working_set_index.terms_of(query), targets or ())
             if route is not None:
                 add(str(route["collection"]), origin)
         if restricted:
@@ -6150,7 +6153,19 @@ def _routing_targets(
     index_token: tuple[int, int, int] | None = None,
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[Any, ...]:
-    """Records routing targets for `claims_match`, via the existing claims rule.
+    """Records routing targets for `claims_match`; none when the manifests cannot be read."""
+    targets = _routing_targets_or_none(vault_root, index_generation, index_token=index_token, visible=visible)
+    return () if targets is None else targets
+
+
+def _routing_targets_or_none(
+    vault_root: Path,
+    index_generation: int,
+    *,
+    index_token: tuple[int, int, int] | None = None,
+    visible: Callable[[str], bool] | None = None,
+) -> tuple[Any, ...] | None:
+    """Records routing targets for `claims_match`, via the existing claims rule; None when they cannot be read.
 
     Read from the manifests the index update published for this generation, so
     the request path enumerates no directory to build them. These claims are
@@ -6167,9 +6182,9 @@ def _routing_targets(
         manifests = working_set_index.records_manifests(
             vault_root, index_generation, token=index_token
         )
-    except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
+    except Exception:  # noqa: BLE001 - a caller decides whether a failed read differs from no targets
         log.debug("activation: routing targets unavailable", exc_info=True)
-        return ()
+        return None
     targets: list[Any] = []
     for manifest in manifests:
         path = str(getattr(manifest, "path", ""))

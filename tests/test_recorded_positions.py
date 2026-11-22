@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from exomem import (
     semantic_language_registry,
     served_context,
     working_set,
+    working_set_index,
 )
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress, principal
@@ -339,6 +341,55 @@ def test_a_turn_whose_link_lookup_failed_reports_the_positions_it_read_as_partia
 
     assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
     assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_link_reasons_could_not_be_read_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph listed the link, but its reason could not be read, so the link and the linked page that holds the
+    position were dropped after discovery; the block still read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    read_connections = working_set.read_connections
+
+    def unreadable() -> str:
+        raise egress.ReaderViewUnavailable("reader view unavailable")
+
+    def with_unreadable_reasons(*args, **kwargs):
+        return {
+            seed: (tuple(replace(connection, build_why=unreadable) for connection in listed), omitted)
+            for seed, (listed, omitted) in read_connections(*args, **kwargs).items()
+        }
+
+    monkeypatch.setattr(working_set, "read_connections", with_unreadable_reasons)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_collection_routing_could_not_be_read_reports_its_positions_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable manifest index read as "no collection to route to", so a lead only routing finds was missing
+    and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("manifest index unreadable")
+
+    monkeypatch.setattr(working_set_index, "records_manifests", unreadable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"]["state"] == "partial" and packet["positions"]["reason"] == "lane_failed"
+    # The lanes that still ran served the lead and its link, so the position they reach is served.
+    assert [item["ref"].rpartition("/")[2] for item in packet["positions"]["items"]] == ["studio-equipment-log.md#slow-cool"]
 
 
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -106,12 +106,13 @@ def packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(lines)) + (1 if lines else 0)
 
 
-def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
+def _reasoned(block: dict[str, Any], link: dict[str, Any], reach: Reach | None = None) -> bool:
     """Build a link's `why` when the allocation first tries it; False when it cannot be listed.
 
     The reason reads pages, so a link the allowance never reaches costs no read; the line's length is part of
     what the allowance charges, so it is built before the link is measured. A reader view that cannot be read
-    leaves the link unlisted and the lane reported failed, as an unreadable graph does.
+    leaves the link unlisted and the lane reported failed, as an unreadable graph does, and the link's target
+    is then a page the turn reaches that the response does not serve.
     """
     build = link.pop("build_why", None)
     if build is None:
@@ -119,7 +120,9 @@ def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
     try:
         link["why"] = build()
     except egress.ReaderViewUnavailable:
-        _add_missing(block, "lane_failed")
+        _add_missing(block, _LANE_FAILED)
+        if reach is not None:
+            reach.stop(_LANE_FAILED)
         return False
     return True
 
@@ -713,7 +716,7 @@ def compile_context(
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
                     _add_missing(block, "budget")
-                elif links and _reasoned(block, links[0]):
+                elif links and _reasoned(block, links[0], reach):
                     item["links"] = links[:1]
                     if packet_chars(block) > allowance:
                         item.pop("links")
@@ -752,7 +755,7 @@ def compile_context(
                 served = item["links"] = []
             before = len(served)
             for link in links:
-                if not _reasoned(block, link):
+                if not _reasoned(block, link, reach):
                     break
                 served.append(link)
                 if packet_chars(block) > allowance:
