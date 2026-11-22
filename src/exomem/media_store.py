@@ -419,7 +419,7 @@ def _adapter(connection: dict[str, object], name: str) -> Store:
         root = connection.get("root")
         if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(root, str):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
-        if "\0" in root:
+        if b"\0" in os.fsencode(root):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the filesystem store root contains a NUL byte")
         bound = connection.get("max_object_bytes")
         return FilesystemStore(Path(root), name=name,

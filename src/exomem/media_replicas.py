@@ -1872,6 +1872,9 @@ def _reconcile_copy(ledger: MediaJobStore, row: sqlite3.Row) -> None:
 def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | None, *, attempts: int | None = None,
             retry_at: float | None = None) -> None:
     with closing(ledger._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        # The writer lock may have taken time. Check the copy's generation again before writing its outcome.
+        foreground_priority.check_cancelled()
         conn.execute("UPDATE media_replica_queue SET state = :state, code = :code, attempts = COALESCE(:attempts, attempts), "
                      f"retry_at = COALESCE(:retry_at, retry_at) WHERE {_PENDING_COPY}",
                      {**_copy_identity(row), "state": state, "code": code, "attempts": attempts, "retry_at": retry_at})

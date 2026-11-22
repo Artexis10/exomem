@@ -602,6 +602,62 @@ def test_a_settlement_error_cannot_hide_the_first_due_verification(
     assert "cannot record the queued copy" in caplog.text
 
 
+def test_stopping_a_copy_while_its_failure_settlement_waits_keeps_it_queued(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.rebuild(vault)
+    assert media_replicas.scan(vault, MIRROR) == 1
+    ledger = media_jobs.MediaJobStore(vault)
+    attempts = media_replicas._MAX_ATTEMPTS - 1
+    with closing(sqlite3.connect(ledger.path)) as conn, conn:
+        conn.execute("UPDATE media_replica_queue SET attempts = ?", (attempts,))
+
+    stop, waiting = threading.Event(), threading.Event()
+    connect = media_jobs.MediaJobStore._connect
+
+    class ObservedSettlement(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            waiting.set()
+            return super().execute(sql, parameters)
+
+    with closing(sqlite3.connect(ledger.path, check_same_thread=False)) as held_writer:
+        def failed_transfer(*_args):
+            held_writer.execute("BEGIN IMMEDIATE")
+            raise OSError(errno.EIO, "copy failed while the replica ledger had a writer")
+
+        def enter_settlement(self, *, readonly=False):
+            if held_writer.in_transaction and not readonly:
+                return sqlite3.connect(ledger.path, factory=ObservedSettlement)
+            return connect(self, readonly=readonly)
+
+        def copy():
+            try:
+                with media_replicas.foreground_priority.bulk(stop=stop):
+                    media_replicas.drain(vault, store=MIRROR)
+            except media_replicas.foreground_priority.BulkCancelled:
+                pass
+
+        monkeypatch.setattr(media_store, "replicate", failed_transfer)
+        monkeypatch.setattr(media_jobs.MediaJobStore, "_connect", enter_settlement)
+        thread = threading.Thread(target=copy, daemon=True)
+        thread.start()
+        try:
+            assert waiting.wait(5)
+        finally:
+            stop.set()
+            held_writer.rollback()
+            thread.join(6)
+            assert not thread.is_alive()
+
+    with closing(sqlite3.connect(ledger.path)) as conn:
+        assert conn.execute("SELECT state, attempts, code FROM media_replica_queue").fetchall() == [
+            ("pending", attempts, None),
+        ]
+
+
 @pytest.mark.parametrize("phase", ["copy", "drain"])
 def test_translated_ledger_contention_preserves_copy_attempts_and_due_verification(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
@@ -844,6 +900,7 @@ def test_a_store_that_does_not_answer_is_checked_before_any_work_and_spends_no_a
     {"retrieval_class": "invalid"},
     {"adapter": "media-edge"},
     {"root": "invalid\0root"},
+    {"root": "invalid\ud800root"},
     {"max_object_bytes": float("inf")},
 ])
 def test_invalid_destination_setup_pauses_a_queued_copy_until_configured(
