@@ -4436,6 +4436,7 @@ def _read_owner_bytes(
     descriptor_id: str,
     *,
     limit: int,
+    deadline: float | None = None,
 ) -> bytes:
     """Read one exact private owner file through a retained no-follow handle."""
 
@@ -4467,6 +4468,7 @@ def _read_owner_bytes(
         root,
         descriptor_ids=(descriptor_id,),
         identity_may_change=False,
+        deadline=deadline,
     ):
         acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:

@@ -40,7 +40,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (keep-handed-files-as-sources).
 # The door operation `maintenance.capture_metadata`, the owner's metadata-only capture backfill, added 62 B to the two
 # door enums on 2026-11-20 (index-capture-metadata).
-TOTAL_BUDGET = 29_450
+# The per-file `diarize` speaker-label choice on the `save_source` and `save_evidence` file handles added 212 B on
+# 2026-11-22 (add-media-processing-policy).
+TOTAL_BUDGET = 29_600
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -63,8 +65,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1200,
-    "save_source": 1412,
+    "save_evidence": 1300,
+    "save_source": 1550,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

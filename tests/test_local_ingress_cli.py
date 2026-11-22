@@ -481,6 +481,33 @@ def test_attach_sends_smaller_parts_after_a_proxy_times_out_on_a_large_one(
     assert (vault / receipt["path"]).read_bytes() == source.read_bytes()
 
 
+@pytest.mark.parametrize(
+    ("option", "resumable", "expected"),
+    [("--diarize", False, True), ("--no-diarize", True, False)],
+)
+def test_attach_keeps_the_speaker_label_choice(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    option: str, resumable: bool, expected: bool,
+) -> None:
+    from exomem import preserve
+
+    source = tmp_path / "recording.wav"
+    source.write_bytes(b"recording bytes")
+    transport = _ServiceTransport(_service_app(tmp_path, monkeypatch))
+    args = [str(source), "--scope", "Device", "--category", "Uploads", option,
+            "--token-file", str(_token_file(tmp_path)), "--port", "8764"]
+    if resumable:
+        args.append("--resumable")
+
+    result = _attach_main(args, transport=transport)
+
+    output = capsys.readouterr()
+    assert result == 0, output.err
+    original = vault / json.loads(output.out)["path"]
+    assert original.read_bytes() == source.read_bytes()
+    assert preserve.diarize_pin(original.with_suffix(".wav.md").read_text()) is expected
+
+
 def test_attach_sends_a_file_the_listener_refuses_as_too_large_through_a_session(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

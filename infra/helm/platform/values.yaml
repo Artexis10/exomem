@@ -211,6 +211,8 @@ cellctl:
   # Requests cover steady progress and non-reclaimable memory with headroom; the limits cover the
   # peak and larger production vaults. The timeout covers a build several times that long.
   cataloguePrewarm: false
+  # Empty until verification is explicitly activated for these cells.
+  resticVerificationCellIds: []
   catalogueBuildTimeoutSeconds: 1800
   catalogueBuildResources:
     requests:

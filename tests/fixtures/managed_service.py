@@ -55,6 +55,7 @@ def worker(root, socket_path, standby=False):
     from exomem.service_ingress import WORKER_KEEP_ALIVE_SECONDS
     from exomem.session_oauth import ExomemSessionOAuthProxy
 
+    vault_root = Path(os.environ["EXOMEM_VAULT_PATH"])
     if (root / "fail-start").exists():
         raise SystemExit(2)
     if standby:
@@ -65,9 +66,6 @@ def worker(root, socket_path, standby=False):
         from exomem import epistemic_graph
 
         class _AdoptedIndex:
-            """Stand in for the graph index: this root is not a real vault, so
-            the real constructor refuses it before adoption could run."""
-
             def __init__(self, _vault_root):
                 pass
 
@@ -83,14 +81,11 @@ def worker(root, socket_path, standby=False):
         event(root, "standby-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
         readiness.mark_ready("lexical")
         if not (root / "standby-stalls").exists():
-            service_standby.prove_graph_snapshot(root)
-            # The corpus build is real here -- it is a read over this root and
-            # needs no vault -- because the gate that admits governed writes
-            # waits on it, and a standby that reaches cutover-ready without it
-            # promotes into a worker that refuses writes.
-            service_standby.build_semantic_corpus(root)
+            service_standby.prove_graph_snapshot(vault_root)
+            # The real corpus build settles the governed write gate.
+            service_standby.build_semantic_corpus(vault_root)
             # Run the final warm step that the released migration readiness requires.
-            service_standby.prepare_collections_migration(root)
+            service_standby.prepare_collections_migration(vault_root)
     else:
         (root / "worker.pid").write_text(str(os.getpid()))
         event(root, "worker-start")
@@ -165,7 +160,7 @@ else:
     @app.custom_route("/control/promote", methods=["POST"])
     async def promote(request):
         payload = json.loads(await request.body() or b"{}")
-        record = service_standby.promote(root, migrated=bool(payload.get("migrated")))
+        record = service_standby.promote(vault_root, migrated=bool(payload.get("migrated")))
         (root / "worker.pid").write_text(str(os.getpid()))
         event(root, "promoted", migrated=bool(payload.get("migrated")))
         return JSONResponse(record)
@@ -190,6 +185,7 @@ async def daemon(root, port, unit, env_file=None):
         verify_systemd_identity,
     )
 
+    Path(os.environ["EXOMEM_VAULT_PATH"]).mkdir(parents=True, exist_ok=True)
     directory = private_directory(root / "managed")
     identity = verify_systemd_identity(unit) if unit else {"unit": "isolated-fixture"}
     enable_subreaper()

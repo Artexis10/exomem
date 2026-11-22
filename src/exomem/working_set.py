@@ -1600,11 +1600,14 @@ def task_candidates(
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
             with find_types.timing_span(timings, "working_set.task_context_routing"):
-                targets = _routing_targets(
+                targets = _routing_targets_or_none(
                     vault_root, index_token[1], index_token=index_token,
                     visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
                 )
-                route = collection_claims.route(working_set_index.terms_of(query), targets)
+                if targets is None:
+                    # A collection the turn routes to is a lead; an unread manifest index is a failed lane, not no route.
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                route = collection_claims.route(working_set_index.terms_of(query), targets or ())
             if route is not None:
                 add(str(route["collection"]), origin)
         if restricted:
@@ -1735,12 +1738,13 @@ def attach_task_links(
         return []
     if budget_exhausted("working_set.task_context_links"):
         return ["budget"]
+    unread: set[str] = set()
     try:
         with find_types.timing_span(timings, "working_set.task_context_links"):
             links = read_connections(
                 vault_root, [c["source_ref"] for c in candidates],
                 by_path=link_targets, visible=caller.visible, per_seed=TASK_LINKS_PER_CANDIDATE,
-                defer_why=True, purpose=caller.purpose,
+                defer_why=True, purpose=caller.purpose, unread=unread,
             )
     except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
         log.debug("task-context links unavailable", exc_info=True)
@@ -1762,7 +1766,8 @@ def attach_task_links(
             ]
         if omitted:
             candidate["links_omitted"] = omitted
-    return []
+    # The links read stand; a page the graph could not interpret may author one more, so the lane is not the whole.
+    return ["lane_failed"] if unread else []
 
 
 @dataclass(frozen=True, slots=True)
@@ -1996,8 +2001,12 @@ def read_connections(
     defer_why: bool = False,
     purpose: str | None = None,
     quote_prose: bool | None = None,
+    unread: set[str] | None = None,
 ) -> dict[str, tuple[list[Connection], int]] | None:
     """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
+
+    `unread`, when given, receives the admitted pages whose selected interpretation the graph could not read for
+    this lookup: an edge such a page authors may be missing from the connections served.
 
     One batched read of the graph owner's neighbour API in BOTH directions, so the
     edge store stays its own. A connection lists the relation, the direction, the
@@ -2033,7 +2042,12 @@ def read_connections(
 
     # Per seed, one entry per target keeps its best-ranked edge.
     ranked: dict[str, dict[str, tuple[int, int, int, Connection]]] = {}
-    for position, neighbor in enumerate(index.neighbors_for(list(seeds), keep=visible)):
+    try:
+        neighbors = index.neighbors_for(list(seeds), keep=visible, refuse_unavailable=True, unread=unread)
+    except epistemic_graph.GraphSnapshotUnavailable:
+        # The availability check passed, then the snapshot refused: the graph cannot answer, as when it is unavailable.
+        return None
+    for position, neighbor in enumerate(neighbors):
         target = str(neighbor.other_rel)
         if target == neighbor.seed_rel or target not in by_path:
             continue
@@ -3898,13 +3912,15 @@ def _resident_vector_paths(
         # encoding the same turn again.
         working_set_runtime.remember_turn_vector(text, query)
         stale = resident.stale_paths or ()
-        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
+        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing. The hits
+        # stand, but a rewritten page the caller may see went unread by meaning, so the reading is not the whole.
+        state = "lane_failed" if any(path in allowed for path in stale) else "ready"
         rows = np.fromiter(
             (index for index, (path, _chunk) in enumerate(resident.metadata) if path in allowed and path not in stale),
             dtype=np.int64,
         )
         if rows.size == 0:
-            return [], "ready"
+            return [], state
         # Score the whole matrix, then mask: indexing first copies most of the matrix on every query (#951).
         similarities = (resident.matrix @ (query / norm))[rows]
         config = ranking_config.DEFAULT_RANKING
@@ -3915,12 +3931,12 @@ def _resident_vector_paths(
         )
         if not cleared:
             # No chunk clears the band, or too few admitted rows to calibrate one: the lane lists nothing.
-            return [], "ready"
+            return [], state
         best: dict[str, float] = {}
         for position in cleared:
             path = resident.metadata[int(rows[position])][0]
             best[path] = max(float(similarities[position]), best.get(path, float("-inf")))
-        return sorted(best, key=lambda page: (-best[page], page))[:limit], "ready"
+        return sorted(best, key=lambda page: (-best[page], page))[:limit], state
     except Exception:  # noqa: BLE001 - a failed dense reading leaves the keyword lanes standing
         log.debug("task-context dense reading unavailable", exc_info=True)
         return [], "lane_failed"
@@ -6150,7 +6166,19 @@ def _routing_targets(
     index_token: tuple[int, int, int] | None = None,
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[Any, ...]:
-    """Records routing targets for `claims_match`, via the existing claims rule.
+    """Records routing targets for `claims_match`; none when the manifests cannot be read."""
+    targets = _routing_targets_or_none(vault_root, index_generation, index_token=index_token, visible=visible)
+    return () if targets is None else targets
+
+
+def _routing_targets_or_none(
+    vault_root: Path,
+    index_generation: int,
+    *,
+    index_token: tuple[int, int, int] | None = None,
+    visible: Callable[[str], bool] | None = None,
+) -> tuple[Any, ...] | None:
+    """Records routing targets for `claims_match`, via the existing claims rule; None when they cannot be read.
 
     Read from the manifests the index update published for this generation, so
     the request path enumerates no directory to build them. These claims are
@@ -6167,9 +6195,9 @@ def _routing_targets(
         manifests = working_set_index.records_manifests(
             vault_root, index_generation, token=index_token
         )
-    except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
+    except Exception:  # noqa: BLE001 - a caller decides whether a failed read differs from no targets
         log.debug("activation: routing targets unavailable", exc_info=True)
-        return ()
+        return None
     targets: list[Any] = []
     for manifest in manifests:
         path = str(getattr(manifest, "path", ""))

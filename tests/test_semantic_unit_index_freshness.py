@@ -215,6 +215,82 @@ def test_rewriting_one_note_interprets_only_that_parent_and_ranks_as_a_fresh_sto
     assert {parent for parent, _anchor, _score in cold} == parents
 
 
+def test_unit_statistics_after_seeded_parent_edits_equal_a_count_of_the_winning_units(tmp_path: Path) -> None:
+    """Each rebuild from the scope's base equals `CorpusStatistics.of` over the units it admits, bit for bit.
+
+    The parents share one page id, so a block anchor that two parents hold is one ref: the first occurrence in
+    (parent path, rowid) order wins, and an edit, delete or rename can move the winner to another parent's text.
+    """
+    import json
+    import random
+
+    from exomem import bm25
+
+    words = ["harbor", "tide", "gauge", "chain", "buoy", "reef", "pier", "swell"]
+    anchors = ["shared", "common", "spare"]
+    names = [f"parent-{index}" for index in range(6)]
+    chosen = random.Random(7)
+
+    def write(name: str) -> str:
+        lines = [
+            f"- [fact] {' '.join(chosen.choices(words, k=chosen.randint(1, 5)))} ^{anchor}"
+            for anchor in chosen.sample(anchors, chosen.randint(1, 3))
+        ]
+        path = tmp_path / "Knowledge Base/Notes" / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nexomem_id: {_PAGE_ID}\n---\n# Units\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
+        return path.relative_to(tmp_path).as_posix()
+
+    def figures(statistics) -> tuple:
+        return (
+            statistics.pages,
+            statistics.average_length.hex(),
+            list(statistics.document_frequency.items()),
+            statistics.idf_floor.hex(),
+        )
+
+    def built_and_counted(parents: set[str]) -> tuple[tuple, tuple]:
+        store = lexstore.get_store(tmp_path)
+        connection = store._connect()
+        try:
+            connection.execute("BEGIN")
+            view = lexstore._SelectedUnits(tmp_path, connection, admitted=parents)
+            entry = store._admitted_unit_statistics(connection, "kb", parents, view)
+            corpus: dict[str, list[str]] = {}
+            for row, unit in view.served(connection.execute(
+                "SELECT u.unit_ref, u.parent_path, unit_fts.stemmed FROM semantic_units u "
+                "JOIN unit_fts ON unit_fts.rowid = u.rowid "
+                "WHERE u.in_kb = 1 AND u.parent_path IN (SELECT value FROM json_each(?)) "
+                "ORDER BY u.parent_path, u.rowid",
+                (json.dumps(sorted(parents)),),
+            )):
+                corpus.setdefault(str(unit.unit_ref), str(row[2]).split())
+            view.require_complete()
+            return figures(entry.statistics), figures(bm25.CorpusStatistics.of(corpus))
+        finally:
+            connection.close()
+
+    parents = {write(name) for name in names[:4]}
+    lexstore.ensure_fresh(tmp_path)
+    built_and_counted(parents)
+    for step in range(16):
+        change = chosen.choice(["edit", "edit", "add", "delete", "rename"])
+        free = [name for name in names if f"Knowledge Base/Notes/{name}.md" not in parents]
+        if change in ("delete", "rename") and len(parents) > 1:
+            gone = chosen.choice(sorted(parents))
+            (tmp_path / gone).unlink()
+            parents.discard(gone)
+        if change in ("add", "rename") and free:
+            parents.add(write(chosen.choice(free)))
+        if change == "edit":
+            parents.add(write(Path(chosen.choice(sorted(parents))).stem))
+        find_module.clear_cache()
+        lexstore.ensure_fresh(tmp_path)
+        assert lexstore.get_store(tmp_path)._unit_bases["kb"].counted is not None
+        built, counted = built_and_counted(parents)
+        assert built == counted, (step, change)
+
+
 def test_a_narrower_admitted_set_between_writes_does_not_cost_the_full_set_its_parents(tmp_path: Path) -> None:
     """Callers with different views alternate on one service; a narrow request must not empty the shared base."""
     import uuid

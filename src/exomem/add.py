@@ -24,7 +24,7 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, TYPE_CHECKING, Any
 
 from . import (
     call_spans,
@@ -50,6 +50,9 @@ from . import (
 )
 from .kbdir import managed_join, managed_relative
 from .source_coverage import CAPTURE_HEADING
+
+if TYPE_CHECKING:
+    from .deferred_index import DeferredReceipt
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
@@ -219,6 +222,7 @@ class SourceArtifact:
     #: The same bytes in a private upload stage (`upload_stage.StagedUpload`), already hashed before the
     #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
     staged: Any | None = None
+    diarize: bool | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -526,6 +530,8 @@ def add(
     extra_frontmatter: Mapping[str, object] | None = None,
     supersede: Sequence[tuple[str, str]] = (),
     defer_fanout_to_terminal: bool = False,
+    custody_before_commit: bool = False,
+    corpus_advisories: bool = True,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
@@ -565,7 +571,11 @@ def add(
 
     `defer_fanout_to_terminal` is the episode recorder's opt-in: its caller
     keeps planning and canonical writes under the wide guard, while derived
-    refresh waits for the committed mutation's terminal.
+    refresh waits for the committed mutation's terminal. The upload doors add
+    `custody_before_commit`: the pages' full-refresh custody is recorded before
+    the install and retired when the deferred refresh completes. They also pass
+    `corpus_advisories=False`, because the upload receipt carries no advisories,
+    so the near-duplicate and contradiction pass would be paid for nothing.
 
     `reuse_payload` is the capture door's opt-in, and its caller holds the mutation guard across this
     call: a text capture without identity, correction, adoption or episode fields that repeats the text
@@ -622,6 +632,7 @@ def add(
                 projects=projects, today=today, artifact=SourceArtifact(original, "source.txt", "text/plain"),
                 adoption_seed=adoption_seed, extra_frontmatter=extra_frontmatter,
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
+                custody_before_commit=custody_before_commit, corpus_advisories=corpus_advisories,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
                 passages=passages,
@@ -642,6 +653,14 @@ def add(
     if artifact is not None:
         safe_name = source_artifact_name(artifact.filename)
         artifact_suffix = source_artifact_suffix(artifact.filename)
+        if artifact.diarize is not None:
+            from . import media_engines, media_types
+
+            if media_engines.engine_for(media_types.media_type_for(safe_name)) != media_engines.SPEECH:
+                raise AddError(
+                    code="DIARIZE_NOT_APPLICABLE", missing=["diarize"],
+                    reason="speaker labels apply to audio and video only",
+                )
         if artifact.staged is not None:
             # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
             artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
@@ -667,7 +686,8 @@ def add(
     contradiction_candidates: list[corpus_aware.DupCandidate] = []
     # A recap revision near-duplicates the revision it supersedes by
     # construction, so the embedding pass could only ever report that.
-    if _prepare is None and _allocation is None and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None:
+    if (corpus_advisories and _prepare is None and _allocation is None
+            and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None):
         try:
             # One embedding pass: dups (vs other sources) + contradictions (vs
             # active compiled conclusions). Restricting contradiction candidates
@@ -891,6 +911,10 @@ def add(
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
+    if artifact is not None and artifact.diarize is not None:
+        from .preserve import set_diarize_pin
+
+        source_md = set_diarize_pin(source_md, artifact.diarize)
     if raw_protection:
         source_md = raw_guard.protect(
             source_md, artifact_path=artifact_path.relative_to(vault_root).as_posix(),
@@ -1122,11 +1146,15 @@ def add(
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
             created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
+            custody = (
+                full_refresh_custody(vault_root, writes) if custody_before_commit and _prepare is None else None
+            )
             committed = batch_atomic_write(
                 writes,
                 vault_root=vault_root,
                 required_guards=required_guards,
                 post_commit_fanout=False,
+                _retained_original=retained_original,
                 _vocabulary_auxiliaries=bound_outputs,
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
@@ -1173,7 +1201,8 @@ def add(
     if defer_fanout_to_terminal:
         assert isinstance(committed, list)
         deferred_fanout(
-            vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
+            vault_root, committed, created_paths=created_paths, publication_intents=publication_intents,
+            receipts=custody,
         )
 
     if custody_started:
@@ -1538,17 +1567,23 @@ def deferred_fanout(
     *,
     created_paths: list[Path],
     publication_intents: list[object],
+    receipts: list[DeferredReceipt] | None = None,
 ) -> None:
     """Run the derived fanout of a batch committed with `post_commit_fanout=False`.
 
     The Source already committed, so nothing here fails the caller except an
     uncertain outcome the terminal must report. Shared by the Source writer and
     the episode recorder's in-place revision.
+
+    `receipts` is the full-refresh custody a caller recorded before its commit
+    (`full_refresh_custody`). The fanout then retires that exact custody when it
+    completes and reports its outcome to the enclosing `fanout_after_release`.
     """
     from . import deferred_index, file_watcher, writer_lease
     from . import vault as vault_module
 
     replaced = list(dict.fromkeys(committed))
+    pretaken = receipts
 
     def abort_intents() -> None:
         try:
@@ -1589,40 +1624,72 @@ def deferred_fanout(
                     if fanout_succeeded[0]
                     else index_sync.failed_upsert_report(vault_root, replaced)
                 )
+            if pretaken is not None:
+                if fanout_succeeded[0] and pretaken:
+                    try:
+                        # Exact revisions keep a newer receipt on the same page queued. A receipt that the
+                        # drain retired and a later failure re-created restarts at revision 1, so it can match.
+                        deferred_index.clear_full_receipts(vault_root, pretaken)
+                    except Exception as error:  # noqa: BLE001 - the drain retires custody left behind
+                        log.warning("full-refresh custody retirement failed: %s", type(error).__name__)
+                # A fan-out that reported nothing, as in store mode, is noted as unverified, never as complete.
+                writer_lease.note_released_fanout(reports, completed=fanout_succeeded[0])
             return reports
 
-        try:
-            # Keep this receipt after a successful inline drain too: a
-            # same-path ABA write may have replaced its queued revision.
-            # The background drain owns exact-revision retirement.
-            receipts = deferred_index.add_full_receipts(
-                vault_root,
-                [path.relative_to(vault_root).as_posix() for path in replaced],
-            )
-        except Exception as error:  # noqa: BLE001 - a committed Source cannot be retried safely
-            log.warning("episode durable derived demand failed after commit: %s", type(error).__name__)
-            run_fanout()
-            if not fanout_succeeded[0]:
-                raise writer_lease._PostCommitOutcomeUncertain() from None
-        else:
-            def run_terminal_fanout() -> list[object]:
-                from . import epistemic_graph
-
-                # This callback has a durable parent and a terminal that
-                # can report pending. A direct caller below must still
-                # converge, even though it also retained full receipts.
-                coordinator = writer_lease.active_manager()._mutation_coordinator_for(
-                    vault_root
-                )
-                with epistemic_graph.parent_receipted_graph_handoff(
+        if pretaken is None:
+            try:
+                # Keep this receipt after a successful inline drain too: a
+                # same-path ABA write may have replaced its queued revision.
+                # The background drain owns exact-revision retirement.
+                receipts = deferred_index.add_full_receipts(
                     vault_root,
-                    state_root=coordinator.state_root,
-                    receipts=tuple(receipts),
-                ):
-                    return run_fanout()
-
-            if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
+                    [path.relative_to(vault_root).as_posix() for path in replaced],
+                )
+            except Exception as error:  # noqa: BLE001 - a committed Source cannot be retried safely
+                log.warning("episode durable derived demand failed after commit: %s", type(error).__name__)
                 run_fanout()
+                if not fanout_succeeded[0]:
+                    raise writer_lease._PostCommitOutcomeUncertain() from None
+                return
+
+        def run_terminal_fanout() -> list[object]:
+            from . import epistemic_graph
+
+            if not receipts:
+                # A store-mode commit derived its own rows and recorded no file-mode custody to hand off.
+                return run_fanout()
+            # This callback has a durable parent and a terminal that
+            # can report pending. A direct caller below must still
+            # converge, even though it also retained full receipts.
+            coordinator = writer_lease.active_manager()._mutation_coordinator_for(
+                vault_root
+            )
+            with epistemic_graph.parent_receipted_graph_handoff(
+                vault_root,
+                state_root=coordinator.state_root,
+                receipts=tuple(receipts),
+            ):
+                return run_fanout()
+
+        if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
+            run_fanout()
+
+
+def full_refresh_custody(vault_root: Path, writes: Sequence[PlannedWrite]) -> list[DeferredReceipt]:
+    """Record durable full-refresh custody for a batch's Markdown pages before the batch installs them.
+
+    A stop between the install and the derived fanout leaves these receipts, so the next drain makes the
+    pages searchable. A store-mode commit derives its own rows, and a fast-ack session already carries the
+    batch's derived work, so neither records custody here.
+    """
+    from . import deferred_index, writer_lease
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(vault_root) or writer_lease.active_derived_batch_custody(vault_root):
+        return []
+    return deferred_index.add_full_receipts(
+        vault_root, [write.path.relative_to(vault_root).as_posix() for write in writes]
+    )
 
 
 def _episode_frontmatter_lines(

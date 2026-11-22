@@ -783,7 +783,7 @@ class MediaWorker:
 
     def _process_original(self, job: _Job) -> _ProcessOutcome:
         outcome = _ProcessOutcome(_COMPLETE)
-        if job.do_ocr and media_engines.stage_enabled(job.media_type):
+        if job.do_ocr and (media_engines.stage_enabled(job.media_type) or job.diarize is not None):
             outcome = self._run_extraction(job)
         if outcome.state == _HANDOFF:
             return outcome
@@ -883,6 +883,7 @@ class MediaWorker:
             language, multilingual = job.language, job.language_mode == LANGUAGE_MODE_MULTILINGUAL
         else:
             language, multilingual = preserve.asr_language_pin(claimed_content)
+        diarize = job.diarize if job.diarize is not None else preserve.diarize_pin(claimed_content)
         expected_sidecar = guard.expected_content_hash
         expected_evidence_version = _evidence_version_or_none(claimed_content)
         expected_binary = self._identity(job)
@@ -901,6 +902,8 @@ class MediaWorker:
                 committed, BLOCKED, self._asr_runtime_failure
             )
         try:
+            if job.diarize is not None and not media_engines.stage_enabled(job.media_type):
+                raise extract.EngineDisabled(media_engines.SPEECH, "the speech engine is switched off")
             kwargs = {"media_type": job.media_type, "vault_root": self._vault_root}
             signature = inspect.signature(extract.extract_text)
             parameters = signature.parameters.values()
@@ -911,6 +914,8 @@ class MediaWorker:
                 kwargs["language"] = language
             if multilingual:
                 kwargs["multilingual"] = True
+            if diarize is not None:
+                kwargs["diarize"] = diarize
             with media_store.logical_view(self._vault_root, job.binary_path) as view:
                 result = extract.extract_text(view, **kwargs)
         except extract.TimestampRenderingUnavailable as e:
@@ -1205,10 +1210,9 @@ class MediaWorker:
 
         A job whose engine is now available, or whose wait for a disabled engine has
         ended, returns to pending; one parked for a missing module returns once that
-        module is found. A job blocked on an engine the deployment switched
-        off loses that stage: its sidecar is first shown as pending again, so no old
-        install instruction stays, and its media waits with no job until the engine
-        is enabled.
+        module is found. An inferred job for a newly disabled engine loses its
+        stage and its sidecar returns to pending. An explicit speaker choice
+        keeps its queued extraction until the engine is available again.
         """
         assert self._store is not None
         enabled = media_engines.enabled_engines()
@@ -1218,7 +1222,7 @@ class MediaWorker:
                 if job.blocked_context in enabled:
                     requeued += self._store.requeue_engine_wait(job)
             elif not media_engines.stage_enabled(job.media_type):
-                if self._present_pending(job):
+                if job.diarize is None and self._present_pending(job):
                     dropped += self._store.drop_extraction_stage(job)
             elif _module_findable(job.blocked_context) and media_engines.stage_available(job.media_type):
                 requeued += self._store.requeue_engine_wait(job)
@@ -1614,6 +1618,7 @@ class MediaWorker:
             engine=engine,
             speakers=speakers,
             speaker_verification=speaker_verification,
+            diarize=job.diarize,
             attempts=max(1, job.attempts),
             asr=asr,
             ocr=ocr,

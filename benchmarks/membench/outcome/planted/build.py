@@ -44,23 +44,6 @@ GOVERNANCE = {
 }
 
 
-def _find(data, key: str):
-    """The first value under ``key`` anywhere in a nested result."""
-    if isinstance(data, dict):
-        if key in data:
-            return data[key]
-        values = data.values()
-    elif isinstance(data, list):
-        values = data
-    else:
-        return None
-    for value in values:
-        found = _find(value, key)
-        if found is not None:
-            return found
-    return None
-
-
 def neutral_unit_id(case_id: str, role: str) -> str:
     """A claim unit id that names no role: an id ending in "stale" told the answering agent
     which note to distrust, so it reached both arms and helped the one without governance."""
@@ -95,7 +78,7 @@ class Builder:
     @staticmethod
     def operational(data: dict) -> dict:
         """The vault paths of a write. A compact reply names pages by title and id; the commit asked
-        for `response_detail="full"`, which keeps the paths under `diagnostics.operational`."""
+        for `detail="full"`, which keeps the paths under `diagnostics.operational`."""
         operational = (data.get("diagnostics") or {}).get("operational")
         return operational if isinstance(operational, dict) else {}
 
@@ -107,32 +90,20 @@ class Builder:
                     return layer[key]
         raise RuntimeError(f"no page path in the returned data {json.dumps(data)[:400]}")
 
-    async def governed(self, tool: str, args: dict, step: str, *, review: str) -> dict:
-        """The product's two-step write: validate, then commit with the draft's guards.
-
-        A page that relates to nothing at write time commits with an explicit
-        ``reviewed_none`` relation review, which is what the product asks an agent for.
-        """
-        draft = await self.call(tool, {**args, "validate_only": True}, f"{step}:validate")
-        # Only the commit asks for full detail: it keeps the page paths, and the draft call stays as it was.
-        commit = {**args, "response_detail": "full"}
-        for key in ("draft_id", "draft_hash", "draft_token", "relation_review_hash"):
-            value = _find(draft, key)
-            if value is not None:
-                commit[key] = value
-        if "relation_review_hash" in commit:
-            commit["relation_disposition"] = "reviewed_none"
-            commit["relation_review_reason"] = review
-        return await self.call(tool, commit, step)
-
     async def note(self, title: str, content: str, domain: str, step: str) -> str:
-        data = await self.governed(
+        data = await self.call(
             "create_note",
             # No ``topics``: a second auto-registered topic on a fresh vault corrupts
             # source-taxonomy.yaml (product defect, fixed separately); both arms are affected alike.
-            {"title": title, "content": content, "note_type": "insight", "sources": []},
+            {
+                "title": title,
+                "content": content,
+                "type": "insight",
+                "sources": [],
+                "unlinked_reason": "Written before any related page exists; no truthful typed relation applies yet.",
+                "detail": "full",
+            },
             step,
-            review="Written before any related page exists; no truthful typed relation applies yet.",
         )
         self.authored.append(self.path_of(data))
         return self.authored[-1]
@@ -159,30 +130,31 @@ class Builder:
         governance = GOVERNANCE[kind]
         if corr["form"] == "source":
             data = await self.call(
-                "capture_source",
+                "save_source",
                 {
                     "title": corr["title"],
                     "content": f"{corr['source_label']}. {corr['context']}\n\n{corr['claim']}\n",
                     "source_kind": "document",
-                    "response_detail": "full",
+                    "detail": "full",
                 },
                 f"{cid}:correction-source",
             )
             corr_path = self.path_of(data)
             self.authored.append(corr_path)
         elif arm == "E" and governance is None:
-            data = await self.governed(
+            data = await self.call(
                 "supersede_note",
                 {
-                    "old_path": stale_path,
+                    "note": stale["title"],
                     "title": corr["title"],
                     "content": corr_body,
-                    "note_type": "insight",
-                    "reason": "The rule changed.",
+                    "type": "insight",
+                    "why": "The rule changed.",
                     "sources": [],
+                    "unlinked_reason": "The supersession itself links the two pages; no other typed relation applies.",
+                    "detail": "full",
                 },
                 f"{cid}:supersede",
-                review="The supersession itself links the two pages; no other typed relation applies.",
             )
             # The result names both pages; the replacement is the one that is not the stale page.
             corr_path = next(p for p in self.operational(data)["paths"] if p != stale_path)
@@ -199,13 +171,11 @@ class Builder:
             await self.call(
                 "edit_note",
                 {
-                    "path": stale_path,
+                    "note": stale["title"],
                     "why": f"Later evidence: {corr['title']}.",
-                    "operation": {
-                        "kind": "replace_string",
-                        "old_string": f"- id: {stale_unit}\n",
-                        "new_string": f"- id: {stale_unit}\n{inserted}",
-                    },
+                    "action": "replace_text",
+                    "old_text": f"- id: {stale_unit}\n",
+                    "new_text": f"- id: {stale_unit}\n{inserted}",
                 },
                 f"{cid}:verdict",
             )

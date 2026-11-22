@@ -46,6 +46,13 @@
 
 ## 4. Release and acceptance
 
-- [ ] 4.1 Release, and upgrade the personal service through its normal procedure.
-- [ ] 4.2 Prove a brief read from a real client against the personal store.
-- [ ] 4.3 Run the evaluation (design, Evaluation) and record the per-case result.
+- [x] 4.1 Release, and upgrade the personal service through its normal procedure.
+  - v0.189.0 is the first release with the second-hop member rule (2.9). The personal service was upgraded through its normal procedure and runs a later release.
+- [x] 4.2 Prove a brief read from a real client against the personal store.
+  - 2026-11-22, Claude Code over MCP against the personal store. A researched subject's brief, read to its last page, returned `ranked_by: "similarity"` and 8 compiled notes: the seed, 2 notes one hop away and 5 notes two hops away. It counted 38 more under `cap`, with an exact count. `changed_since` said `first_read`; a second read said `unchanged` at the same generation.
+  - Against that subject's independent answer key, the brief held both core members and 2 of the 4 peripheral members, and `related` named the other 2. Four of the 8 notes were outside the key.
+- [x] 4.3 Run the evaluation (design, Evaluation) and record the per-case result. Development round only; the decision run moved to `route-subject-returns-to-brief` (see the decision below).
+  - 2026-11-22 development round: five researched subjects, one draw per arm, the shipped Claude Code client on the release the personal service runs, a blind Claude judge against independent keys. The per-case results are kept in the personal eval-run record, outside this repository.
+  - The routing line in the client skill never reached the model: no run in any arm opened the skill, and the model followed the server's instructions instead.
+  - With the line given directly, every brief call answered `index_warming` with no items, because the service's graph read snapshot was waiting on its background cold proof. The recap scores therefore measured failed brief calls, not the brief: composite difference -0.055, 95% interval -0.117 to +0.006, five subjects.
+  - Decision (owner, 2026-11-22): close this change with the brief shipped, and move the routing decision to `route-subject-returns-to-brief`, which routes through the server's instructions and is evaluated once the brief serves.

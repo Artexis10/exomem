@@ -745,6 +745,7 @@ def test_a_served_search_returns_the_scans_groups_with_one_graph_read_and_no_sca
     offline = {name: _groups(_search(vault, filters)) for name, filters in SERVED_GROUPS.items()}
     find_module.clear_cache()
     warm_managed_cell(vault)
+    assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
 
     def no_scan(*_args, **_kwargs):
         raise AssertionError("the served reader answered a filter by reading every page")

@@ -80,9 +80,11 @@ def passage_tools(vault, monkeypatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     mcp = server.build_server(require_auth=False)
 
-    def call(name, arguments):
+    def call(name, arguments, *, before_request=None):
         async def invoke():
             async with Client(mcp) as client:
+                if before_request is not None:
+                    before_request()
                 return await client.call_tool(name, arguments, raise_on_error=False)
 
         result = asyncio.run(invoke())
@@ -586,7 +588,8 @@ def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     )["source"]["path"]
     embeddings.index_incremental(vault)
     publish_reference(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
     reads = []
     original = reserved_paths.read_generic_bytes
 
@@ -608,16 +611,20 @@ def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     tombstoned = lifecycle.is_tombstoned
     before = len(encoder.texts)
     with monkeypatch.context() as patch:
-        patch.setattr(reserved_paths, "read_generic_bytes", counted)
-        if anchor_state == "revoked":
-            patch.setattr(source_capture, "require_authority", revoke_before_anchor)
-        elif anchor_state == "tombstoned":
-            patch.setattr(lifecycle, "is_tombstoned", lambda root, path: path == anchor or tombstoned(root, path))
+        def observe_search():
+            assert graph.validate_startup_snapshot() is True
+            patch.setattr(reserved_paths, "read_generic_bytes", counted)
+            if anchor_state == "revoked":
+                patch.setattr(source_capture, "require_authority", revoke_before_anchor)
+            elif anchor_state == "tombstoned":
+                patch.setattr(lifecycle, "is_tombstoned", lambda root, path: path == anchor or tombstoned(root, path))
+
         reply = call(
             "search_memory",
             {"query": "lantern", "limit": 1, "options": {
                 "result_level": "passage", "relations": ["supports"], "relation_of": anchor,
             }},
+            before_request=observe_search,
         )
     if anchor_state == "revoked":
         assert "PASSAGE_AUTHORITY_REQUIRED" in str(reply), reply

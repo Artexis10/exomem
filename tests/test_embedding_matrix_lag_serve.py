@@ -205,7 +205,7 @@ def test_scoring_a_few_paths_leaves_out_a_path_the_lagging_matrix_holds_stale_ro
     monkeypatch.setattr(idx, "start_corpus_matrix_load", lambda: None)  # hold the lag for the whole test
     _lag_behind_another_writer(idx, "a.md", "new a", [0, 1])
 
-    assert set(idx.best_scores_for_paths(_pad([1, 0]), {"a.md", "b.md", "c.md"})) == {"b.md", "c.md"}
+    assert set(idx.page_scorer().best_scores(_pad([1, 0]), {"a.md", "b.md", "c.md"})) == {"b.md", "c.md"}
 
 
 def test_a_policy_identity_change_still_refuses_a_lagging_matrix(

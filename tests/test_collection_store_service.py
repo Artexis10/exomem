@@ -564,6 +564,38 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
             "MAINTENANCE_REQUIRES_CLI")
 
 
+def test_an_adoption_leaves_every_view_readable_by_its_owner(service):
+    """Defect: an adoption starts a new store instance and rewrites no view. The release proof
+    wanted the render under the new instance, so every view was withheld from every caller, the
+    owner included, until a row change rendered it again."""
+    root = service.root
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    def views():
+        # History pages carry no instance stamp, so an adoption cannot strand them.
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return dict(reader.execute("SELECT path,state FROM projection_state WHERE kind!='history'"))
+
+    found = SimpleNamespace(root=root, meta=lambda: store_meta(root))
+    _published(found)
+    _until(lambda: views() and set(views().values()) == {"current"})
+    before = store_meta(root)[schema.META_INSTANCE_ID]
+    path = replica.replica_path(root)
+    path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
+    _preserved(found)
+    with capabilities.active_surface(descriptor):
+        preview = call(root, "maintain_memory", mode="collections-store-adopt-local")
+        applied = call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
+                       plan_id=preview["plan_id"], why="adopt the copy this host holds")
+    assert applied["status"] == "adopted", applied.get("reason")
+    assert store_meta(root)[schema.META_INSTANCE_ID] != before
+
+    for view in views():
+        assert call(root, "read_memory", path=view)["path"] == view
+
+
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(
         service, tmp_path, monkeypatch, capsys):
     """Defect: the service creates, imports into or answers a summary collection before the release

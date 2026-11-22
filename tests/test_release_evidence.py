@@ -24,24 +24,29 @@ spec.loader.exec_module(evidence)
 
 
 @pytest.mark.parametrize(
-    "event,draft,branch,full,release",
+    "event,draft,base,branch,full,release,reconcile",
     [
-        ("pull_request", True, "source", False, False),
-        ("pull_request", False, "source", False, False),
-        ("pull_request", False, evidence.RELEASE_BRANCH, False, True),
-        ("push", False, "main", False, False),
-        ("schedule", False, "main", True, False),
-        ("workflow_dispatch", False, "source", True, False),
+        ("pull_request", True, "main", "source", False, False, False),
+        ("pull_request", False, "main", "source", False, False, False),
+        ("pull_request", False, "main", evidence.RELEASE_BRANCH, False, True, False),
+        ("pull_request", False, "main", "release-reconcile/" + "a" * 40, False, True, True),
+        # A reconciliation only lands on main; elsewhere the branch name buys no release tier.
+        ("pull_request", False, "feature", "release-reconcile/" + "a" * 40, False, False, False),
+        ("push", False, "main", "main", False, False, False),
+        ("schedule", False, "main", "main", True, False, False),
+        ("workflow_dispatch", False, "main", "source", True, False, False),
     ],
 )
 def test_scope_runs_full_only_on_schedule_and_dispatch_and_targets_release_prs(
-    event, draft, branch, full, release
+    event, draft, base, branch, full, release, reconcile
 ):
     assert evidence.ci_scope(
-        event, {"pull_request": {"draft": draft, "head": {"ref": branch}}}
+        event,
+        {"pull_request": {"draft": draft, "base": {"ref": base}, "head": {"ref": branch}}},
     ) == {
         "full": full,
         "release": release,
+        "reconcile": reconcile,
     }
 
 

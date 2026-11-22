@@ -647,9 +647,9 @@ _REMAINING = {
     )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths", "language", "multilingual"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("process", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("replicate", "change_media", ("store",), ("store",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "triage_memory": (None, (

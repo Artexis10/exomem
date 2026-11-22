@@ -601,6 +601,11 @@ class _FileInputs:
     access_blocked: bool
     key: tuple
 
+    @property
+    def digest(self):
+        """One digest over every input; it moves when any of them does."""
+        return hashlib.sha256(json.dumps([self.policy.fingerprint, *self.key]).encode()).hexdigest()
+
 
 def _file_inputs(root):
     """Read a release's file-held inputs once; a page's epoch and the repair key both come from here, so they cannot drift."""
@@ -618,8 +623,7 @@ def release_inputs(root):
     The store thread keys its history repair on this, so a changed policy, access file, blocked flag
     or tombstone marks the pages pending without a census render. It reads no history.
     """
-    found = _file_inputs(root)
-    return hashlib.sha256(json.dumps([found.policy.fingerprint, *found.key]).encode()).hexdigest()
+    return _file_inputs(root).digest
 
 
 class PageContext:
@@ -634,6 +638,8 @@ class PageContext:
         found = _file_inputs(root)
         self.policy, self.tombstones, self.access, self.access_blocked = (
             found.policy, found.tombstones, found.access, found.access_blocked)
+        # The `release_inputs` of this context's own read, so a proof of its render names what it rendered from.
+        self.inputs = found.digest
         # A failed policy read cannot turn its empty scopes into permission to publish history.
         if self.policy.blocked:
             governance.OperationAuthorization.refuse()

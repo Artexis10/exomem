@@ -138,11 +138,12 @@ class ReconcileResult:
 
 @dataclass(frozen=True)
 class ExtractionRequest:
-    """The language or mode a caller declared, and whether it replaces a completed transcript."""
+    """A caller's extraction preferences and whether to replace a completed transcript."""
 
     language: str | None
     mode: str | None
     reprocess: bool
+    diarize: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -1466,7 +1467,9 @@ def _enqueue(
     """
     if request is None:
         return store.enqueue(job), False
-    row_id = store.request_extraction(job, request.language, request.mode, reprocess=request.reprocess)
+    row_id = store.request_extraction(
+        replace(job, diarize=request.diarize), request.language, request.mode, reprocess=request.reprocess
+    )
     if row_id is None:
         raise MediaProcessingError(
             "MEDIA_BUSY", "the file is being processed now; ask again when that run ends"
@@ -1510,10 +1513,11 @@ def reprocess_media(
     *,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
-    """Queue one explicit second extraction of a media file, optionally with a language or mode.
+    """Queue a second extraction of a media file with optional preferences.
 
     Only this call extracts over a completed transcript. The job keeps the old text
     on a page next to the sidecar when the new text is ready, and leaves the sidecar
@@ -1522,7 +1526,7 @@ def reprocess_media(
     """
     return _queue_extraction(
         vault_root, binary_path, language, multilingual, commit_guard, reprocess=True,
-        queue_guard=queue_guard,
+        queue_guard=queue_guard, diarize=diarize,
     )
 
 
@@ -1532,15 +1536,16 @@ def process_declared_media(
     *,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
     commit_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
-    """Process a media file whose transcript is not complete yet, with the language or mode declared.
+    """Process a media file with declared extraction preferences before its transcript completes.
 
     A complete transcript is refused: it keeps its text until `reprocess_media` replaces it,
     and a declaration that was ignored would read as one that was applied.
     """
     return _queue_extraction(
-        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False
+        vault_root, binary_path, language, multilingual, commit_guard, reprocess=False, diarize=diarize
     )
 
 
@@ -1552,6 +1557,7 @@ def _queue_extraction(
     commit_guard: Callable[[], AbstractContextManager[object]] | None,
     *,
     reprocess: bool,
+    diarize: bool | None = None,
     queue_guard: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> ReconcileResult:
     vault = Path(vault_root).resolve()
@@ -1561,10 +1567,13 @@ def _queue_extraction(
     binary = Path(os.path.abspath(binary))
     hint, mode = declared_language(language, multilingual)
     media_type = classify_media(binary)
-    if mode is not None and media_engines.engine_for(media_type) != media_engines.SPEECH:
-        raise MediaProcessingError(
-            "LANGUAGE_NOT_APPLICABLE", "a language or mode applies to speech media (audio and video) only"
-        )
+    if media_engines.engine_for(media_type) != media_engines.SPEECH:
+        if mode is not None:
+            raise MediaProcessingError(
+                "LANGUAGE_NOT_APPLICABLE", "a language or mode applies to speech media (audio and video) only"
+            )
+        if diarize is not None:
+            raise MediaProcessingError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to audio and video only")
     if media_type is not None and not media_engines.stage_enabled(media_type):
         raise MediaProcessingError(
             "MEDIA_ENGINE_DISABLED",
@@ -1573,7 +1582,7 @@ def _queue_extraction(
     unavailable = _runtime_unavailable(vault)
     if unavailable is not None:  # retry_media queues nothing in this state either
         raise MediaProcessingError("MEDIA_RUNTIME_UNAVAILABLE", f"{unavailable[0]}; {unavailable[1]}")
-    request = ExtractionRequest(hint, mode, reprocess)
+    request = ExtractionRequest(hint, mode, reprocess, diarize)
     result = reconcile_media(
         vault, binary, commit_guard=commit_guard, request=request, queue_guard=queue_guard
     )
@@ -1582,7 +1591,7 @@ def _queue_extraction(
     if not reprocess and result.state == "completed":
         raise MediaProcessingError(
             "TRANSCRIPT_COMPLETE",
-            "the transcript is already complete; reprocess replaces it with the declared language",
+            "the transcript is already complete; use reprocess to apply extraction preferences",
         )
     if result.attached:  # reconcile_media wrote the request into the job row as it queued the job
         return replace(result, requeued=1)
@@ -1593,7 +1602,8 @@ def _queue_extraction(
     with boundary:
         job_id = store.request_extraction(
             media_jobs.MediaJob(
-                binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type
+                binary_path=binary, sidecar_path=result.sidecar_path, media_type=result.media_type,
+                diarize=request.diarize,
             ),
             hint,
             mode,
@@ -1865,6 +1875,8 @@ def _render_pending_sidecar(
         rendered = document_containers.annotate(rendered, "container_member", container_binding)
     if existing_id is not None:
         rendered = preserve._set_frontmatter_field(rendered, "exomem_id", existing_id)
+    if original is not None:
+        rendered = preserve.set_diarize_pin(rendered, preserve.diarize_pin(original))
     rendered = _set_fields(rendered, _pending_fields(provenance))
     if preserved_notes:
         rendered = (

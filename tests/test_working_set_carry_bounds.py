@@ -508,6 +508,57 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     }
 
 
+def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_and_renames() -> None:
+    """Each corpus built from the previous one's base equals `CorpusStatistics.of` over its texts, bit for bit.
+
+    A few words over a few pages make every order move happen often: an edit or add brings a word forward,
+    a delete or edit ends a word or hands it to the next page that holds it, and a page re-adds a word that
+    another page introduced. A build sometimes starts from an older base, as an alternating admitted set does.
+    """
+    import random
+
+    from exomem import bm25
+
+    def figures(statistics) -> tuple:
+        return (
+            statistics.pages,
+            statistics.average_length.hex(),
+            list(statistics.document_frequency.items()),
+            statistics.idf_floor.hex(),
+        )
+
+    words = ["harbor", "tide", "gauge", "chain", "buoy", "reef", "pier", "swell", "keel", "mast"]
+
+    def written(chosen: random.Random) -> str:
+        return " ".join(chosen.choices(words, k=chosen.randint(0, 8)))
+
+    paths = [f"Notes/page-{index:02d}.md" for index in range(8)]
+    for seed in range(150):
+        chosen = random.Random(seed)
+
+        rows = {path: written(chosen) for path in chosen.sample(paths, 4)}
+        bases = [lexstore._admitted_corpus(rows, {p: lexstore._text_digest(t) for p, t in rows.items()}, None)[2]]
+        for step in range(30):
+            rows = dict(rows)
+            free = [path for path in paths if path not in rows]
+            change = chosen.choice(["add", "edit", "edit", "delete", "rename"])
+            if change == "add" and free:
+                rows[chosen.choice(free)] = written(chosen)
+            elif change == "delete" and len(rows) > 1:
+                del rows[chosen.choice(sorted(rows))]
+            elif change == "rename" and free:
+                rows[chosen.choice(free)] = rows.pop(chosen.choice(sorted(rows)))
+            else:
+                rows[chosen.choice(sorted(rows))] = written(chosen)
+            base = chosen.choice(bases[-2:])
+            statistics, _postings, retained = lexstore._admitted_corpus(
+                rows, {path: lexstore._text_digest(text) for path, text in rows.items()}, base
+            )
+            oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in rows.items()})
+            assert figures(statistics) == figures(oracle), (seed, step, change)
+            bases.append(retained)
+
+
 @pytest.mark.parametrize("repeats", [256, 65_536])
 def test_a_page_term_count_survives_a_word_repeated_past_each_storage_width(repeats: int) -> None:
     """A page's counts are kept in the narrowest width that holds them: a word repeated past a width's

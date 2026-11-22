@@ -119,10 +119,22 @@ The cell embeds each passage exactly as declared and adds no title. Put any cont
 
 Passage search requires whole-namespace content authority. Restricted callers receive `PASSAGE_AUTHORITY_REQUIRED` and can use ordinary page search.
 The service must first publish its corpus through the maintained warm-up. A cold or invalid publication returns `PASSAGE_INDEX_UNAVAILABLE`.
-The request never builds the corpus. Filters and relations select eligible Sources before dense ranking.
+The request never builds the corpus. Filters and relations select eligible Sources before ranking.
 Passage search accepts limits from 1 to 200 and refuses page-ranking options such as reranking, graph expansion or compilation boosts.
 
-Each hit returns a Source `ref`, optional `source_identity`, `passage_key`, one-based `passage_ordinal`, `passage_hash`, `span` and dense `score`.
+By default, passage search ranks the eligible chunks by dense similarity alone.
+Set `mode` to `hybrid` to fuse that ranking by reciprocal rank fusion with lexical matching of the chunk text's stems.
+Lexical matching finds a passage that shares the query's words when the embedding model ranks it low.
+`vector` names the default explicitly. Any mode other than `vector` or `hybrid` is refused.
+
+Each hit returns a Source `ref`, optional `source_identity`, `passage_key`, one-based `passage_ordinal`, `passage_hash`, `span`, `score` and `similarity`.
+The score of the hit at rank `r` is the dense similarity at dense rank `r`, so fused and dense-only replies have the same score distribution.
+The `similarity` is the hit's own dense similarity to the query. It is `null` for a lexical match outside the dense ranking's top 200 chunks.
+In a dense-only reply, the two values are the same.
+The reply's `ranking` is `fused` when both rankings ordered the hits, and `dense` when dense similarity alone did.
+A `hybrid` reply also carries `diagnostics.lexical`: `ready` when lexical matching took part, otherwise `preparing` or `failed`.
+The sidecar keeps the lexical terms of its chunks. Until they match the current chunks, a `hybrid` request ranks by dense similarity and reports `ranking: "dense"`.
+A whole-index rebuild marks the terms out of date, and a background backfill derives them again in batches.
 The span uses character offsets in the Source body after frontmatter. Its fields are `start` and `length`.
 The hash covers the complete declared passage as UTF-8, including when a hit covers only one chunk.
 Several passages from one Source can rank. Hits contain no passage text; callers resolve their own records through the opaque key.

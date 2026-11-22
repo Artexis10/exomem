@@ -509,12 +509,14 @@ def preserve_members(
     verified: str,
     description: str | None = None,
     sha256: str | None = None,
+    defer_fanout_to_terminal: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Preserve a seekable zip as members; return the receipt and whether it stored.
 
     `verified` says what checked the archive's SHA-256 (`session` or `upload`).
     `guard` opens the vault mutation guard around the manifest commit only. A
     caller that already verified the archive passes its `sha256` to skip a pass.
+    `defer_fanout_to_terminal` passes the upload doors' opt-in to `preserve`.
     A refusal leaves no new manifest. A floor refusal also removes newly unowned blobs.
     """
     from . import preserve as preserve_module
@@ -614,6 +616,7 @@ def preserve_members(
                     or f"Archive {archive['filename']} preserved as {len(members):,} members.",
                     max_stream_bytes=len(data),
                     raw_protection=True,
+                    defer_fanout_to_terminal=defer_fanout_to_terminal,
                 )
         except OpError as error:
             if error.code == media_capacity.UPLOAD_SPACE_BUSY:

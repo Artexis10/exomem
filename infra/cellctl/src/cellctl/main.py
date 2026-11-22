@@ -27,6 +27,7 @@ from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
 from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
+from .restic_verification import VerificationConfig
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
@@ -314,6 +315,13 @@ def build_catalogue_prewarm():
     ), _positive_integer_env("CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS"))
 
 
+def build_restic_verification() -> VerificationConfig:
+    cell_ids = json.loads(os.environ.get("CELLCTL_RESTIC_VERIFICATION_CELL_IDS", "[]"))
+    if not isinstance(cell_ids, list):
+        raise ValueError("restic verification cell IDs must be a JSON array")
+    return VerificationConfig(cell_ids=tuple(cell_ids))
+
+
 def build_cluster_config() -> ClusterConfig:
     model_env_raw = os.environ.get("CELLCTL_CELL_MODEL_ENV")
     job_egress_except_raw = os.environ.get("CELLCTL_JOB_EGRESS_EXCEPT")
@@ -377,6 +385,7 @@ def build_cluster_config() -> ClusterConfig:
     check_model_env(model_env)
     return ClusterConfig(
         catalogue_prewarm=build_catalogue_prewarm(),
+        restic_verification=build_restic_verification(),
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         cell_data_backup_bucket=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"],
