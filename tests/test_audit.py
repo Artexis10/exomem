@@ -1364,6 +1364,30 @@ def test_a_mixed_selection_still_parses_the_corpus(
     assert ("unprocessed_source", ordinary) in categories
 
 
+def test_a_custody_only_audit_still_lists_a_source_with_an_oversized_frontmatter_block(
+    vault: Path,
+) -> None:
+    # The selector cannot decide past its bounded header read, so it keeps the
+    # page and the ordinary admission and parse decide the mark.
+    rel = "Knowledge Base/Sources/Articles/2026-11-01-kept-file.md"
+    padding = "\n".join(
+        f'  - "[[unresolved-entry-{index}]]"' for index in range(3000)
+    )
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nsource_type: article\ncaptured: 2026-11-01\ncustody_only: true\n"
+        f"ingested_into:\n{padding}\n---\n\nKept bytes.\n",
+        encoding="utf-8",
+    )
+    assert target.stat().st_size > 64 * 1024
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
+
+
 def test_a_budget_that_expires_inside_the_lookup_reports_unknown(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

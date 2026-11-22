@@ -2543,7 +2543,12 @@ def _parse_all(
 
 
 def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], bool]:
-    """Keep only append-only pages whose frontmatter records `custody_only: true`."""
+    """Keep append-only pages whose frontmatter records `custody_only: true`.
+
+    Only a decided negative drops a page: on any uncertainty — an unreadable,
+    unterminated or oversized frontmatter block — the page stays in and the
+    ordinary admission and full parse decide it, exactly as without a selector.
+    """
 
     def select(rel: str, content: bytes | None) -> bool:
         if in_append_only_tree(rel) is None:
@@ -2563,7 +2568,7 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
                 reserved_paths.ReservedPathLeafError,
                 vault_module.FrontmatterError,
             ):
-                return False
+                return True
         return _custody_marked(content)
 
     return select
