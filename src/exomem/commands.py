@@ -14734,13 +14734,16 @@ def op_record_memory(
         query=query,
         item_id=item_id,
     )
-    if action in _RECORD_ITEM_WRITES and isinstance(result, dict) and result.get("outcome") == "committed":
+    if action in _record_writes() and isinstance(result, dict) and result.get("outcome") == "committed":
         _log_record_write(vault_root, collection)
     return result
 
 
-#: The record_memory actions that write collection items; the tool's own action names, not vocabulary.
-_RECORD_ITEM_WRITES = frozenset({"append", "bulk_upsert", "update", "retract"})  # nosemgrep: ep-word-set -- the record_memory action Literal's write members
+def _record_writes() -> frozenset[str]:
+    """The record_memory actions whose operation entry declares a write effect, read from the one operation table."""
+    from . import operation_entries
+
+    return frozenset(entry.action for entry in operation_entries.RECORDS.entries if entry.effect == "write")
 
 
 def _log_record_write(vault_root: Path, collection: str | None) -> None:

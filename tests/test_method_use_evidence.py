@@ -65,9 +65,10 @@ def _evidence(root: Path, sidecar: Path, *, disabled: bool = False) -> dict:
 def test_a_write_into_the_linked_collection_after_serving_reads_followed(vault: Path, logs: Path) -> None:
     _vault(vault)
     now = time.time()
-    sidecar = _served(vault, now - 3600)
-    _log(logs, "writes.jsonl", "written_path", [(now - 7200, ITEM_NOTE), (now - 3000, MANIFEST)])
-    _log(logs, "reads.jsonl", "read_path", [(now - 7200, ITEM_NOTE)])
+    # Served three hours ago, so its two-hour window has closed.
+    sidecar = _served(vault, now - 3 * 3600)
+    _log(logs, "writes.jsonl", "written_path", [(now - 4 * 3600, ITEM_NOTE), (now - 3 * 3600 + 600, MANIFEST)])
+    _log(logs, "reads.jsonl", "read_path", [(now - 4 * 3600, ITEM_NOTE)])
 
     entry = _evidence(vault, sidecar)
 
@@ -79,10 +80,10 @@ def test_a_write_into_the_linked_collection_after_serving_reads_followed(vault: 
 def test_no_later_read_or_write_reads_not_observed_never_unknown(vault: Path, logs: Path) -> None:
     _vault(vault)
     now = time.time()
-    sidecar = _served(vault, now - 3600)
-    # Both logs began before the serving, so a missing event is a real absence, not a rotation.
-    _log(logs, "writes.jsonl", "written_path", [(now - 7200, ITEM_NOTE), (now - 3000, ITEM_NOTE)])
-    _log(logs, "reads.jsonl", "read_path", [(now - 7200, ITEM_NOTE)])
+    sidecar = _served(vault, now - 3 * 3600)
+    # Both logs began before the serving and the window has closed, so a missing event is a real absence.
+    _log(logs, "writes.jsonl", "written_path", [(now - 4 * 3600, ITEM_NOTE), (now - 3 * 3600 + 600, ITEM_NOTE)])
+    _log(logs, "reads.jsonl", "read_path", [(now - 4 * 3600, ITEM_NOTE)])
 
     entry = _evidence(vault, sidecar)
 
@@ -100,3 +101,25 @@ def test_disabled_logs_and_a_method_with_no_destination_read_unknown(vault: Path
     assert _evidence(vault, sidecar)["followed"]["unknown"] == 1
     disabled = _evidence(vault, sidecar, disabled=True)
     assert disabled["opened"]["unknown"] == 1 and disabled["followed"]["unknown"] == 1
+
+
+def test_a_write_into_a_served_collection_itself_reads_followed_and_an_open_window_reads_unknown(
+    vault: Path, logs: Path
+) -> None:
+    """A selected collection's own item writes were never counted, and a window still open read as not observed."""
+    _vault(vault)
+    now = time.time()
+    with served_context._connect(vault) as connection:  # noqa: SLF001 - the table's own writer
+        for row_id, at in (("closed", now - 3600 * 3), ("open", now - 600)):
+            connection.execute(
+                "INSERT INTO served_context (id, timestamp, principal, view, map_unchanged, stance_refs, slice_refs, upkeep,"
+                " task_context) VALUES (?, ?, 'owner', 'maps', 0, '[]', '[]', '[]', ?)",
+                (row_id, at, json.dumps({"methods": {"items": [{"ref": MANIFEST, "source_ref": MANIFEST, "read_ref": MANIFEST}]}})),
+            )
+    _log(logs, "writes.jsonl", "written_path", [(now - 3600 * 4, ITEM_NOTE), (now - 3600 * 3 + 60, MANIFEST)])
+    _log(logs, "reads.jsonl", "read_path", [(now - 3600 * 4, ITEM_NOTE)])
+
+    (entry,) = method_use.report(vault, served_context.sidecar_path(vault), resolver_for=lambda: None, disabled=False)["methods"]
+
+    assert entry["followed"]["observed"] == 1  # the closed window saw a write into the collection
+    assert entry["followed"]["unknown"] == 1  # the open window has seen nothing yet

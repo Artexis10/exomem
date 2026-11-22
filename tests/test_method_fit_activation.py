@@ -150,3 +150,28 @@ def test_a_tight_allowance_cuts_the_contract_before_it_drops_the_skill(
     _judge(monkeypatch, {"methods": ["kiln-firing"]})
     (method,) = _selected(_activate(vault, turn=TURN, max_chars=1200))
     assert method.get("contract", {}).get("complete") is not True
+
+
+@pytest.mark.parametrize("placement_file", ["missing.json", "broken.json"])
+def test_an_unusable_placement_file_costs_the_judgment_not_the_turn(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, placement_file: str
+) -> None:
+    """A bad placement file once emptied the whole task context while saying the judgment was disabled."""
+    _seed(vault)
+    if placement_file == "broken.json":
+        (tmp_path / placement_file).write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv(context_fit.METHOD_FIT_ENV, str(tmp_path / placement_file))
+    _judge(monkeypatch, {"methods": ["kiln-firing"]})
+    packet = _activate(vault, turn=TURN, max_chars=6000)
+    assert packet["task_context"]["method_fit"]["state"] == "unavailable"
+    assert packet["task_context"]["state"] != "unavailable"
+
+
+def test_two_selected_methods_both_keep_their_place_under_a_tight_allowance(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    long_body = SKILL_BODY + "".join(f"{n}. Step {n} of the long firing schedule, held for an hour.\n" for n in range(4, 90))
+    _seed(vault, long_body)
+    _judge(monkeypatch, {"methods": ["kiln-firing", "Depot stock"]})
+    selected = _selected(_activate(vault, turn=TURN, max_chars=1600))
+    assert [item["kind"] for item in selected] == ["skill", "collection"]

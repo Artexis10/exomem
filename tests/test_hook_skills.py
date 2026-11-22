@@ -227,3 +227,21 @@ def test_a_tight_cap_cuts_the_selected_skills_contract_instead_of_dropping_it():
 
     assert len(text) <= 600
     assert "load the rest with read_page" in text and "Skills/kiln/SKILL.md" in text
+
+
+def test_two_selected_methods_render_once_each_and_neither_is_dropped():
+    """The hook rendered a selected collection twice, and a long first contract dropped the second method."""
+    def method(name, kind, path):
+        return {"kind": kind, "name": name, "description": f"{name} method.", "read_ref": path, "source_ref": path,
+                "selection": "method_fit", "contract": {"text": "\n".join(f"{n}. Step {n} of {name}." for n in range(1, 300)), "complete": True}}
+
+    block = {"candidates": [], "methods": {"reset": False, "items": [
+        method("alpha", "skill", "Skills/alpha/SKILL.md"), method("Depot stock", "collection", "Records/Depot/_collection.md"),
+    ]}}
+    text = hook._format_task_context(block, 3000)
+
+    assert len(text) <= 3000
+    assert sum("Skills/alpha/SKILL.md" in line for line in text.splitlines()) == 1
+    assert sum("Records/Depot/_collection.md" in line for line in text.splitlines()) == 1
+    # Contracts are cut at whole lines, never mid-step.
+    assert "of alpha.\\n" in text and "load the rest with read_page" in text

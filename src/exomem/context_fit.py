@@ -157,6 +157,41 @@ async def _complete(
                 else reply["choices"][0]["message"]["content"])
 
 
+def _released_for_model(
+    root: Path, path: str, caller: Any, provider: Any, check: Any, text_of: Any, sources: dict | None = None,
+) -> tuple[Any, Any, str] | None:
+    """`(source, shared, text)` for one page a judgment may show its model; None when that page is not admitted.
+
+    `source` is the page as the caller reads it in full and `shared` its projection for the model's audience: the
+    caller's own for a local placement, the caller/provider intersection for an API placement. `text` is `text_of`
+    the shared projection with every reference the caller, and for an API placement the provider, may not see
+    redacted. Both judgments read their model input through here, so a disclosure rule changes in one place.
+    """
+    from .context_task import project_source
+
+    if not caller.sees(path) or not egress.quick_page_visible(root, path, purpose=caller.purpose):
+        return None
+    if provider is not None and not egress.quick_page_visible(root, path, principal=provider, purpose=caller.purpose):
+        return None
+    source = (sources or {}).get(path)
+    if source is None:
+        source = project_source(root, path, caller, check=check)
+    if source is None:
+        return None
+    shared = project_source(root, path, caller, expected_hash=source.raw_hash, provider=provider, check=check)
+    if shared is None:
+        return None
+    text = egress.redact_withheld_references(
+        root, egress.prose_for_caller(root, text_of(shared), owner_path=path), purpose=caller.purpose,
+    )
+    if provider is not None:
+        text = egress.redact_withheld_references(
+            root, egress.prose_for_caller(root, text, owner_path=path, principal=provider),
+            principal=provider, purpose=caller.purpose,
+        )
+    return source, shared, text
+
+
 def interpret(
     root: Path, *, caller: Any, candidates: Sequence[dict[str, Any]], turn: str,
     conversation: Any, placement: Placement | None = None, transport=None, sources=None,
@@ -189,31 +224,15 @@ def interpret(
         for item in candidates:
             inference_timeout()
             path = item["source_ref"]
-            if not caller.sees(path) or not egress.quick_page_visible(root, path, purpose=caller.purpose):
-                raise ValueError("candidate is no longer admitted")
-            if provider is not None and not egress.quick_page_visible(root, path, principal=provider, purpose=caller.purpose):
-                raise ValueError("provider disclosure is not admitted")
-            from .context_task import project_source
-
-            source = (sources or {}).get(path)
-            if source is None:
-                source = project_source(root, path, caller, check=inference_timeout)
-            if source is None:
-                raise ValueError("full source input is not admitted")
-            shared = project_source(
-                root, path, caller, expected_hash=source.raw_hash, provider=provider, check=inference_timeout,
+            released = _released_for_model(
+                root, path, caller, provider, inference_timeout, lambda shared: shared.public["body"], sources,
             )
-            if shared is None or item["source_version"] != source.version:
-                raise ValueError("candidate source changed or full source input is not admitted")
+            if released is None:
+                raise ValueError("candidate or full source input is not admitted to this audience")
+            source, shared, source_text = released
+            if item["source_version"] != source.version:
+                raise ValueError("candidate source changed")
             inference_timeout()
-            source_text = egress.redact_withheld_references(
-                root, egress.prose_for_caller(root, shared.public["body"], owner_path=path), purpose=caller.purpose,
-            )
-            if provider is not None:
-                source_text = egress.redact_withheld_references(
-                    root, egress.prose_for_caller(root, source_text, owner_path=path, principal=provider),
-                    principal=provider, purpose=caller.purpose,
-                )
             # Model identities belong to the released intersection; their private binding grants no admission.
             model_item = {"ref": shared.public.get("ref") or path, "source_version": shared.version, "source_text": source_text}
             identity = model_item["ref"], model_item["source_version"]
@@ -269,14 +288,17 @@ def _method_schema(labels: Sequence[str], limit: int) -> dict[str, Any]:
 
 def select_methods(
     root: Path, *, caller: Any, carriers: Sequence[dict[str, Any]], turn: str, conversation: Any, limit: int,
-    placement: Placement | None = None, transport=None,
+    placement: Placement | None = None, transport=None, sources: dict | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """The carriers a bounded model judges to apply to the turn, from their authored descriptions; none on any failure.
 
-    Each carrier is `{"label", "path", "description", ...}`: a label unique among them, the page it names and the
-    text its author wrote to say when it applies. The model may only return supplied labels (a schema enum), so its
-    answer is read through structure, never by matching words. Selection proposes; it grants no authority, and a
-    failure, a timeout or a disabled placement selects nothing and leaves the rest of the response unchanged.
+    Each carrier is `{"name", "path", "kind", "description_of", "max_chars"}`: the name it is offered by, the page,
+    and how to read the text its author wrote to say when it applies from the page's projection. Each description
+    is read through `_released_for_model`, so an API placement sees only what its provider audience may see. Labels
+    are made unique among the admitted carriers only, so a withheld page changes no label. Carriers are offered in
+    order until the input allowance is reached; the rest are counted as `omitted`. The model may only return
+    supplied labels (a schema enum), so its answer is read through structure, never by matching words. Selection
+    proposes; it grants no authority, and a failure, a timeout or a disabled placement selects nothing.
     """
     started = time.monotonic()
     try:
@@ -286,39 +308,59 @@ def select_methods(
         if not carriers or limit <= 0 or not turn.strip():
             return [], {"state": "empty"}
         budget = request_budget.current()
-        timeout = config.timeout_seconds
-        if budget is not None:
-            timeout = min(timeout, budget.remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS)
-        if timeout <= 0:
-            raise TimeoutError("no method-fit allowance")
+
+        def judgment_timeout() -> float:
+            timeout = config.timeout_seconds
+            if budget is not None:
+                # At most half the request's budget, so a door that a client abandons early (the start-of-turn hook)
+                # still answers inside its patience when the model is slow.
+                timeout = min(timeout, budget.seconds / 2, budget.remaining() - request_budget.ACTIVATION_STAGE_RESERVE_SECONDS)
+            if timeout <= 0:
+                raise TimeoutError("no method-fit allowance")
+            return timeout
+
+        judgment_timeout()
         provider = (principal.RequestPrincipal(config.provider_audience, surface="provider")
                     if config.placement == "api" else None)
+        conversation_part = {
+            "turn": turn, "recent": [{"role": entry.role, "text": entry.text} for entry in conversation.recent],
+            "focus": conversation.focus,
+        }
+        room = config.max_input_chars - len(json.dumps(conversation_part, ensure_ascii=False)) - 64
         by_label: dict[str, dict[str, Any]] = {}
-        listed = []
+        listed: list[dict[str, str]] = []
+        omitted = 0
         for carrier in carriers:
-            path = carrier["path"]
-            if not caller.sees(path) or not egress.quick_page_visible(root, path, purpose=caller.purpose):
+            if omitted:
+                omitted += 1
                 continue
-            if provider is not None and not egress.quick_page_visible(root, path, principal=provider, purpose=caller.purpose):
+            judgment_timeout()
+            released = _released_for_model(
+                root, carrier["path"], caller, provider, judgment_timeout, carrier["description_of"], sources,
+            )
+            if released is None:
                 continue
-            if carrier["label"] in by_label:
-                raise ValueError("method labels must be unique")
-            by_label[carrier["label"]] = carrier
-            listed.append({"label": carrier["label"], "description": carrier["description"]})
+            description = " ".join(egress.without_wikilinks(released[2]).split())[: carrier["max_chars"]]
+            label = carrier["name"] if carrier["name"] not in by_label else f"{carrier['name']} ({carrier['path']})"
+            entry = {"label": label, "description": description}
+            cost = len(json.dumps(entry, ensure_ascii=False)) + 2
+            if cost > room:
+                omitted += 1
+                continue
+            room -= cost
+            by_label[label] = {**carrier, "label": label}
+            listed.append(entry)
         if not listed:
             return [], {"state": "empty"}
-        data, _scrubbed = scrubber.scrub_text(json.dumps({
-            "methods": listed, "turn": turn,
-            "recent": [{"role": entry.role, "text": entry.text} for entry in conversation.recent],
-            "focus": conversation.focus,
-        }, ensure_ascii=False))
+        data, _scrubbed = scrubber.scrub_text(json.dumps({"methods": listed, **conversation_part}, ensure_ascii=False))
         if len(data) > config.max_input_chars:
             raise ValueError("method inputs exceed the configured allowance")
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             content = asyncio.run(_complete(
-                config, METHOD_TEMPLATE, data, _method_schema(list(by_label), limit), "method_fit", timeout, transport,
+                config, METHOD_TEMPLATE, data, _method_schema(list(by_label), limit), "method_fit",
+                judgment_timeout(), transport,
             ))
         else:
             raise ValueError("synchronous method selection requires a worker thread")
@@ -331,7 +373,8 @@ def select_methods(
             "state": "ready", "placement": config.placement, "runtime": config.runtime,
             "model": config.model, "model_revision": config.model_revision,
             "runtime_version": config.runtime_version, "template_version": METHOD_TEMPLATE_VERSION,
-            "considered": len(listed), "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "considered": len(listed), "omitted": omitted, "elapsed_ms": round((time.monotonic() - started) * 1000),
         }
-    except (ValueError, OSError, KeyError, TypeError, IndexError, TimeoutError, httpx.HTTPError, ValidationError):
+    except (ValueError, OSError, KeyError, TypeError, IndexError, TimeoutError, httpx.HTTPError, ValidationError,
+            runtime_resources.PreparationBudgetExceeded, runtime_resources.PreparationCapacityBusy):
         return [], {"state": "unavailable", "elapsed_ms": round((time.monotonic() - started) * 1000)}

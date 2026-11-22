@@ -45,6 +45,8 @@ log = logging.getLogger(__name__)
 MAX_CANDIDATES = 12
 #: At most this many collection manifests are offered to the method-fit judgment, so one turn reads a bounded number.
 MAX_COLLECTION_CARRIERS = 48
+#: How much of a collection manifest's body the judgment reads as its description: enough for what one item is.
+COLLECTION_DESCRIPTION_CHARS = 600
 RESET_ADVICE = "Discard held methods."
 READ_ADVICE = "Retrieval lead; read the source and its current state before using it."
 #: The `kind` of a method item that is a whole vault skill rather than one unit of a page.
@@ -568,6 +570,15 @@ def _method_items(
     return items
 
 
+def _skill_description(source: SourceProjection) -> str:
+    """A skill's authored trigger text, as released: its frontmatter `description`."""
+    return str((source.public.get("frontmatter") or {}).get("description") or "")
+
+
+def _body_text(source: SourceProjection) -> str:
+    return str(source.public.get("body") or "")
+
+
 def _selected_methods(
     root: Path, *, caller: Any, catalogue: Any, turn: str, conversation: Any, sources: dict, contract_chars: int,
     index_token: tuple[int, int, int] | None,
@@ -583,41 +594,34 @@ def _selected_methods(
     limit = int(activation_conventions.load_conventions(root).conventions.budget("method_fit_max_items") or 0)
     if limit <= 0 or caller.restricted:
         return [], {"state": "disabled"}
-    if context_fit.configured(root, context_fit.METHOD_FIT_ENV) is None:
-        return [], {"state": "disabled"}
+    try:
+        if context_fit.configured(root, context_fit.METHOD_FIT_ENV) is None:
+            return [], {"state": "disabled"}
+    except (ValueError, OSError):
+        # A missing, unreadable or in-vault placement file is a failed judgment, never a failed turn.
+        log.warning("method-fit placement unusable", exc_info=True)
+        return [], {"state": "unavailable"}
     pending = set(catalogue.pending())
     carriers: list[dict[str, Any]] = []
-    labels: set[str] = set()
-
-    def offer(label: str, path: str, kind: str, description: str) -> None:
-        if label in labels:
-            label = f"{label} ({path})"  # a second carrier of the same name stays selectable by its path
-        labels.add(label)
-        carriers.append({
-            "label": label, "path": path, "kind": kind,
-            "description": " ".join(egress.without_wikilinks(description).split())[:vault_skills.DESCRIPTION_MAX_CHARS],
-        })
-
+    # Skills first: when the input allowance runs out, the user's own skills are offered before collections.
     for entry in catalogue.entries_by_id(catalogue.skill_ids()):
-        if entry.path and entry.path not in pending and caller.sees(entry.path):
-            offer(entry.skill, entry.path, SKILL_KIND, entry.description or entry.title)
-    # A Records collection's manifest body is its authored contract, so its opening says what the collection is for.
-    # The manifests come from the index the update published, so this enumerates no directory.
+        if entry.path and entry.path not in pending:
+            carriers.append({
+                "name": entry.skill, "path": entry.path, "kind": SKILL_KIND, "description_of": _skill_description,
+                "max_chars": vault_skills.DESCRIPTION_MAX_CHARS,
+            })
+    # A Records collection's manifest body is its authored contract. The manifests come from the index the update
+    # published, so this enumerates no directory; their text is read only when the judgment offers them.
     manifests = working_set_index.records_manifests(root, index_token[1], token=index_token) if index_token else ()
     for manifest in manifests[:MAX_COLLECTION_CARRIERS]:
         path = str(getattr(manifest, "path", ""))
-        if not path or not caller.sees(path):
-            continue
-        try:
-            source = project_source(root, path, caller, cache=sources)
-        except TaskDeadline:
-            break
-        except Exception:  # noqa: BLE001 - an unreadable manifest is not offered; the others still are
-            source = None
-        if source is not None:
-            offer(str(manifest.title or path), path, COLLECTION_KIND, str(source.public.get("body") or manifest.title))
+        if path:
+            carriers.append({
+                "name": str(manifest.title or path), "path": path, "kind": COLLECTION_KIND,
+                "description_of": _body_text, "max_chars": COLLECTION_DESCRIPTION_CHARS,
+            })
     chosen, state = context_fit.select_methods(
-        root, caller=caller, carriers=carriers, turn=turn, conversation=conversation, limit=limit,
+        root, caller=caller, carriers=carriers, turn=turn, conversation=conversation, limit=limit, sources=sources,
     )
     methods = []
     for carrier in chosen:
@@ -636,7 +640,9 @@ def _selected_methods(
         method = {
             "ref": skill_ref(source), "source_ref": carrier["path"], "source_version": source.version,
             "applicability": "read_required", "read_ref": skill_ref(source), "kind": COLLECTION_KIND,
-            "name": source.title or carrier["label"], "description": carrier["description"], "selection": METHOD_FIT,
+            "name": source.title or carrier["name"], "selection": METHOD_FIT,
+            # The contract below carries the whole body, so the line's description is only its opening sentence.
+            "description": vault_skills.summary(" ".join(egress.without_wikilinks(_body_text(source)).split()), 200),
         }
         if contract := contract_of(str(source.public.get("body") or ""), contract_chars):
             method["contract"] = contract
@@ -861,11 +867,18 @@ def compile_context(
         tails: dict[int, list[dict[str, str]]] = {}
         # A method the judgment selected for this turn is served first: it is the turn's answer to "how", so no
         # retrieval lead may take its room. Its contract is cut before the method is dropped.
+        # Every selected method is seated by its plain line first, so one long contract never starves another
+        # method of its place; the contracts then fill the room that is left, in selection order.
+        contracts = {id(method): method.pop("contract", None) for method in selected}
         for method in selected:
             block["methods"]["items"].append(method)
-            if not _fit_contract(block, method, allowance):
+            if packet_chars(block) > allowance:
                 block["methods"]["items"].pop()
                 _add_missing(block, "budget")
+        for method in selected:
+            if contracts[id(method)] and any(method is served for served in block["methods"]["items"]):
+                method["contract"] = contracts[id(method)]
+                _fit_contract(block, method, allowance)
         for item in candidates:
             links = item.pop("links", [])
             # Guarded turn leads already carry this route, and a page the method-fit judgment selected is routed by its

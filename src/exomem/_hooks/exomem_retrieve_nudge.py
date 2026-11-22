@@ -2431,8 +2431,11 @@ def _skill_method_line(item: dict, max_chars: int) -> str:
         line = _packet_line(kind, f"{name}: {description}; {guide}: {json.dumps(text, ensure_ascii=False)}", read_ref)
         if len(line) + 1 <= max_chars or not text:
             return line if text else plain
-        # Escaping lengthens the text, so the cut repeats until the line fits.
-        text, complete = text[: max(0, len(text) - (len(line) + 1 - max_chars))].rstrip(), False
+        # Escaping lengthens the text, so the cut repeats until the line fits. It keeps whole lines, as the service
+        # cuts a contract, and falls back to whole words only inside the first line.
+        limit = max(0, len(text) - (len(line) + 1 - max_chars))
+        cut = text.rfind("\n", 0, limit + 1)
+        text, complete = (text[:cut] if cut > 0 else text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else "").rstrip(), False
 
 
 def _format_task_context(block: object, max_chars: int, slice_block: object = None, *, links: bool = True) -> str:
@@ -2454,8 +2457,13 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
     header = _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", "")
     # The header line is charged first, so a selected skill's line is sized to the room the header leaves.
     room = max_chars - len(header) - 1
-    for item in selected:
-        entries.append((_skill_method_line(item, room), ""))
+    # Each selected method keeps room for the plain lines of those after it, so one long contract never drops another.
+    plains = [len(_skill_method_line({**item, "contract": None}, room)) + 1 for item in selected]
+    used = 0
+    for position, item in enumerate(selected):
+        line = _skill_method_line(item, room - used - sum(plains[position + 1:]))
+        entries.append((line, ""))
+        used += len(line) + 1
     for item in block.get("candidates") or ():
         if any(item.get("source_ref") == method.get("source_ref") for method in selected):
             continue  # the selected skill's own line already routes to it
@@ -2464,9 +2472,10 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")
-        if item.get("kind") == "skill":
-            if not any(item is chosen for chosen in selected):
-                entries.append((_skill_method_line(item, room), ""))
+        if any(item is chosen for chosen in selected):
+            continue  # already rendered first, with its contract
+        if item.get("kind") in ("skill", "collection"):
+            entries.append((_skill_method_line(item, room), ""))
             continue
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)

@@ -285,3 +285,44 @@ def test_optional_preparation_capacity_preserves_the_complete_baseline(vault: Pa
             candidates=candidates, turn="Compare optical alignment", conversation=working_set_conversation.NONE,
             placement=config, transport=httpx.MockTransport(forbidden))
     assert baseline == candidates and status == {"state": "unavailable"}
+
+
+def test_method_fit_sends_an_api_provider_only_what_that_provider_may_see(vault: Path) -> None:
+    """The first method-fit build sent the caller's text of each method to an API provider, withheld references included."""
+    from test_context_catalogue import _write
+
+    hidden = _page(vault, "provider-only-secret", body="Provider-confined calibration material.\n")
+    write_scope(vault, paths=hidden)
+    write_rule(vault, ceiling=0, audience="fixture-provider")
+    visible_skill = _write(
+        vault, "Knowledge Base/Skills/kiln-firing/SKILL.md",
+        f"---\nname: kiln-firing\ndescription: Fire loads and log the result in {hidden} after each firing\n---\n\nSteps.\n",
+    )
+    manifest = _page(vault, "firing-log", body=f"One item per firing. See [[{hidden}]] for the calibration.\n")
+    config = context_fit.Placement(
+        placement="api", runtime="openai", endpoint="https://provider.invalid/v1", model="fixture-model",
+        model_revision="fixture-model", runtime_version="fixture-runtime", timeout_seconds=1.0, max_input_chars=32000,
+        max_output_tokens=200, resource_allowance_gib=1.0, provider_audience="fixture-provider", disclosure_authorized=True,
+    )
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(json.loads(request.content)["messages"][1]["content"]))
+        return httpx.Response(200, json={"model": "fixture-model", "choices": [{"message": {"content": json.dumps({"methods": []})}}]})
+
+    carriers = [
+        # The withheld page is offered first under the same name as the visible skill: it must change no label.
+        {"name": "kiln-firing", "path": hidden, "kind": "skill", "description_of": context_task._body_text, "max_chars": 1024},
+        {"name": "kiln-firing", "path": visible_skill, "kind": "skill", "description_of": context_task._skill_description, "max_chars": 1024},
+        {"name": "Firing log", "path": manifest, "kind": "collection", "description_of": context_task._body_text, "max_chars": 600},
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="The glaze pots are drying", conversation=working_set_conversation.NONE,
+            limit=2, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert status["state"] == "ready" and chosen == []
+    payload = json.dumps(sent)
+    assert hidden not in payload and "Provider-confined" not in payload
+    assert [item["label"] for item in sent[0]["methods"]] == ["kiln-firing", "Firing log"]
