@@ -234,8 +234,9 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
     memo = read.request_memo(root)
     if memo is None:
         return {}
+    unique_paths = dict.fromkeys(paths)
     facts = memo.setdefault((__name__, "facts"), {})
-    wanted = [path for path in dict.fromkeys(paths) if path not in facts]
+    wanted = [path for path in unique_paths if path not in facts]
     if wanted:
         pages = read.owned_as_pages(root, wanted)
         with read.snapshot(root) as snapshot:
@@ -248,20 +249,21 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
                     facts.update(dict.fromkeys(chunk))
                     for path, sha256, version, simple, raw, size in conn.execute(
                         "SELECT f.path, f.sha256, f.facts_version, f.simple, f.subject, p.size "
-                        "FROM page_admission f JOIN store_pages p ON p.path = f.path AND p.sha256 = f.sha256 "
+                        "FROM page_admission f JOIN store_pages p INDEXED BY store_pages_meta "
+                        "ON p.path = f.path AND p.sha256 = f.sha256 "
                         "WHERE f.path IN (SELECT value FROM json_each(?))", (json.dumps(chunk),),
                     ):
                         if version == FACTS_VERSION and simple and pages[path]:
                             facts[path] = (sha256, raw, size)  # decoded only on a miss of the scope-set memo
     scopes = memo.setdefault((__name__, "scopes", policy.fingerprint), {})
     pending = {
-        path: fact for path in dict.fromkeys(paths)
+        path: fact for path in unique_paths
         if (fact := facts.get(path)) is not None and (path, fact[0]) not in scopes
     }
     if pending:
         _resolve(root, policy, memo, facts, scopes, pending)
     return {
-        path: found for path in dict.fromkeys(paths)
+        path: found for path in unique_paths
         if (fact := facts.get(path)) is not None
         and (found := scopes.get((path, fact[0]))) is not None
     }

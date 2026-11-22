@@ -136,6 +136,12 @@ def classify(rel: str) -> Ownership:
     return _classified(rel, *_ownership_key())
 
 
+def page_classifier() -> Callable[[str], bool]:
+    """Bind the ownership configuration for one synchronous page scan."""
+    key = _ownership_key()
+    return lambda rel: _classified(rel, *key) is Ownership.PAGE
+
+
 def classify_many(rels: Iterable[str]) -> dict[str, Ownership]:
     """``classify`` for each distinct path of ``rels``, by the same rule: a path costs one classification."""
     key = _ownership_key()

@@ -49,7 +49,11 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     write_pages(vault, {
         prefix + "index.md": "# Notes\n\n## By type\n\n### Research (0)\n\n"
         "- [[Knowledge Base/Notes/Research/Navigation/|Navigation]] (0)\n\n### Insights (0)\n",
+        "Knowledge Base/Sources/Articles/visible.md": "# Visible source\n",
+        "Knowledge Base/Sources/Articles/_hidden/ignored.md": "# Hidden source\n",
         "Knowledge Base/Entities/index.md": "# Entities\n\n## By type\n",
+        "Knowledge Base/Entities/People/visible.md": "# Visible person\n",
+        "Knowledge Base/Entities/People/_hidden/ignored.md": "# Hidden person\n",
     })
     build_indexes(vault)
     counts = indexes._count_notes_by_subfolder(vault / prefix)
@@ -77,6 +81,13 @@ def test_navigation_preview_keeps_nested_counts_and_log_bytes(vault, monkeypatch
     assert migrate_apply(vault) == 0
     with read.snapshot(vault) as view:
         assert view.page(prefix + "Research/Navigation/.loose/outside.md") is None
+        assert view.held_pages((
+            "Knowledge Base/Sources/Articles/_hidden/ignored.md",
+            "Knowledge Base/Entities/People/_hidden/ignored.md",
+        )) == {
+            "Knowledge Base/Sources/Articles/_hidden/ignored.md",
+            "Knowledge Base/Entities/People/_hidden/ignored.md",
+        }
     damage_every_owned_projection(vault, damage)
 
     with record_store_reads(vault, monkeypatch) as events, read.request_snapshot(vault):
