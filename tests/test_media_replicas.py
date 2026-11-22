@@ -508,6 +508,78 @@ def test_a_worker_round_that_settles_copies_still_runs_the_checks_that_are_due(
     assert _replica_row(vault)["checked_at"] > 0
 
 
+def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
+        vault: Path, selected_store, mirrored: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_store, next_store = MIRROR, "second-mirror"
+    second_root = tmp_path / "second-mirror"
+    second_root.mkdir()
+    media_store.write_store_marker(second_root, next_store)
+    values, config = selected_store
+    values["stores"].append({"name": next_store, "adapter": "filesystem", "root": str(second_root),
+                             "failure_domain": "disk-c", **IMMEDIATE})
+    config.write_text(json.dumps({"vaults": {str(vault): values}}))
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    media_replicas.rebuild(vault)
+    for store in (first_store, next_store):
+        media_replicas.request(vault, store)
+        assert media_replicas.scan(vault, store) == 1
+
+    started, release, finished, copied, checked = (threading.Event() for _ in range(5))
+    upload = media_store.FilesystemStore.upload
+    replicate, reconcile, check = media_store.replicate, media_replicas._reconcile_copy, media_replicas.check
+    stalled_uploads = []
+
+    def held_upload(backend, *args, **kwargs):
+        if backend.name != first_store:
+            return upload(backend, *args, **kwargs)
+        stalled_uploads.append(backend.name)
+        started.set()
+        assert release.wait(15)
+        return upload(backend, *args, **kwargs)
+
+    def copy_original(work_vault, path, store):
+        try:
+            return replicate(work_vault, path, store)
+        finally:
+            if store == first_store:
+                finished.set()
+
+    def copy_committed(ledger, row):
+        reconcile(ledger, row)
+        if row["store"] == next_store:
+            copied.set()
+
+    def verification_round(work_vault, **kwargs):
+        result = check(work_vault, **kwargs)
+        if started.is_set() and _replica_row(vault, store="test-store")["checked_at"] > 0:
+            checked.set()
+        return result
+
+    monkeypatch.setattr(media_store.FilesystemStore, "upload", held_upload)
+    monkeypatch.setattr(media_store, "replicate", copy_original)
+    monkeypatch.setattr(media_replicas, "_reconcile_copy", copy_committed)
+    monkeypatch.setattr(media_replicas, "check", verification_round)
+    worker = media_replicas.start(vault)
+    try:
+        assert started.wait(5)
+        _due_again(vault)
+        monkeypatch.setitem(media_replicas._checked, vault, 0.0)
+        media_replicas.wake()
+        assert copied.wait(5) and checked.wait(5)
+        assert stalled_uploads == [first_store]
+        assert media_replicas.progress(vault, first_store)["remaining"] == 1
+    finally:
+        media_replicas.stop(timeout=0.1, worker=worker)
+        release.set()
+        worker.join(5)
+        assert finished.wait(5)
+
+    assert [replica.store for replica in originals.original_state(vault, original).replicas] == [next_store]
+    assert media_replicas.progress(vault, first_store)["remaining"] == 1
+
+
 def test_a_settlement_error_cannot_hide_the_first_due_verification(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -526,8 +598,9 @@ def test_a_settlement_error_cannot_hide_the_first_due_verification(
     assert "cannot record the queued copy" in caplog.text
 
 
+@pytest.mark.parametrize("phase", ["copy", "drain"])
 def test_translated_ledger_contention_preserves_copy_attempts_and_due_verification(
-        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch,
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, phase: str,
 ) -> None:
     from exomem.cli_ops import OpError
 
@@ -538,10 +611,13 @@ def test_translated_ledger_contention_preserves_copy_attempts_and_due_verificati
     media_replicas.scan(vault, MIRROR)
     _due_again(vault)
 
-    def ledger_busy(*_args):
+    def ledger_busy(*_args, **_kwargs):
         raise OpError(media_store.STORE_BUSY_CODE, "media ledger is busy")
 
-    monkeypatch.setattr(media_store, "replicate", ledger_busy)
+    if phase == "drain":
+        monkeypatch.setattr(media_replicas, "drain", ledger_busy)
+    else:
+        monkeypatch.setattr(media_store, "replicate", ledger_busy)
 
     assert media_replicas.work(vault)
     assert _replica_row(vault, store="test-store")["checked_at"] > 0
@@ -759,14 +835,19 @@ def test_a_store_that_does_not_answer_is_checked_before_any_work_and_spends_no_a
     assert originals.original_state(vault, original).replicas == ()
 
 
+@pytest.mark.parametrize("invalid", [
+    {"max_object_bytes": "invalid"},
+    {"retrieval_class": "invalid"},
+    {"adapter": "media-edge"},
+])
 def test_invalid_destination_setup_pauses_a_queued_copy_until_configured(
-        vault: Path, selected_store, mirrored: Path) -> None:
+        vault: Path, selected_store, mirrored: Path, invalid: dict[str, str]) -> None:
     original = _stored(vault, "Recordings")
     _offload(vault, original)
     media_replicas.request(vault, MIRROR)
     media_replicas.rebuild(vault)
     assert media_replicas.scan(vault, MIRROR) == 1
-    _declare(vault, selected_store, mirrored, max_object_bytes="invalid")
+    _declare(vault, selected_store, mirrored, **invalid)
 
     assert media_replicas.drain(vault) == 0
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
@@ -919,6 +1000,10 @@ def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_row
     assert media_replicas.drain(vault) == 0  # the queue table gained its `kind` and `token` columns
     rebuilt = _measured(vault)["totals"]
     assert (rebuilt["replicas"], rebuilt["verification_time_unknown"]) == (2, 1)
+    media_replicas.confirm_key_export(vault)
+    [shown] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
+    assert (shown["recoverable"], shown["verified_at"]) == (None, "1970-01-01T00:00:07+00:00")
+    assert media_replicas.status(vault)["totals"]["verified_at_upload"] == 0
     assert row["ciphertext_sha256"] is None  # the digest of the stored ciphertext waits for the rebuild too
 
     media_replicas.rebuild(vault)
@@ -2029,6 +2114,48 @@ def test_a_ciphertext_copy_does_not_gain_health_when_its_own_upload_is_confirmed
         assert (copied["recoverable"], copied["reason"]) == (None, "damage evidence unavailable")
     totals = media_replicas.status(vault)["totals"]
     assert (totals["recoverable"], totals["recoverability_unknown"], totals["verification_time_unknown"]) == (0, 2, 1)
+    assert totals["verified_at_upload"] == 0
+
+    _configure(selected_store, vault, stores=[{**primary, "sample_bytes_per_month": 0}, mirror])
+    assert media_replicas.sample(vault) == 1
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["recoverability_unknown"], totals["verified_at_upload"]) == (1, 1, 0)
+
+
+def test_one_exact_sample_proves_shared_health_without_rewriting_its_other_filing(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(selected_store, vault, stores=[{"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE}])
+    first = _preserved(vault, category="first")
+    second = _preserved(vault, category="second")
+    assert _offload(vault, first) == _offload(vault, second)
+    media_jobs.job_store_path(vault).unlink()
+    assert media_replicas.rebuild(vault) == 2
+    media_replicas.confirm_key_export(vault)
+    relative = second.relative_to(vault).as_posix()
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET sample_from = ? WHERE binary_rel = ?", (time.time(), relative))
+        conn.execute("CREATE TRIGGER forbid_second_sample_update BEFORE UPDATE ON media_replicas "
+                     "WHEN old.sample_from > 0 BEGIN SELECT RAISE(ABORT, 'rewrote an unsampled filing'); END")
+    monkeypatch.setattr(media_replicas, "_SAMPLE_READS", 1)
+
+    assert media_replicas.sample(vault) == 1
+
+    [shown] = media_replicas.original_view(vault, relative)["replicas"]
+    assert (shown["recoverable"], shown["last_check"], shown["verified_at"]) == (True, None, None)
+    listed = {item["path"]: item["replicas"][0] for item in media_replicas.page(vault)["originals"]}
+    assert listed[relative]["recoverable"] is True
+    assert listed[relative]["last_check"] is None
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["recoverability_unknown"], totals["verified_at_upload"]) == (2, 0, 0)
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("DELETE FROM media_key_exports")
+    assert media_replicas.status(vault)["totals"]["recoverability_unknown"] == 2
+    media_replicas.confirm_key_export(vault)
+    with closing(sqlite3.connect(media_jobs.job_store_path(vault))) as conn, conn:
+        conn.execute("DROP TABLE media_replicas")
+    assert media_replicas.status(vault)["state"] == "unknown"
+    assert media_replicas.rebuild(vault) == 2  # The exact decrypt receipt survived both filing rows.
+    assert media_replicas.status(vault)["totals"]["recoverable"] == 2
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -3084,14 +3211,14 @@ def test_the_status_tracks_current_sampling_and_key_exports_while_filings_and_jo
     month = media_replicas._month(time.time())
     with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
         conn.executemany(
-            "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, state, seen, sample_month, verified_at) "
-            "VALUES (?, ?, 'object', '1', ?, ?, 0, ?, ?)",
+            "INSERT INTO media_replicas(binary_rel, store, object, version, key_version, state, seen, sample_month, "
+            "verified_at, plaintext_proved) VALUES (?, ?, 'object', '1', ?, ?, 0, ?, ?, ?)",
             [
-                ("older", MIRROR, "0", media_replicas.UPLOAD_VERIFIED, month, 2),
-                ("skipped", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, month, 3),
-                ("no-digest", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, -1, None),
-                ("prior-month", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, 200001, 4),
-                ("damaged", MIRROR, "1", media_replicas.QUARANTINED, month, 5),
+                ("older", MIRROR, "0", media_replicas.UPLOAD_VERIFIED, month, 2, 1),
+                ("skipped", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, month, 3, 1),
+                ("no-digest", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, -1, None, None),
+                ("prior-month", MIRROR, "1", media_replicas.UPLOAD_VERIFIED, 200001, 4, 1),
+                ("damaged", MIRROR, "1", media_replicas.QUARANTINED, month, 5, 1),
             ],
         )
         conn.executemany(
@@ -3151,7 +3278,7 @@ def test_a_status_projection_upgrade_keeps_existing_proofs_exports_and_pending_c
                                 "('media_replicas','media_key_exports','media_replica_queue')").fetchall()
         for (trigger,) in triggers:
             conn.execute(f"DROP TRIGGER {trigger}")
-        for table in ("media_replica_counts", "media_replica_buckets"):
+        for table in ("media_replica_counts", "media_replica_buckets", "media_replica_decrypt_proofs"):
             conn.execute(f"DROP TABLE {table}")
         conn.execute("DELETE FROM meta WHERE key = ?", (media_replicas._EXPORT_COVERAGE_KEY,))
 
@@ -3727,6 +3854,31 @@ def test_a_sample_releases_the_plaintext_finding_without_proving_an_unread_versi
     views = {item["store"]: item for item in media_replicas.original_view(vault, relative)["replicas"]}
     assert views[pointer.store]["last_check"]["level"] == media_replicas.DECRYPTED
     assert (views[MIRROR]["state"], views[MIRROR]["last_check"]) == (media_replicas.UPLOAD_VERIFIED, None)
+
+
+def test_a_sample_release_does_not_stamp_a_sibling_with_a_different_exact_identity(
+        vault: Path, selected_store) -> None:
+    _configure(selected_store, vault, stores=[{"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE}])
+    first = _preserved(vault, category="first")
+    second = _preserved(vault, category="second")
+    pointer = _offload(vault, first)
+    assert _offload(vault, second) == pointer
+    media_replicas.rebuild(vault)
+    media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    _unproven(vault)
+    relative = second.relative_to(vault).as_posix()
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET key_version = '2', plaintext_proved = 0 WHERE binary_rel = ?",
+                     (relative,))  # A stale ledger row whose stored identity differs from the sample's.
+
+    assert media_replicas.sample(vault) == 1
+
+    listed = next(row for row in media_replicas.page(vault)["originals"] if row["path"] == relative)
+    [sibling] = listed["replicas"]
+    assert sibling["finding"] is None  # The release of the false alarm still applies to the ciphertext.
+    assert sibling["last_check"] is None
+    assert sibling["recoverable"] is None
 
 
 @pytest.mark.parametrize("lost", ["media_damaged_versions", "media_damaged_digests"])

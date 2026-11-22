@@ -1137,13 +1137,16 @@ def _publishing(vault: Path, operation: str, unit: Callable[[], None], *,
     so the request waits for a new choice. A plaintext finding that lands after the check reaches the new version
     through its row write (`media_replicas.record`).
     """
-    from . import media_replicas
+    from . import foreground_priority, media_replicas
     from .vault_store import media as store_media
     from .vault_store import projector
 
     versions = (*publishing, copied_from) if copied_from is not None else publishing
+    stop = foreground_priority.cancellation_event()
 
     def checked() -> None:
+        if stop is not None and stop.is_set():
+            raise MediaStoreError(STORE_BUSY_CODE, "the background publication was stopped")
         if versions and media_replicas.has_quarantined(vault, versions):
             raise MediaStoreError(STORE_BUSY_CODE, "a version needed for publication was found damaged")
         unit()
@@ -2193,9 +2196,13 @@ def store_reachable(vault: Path, name: str) -> bool | None:
     return True
 
 
-def _copy_backend(vault: Path, name: str) -> Store:
-    """Confirm identity with a bounded preflight before reading or protecting the source."""
+def _copy_backend(
+    vault: Path, name: str, *, serves_eviction: bool = False,
+) -> tuple[dict[str, object], originals.StoreEntry, Store]:
+    """Validate destination setup and confirm identity before reading or protecting the source."""
     try:
+        config = _settings(vault)
+        entry = require_replica_store(vault, name, serves_eviction=serves_eviction)
         backend = store_for(vault, name)
     except MediaStoreError as error:
         if error.code != "MEDIA_STORE_UNAVAILABLE":
@@ -2211,7 +2218,7 @@ def _copy_backend(vault: Path, name: str) -> Store:
         except MediaStoreError as error:
             raise CopyStoreUnavailable() from error
         media_replicas._note_reach(vault, name, True)
-    return backend
+    return config, entry, backend
 
 
 def replica_unusable(vault: Path, replica: StoredObject) -> str | None:
@@ -2293,9 +2300,7 @@ def replicate(vault: Path, path: Path, store_name: str) -> StoredObject:
     An existing replica in this store that still verifies is kept and nothing is written.
     """
     vault = Path(vault).resolve()
-    config = _settings(vault)
-    require_replica_store(vault, store_name)
-    backend = _copy_backend(vault, store_name)
+    config, _, backend = _copy_backend(vault, store_name)
     ledger = MediaJobStore(vault)
     with _pin(vault, path) as (_ledger, token), ExitStack() as held:
         snapshot = original_state(vault, path)
@@ -2466,9 +2471,7 @@ def recopy(vault: Path, path: Path, store_name: str) -> StoredObject | None:
     from . import media_replicas
 
     vault = Path(vault).resolve()
-    config = _settings(vault)
-    entry = require_replica_store(vault, store_name, serves_eviction=True)
-    backend = _copy_backend(vault, store_name)
+    config, entry, backend = _copy_backend(vault, store_name, serves_eviction=True)
     ledger = MediaJobStore(vault)
     relative = ledger._relative(path)
     scope = "" if entry.serves_eviction else store_name  # the record of an upload is per store; empty serves eviction

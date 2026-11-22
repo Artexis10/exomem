@@ -48,6 +48,8 @@ A store without a declared descriptor gets no check, because a check whose stren
 
 Rejected alternative: run a presence check on every store, declared or not. It would start new edge traffic on every Cloud cell with this release, outside that rollout.
 
+The replica worker keeps two copy slots per process and one per destination. An indexed walk of pending stores rotates the free slots between destinations. An active copy keeps its slot through publication and cleanup. The scheduler runs its due checks while those slots are occupied. The stop signal travels to the guarded publication callback, including when the store thread runs it. A callback already in progress completes its commit.
+
 ### D2: A sampled check proves decryption within a monthly budget
 
 Only a download and decrypt proves that the key version still opens the replica and that the plaintext matches `binary_sha256`. That costs egress on a remote store. So each store gets a monthly byte budget for sampled checks, in an optional descriptor field `sample_bytes_per_month`. The default is 1 GiB. Zero turns sampling off. The owner sets it per store, because egress cost is a property of the store.
@@ -65,6 +67,8 @@ A lost table loses the check history. Every row then reads "never checked", whic
 A rebuild advances its generation and clears the census before it reads bindings. It writes short ledger batches. Each batch and the final transaction confirm the current generation. A publication that uses that generation takes precedence over a binding the rebuild already read. The final transaction records how many bindings the walk could not read.
 
 Owner status reads one ledger snapshot. It uses per-store counts and sparse indexed counts keyed by the dimension they measure. Replica, key-export and queue writes maintain these counts in their own transactions. The sampling read uses the current key and UTC month. The aggregate derives the number of replicas under older keys by subtraction. It reads failed attempts and copy counts by their reported tokens. Key-export receipts update the healthy counts using an index on the affected key. Schema initialization backfills the projection, including proofs and pending jobs, from the ledger in one transaction. Status checks projection coverage before it reports counts. Exact-path status reads surviving damage independently of the replica row, with applicable key receipts in the same read snapshot. Paged status and copy progress report unknown while the projection is incomplete.
+
+Upload time and upload plaintext proof are separate. Legacy transfer times remain visible, and only an upload with surviving plaintext evidence counts as verified at upload. A decrypt receipt is keyed by store, object, version, key, ciphertext size and digest. The same row counts healthy filings of that identity that lack upload proof. A successful sample changes the receipt once and adjusts the store and key counts by that membership. It credits the check time only to the sampled filing. Exact and paged views read the receipt from the same snapshot as the replica rows. The surviving receipt can serve rebuilt filings after loss of their rows.
 
 SQLite gives the cold initialization transaction one writer. A competing initializer that reaches the lock timeout returns the operation's retryable busy outcome. Copy progress leaves schema initialization to writers. The managed upgrade already drains and stops the old runtime before a new one opens its machine-local state.
 

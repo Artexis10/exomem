@@ -8,6 +8,14 @@ The replica worker SHALL check every replica in a store with a declared descript
 
 A round SHALL read the configured stores' budgets and earliest due times in one indexed ledger snapshot. Before updating the projection, a refresh SHALL compare the live binding under the publication boundary and match the picked replica row. It SHALL preserve any newer publication and receipt. A filesystem check SHALL read the held length before hashing. A mismatch SHALL require no ciphertext read. The hash pass SHALL stop at the expected length and check its round deadline between reads. If the window ends mid-hash, the worker SHALL retain the in-memory digest and resume only after it reopens and confirms the same held file version. Read pacing SHALL count ciphertext read by the adapter, including filesystem HEAD for a presence check, and a size refusal before reading SHALL cost zero bytes.
 
+The replica worker SHALL run each due check round independently of active copy transfers. It SHALL keep one active copy batch per destination within the process copy limit and rotate through pending destinations. A stalled transfer keeps its slot until the transfer finishes and cleans up. A stopped worker SHALL leave a transfer queued if its guarded publication had yet to start.
+
+#### Scenario: A copy stalls after preflight
+
+- **WHEN** a destination accepts its probe and stalls during a copy
+- **THEN** the copy retains its slot while another destination can finish and due verification proceeds
+- **AND** stopping that worker leaves the copy queued if its guarded publication has yet to start
+
 #### Scenario: A rotted replica on a NAS
 
 - **WHEN** one byte of a replica's ciphertext changes in a `filesystem` store whose `head` recomputes content
@@ -143,7 +151,7 @@ A per-original view SHALL page through results by path, and SHALL show each repl
 
 The exact-path status SHALL read the current binding, replica row, damage authority and applicable key-export receipts. It SHALL use one ledger snapshot. Surviving exact damage evidence SHALL remain visible when a filing row is missing. The status SHALL read a surviving quarantine of the same stored version through its index. Missing damage or key-export evidence SHALL read as unknown. A surviving key-export receipt SHALL still establish custody when export coverage is incomplete. Paged coverage and copy progress SHALL report unknown while their source projection is incomplete. Status reads SHALL leave schema initialization to the writer. A writer that times out while another writer initializes the ledger SHALL report a retryable busy outcome.
 
-An empty ledger or binding rebuild SHALL NOT establish complete key-export history. A replica without surviving plaintext proof SHALL report unknown recoverability even with a confirmed key. Encryption from verified local plaintext and a successful exact decrypt establish that proof. A ciphertext copy or a reused version SHALL carry the surviving proof of its exact source. Confirming a ciphertext upload SHALL record its time independently of plaintext proof. Reusing a version SHALL leave a new filing's upload time unknown. Surviving findings SHALL still establish quarantine.
+An empty ledger or binding rebuild SHALL NOT establish complete key-export history. A replica without surviving plaintext proof SHALL report unknown recoverability even with a confirmed key. Encryption from verified local plaintext and a successful exact decrypt establish that proof. A ciphertext copy or a reused version SHALL carry the surviving proof of its exact source. Confirming a ciphertext upload SHALL record its time independently of plaintext proof. Reusing a version SHALL leave a new filing's upload time unknown. For healthy filings that lack upload proof, a successful sample SHALL record one shared proof of their exact stored identity and update their recoverability counts without rewriting those filings. The sample SHALL credit a successful check time only to the sampled filing. A later sample SHALL NOT turn unknown upload verification into verified-at-upload status. Surviving findings SHALL still establish quarantine.
 
 #### Scenario: A lost verification table
 
