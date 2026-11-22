@@ -1388,6 +1388,46 @@ def test_a_custody_only_audit_still_lists_a_source_with_an_oversized_frontmatter
     assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
 
 
+def test_a_custody_only_audit_lists_a_marked_source_that_drifted_out_of_sources(
+    vault: Path,
+) -> None:
+    # The custody check treats any `type: source` page as a captured Source wherever
+    # it lives, so the selector must not bound its read to the append-only trees.
+    rel = "Knowledge Base/Notes/Stray/2026-11-01-drifted-file.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\ntype: source\nsource_type: article\ncaptured: 2026-11-01\n"
+        "custody_only: true\ningested_into: []\n---\n\nDrifted bytes.\n",
+        encoding="utf-8",
+    )
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
+
+
+def test_a_custody_only_audit_lists_a_source_with_an_escaped_mark_key(
+    vault: Path,
+) -> None:
+    # YAML unescapes the quoted key, so the page records `custody_only: true`
+    # without the literal byte string ever appearing in it.
+    rel = "Knowledge Base/Sources/Articles/2026-11-01-kept-file.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '---\ntype: source\nsource_type: article\ncaptured: 2026-11-01\n"custody\\u005fonly": true\n'
+        "ingested_into: []\n---\n\nKept bytes.\n",
+        encoding="utf-8",
+    )
+
+    with library_scope():
+        report = audit_module.audit(vault, categories=["custody_source"])
+
+    assert ("custody_source", rel) in {(f.category, f.path) for f in report.findings}
+
+
 def test_a_budget_that_expires_inside_the_lookup_reports_unknown(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

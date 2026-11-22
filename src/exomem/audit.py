@@ -2543,7 +2543,7 @@ def _parse_all(
 
 
 def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], bool]:
-    """Keep append-only pages whose frontmatter records `custody_only: true`.
+    """Keep pages whose frontmatter records `custody_only: true`.
 
     Only a decided negative drops a page: on any uncertainty — an unreadable,
     unterminated or oversized frontmatter block — the page stays in and the
@@ -2551,8 +2551,6 @@ def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], 
     """
 
     def select(rel: str, content: bytes | None) -> bool:
-        if in_append_only_tree(rel) is None:
-            return False
         if content is None:
             # A file-mode page: read only its fenced block, through the same
             # held no-follow leaf the corpus parse reads the page with.
@@ -2582,8 +2580,6 @@ def _custody_marked(content: bytes) -> bool:
     `custody_only` field — bad UTF-8, no block, invalid or non-mapping YAML —
     selects nothing either.
     """
-    if b"custody_only" not in content:
-        return False
     try:
         text = vault_module.markdown_lf(content.decode("utf-8"))
     except UnicodeDecodeError:
