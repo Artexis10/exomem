@@ -416,12 +416,15 @@ def _adapter(connection: dict[str, object], name: str) -> Store:
             from .media_edge_store import EdgeStore
 
             return EdgeStore.from_configuration(connection)
-        if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(connection.get("root"), str):
+        root = connection.get("root")
+        if adapter not in (FILESYSTEM_ADAPTER, FILESYSTEM_ADAPTER_ALIAS) or not isinstance(root, str):
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the media store adapter is unavailable")
+        if "\0" in root:
+            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the filesystem store root contains a NUL byte")
         bound = connection.get("max_object_bytes")
-        return FilesystemStore(Path(str(connection["root"])), name=name,
+        return FilesystemStore(Path(root), name=name,
                                max_object_bytes=None if bound is None else int(bound))
-    except (TypeError, ValueError) as error:
+    except (TypeError, ValueError, OverflowError) as error:
         # A connection field of the wrong type or form makes this one store unavailable, never the caller's whole pass.
         raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", f"the store's connection fields are invalid: {error}") from error
 

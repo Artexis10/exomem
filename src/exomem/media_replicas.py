@@ -219,8 +219,9 @@ def _health_key(replica: originals.StoredObject) -> tuple[str, str, str, str, in
 _PROVED_EXACT_UPLOAD = _KNOWN_EXACT_UPLOAD + f" AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS}) LIMIT 1"
 _PROVED_EXACT_DECRYPT = (f"SELECT 1 FROM {_DECRYPT_PROOFS} WHERE sampled = 1 "
                          f"AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS})")
-_RECORD_EXACT_DECRYPT = (f"UPDATE {_DECRYPT_PROOFS} SET sampled = 1 WHERE sampled = 0 "
-                         f"AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS})")
+_RECORD_EXACT_DECRYPT = (f"INSERT INTO {_DECRYPT_PROOFS}({_HEALTH_COLUMNS}, n, sampled) "
+                         f"VALUES ({_HEALTH_PARAMETERS}, 0, 1) ON CONFLICT({_HEALTH_COLUMNS}) "
+                         "DO UPDATE SET sampled = 1 WHERE sampled = 0")
 
 
 def _restore_upload_proofs(conn: sqlite3.Connection) -> None:
@@ -313,8 +314,9 @@ def _initialize_decrypt_membership(conn: sqlite3.Connection, existing: set[str])
     conn.execute(f"UPDATE {_DECRYPT_PROOFS} SET n = 0")
     conn.execute(f"DELETE FROM {_DECRYPT_PROOFS} WHERE sampled = 0")
     conn.execute(f"INSERT INTO {_DECRYPT_PROOFS}({_HEALTH_COLUMNS}, n, sampled) "
-                 f"SELECT {_HEALTH_COLUMNS}, COUNT(*), MAX(decrypted_at > 0) FROM media_replicas "
-                 f"WHERE {_decrypt_membership('')} GROUP BY {_HEALTH_COLUMNS} "
+                 f"SELECT {_HEALTH_COLUMNS}, SUM({_decrypt_membership('')}), MAX(decrypted_at > 0) FROM media_replicas "
+                 f"WHERE state <> '{QUARANTINED}' AND ciphertext_sha256 IS NOT NULL "
+                 f"AND ({_upload_proof()} = 0 OR decrypted_at > 0) GROUP BY {_HEALTH_COLUMNS} "
                  f"ON CONFLICT({_HEALTH_COLUMNS}) DO UPDATE SET n = excluded.n, sampled = MAX(sampled, excluded.sampled)")
 
 
@@ -324,7 +326,7 @@ def _decrypt_membership_delta(event: str, changed: str) -> list[str]:
     if event != "INSERT":
         where = f"({_HEALTH_COLUMNS}) = ({_health_columns('old.')}) AND {_decrypt_membership('old.')}{restrict}"
         statements += [f"UPDATE {_DECRYPT_PROOFS} SET n = n - 1 WHERE {where}",
-                       f"DELETE FROM {_DECRYPT_PROOFS} WHERE {where} AND n = 0"]
+                       f"DELETE FROM {_DECRYPT_PROOFS} WHERE {where} AND n = 0 AND sampled = 0"]
     if event != "DELETE":
         statements.append(f"INSERT INTO {_DECRYPT_PROOFS}({_HEALTH_COLUMNS}, n) "
                           f"SELECT {_health_columns('new.')}, 1 WHERE {_decrypt_membership('new.')}{restrict} "
@@ -956,7 +958,10 @@ def rebuild(vault: Path) -> int:
         conn.execute(_INHERIT_ALL)
         _quarantine_listing(conn, time.time())
         _restore_upload_proofs(conn)
-        conn.execute(f"DELETE FROM {_DECRYPT_PROOFS} WHERE n = 0")
+        if not unread:
+            # Zero decrypt-only members can still mean that all live filings have upload proof.
+            conn.execute(f"DELETE FROM {_DECRYPT_PROOFS} AS receipt WHERE n = 0 AND NOT EXISTS ({_KNOWN_EXACT_UPLOAD} "
+                         f"AND ({_HEALTH_COLUMNS}) = ({_health_columns('receipt.')}))")
         # A request that had no verified source, a copy again or a first replica, may have one now: the original came
         # back, another replica did, or a pointer that was found wrong has been repaired.
         conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
@@ -1401,7 +1406,7 @@ def _coverage(census: sqlite3.Row, *, exports_complete: bool = True, damage_comp
 
 _CHECK_COLUMNS = (
     "level, checked_at, decrypted_at, failure, "
-    f"{_proof_level()} AS proof_level, {_PROOF_AT} AS proof_at"
+    f"{_proof_level()} AS proof_level, {_PROOF_AT} AS proof_at, {_upload_proof()} AS upload_proved"
 )
 _SHARED_HEALTH_UNKNOWN = (f"({_unproved_health('r.')} AND NOT EXISTS (SELECT 1 FROM {_DECRYPT_PROOFS} "
                           f"WHERE ({_HEALTH_COLUMNS}) = ({_health_columns('r.')}) AND sampled = 1))")
@@ -1419,6 +1424,14 @@ def _check_view(row: sqlite3.Row) -> dict[str, object]:
         # What the last check or sample attempt found when it could not prove the replica and found no damage.
         "failed_attempt": None if quarantined else row["failure"],
     }
+
+
+def _evidence_state(row: sqlite3.Row) -> str:
+    if row["state"] == QUARANTINED:
+        return QUARANTINED
+    if row["unproved"]:
+        return "unknown"
+    return UPLOAD_VERIFIED if row["upload_proved"] else DECRYPTED
 
 
 def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str, object]:
@@ -1463,7 +1476,7 @@ def page(vault: Path, *, after: str | None = None, limit: int = 100) -> dict[str
         if row["unproved"]:
             recoverable, reason = None, _DAMAGE_EVIDENCE_UNAVAILABLE
         listed.setdefault(row["binary_rel"], []).append({
-            "store": row["store"], "state": "unknown" if row["unproved"] else row["state"],
+            "store": row["store"], "state": _evidence_state(row),
             "verified_at": _iso(row["verified_at"]),
             "failure_domain": entry.failure_domain if entry is not None else None,
             "retrieval_class": entry.retrieval_class if entry is not None else None,
@@ -1610,7 +1623,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
         elif not damage_complete or not projection_complete or checked is None or checked["unproved"]:
             state, recoverable, reason = "unknown", None, _DAMAGE_EVIDENCE_UNAVAILABLE
         else:
-            state = UPLOAD_VERIFIED
+            state = _evidence_state(checked)
             recoverable, reason = recoverability(config, replica.key_version, exports, exports_complete=exports_complete)
         found.append({
             "store": replica.store, "state": state,
@@ -1762,6 +1775,7 @@ def drain(vault: Path, *, deadline: float | None = None, store: str | None = Non
                 _reconcile_copy(ledger, row)
         except (media_store.StoreReadPending, media_store.CopyStoreUnavailable) as error:
             # The copy had not passed preflight and spent no upload or retry attempt.
+            foreground_priority.check_cancelled()
             if isinstance(error, media_store.CopyStoreUnavailable):
                 _note_reach(vault, row["store"], False)
             paused.add(row["store"])
@@ -1783,6 +1797,8 @@ def drain(vault: Path, *, deadline: float | None = None, store: str | None = Non
                 raise
         except (OSError, ValueError) as error:
             code = type(error).__name__
+        # A transfer that returns after shutdown leaves its request for the next activation.
+        foreground_priority.check_cancelled()
         if code is None:
             settled += 1
         elif code == media_store.STORE_BUSY_CODE:
@@ -2007,7 +2023,7 @@ def _bound(vault: Path, row: sqlite3.Row) -> tuple[originals.OriginalSnapshot, o
     entry = media_store._entry_in(snapshot, row["store"])
     if entry is None:
         return UNLISTED
-    if (entry.object, entry.version) != (row["object"], row["version"]):
+    if not _matches_replica(row, entry):
         from .writer_lease import get_manager
 
         with get_manager().consistency_guard(vault, operation="media_replica_refresh", holder_kind="background"):
@@ -2020,13 +2036,14 @@ def _bound(vault: Path, row: sqlite3.Row) -> tuple[originals.OriginalSnapshot, o
             with closing(MediaJobStore(vault, create=False)._connect()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if conn.execute(
-                    "SELECT 1 FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? AND version = ?",
-                    (row["binary_rel"], row["store"], row["object"], row["version"]),
+                    f"SELECT 1 FROM media_replicas WHERE binary_rel = ? AND ({_HEALTH_COLUMNS}) IS ({_HEALTH_PARAMETERS})",
+                    (row["binary_rel"], *(row[field] for field in _HEALTH_FIELDS)),
                 ).fetchone() is None:
                     return None
                 changed = _record_replica(conn, row["binary_rel"], entry, verified_at=None)
         if changed:
             wake()
+        return None
     return snapshot, entry
 
 
@@ -2068,7 +2085,7 @@ def _failed(vault: Path, row: sqlite3.Row, finding: str, *, attempted: originals
 
 #: The replicas of a store attempted longest ago, never-attempted first, that the cycle has made due: a range of
 #: `media_replicas_due` in its own order, so a pick reads `LIMIT` rows whatever the table holds.
-_DUE = ("SELECT binary_rel, store, object, version, check_from FROM media_replicas "
+_DUE = (f"SELECT binary_rel, {_HEALTH_COLUMNS}, check_from FROM media_replicas "
         f"WHERE store = ? AND state <> '{QUARANTINED}' AND check_from <= ? ORDER BY check_from LIMIT ?")
 
 
@@ -2242,13 +2259,13 @@ _SAMPLE_RELEASE = 256
 #: The replica of a store whose sample turn is oldest, never-sampled first, among those not skipped this month and
 #: whose turn the cycle has made due: a range of `media_replicas_sample` in its own order. The key version is the one
 #: whose identity this install holds. A replica is sampled once per cycle, so a small store does not spend its budget twice.
-_SAMPLE = ("SELECT binary_rel, store, object, version, size FROM media_replicas "
+_SAMPLE = (f"SELECT binary_rel, {_HEALTH_COLUMNS} FROM media_replicas "
            f"WHERE store = ? AND key_version = ? AND state <> '{QUARANTINED}' AND sample_month = 0 "
            "AND sample_from <= ? ORDER BY sample_from LIMIT 1")
 #: The quarantined replica that a sample may release, whose turn comes first: a range of `media_replicas_reproof`, whose
 #: every row a plaintext finding still holds (a finding of another cause moves its filings out of it, `quarantine_all`).
 #: It also reads the generation of its ciphertext's damage (see `_released`).
-_REPROOF = ("SELECT binary_rel, store, object, version, size, (SELECT generation FROM media_damaged_digests AS d "
+_REPROOF = (f"SELECT binary_rel, {_HEALTH_COLUMNS}, (SELECT generation FROM media_damaged_digests AS d "
             "WHERE d.ciphertext_sha256 = media_replicas.ciphertext_sha256) AS generation "
             f"FROM media_replicas WHERE store = ? AND key_version = ? AND state = '{QUARANTINED}' "
             f"AND failure = '{PLAINTEXT_MISMATCH}' AND sample_from <= ? ORDER BY sample_from LIMIT 1")
@@ -2264,15 +2281,14 @@ def _month(moment: float) -> int:
     return stamp.year * 100 + stamp.month
 
 
-def _mark_sample(vault: Path, row: sqlite3.Row, month: int, *, attempted: originals.StoredObject | None = None) -> None:
+def _mark_sample(vault: Path, row: sqlite3.Row, month: int, replica: originals.StoredObject) -> None:
     """Take a replica out of the sample picks for `month` (or for good, for `_UNSAMPLEABLE`).
 
-    It lands on the version that was looked at (`attempted`, else the row's own), as `_failed` does.
+    It lands on the exact version that was looked at.
     """
-    name, version = (attempted.object, attempted.version) if attempted is not None else (row["object"], row["version"])
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute("UPDATE media_replicas SET sample_month = ? WHERE binary_rel = ? AND store = ? "
-                     "AND object = ? AND version = ?", (month, row["binary_rel"], row["store"], name, version))
+        conn.execute("UPDATE media_replicas SET sample_month = ? WHERE binary_rel = ? "
+                     f"AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS})", (month, row["binary_rel"], *_health_key(replica)))
 
 
 def _proved(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) -> None:
@@ -2416,11 +2432,6 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
             remaining = entry.sample_bytes_per_month - (held["bytes"] if held is not None else 0)
             if remaining <= 0:
                 break
-            if row["size"] > remaining:  # a size of 0 is not yet known: the binding gives it below
-                if not quarantined:
-                    _mark_sample(vault, row, month)
-                    skips += 1
-                continue
             foreground_priority.yield_to_foreground()
             bound = _bound(vault, row)
             if bound is None:
@@ -2433,7 +2444,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
             snapshot, replica = bound
             if snapshot.binary_sha256 is None or snapshot.binary_size is None:
                 # the binding is readable and lists no plaintext digest: nothing to hash against
-                _mark_sample(vault, row, _UNSAMPLEABLE, attempted=replica)
+                _mark_sample(vault, row, _UNSAMPLEABLE, replica)
                 skips += 1
                 continue
             reserved = False
@@ -2444,7 +2455,7 @@ def sample(vault: Path, *, deadline: float | None = None) -> int:
                     reserved = _charge(conn, name, month, replica.ciphertext_size, entry.sample_bytes_per_month)
             if not reserved:  # it does not fit the month's remainder, or another runtime spent the remainder meanwhile
                 if not quarantined:
-                    _mark_sample(vault, row, month, attempted=replica)
+                    _mark_sample(vault, row, month, replica)
                     skips += 1
                 continue
             if time.monotonic() >= until:

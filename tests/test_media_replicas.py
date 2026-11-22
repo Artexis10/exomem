@@ -508,8 +508,10 @@ def test_a_worker_round_that_settles_copies_still_runs_the_checks_that_are_due(
     assert _replica_row(vault)["checked_at"] > 0
 
 
+@pytest.mark.parametrize("upload_fails", [False, True])
 def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
         vault: Path, selected_store, mirrored: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        upload_fails: bool,
 ) -> None:
     first_store, next_store = MIRROR, "second-mirror"
     second_root = tmp_path / "second-mirror"
@@ -526,25 +528,24 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
         media_replicas.request(vault, store)
         assert media_replicas.scan(vault, store) == 1
 
-    started, release, finished, copied, checked = (threading.Event() for _ in range(5))
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
+        ledger.execute("UPDATE media_replica_queue SET attempts = ? WHERE store = ?",
+                       (media_replicas._MAX_ATTEMPTS - 1, first_store))
+
+    started, release, copied, checked = (threading.Event() for _ in range(4))
     upload = media_store.FilesystemStore.upload
-    replicate, reconcile, check = media_store.replicate, media_replicas._reconcile_copy, media_replicas.check
+    reconcile, check = media_replicas._reconcile_copy, media_replicas.check
     stalled_uploads = []
 
     def held_upload(backend, *args, **kwargs):
         if backend.name != first_store:
             return upload(backend, *args, **kwargs)
-        stalled_uploads.append(backend.name)
+        stalled_uploads.append(threading.current_thread())
         started.set()
         assert release.wait(15)
+        if upload_fails:
+            raise OSError(errno.EIO, "the destination failed after the worker stopped")
         return upload(backend, *args, **kwargs)
-
-    def copy_original(work_vault, path, store):
-        try:
-            return replicate(work_vault, path, store)
-        finally:
-            if store == first_store:
-                finished.set()
 
     def copy_committed(ledger, row):
         reconcile(ledger, row)
@@ -558,7 +559,6 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
         return result
 
     monkeypatch.setattr(media_store.FilesystemStore, "upload", held_upload)
-    monkeypatch.setattr(media_store, "replicate", copy_original)
     monkeypatch.setattr(media_replicas, "_reconcile_copy", copy_committed)
     monkeypatch.setattr(media_replicas, "check", verification_round)
     worker = media_replicas.start(vault)
@@ -568,16 +568,20 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
         monkeypatch.setitem(media_replicas._checked, vault, 0.0)
         media_replicas.wake()
         assert copied.wait(5) and checked.wait(5)
-        assert stalled_uploads == [first_store]
+        assert len(stalled_uploads) == 1
         assert media_replicas.progress(vault, first_store)["remaining"] == 1
     finally:
         media_replicas.stop(timeout=0.1, worker=worker)
         release.set()
         worker.join(5)
-        assert finished.wait(5)
+        for copy in stalled_uploads:
+            copy.join(5)
+            assert not copy.is_alive()
 
     assert [replica.store for replica in originals.original_state(vault, original).replicas] == [next_store]
-    assert media_replicas.progress(vault, first_store)["remaining"] == 1
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
+        assert ledger.execute("SELECT state, attempts, code FROM media_replica_queue WHERE store = ?",
+                              (first_store,)).fetchone() == ("pending", media_replicas._MAX_ATTEMPTS - 1, None)
 
 
 def test_a_settlement_error_cannot_hide_the_first_due_verification(
@@ -839,9 +843,11 @@ def test_a_store_that_does_not_answer_is_checked_before_any_work_and_spends_no_a
     {"max_object_bytes": "invalid"},
     {"retrieval_class": "invalid"},
     {"adapter": "media-edge"},
+    {"root": "invalid\0root"},
+    {"max_object_bytes": float("inf")},
 ])
 def test_invalid_destination_setup_pauses_a_queued_copy_until_configured(
-        vault: Path, selected_store, mirrored: Path, invalid: dict[str, str]) -> None:
+        vault: Path, selected_store, mirrored: Path, invalid: dict[str, object]) -> None:
     original = _stored(vault, "Recordings")
     _offload(vault, original)
     media_replicas.request(vault, MIRROR)
@@ -849,6 +855,7 @@ def test_invalid_destination_setup_pauses_a_queued_copy_until_configured(
     assert media_replicas.scan(vault, MIRROR) == 1
     _declare(vault, selected_store, mirrored, **invalid)
 
+    assert media_store.store_reachable(vault, MIRROR) is False
     assert media_replicas.drain(vault) == 0
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         assert ledger.execute("SELECT state, attempts, code FROM media_replica_queue").fetchall() == [("pending", 0, None)]
@@ -979,7 +986,10 @@ def test_quarantining_an_entry_that_the_table_already_replaced_leaves_the_newer_
 def test_a_table_of_an_earlier_release_gains_the_check_columns_and_keeps_its_rows(
         vault: Path, selected_store, mirrored: Path) -> None:
     """An upgrade that met the old table with `no such column` would stop the replica worker for good."""
-    relative, replica = _replicated(vault)
+    original = _preserved(vault)
+    _offload(vault, original)
+    replica = media_store.replicate(vault, original, MIRROR)
+    relative = original.relative_to(vault).as_posix()
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
         ledger.execute("DROP TABLE media_replicas")
         ledger.execute("DROP TABLE media_replica_queue")
@@ -2120,6 +2130,56 @@ def test_a_ciphertext_copy_does_not_gain_health_when_its_own_upload_is_confirmed
     assert media_replicas.sample(vault) == 1
     totals = media_replicas.status(vault)["totals"]
     assert (totals["recoverable"], totals["recoverability_unknown"], totals["verified_at_upload"]) == (1, 1, 0)
+    [listed] = media_replicas.page(vault)["originals"]
+    for view in (media_replicas.original_view(vault, relative), listed):
+        [copied] = [item for item in view["replicas"] if item["store"] == MIRROR]
+        assert copied["state"] == media_replicas.DECRYPTED
+        assert copied["verified_at"] is not None
+
+
+@pytest.mark.parametrize("stale_size", ["small", "large"])
+def test_a_sample_refreshes_stale_size_and_digest_before_reserving_its_budget(
+        vault: Path, selected_store, mirrored: Path, stale_size: str) -> None:
+    original = _preserved(vault)
+    _offload(vault, original)
+    replica = media_store.replicate(vault, original, MIRROR)
+    media_replicas.rebuild(vault)
+    size = replica.ciphertext_size
+    primary, mirror = selected_store[0]["stores"]
+    _configure(selected_store, vault, stores=[{**primary, "sample_bytes_per_month": 0},
+                                              {**mirror, "sample_bytes_per_month": 2 * size}])
+    with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("UPDATE media_replicas SET size = ?, ciphertext_sha256 = NULL WHERE store = ?",
+                     (0 if stale_size == "small" else 3 * size, MIRROR))
+
+    assert media_replicas.sample(vault) == 1
+
+    row = _replica_row(vault)
+    assert (row["size"], row["ciphertext_sha256"]) == (size, replica.ciphertext_sha256)
+    assert row["decrypted_at"] > 0
+    assert _mirror_stats(vault)["sample"]["spent_bytes"] == size
+
+
+def test_a_sample_of_an_upload_verified_version_survives_loss_of_its_filing_row(
+        vault: Path, selected_store) -> None:
+    _configure(selected_store, vault, stores=[{"name": "test-store", "failure_domain": "disk-a", **IMMEDIATE}])
+    original = _preserved(vault)
+    _offload(vault, original)
+    media_replicas.confirm_key_export(vault)
+    media_replicas.rebuild(vault)
+    assert media_replicas.status(vault)["totals"]["verified_at_upload"] == 1
+    assert media_replicas.sample(vault) == 1
+    assert media_replicas.rebuild(vault) == 1  # A zero-membership receipt still has a live upload-verified filing.
+
+    with closing(sqlite3.connect(media_jobs.job_store_path(vault))) as conn, conn:
+        conn.execute("DROP TABLE media_replicas")
+    assert media_replicas.rebuild(vault) == 1
+
+    relative = original.relative_to(vault).as_posix()
+    [shown] = media_replicas.original_view(vault, relative)["replicas"]
+    assert (shown["recoverable"], shown["last_check"], shown["verified_at"]) == (True, None, None)
+    totals = media_replicas.status(vault)["totals"]
+    assert (totals["recoverable"], totals["verified_at_upload"]) == (1, 0)
 
 
 def test_one_exact_sample_proves_shared_health_without_rewriting_its_other_filing(
