@@ -18,7 +18,9 @@ Store a versioned verification receipt on the cell StatefulSet. Bind it to the c
 
 An unavailable observation, missing attempt, deadline, or failed check preserves the next slice and triggers backoff. Preserve the last verified slice and its time. Keep a successful receipt within its originating StatefulSet and configured repository address. A result covers the exact observed check and its time.
 
-The rendered command has an absolute start cutoff. An ambiguous create keeps the slot through the runtime and termination bounds. An observed active orphan keeps it until Kubernetes reports terminal or absent. In-place restore excludes the exact controlled verifier with its scratch mounts.
+The rendered command has an absolute start cutoff. Before submitting a Job, cellctl reserves the slot in one Helm-provisioned ConfigMap with a resource-version precondition. That reservation survives replacement of the controller or cell StatefulSet. An ambiguous create keeps it through the runtime and termination bounds. An observed active orphan keeps it until Kubernetes reports terminal or absent.
+
+The result observer and the in-place restore guards share the same admitted scratch-only Pod check. The restore guards bound their Kubernetes requests and subprocesses.
 
 ### Bound work and retain the existing backup contract
 

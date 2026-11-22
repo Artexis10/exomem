@@ -15,6 +15,7 @@ from .k8s_client import VERIFICATION_CENSUS_SECONDS, VerificationCreateRejected
 from .manifests import (
     RESTIC_VERIFICATION_ANNOTATION,
     RESTIC_VERIFICATION_GRACE_SECONDS,
+    RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS,
     RESTIC_VERIFICATION_MAX_PARTS,
     cell_id_from_namespace,
     namespace_name,
@@ -35,7 +36,7 @@ _IDLE_CENSUS_INTERVAL = timedelta(minutes=2)
 class VerificationConfig:
     cell_ids: tuple[str, ...] = ()
     parts: int = 24
-    deadline_seconds: int = 300
+    deadline_seconds: int = RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS
     download_kib_per_second: int = 8192
     interval: timedelta = timedelta(days=1)
     retry: timedelta = timedelta(hours=1)
@@ -50,22 +51,58 @@ class VerificationConfig:
             raise ValueError("restic verification needs at most 1024 unique base32 cell IDs")
         if type(self.parts) is not int or not 1 <= self.parts <= RESTIC_VERIFICATION_MAX_PARTS:
             raise ValueError("restic verification partition count is invalid")
-        if any(type(value) is not int or value <= 0 for value in (self.deadline_seconds, self.download_kib_per_second)):
-            raise ValueError("restic verification needs positive whole time and rate limits")
+        if (type(self.deadline_seconds) is not int or not 1 <= self.deadline_seconds <= RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS
+                or type(self.download_kib_per_second) is not int or self.download_kib_per_second <= 0):
+            raise ValueError("restic verification needs a positive whole rate and a bounded deadline")
         if min(self.interval, self.retry) <= timedelta(0):
             raise ValueError("restic verification intervals must be positive")
 
 
 @dataclass(frozen=True)
-class VerificationReceipt:
+class VerificationSlot:
+    attempt_id: str
+    started_at: datetime
+    deadline_seconds: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attempt_id, str) or uuid.UUID(self.attempt_id).hex != self.attempt_id:
+            raise ValueError("invalid verification attempt ID")
+        if type(self.deadline_seconds) is not int or not 1 <= self.deadline_seconds <= RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS:
+            raise ValueError("invalid verification launch window")
+        if not isinstance(self.started_at, datetime) or self.started_at.tzinfo is None:
+            raise ValueError("invalid verification start time")
+
+    @property
+    def start_before(self) -> int:
+        return int(self.started_at.timestamp()) + self.deadline_seconds
+
+    @property
+    def may_run_until(self) -> datetime:
+        # The command rejects late starts. The Pod keeps its runtime deadline and shutdown grace.
+        return datetime.fromtimestamp(self.start_before, UTC) + timedelta(
+            seconds=self.deadline_seconds + RESTIC_VERIFICATION_GRACE_SECONDS,
+        )
+
+    def encode(self) -> str:
+        return json.dumps({**asdict(self), "started_at": self.started_at.astimezone(UTC).isoformat()}, separators=(",", ":"))
+
+    @classmethod
+    def decode(cls, raw: str, now: datetime) -> VerificationSlot:
+        fields = json.loads(raw)
+        fields["started_at"] = datetime.fromisoformat(fields["started_at"])
+        slot = cls(**fields)
+        if slot.started_at > now:
+            raise ValueError("verification reservation starts in the future")
+        return slot
+
+
+@dataclass(frozen=True)
+class VerificationReceipt(VerificationSlot):
     repository: str
     statefulset_uid: str
     invocation: str
     total: int
     part: int
-    attempt_id: str
-    started_at: datetime
-    deadline_seconds: int
     outcome: Outcome = "pending"
     job_uid: str | None = None
     pod_uid: str | None = None
@@ -76,6 +113,7 @@ class VerificationReceipt:
     last_success_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if type(self.part) is not int or type(self.total) is not int or not (
             1 <= self.part <= self.total <= RESTIC_VERIFICATION_MAX_PARTS
         ):
@@ -83,13 +121,6 @@ class VerificationReceipt:
         for value in (self.repository, self.invocation):
             if not isinstance(value, str) or len(value) != 64 or len(bytes.fromhex(value)) != 32:
                 raise ValueError("invalid verification fingerprint")
-        if not isinstance(self.attempt_id, str) or uuid.UUID(self.attempt_id).hex != self.attempt_id:
-            raise ValueError("invalid verification attempt ID")
-        if type(self.deadline_seconds) is not int or self.deadline_seconds <= 0:
-            raise ValueError("invalid verification launch window")
-        # Validate this on parsing too, outside the cell/fleet scheduling path.
-        if self.started_at is None or self.may_run_until <= self.started_at:
-            raise ValueError("invalid verification receipt times")
         if not self.statefulset_uid or any(
             value is not None and (not isinstance(value, str) or not value)
             for value in (self.statefulset_uid, self.job_uid, self.pod_uid)
@@ -142,16 +173,8 @@ class VerificationReceipt:
         return restic_verification_job_name(self.attempt_id)
 
     @property
-    def start_before(self) -> int:
-        return int(self.started_at.timestamp()) + self.deadline_seconds
-
-    @property
-    def may_run_until(self) -> datetime:
-        # The command refuses to start at the absolute cutoff. The Pod keeps its
-        # own runtime deadline even without a Job, plus Kubernetes' shutdown grace.
-        return datetime.fromtimestamp(self.start_before, UTC) + timedelta(
-            seconds=self.deadline_seconds + RESTIC_VERIFICATION_GRACE_SECONDS,
-        )
+    def slot(self) -> VerificationSlot:
+        return VerificationSlot(self.attempt_id, self.started_at, self.deadline_seconds)
 
     @property
     def next_part(self) -> int:
@@ -205,6 +228,15 @@ async def _write_receipt(cluster, namespace: str, receipt: VerificationReceipt) 
     )
 
 
+async def _release_slot(cluster, slot: VerificationSlot) -> None:
+    try:
+        version, value = await asyncio.to_thread(cluster.read_restic_verification_slot)
+        if value == slot.encode():
+            await asyncio.to_thread(cluster.patch_restic_verification_slot, version, None)
+    except Exception as error:  # noqa: BLE001 -- a stale reservation still expires on its own
+        logger.warning("cellctl: restic verification slot release is unknown: %s", describe_error(error))
+
+
 async def sync_verifications(
     cluster, config: VerificationConfig, *, targets: dict[str, VerificationTarget], now: datetime,
     allow_start: bool, start, runtime: VerificationRuntime,
@@ -219,7 +251,7 @@ async def sync_verifications(
     selected = {namespace_name(cell_id) for cell_id in config.cell_ids}
     for namespace, target in targets.items():
         record = VerificationReceipt.parse(target.annotation)
-        if record is not None and record.statefulset_uid != target.statefulset_uid:
+        if record is not None and (record.statefulset_uid != target.statefulset_uid or record.started_at > now):
             record = None
         records[namespace] = record
         if record is not None and record.outcome == "pending":
@@ -243,7 +275,10 @@ async def sync_verifications(
     active = any(job.active for jobs in observed.values() for job in jobs)
     runtime.census_retry_at = None
     runtime.next_census_at = now if active else now + _IDLE_CENSUS_INTERVAL
-    unsettled = False
+    if active and not pending:
+        # An orphan still owns the slot. It does not make the whole loop hot.
+        runtime.census_retry_at = now + _IDLE_CENSUS_INTERVAL
+        return False
     for namespace in sorted(pending):
         record = records[namespace]
         target = targets[namespace]
@@ -261,11 +296,11 @@ async def sync_verifications(
                 return True
             continue
         if (not same_job or job.deleting) and now < record.may_run_until:
-            # Empty lists and unacknowledged or replaced Jobs cannot release a pending start.
-            unsettled = True
             continue
         if namespace in runtime.refused_until:
             continue
+        if same_job and not job.active and not job.deleting:
+            await _release_slot(cluster, record.slot)
         settled = record.settle(job, eligible=eligible, now=now, config=config)
         try:
             await _write_receipt(cluster, namespace, settled)
@@ -280,26 +315,46 @@ async def sync_verifications(
             logger.warning("cellctl: restic verification is unsettled for %s: %s", namespace, describe_error(error))
         return True  # Bound a pass to one receipt and one cleanup.
 
-    if active or unsettled or not due:
+    if active or not due:
         return active
+    try:
+        version, value = await asyncio.to_thread(cluster.read_restic_verification_slot)
+        if value is not None:
+            try:
+                slot = VerificationSlot.decode(value, now)
+                expires = slot.may_run_until
+            except (KeyError, TypeError, ValueError, OverflowError, RecursionError, OSError):
+                # Preserve a full possible runtime after the first malformed read, across restarts too.
+                recovery = VerificationSlot(uuid.uuid4().hex, now, RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS)
+                await asyncio.to_thread(cluster.patch_restic_verification_slot, version, recovery.encode())
+                logger.warning("cellctl: invalid restic verification slot, waiting until %s", recovery.may_run_until)
+                return False
+            if now < expires:
+                return False
+    except Exception as error:  # noqa: BLE001 -- only new optional work depends on the slot read
+        runtime.census_retry_at = now + _IDLE_CENSUS_INTERVAL
+        logger.warning("cellctl: restic verification slot is unavailable: %s", describe_error(error))
+        return False
     _, namespace, previous, target = min(due, key=lambda candidate: candidate[:2])
     part = previous.next_part if previous is not None else 1
-    start_before = int(now.timestamp()) + config.deadline_seconds
+    slot = VerificationSlot(uuid.uuid4().hex, now, config.deadline_seconds)
     invocation = restic_verification_invocation(
-        target.image, restic_verification_command(part, config.parts, config.download_kib_per_second, start_before),
+        target.image, restic_verification_command(part, config.parts, config.download_kib_per_second, slot.start_before),
         target.repository,
     )
     receipt = VerificationReceipt(
-        target.repository, target.statefulset_uid, invocation, config.parts, part, uuid.uuid4().hex, now,
-        config.deadline_seconds,
+        slot.attempt_id, slot.started_at, slot.deadline_seconds,
+        target.repository, target.statefulset_uid, invocation, config.parts, part,
         last_success_part=previous.last_success_part if previous is not None else None,
         last_success_at=previous.last_success_at if previous is not None else None,
     )
     try:
         await _write_receipt(cluster, namespace, receipt)
+        version = await asyncio.to_thread(cluster.patch_restic_verification_slot, version, slot.encode())
         try:
             job_uid = await asyncio.to_thread(start, namespace, receipt)
         except VerificationCreateRejected as error:
+            await asyncio.to_thread(cluster.patch_restic_verification_slot, version, None)
             await _write_receipt(cluster, namespace, receipt.settle(None, eligible=False, now=now, config=config))
             logger.warning("cellctl: restic verification creation was rejected in %s: %s", namespace, describe_error(error))
         else:

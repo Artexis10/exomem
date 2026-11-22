@@ -729,6 +729,8 @@ class ClusterGateway:
     def observe_catalogue_builds(self) -> dict: ...  # pragma: no cover
     def delete_catalogue_build_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover
     def observe_restic_verifications(self) -> dict: ...  # pragma: no cover
+    def read_restic_verification_slot(self) -> tuple[str, str | None]: ...  # pragma: no cover
+    def patch_restic_verification_slot(self, version: str, reservation: str | None) -> str: ...  # pragma: no cover
     def create_restic_verification_job(self, manifest: dict) -> str: ...  # pragma: no cover
     def delete_restic_verification_job(self, namespace: str, name: str, *, uid: str) -> None: ...  # pragma: no cover
     def delete_job(self, namespace: str, name: str) -> None: ...  # pragma: no cover

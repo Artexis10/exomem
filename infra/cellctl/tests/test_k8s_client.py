@@ -17,7 +17,13 @@ from urllib3.response import HTTPResponse
 
 from cellctl import manifests
 from cellctl.export_layout import PACK, PAUSE, UPLOAD, job_name, legacy_job_name
-from cellctl.k8s_client import CELL_LABEL, ClusterClient, VerificationCreateRejected
+from cellctl.k8s_client import (
+    CELL_LABEL,
+    VERIFICATION_SLOT_KEY,
+    VERIFICATION_SLOT_NAME,
+    ClusterClient,
+    VerificationCreateRejected,
+)
 from cellctl.manifests import (
     HOLD_ANNOTATION,
     HOLD_STARTED_ANNOTATION,
@@ -122,13 +128,19 @@ def _named(objects: list, field_selector: str) -> list:
 
 
 def _verification_job(namespace: str, uid: str, *, condition: str):
-    container = NS(
+    container = k8s.V1Container(
         name=manifests.JOB_KIND_RESTIC_VERIFY, image=VERIFIER_IMAGE,
-        command=manifests.restic_verification_command(1, 2, 8192, 1_800_000_000), args=None, env_from=None,
-        env=[NS(name=name, value="s3:https://fixture.invalid/backups" if name == "RESTIC_REPOSITORY" else "fixture",
-                value_from=None) for name in manifests.RESTIC_VERIFICATION_ENV_NAMES],
+        command=manifests.restic_verification_command(1, 2, 8192, 1_800_000_000),
+        env=[k8s.V1EnvVar(name=name, value="s3:https://fixture.invalid/backups" if name == "RESTIC_REPOSITORY" else "fixture")
+             for name in manifests.RESTIC_VERIFICATION_ENV_NAMES],
+        security_context=k8s.V1SecurityContext(allow_privilege_escalation=False, read_only_root_filesystem=True,
+                                                capabilities=k8s.V1Capabilities(drop=["ALL"])),
+        volume_mounts=[k8s.V1VolumeMount(name=name, mount_path=f"/{name}") for name in ("cache", "tmp")],
     )
-    pod_spec = NS(containers=[container], init_containers=None, ephemeral_containers=None, active_deadline_seconds=300)
+    pod_spec = k8s.V1PodSpec(
+        containers=[container], active_deadline_seconds=300, automount_service_account_token=False,
+        volumes=[k8s.V1Volume(name=name, empty_dir=k8s.V1EmptyDirVolumeSource()) for name in ("cache", "tmp")],
+    )
     return NS(
         metadata=NS(namespace=namespace, name=manifests.restic_verification_job_name(uid), uid=uid,
                     deletion_timestamp=None, creation_timestamp=CURRENT_HOLD,
@@ -169,7 +181,7 @@ def test_verification_observes_both_fleet_pages_and_needs_the_exact_job_uid() ->
     jobs = Mock(side_effect=[_paged([current], "jobs-2"), _paged([missing])])
     pods = Mock(side_effect=[_paged([unrelated], "pods-2"), _paged([_verification_pod(current)])])
     client._batch = NS(list_job_for_all_namespaces=jobs)
-    client._core = NS(list_pod_for_all_namespaces=pods)
+    client._core = NS(api_client=k8s.ApiClient(), list_pod_for_all_namespaces=pods)
 
     observed = client.observe_restic_verifications()
 
@@ -193,7 +205,7 @@ def test_old_unscheduled_or_terminating_verifier_pods_hold_the_slot_until_termin
     pod.metadata.creation_timestamp = datetime.fromisoformat(CURRENT_HOLD) - timedelta(hours=1)
     client = ClusterClient.__new__(ClusterClient)
     client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([])))
-    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
+    client._core = NS(api_client=k8s.ApiClient(), list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
 
     orphan, = client.observe_restic_verifications()[NAMESPACE]
     assert orphan.name == gone.metadata.name and orphan.uid is None and orphan.active
@@ -205,14 +217,16 @@ def test_old_unscheduled_or_terminating_verifier_pods_hold_the_slot_until_termin
     assert not stopped.active
 
 
-@pytest.mark.parametrize("changed", ["command", "env", "finished", "native_digest", "pod_start", "container_start"])
+@pytest.mark.parametrize("changed", ["command", "env", "mount", "finished", "native_digest", "pod_start", "container_start"])
 def test_a_zero_exit_needs_matching_native_image_command_and_pod_lifetime(changed) -> None:
     job = _verification_job(NAMESPACE, "completed-job", condition="Complete")
     pod = _verification_pod(job, finished=None if changed == "finished" else CURRENT_HOLD)
     if changed == "command":
         pod.spec.containers[0].command = ["true"]
     if changed == "env":
-        pod.spec.containers[0].env.append(NS(name="PATH", value="/tmp", value_from=None))
+        pod.spec.containers[0].env.append(k8s.V1EnvVar(name="PATH", value="/tmp"))
+    if changed == "mount":
+        pod.spec.containers[0].volume_mounts[0].mount_path = "/usr/local/bin"
     if changed == "native_digest":
         pod.status.container_statuses[0].image_id = "sha256:" + "b" * 64
     if changed == "pod_start":
@@ -221,7 +235,7 @@ def test_a_zero_exit_needs_matching_native_image_command_and_pod_lifetime(change
         pod.status.container_statuses[0].state.terminated.started_at = EARLIER_HOLD
     client = ClusterClient.__new__(ClusterClient)
     client._batch = NS(list_job_for_all_namespaces=Mock(return_value=_paged([job])))
-    client._core = NS(list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
+    client._core = NS(api_client=k8s.ApiClient(), list_pod_for_all_namespaces=Mock(return_value=_paged([pod])))
 
     result, = client.observe_restic_verifications()[NAMESPACE]
 
@@ -237,6 +251,33 @@ def test_a_partial_verifier_census_cannot_mean_vacancy() -> None:
         client.observe_restic_verifications()
 
     assert jobs.call_count == 2
+
+
+def test_verifier_slot_cannot_be_changed_at_a_stale_resource_version() -> None:
+    current = {"metadata": {"resourceVersion": "7"}, "data": {}}
+
+    def request(method, url, *, headers, body=None, **_):
+        assert urlsplit(url).path.endswith(f"/namespaces/exomem-cloud/configmaps/{VERIFICATION_SLOT_NAME}")
+        if method == "PATCH":
+            assert headers["Content-Type"] == "application/json-patch+json"
+            guard, change = json.loads(body)
+            assert guard["path"] == "/metadata/resourceVersion" and guard["op"] == "test"
+            if guard["value"] != current["metadata"]["resourceVersion"]:
+                return HTTPResponse(body=b'{"message":"resource version test failed"}', status=422)
+            assert change["path"] == "/data"
+            current.update(metadata={"resourceVersion": "8"}, data=change["value"])
+        return HTTPResponse(body=json.dumps(current).encode(), status=200)
+
+    with k8s.ApiClient(k8s.Configuration(host="https://cluster.invalid")) as transport:
+        transport.rest_client.pool_manager.request = request
+        client = ClusterClient.__new__(ClusterClient)
+        client._core = k8s.CoreV1Api(transport)
+        assert client.read_restic_verification_slot() == ("7", None)
+        assert client.patch_restic_verification_slot("7", "new reservation") == "8"
+        with pytest.raises(ApiException, match="422"):
+            client.patch_restic_verification_slot("7", None)
+        assert client.read_restic_verification_slot() == ("8", "new reservation")
+        assert current["data"] == {VERIFICATION_SLOT_KEY: "new reservation"}
 
 
 def test_verifier_create_conflict_cannot_adopt_another_job() -> None:

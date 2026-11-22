@@ -1,12 +1,14 @@
 """Restart, replacement and priority consequences of the Cloud verifier."""
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
+import pytest
 
 from cellctl import db, reconcile
-from cellctl.k8s_client import VerificationCreateRejected
+from cellctl.k8s_client import VERIFICATION_SLOT_NAME, VerificationCreateRejected
 from cellctl.main import build_restic_verification
 from cellctl.manifests import (
     JOB_KIND_LABEL,
@@ -18,12 +20,14 @@ from cellctl.restic_verification import (
     VerificationConfig,
     VerificationReceipt,
     VerificationRuntime,
+    VerificationSlot,
     VerificationTarget,
     sync_verifications,
 )
 from cellctl.state import ResticVerificationJob
 
 from .test_exports import FakeS3
+from .test_platform_chart_headers import HELM, _find, _helm_template
 from .test_reconcile import (
     FakeClusterGateway,
     FakeHetznerVolumeProvider,
@@ -44,7 +48,19 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 POLICY = VerificationConfig(cell_ids=(CELL, OTHER), parts=2, interval=timedelta(minutes=2), retry=timedelta(minutes=1))
 
 
-class FakeVerifier:
+class FakeVerifierSlot:
+    slot_snapshot: tuple[str, str | None] = ("1", None)
+
+    def read_restic_verification_slot(self):
+        return self.slot_snapshot
+
+    def patch_restic_verification_slot(self, version, value):
+        assert version == self.slot_snapshot[0]
+        self.slot_snapshot = (str(int(version) + 1), value)
+        return self.slot_snapshot[0]
+
+
+class FakeVerifier(FakeVerifierSlot):
     def __init__(self) -> None:
         self.annotations: dict[str, str] = {}
         self.statefulset_uids = {NAMESPACE: "first-statefulset", OTHER_NAMESPACE: "other-statefulset"}
@@ -74,6 +90,7 @@ class FakeVerifier:
 
     def start(self, namespace, receipt):
         assert self.receipt(namespace) == receipt and not receipt.job_uid
+        assert self.slot_snapshot[1] == receipt.slot.encode()
         self.operations.append(("start", namespace, receipt.part))
         return "job-uid"
 
@@ -106,6 +123,20 @@ def test_verifier_has_an_explicit_default_off_selection(monkeypatch):
     assert build_restic_verification().cell_ids == (CELL,)
 
 
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_chart_precreates_the_slot_without_owning_its_data():
+    documents = _helm_template("--show-only", "templates/cellctl.yaml")
+    slot = _find(documents, "ConfigMap", VERIFICATION_SLOT_NAME)
+    role = _find(documents, "Role", VERIFICATION_SLOT_NAME)
+    binding = _find(documents, "RoleBinding", VERIFICATION_SLOT_NAME)
+
+    assert slot["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep" and "data" not in slot
+    assert role["rules"] == [{"apiGroups": [""], "resources": ["configmaps"],
+                              "resourceNames": [slot["metadata"]["name"]], "verbs": ["get", "patch"]}]
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "cellctl",
+                                     "namespace": slot["metadata"]["namespace"]}]
+
+
 async def test_one_fleet_flight_blocks_a_second_eligible_cell():
     cluster = FakeVerifier()
     await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
@@ -134,6 +165,7 @@ async def test_restart_preserves_last_success_and_retries_the_failed_slice_befor
 
     restarted = FakeVerifier()
     restarted.annotations = cluster.annotations.copy()
+    restarted.slot_snapshot = cluster.slot_snapshot
     restarted.jobs[NAMESPACE] = (observed(second, outcome="failed"),)
     failed_at = NOW + POLICY.interval + timedelta(seconds=10)
     await restarted.sync(now=failed_at, include=(NAMESPACE,))
@@ -159,13 +191,13 @@ async def test_disabled_controller_still_observes_orphans_without_deleting_them(
     restarted = FakeVerifier()
     restarted.jobs[NAMESPACE] = (observed(first, uid=None, active=True),)
     restarted.jobs[OTHER_NAMESPACE] = (observed(first, uid="foreign-job", outcome="success"),)
-    assert await restarted.sync(policy=disabled)
+    assert not await restarted.sync(policy=disabled)
     assert restarted.operations == []
     assert restarted.calls == 1
 
     restarted.jobs.clear()
     assert not await restarted.sync(policy=disabled)
-    assert not await restarted.sync(policy=disabled)
+    assert not await restarted.sync(policy=disabled, now=NOW + timedelta(minutes=2))
     assert restarted.calls == 2
 
 
@@ -204,6 +236,7 @@ async def test_an_uncertain_create_holds_the_fleet_after_restart_even_before_the
 
     restarted = FakeVerifier()
     restarted.annotations = original.annotations.copy()
+    restarted.slot_snapshot = original.slot_snapshot
     await restarted.sync(include=(NAMESPACE, OTHER_NAMESPACE))
     assert restarted.receipt() == attempt and restarted.receipt(OTHER_NAMESPACE) is None
 
@@ -215,6 +248,60 @@ async def test_an_uncertain_create_holds_the_fleet_after_restart_even_before_the
     assert not any(operation[0] == "delete" for operation in restarted.operations)
     await restarted.sync(now=attempt.may_run_until, include=(NAMESPACE, OTHER_NAMESPACE))
     assert restarted.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+@pytest.mark.parametrize("annotation_survives", [False, True])
+async def test_replacement_during_an_uncertain_create_does_not_release_the_fleet_slot(annotation_survives):
+    class LostResponse(FakeVerifier):
+        def start(self, namespace, receipt):
+            raise OSError("response from create was lost")
+
+    original = LostResponse()
+    await original.sync(include=(NAMESPACE,))
+    attempt = original.receipt()
+
+    replacement = FakeVerifier()
+    replacement.statefulset_uids[NAMESPACE] = "replaced-statefulset"
+    replacement.slot_snapshot = original.slot_snapshot
+    if annotation_survives:
+        replacement.annotations = original.annotations.copy()
+    await replacement.sync(include=(OTHER_NAMESPACE,))
+    assert replacement.operations == []
+
+    await replacement.sync(now=attempt.may_run_until, include=(OTHER_NAMESPACE,))
+    assert replacement.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+    assert replacement.receipt() == (attempt if annotation_survives else None)
+
+
+@pytest.mark.parametrize("value", ["[", "future"])
+async def test_malformed_slot_gets_one_durable_bounded_recovery_window(value):
+    cluster = FakeVerifier()
+    if value == "future":
+        value = VerificationSlot("a" * 32, NOW + timedelta(days=100), 300).encode()
+    cluster.slot_snapshot = ("1", value)
+
+    await cluster.sync(include=(OTHER_NAMESPACE,))
+    recovery = VerificationSlot.decode(cluster.slot_snapshot[1], NOW)
+    assert recovery.started_at == NOW and cluster.operations == []
+
+    restarted = FakeVerifier()
+    restarted.slot_snapshot = cluster.slot_snapshot
+    await restarted.sync(now=recovery.may_run_until - timedelta(seconds=1), include=(OTHER_NAMESPACE,))
+    assert restarted.slot_snapshot == cluster.slot_snapshot and restarted.operations == []
+    await restarted.sync(now=recovery.may_run_until, include=(OTHER_NAMESPACE,))
+    assert restarted.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+async def test_unavailable_slot_does_not_create_a_job_from_an_empty_census():
+    class MissingSlot(FakeVerifier):
+        def read_restic_verification_slot(self):
+            raise OSError("slot unavailable")
+
+    cluster = MissingSlot()
+
+    await cluster.sync(include=(NAMESPACE, OTHER_NAMESPACE))
+
+    assert cluster.operations == []
 
 
 async def test_a_definitive_create_rejection_leaves_the_slot_available_for_a_peer():
@@ -239,6 +326,19 @@ async def test_a_malformed_receipt_does_not_stop_a_peer_cell_from_being_verified
     await cluster.sync(include=(OTHER_NAMESPACE,))
 
     assert cluster.receipt() is None and cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
+
+
+@pytest.mark.parametrize("changed", [{"deadline_seconds": 86_400}, {"started_at": (NOW + timedelta(days=1)).isoformat()}])
+async def test_pending_cell_receipts_cannot_extend_the_fleet_reservation(changed):
+    original = FakeVerifier()
+    await original.sync(include=(NAMESPACE,))
+    receipt = json.loads(original.annotations[NAMESPACE]) | changed
+    cluster = FakeVerifier()
+    cluster.annotations[NAMESPACE] = json.dumps(receipt)
+
+    await cluster.sync(include=(OTHER_NAMESPACE,))
+
+    assert cluster.receipt(OTHER_NAMESPACE).job_uid == "job-uid"
 
 
 async def test_a_refused_cell_does_not_starve_the_next_due_cell():
@@ -283,6 +383,8 @@ async def test_copied_receipt_cannot_advance_the_replacement_statefulset():
     cluster.statefulset_uids[NAMESPACE] = "replacement-statefulset"  # The replacement retains the old annotation.
 
     await cluster.sync(include=(NAMESPACE,))
+    assert cluster.receipt() == first
+    await cluster.sync(now=first.may_run_until, include=(NAMESPACE,))
 
     latest = cluster.receipt()
     assert latest.statefulset_uid == "replacement-statefulset" and latest.attempt_id != first.attempt_id
@@ -312,7 +414,7 @@ async def test_statefulset_replaced_during_observation_never_receives_the_old_su
     assert cluster.receipt() is None and cluster.operations == before_replacement
 
 
-class ReconcileVerifierCluster(FakeClusterGateway):
+class ReconcileVerifierCluster(FakeClusterGateway, FakeVerifierSlot):
     verifiers = ()
 
     def observe(self, cell_id, namespace):

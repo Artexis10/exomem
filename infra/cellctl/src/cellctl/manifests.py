@@ -1295,6 +1295,7 @@ BACKUP_JOB_NAME = "cell-backup"
 RESTORE_JOB_NAME = "cell-restore"
 # The closed Job attempt name and annotations shared by the renderer and observer.
 RESTIC_VERIFICATION_JOB_NAME_RE = re.compile(re.escape(JOB_KIND_RESTIC_VERIFY) + r"-[0-9a-f]{32}")
+RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS = 300
 # The verifier's fixed restic environment excludes executable and shell overrides.
 RESTIC_VERIFICATION_ENV_NAMES = frozenset({
     "RESTIC_REPOSITORY", "RESTIC_PASSWORD", "RESTIC_CACHE_DIR", "TMPDIR", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
@@ -1415,6 +1416,33 @@ def is_restic_verification_command(command: object) -> bool:
     n, count, kib, start_before = map(int, (part, total, rate, deadline))
     return (1 <= n <= count <= RESTIC_VERIFICATION_MAX_PARTS and 0 < kib and 0 < start_before
             and command == restic_verification_command(n, count, kib, start_before))
+
+
+def is_restic_verification_pod_spec(pod: dict) -> bool:
+    """Check the admitted command and scratch-only access before trusting a verifier Pod."""
+    if (pod.get("automountServiceAccountToken") is not False or pod.get("initContainers")
+            or pod.get("ephemeralContainers") or pod.get("hostNetwork") or pod.get("hostPID") or pod.get("hostIPC")):
+        return False
+    containers = pod.get("containers") or []
+    if len(containers) != 1:
+        return False
+    container, = containers
+    security = container.get("securityContext") or {}
+    env = container.get("env") or []
+    if (container.get("name") != JOB_KIND_RESTIC_VERIFY
+            or not is_restic_verification_command(container.get("command")) or container.get("args")
+            or container.get("envFrom") or len(env) != len(RESTIC_VERIFICATION_ENV_NAMES)
+            or {entry["name"] for entry in env} != RESTIC_VERIFICATION_ENV_NAMES
+            or any(container.get(key) for key in ("volumeDevices", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"))
+            or security.get("privileged")
+            or any(security.get(key) != value for key, value in _container_security_context().items())):
+        return False
+    volumes = pod.get("volumes") or []
+    mounts = container.get("volumeMounts") or []
+    return (len(volumes) == len(mounts) == 2
+            and {v["name"] for v in volumes if v.keys() == {"name", "emptyDir"}} == {"cache", "tmp"}
+            and {m["name"] for m in mounts if m == {"name": m["name"], "mountPath": "/" + m["name"]}}
+            == {"cache", "tmp"})
 
 
 def restic_verification_invocation(image: str, command: list[str], repository: str) -> str:
@@ -1731,8 +1759,8 @@ def render_restic_verify_job(
     """Check the repository in a bounded Job that needs no cell volume."""
     if not 1 <= part <= total <= RESTIC_VERIFICATION_MAX_PARTS:
         raise ValueError("invalid restic verification slice")
-    if download_kib_per_second <= 0 or deadline_seconds <= 0:
-        raise ValueError("restic verification needs positive rate and time limits")
+    if download_kib_per_second <= 0 or not 1 <= deadline_seconds <= RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS:
+        raise ValueError("restic verification needs a positive rate and a bounded time limit")
 
     repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     pod = _job_pod_spec(spec, job_kind=JOB_KIND_RESTIC_VERIFY, command=[], data_read_only=True, repo=repo)

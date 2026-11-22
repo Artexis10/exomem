@@ -51,13 +51,12 @@ from cellctl.manifests import (  # noqa: E402
     JOB_KIND_LABEL,
     JOB_KIND_RESTIC_VERIFY,
     JOB_KIND_RESTORE,
-    RESTIC_VERIFICATION_ENV_NAMES,
     RESTIC_VERIFICATION_JOB_NAME_RE,
     SNAPSHOT_ID_RE,
     CellManifestSpec,
     _container_security_context,
     _pod_security_context,
-    is_restic_verification_command,
+    is_restic_verification_pod_spec,
     namespace_name,
     render_cell_manifests,
     render_restore_job,
@@ -82,6 +81,8 @@ SCRATCH_DOCUMENTS = {
 }
 # Pod phases in which a pod no longer runs and so no longer uses the volume.
 FINISHED_PHASES = {"Succeeded", "Failed"}
+WORKLOAD_REQUEST_SECONDS = 10
+WORKLOAD_COMMAND_SECONDS = 12
 
 
 @dataclass(frozen=True)
@@ -93,10 +94,16 @@ class PlatformSettings:
     job_egress_except: tuple[str, ...]
 
 
-def _kubectl(context: str, *args: str, payload: str | None = None, quiet: bool = False) -> str:
-    result = subprocess.run(
-        ["kubectl", "--context", context, *args], input=payload, text=True, capture_output=True, check=False
-    )
+def _kubectl(
+    context: str, *args: str, payload: str | None = None, quiet: bool = False, timeout: int | None = None,
+) -> str:
+    try:
+        result = subprocess.run(
+            ["kubectl", "--context", context, *args], input=payload, text=True, capture_output=True,
+            check=False, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"kubectl {' '.join(args)} timed out") from error
     if result.returncode:
         # A Secret apply can echo its payload in an error; say only what failed.
         detail = "" if quiet else ": " + (result.stderr.strip().splitlines() or [""])[-1]
@@ -106,7 +113,8 @@ def _kubectl(context: str, *args: str, payload: str | None = None, quiet: bool =
 
 def _get(context: str, kind: str, name: str, namespace: str | None = None) -> dict:
     args = (["-n", namespace] if namespace else []) + ["get", kind, name, "-o", "json"]
-    return json.loads(_kubectl(context, *args))
+    return json.loads(_kubectl(context, *args, f"--request-timeout={WORKLOAD_REQUEST_SECONDS}s",
+                               timeout=WORKLOAD_COMMAND_SECONDS))
 
 
 def _apply(context: str, document: dict, field_manager: str) -> None:
@@ -354,31 +362,10 @@ def _verifier_label(document: dict) -> bool:
 
 
 def _verifier_spec(pod: dict, image_repository: str) -> bool:
-    if (pod.get("automountServiceAccountToken") is not False or pod.get("initContainers")
-            or pod.get("ephemeralContainers") or pod.get("hostNetwork") or pod.get("hostPID") or pod.get("hostIPC")):
+    if not is_restic_verification_pod_spec(pod):
         return False
-    containers = pod.get("containers") or []
-    if len(containers) != 1:
-        return False
-    container, = containers
-    image = container.get("image", "")
-    security = container.get("securityContext") or {}
-    env = container.get("env") or []
-    if (container.get("name") != JOB_KIND_RESTIC_VERIFY or not DIGEST_IMAGE_RE.search(image)
-            or image.rpartition("@")[0] != image_repository
-            or not is_restic_verification_command(container.get("command")) or container.get("args")
-            or container.get("envFrom") or len(env) != len(RESTIC_VERIFICATION_ENV_NAMES)
-            or {entry["name"] for entry in env} != RESTIC_VERIFICATION_ENV_NAMES
-            or any(container.get(key) for key in ("volumeDevices", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"))
-            or security.get("privileged")
-            or any(security.get(key) != value for key, value in _container_security_context().items())):
-        return False
-    volumes = pod.get("volumes") or []
-    mounts = container.get("volumeMounts") or []
-    return (len(volumes) == len(mounts) == 2
-            and {v["name"] for v in volumes if v.keys() == {"name", "emptyDir"}} == {"cache", "tmp"}
-            and {m["name"] for m in mounts if m == {"name": m["name"], "mountPath": "/" + m["name"]}}
-            == {"cache", "tmp"})
+    image = pod["containers"][0].get("image", "")
+    return bool(DIGEST_IMAGE_RE.search(image) and image.rpartition("@")[0] == image_repository)
 
 
 def _verifier_pod(pod: dict, image_repository: str) -> bool:
@@ -399,7 +386,8 @@ def _job_owner(owner: dict, name: str, uid: str) -> bool:
 
 
 def _list_workloads(context: str, namespace: str, kind: str) -> list[dict]:
-    return json.loads(_kubectl(context, "-n", namespace, "get", kind, "-o", "json", "--request-timeout=10s"))["items"]
+    return json.loads(_kubectl(context, "-n", namespace, "get", kind, "-o", "json",
+                               f"--request-timeout={WORKLOAD_REQUEST_SECONDS}s", timeout=WORKLOAD_COMMAND_SECONDS))["items"]
 
 
 def _running_pods(context: str, namespace: str, *, except_pod: str = "", statefulset: dict | None = None) -> list[str]:

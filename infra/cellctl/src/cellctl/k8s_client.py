@@ -66,7 +66,6 @@ from .manifests import (
     RENDER_DIGEST_ANNOTATION,
     RENDER_DIGEST_APPLIED_AT_ANNOTATION,
     RESTIC_VERIFICATION_ANNOTATION,
-    RESTIC_VERIFICATION_ENV_NAMES,
     RESTIC_VERIFICATION_JOB_NAME_RE,
     RESTORE_JOB_NAME,
     RESTORED_SNAPSHOT_ANNOTATION,
@@ -82,7 +81,7 @@ from .manifests import (
     cell_id_from_namespace,
     clone_claim_name,
     hold_job_name,
-    is_restic_verification_command,
+    is_restic_verification_pod_spec,
     namespace_name,
     restic_verification_invocation,
     snapshot_backup_name,
@@ -117,6 +116,8 @@ logger = logging.getLogger(__name__)
 API_REQUEST_TIMEOUT = (5, 30)
 VERIFICATION_REQUEST_SECONDS = 2
 VERIFICATION_CENSUS_SECONDS = 5
+VERIFICATION_SLOT_NAME = "exomem-restic-verification-slot"
+VERIFICATION_SLOT_KEY = "reservation.json"
 VERIFICATION_LIST_LIMIT = 64
 VERIFICATION_MAX_PAGES = 2
 
@@ -576,7 +577,9 @@ class ClusterClient:
         observed: dict[str, list[ResticVerificationJob]] = {}
         for key in jobs.keys() | pods_by_job.keys():
             namespace, name = key
-            observation = _restic_verification_observation(name, jobs.get(key), pods_by_job.get(key, []))
+            observation = _restic_verification_observation(
+                name, jobs.get(key), pods_by_job.get(key, []), self._core.api_client.sanitize_for_serialization,
+            )
             observed.setdefault(namespace, []).append(observation)
         return {namespace: tuple(family) for namespace, family in observed.items()}
 
@@ -595,6 +598,28 @@ class ClusterClient:
         if not uid:
             raise ValueError("Kubernetes did not acknowledge a verifier Job UID")
         return uid
+
+    def read_restic_verification_slot(self) -> tuple[str, str | None]:
+        slot = self._core.read_namespaced_config_map(
+            VERIFICATION_SLOT_NAME, GATEWAY_NAMESPACE, _request_timeout=VERIFICATION_REQUEST_SECONDS,
+        )
+        version = slot.metadata.resource_version
+        if not version:
+            raise ValueError("Kubernetes did not report the verifier slot resource version")
+        return version, (slot.data or {}).get(VERIFICATION_SLOT_KEY)
+
+    def patch_restic_verification_slot(self, version: str, reservation: str | None) -> str:
+        """Change only the named ConfigMap's reservation at the observed resource version."""
+        data = {} if reservation is None else {VERIFICATION_SLOT_KEY: reservation}
+        slot = self._core.patch_namespaced_config_map(
+            VERIFICATION_SLOT_NAME, GATEWAY_NAMESPACE, [
+                {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+                {"op": "add", "path": "/data", "value": data},
+            ], _request_timeout=VERIFICATION_REQUEST_SECONDS,
+        )
+        if not slot.metadata.resource_version or (slot.data or {}) != data:
+            raise ValueError("Kubernetes did not acknowledge the verifier slot write")
+        return slot.metadata.resource_version
 
     def delete_restic_verification_job(self, namespace: str, name: str, *, uid: str) -> None:
         """Drain the observed Job and its Pods, without deleting a same-name replacement."""
@@ -1635,16 +1660,11 @@ def _verification_pages(list_resources, selector: str, deadline: float):
     raise ValueError("restic verification census exceeded its page budget")
 
 
-def _verification_invocation(pod_spec) -> str | None:
-    if pod_spec is None or len(pod_spec.containers) != 1 or pod_spec.init_containers or pod_spec.ephemeral_containers:
+def _verification_invocation(pod_spec, serialize) -> str | None:
+    if pod_spec is None or not is_restic_verification_pod_spec(serialize(pod_spec)):
         return None
     container, = pod_spec.containers
-    env = {entry.name: entry for entry in container.env or []}
-    if (container.name != JOB_KIND_RESTIC_VERIFY or not is_restic_verification_command(container.command)
-            or container.args or container.env_from or env.keys() != RESTIC_VERIFICATION_ENV_NAMES
-            or len(env) != len(container.env)):
-        return None
-    repository = env["RESTIC_REPOSITORY"]
+    repository = next(entry for entry in container.env if entry.name == "RESTIC_REPOSITORY")
     if not repository.value or repository.value_from:
         return None
     fingerprint = hashlib.sha256(repository.value.encode()).hexdigest()
@@ -1671,7 +1691,7 @@ def _verified_container_finish(job, pod, status) -> datetime | None:
     return None
 
 
-def _restic_verification_observation(name: str, job, pods: list) -> ResticVerificationJob:
+def _restic_verification_observation(name: str, job, pods: list, serialize) -> ResticVerificationJob:
     uid = job.metadata.uid if job is not None else None
     deleting = job is not None and job.metadata.deletion_timestamp is not None
     conditions = [
@@ -1683,7 +1703,7 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
         if owner.api_version == "apps/v1" and owner.kind == "StatefulSet" and owner.name == "cell"
     ] if job is not None else []
     statefulset_uid = owners[0].uid if len(owners) == 1 else None
-    invocation = _verification_invocation(job.spec.template.spec) if job is not None else None
+    invocation = _verification_invocation(job.spec.template.spec, serialize) if job is not None else None
     # A Job with no Pods can still create one.
     active = bool(job is not None and not conditions) or any(
         not pod.status or pod.status.phase not in ("Succeeded", "Failed") for pod in pods
@@ -1706,7 +1726,7 @@ def _restic_verification_observation(name: str, job, pods: list) -> ResticVerifi
         statuses = pod.status.container_statuses or []
         if (pod.metadata.uid and pod.status.phase == "Succeeded" and len(statuses) == 1
                 and statuses[0].name == JOB_KIND_RESTIC_VERIFY and statuses[0].state
-                and _verification_invocation(pod.spec) == invocation):
+                and _verification_invocation(pod.spec, serialize) == invocation):
             finished = _verified_container_finish(job, pod, statuses[0])
             if finished:
                 return replace(observation, outcome="success", pod_uid=pod.metadata.uid, finished_at=finished)

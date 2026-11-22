@@ -357,7 +357,7 @@ def test_in_place_restore_guards_distinguish_the_read_only_verifier(monkeypatch,
     if writable_pod:
         pod["spec"]["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": "cell-data"}})
     workloads = {"jobs": [job], "pods": [pod]}
-    monkeypatch.setattr(manifests, "_kubectl", lambda _context, *args: json.dumps({"items": workloads[args[3]]}))
+    monkeypatch.setattr(manifests, "_kubectl", lambda _context, *args, **_kw: json.dumps({"items": workloads[args[3]]}))
     monkeypatch.setattr(manifests, "_check_cell_namespace", lambda _context, cell: manifests.namespace_name(cell))
     monkeypatch.setattr(manifests, "_get", lambda *_args: statefulset)
     monkeypatch.setattr(manifests, "_cellctl", lambda _context: {"spec": {"replicas": 0}})
@@ -383,3 +383,20 @@ def test_in_place_restore_guards_distinguish_the_read_only_verifier(monkeypatch,
     capsys.readouterr()
     assert manifests.main(["running-pods", "--context", "fixture", "--cell-id", CELL_ID]) == 0
     assert capsys.readouterr().out.splitlines() == ([pod["metadata"]["name"]] if writable_pod else [])
+
+
+def test_verifier_statefulset_lookup_has_both_request_and_subprocess_deadlines(monkeypatch, capsys) -> None:
+    manifests = _manifests()
+    pod = {"metadata": {"name": "fixture-pod", "labels": {manifests.JOB_KIND_LABEL: manifests.JOB_KIND_RESTIC_VERIFY}},
+           "status": {"phase": "Running"}}
+    monkeypatch.setattr(manifests, "_list_workloads", lambda *_args: [pod])
+
+    def timed_out(command, *, timeout, **_kw):
+        assert command[-6:] == ["get", "statefulset", "cell", "-o", "json", "--request-timeout=10s"]
+        assert timeout == 12
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(manifests.subprocess, "run", timed_out)
+
+    assert manifests.main(["running-pods", "--context", "fixture", "--cell-id", CELL_ID]) == 1
+    assert "timed out" in capsys.readouterr().err
