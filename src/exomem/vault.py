@@ -5251,19 +5251,20 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
     """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
-    root, target, limit = _guarded_read_target(vault_root, path)
-    return read_bounded_guarded_bytes(root, target, limit=limit)
+    data, guard, _ = _read_guarded_path(vault_root, path, with_generation=False)
+    return data, guard
 
 
 def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, PathGuard | None]:
     """Read text and return a guard when its bytes can be rechecked without reading it again."""
-    root, target, limit = _guarded_read_target(vault_root, path)
-    data, content, generation = read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+    data, content, generation = _read_guarded_path(vault_root, path, with_generation=True)
     guard = content if content.leaf_policy == "store" else generation
     return data.decode("utf-8"), guard
 
 
-def _guarded_read_target(vault_root: Path, path: Path) -> tuple[Path, str, int]:
+def _read_guarded_path(
+    vault_root: Path, path: Path, *, with_generation: bool
+) -> tuple[bytes, PathGuard, PathGuard | None]:
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -5280,18 +5281,26 @@ def _guarded_read_target(vault_root: Path, path: Path) -> tuple[Path, str, int]:
     absolute = root / relative
     from .vault_store import read
 
-    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
-    # A page that the store lacks raises FileNotFoundError, as the missing file does.
-    stored = read.owned_meta(root, relative.as_posix())
+    # Read the stored bytes and their guard in one snapshot. The disk copy can
+    # be absent or older than the stored page.
+    target = relative.as_posix()
+    stored = read.owned_page(root, target)
+    if stored is not None:
+        _require_read_limit(stored.meta.size)
+        guard = _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
+        return stored.body, guard, None
     try:
-        limit = absolute.lstat().st_size if stored is None else stored.size
+        limit = absolute.lstat().st_size
     except FileNotFoundError:
         raise
     except OSError as error:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    return root, relative.as_posix(), limit
+    if with_generation:
+        return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+    return data, guard, None
 
 
 @dataclass

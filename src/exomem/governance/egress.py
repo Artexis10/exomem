@@ -2343,6 +2343,7 @@ def _stored_admission_many(
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
     classes = memo.setdefault(("scope-admission", named, content_only), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
+    check_tombstones = bool(tombstones) and not content_only
     answers = {}
     for path in paths:
         scopes = scope_sets.get(path)
@@ -2361,7 +2362,7 @@ def _stored_admission_many(
                 permitted = decision.level >= RELEASE_FLOOR
             classes[scopes] = (permitted, decision)
         permitted, decision = classes[scopes]
-        tombstoned = not content_only and lifecycle.is_tombstoned_in(tombstones, path)
+        tombstoned = check_tombstones and lifecycle.is_tombstoned_in(tombstones, path)
         allowed = permitted and not tombstoned
         if record_outcomes and not tombstoned and decision is not None and recording:
             content_hash, size = page_admission.evidence(root, path)
@@ -8365,8 +8366,7 @@ def owner_only_aggregate(
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
                 if entry.kind != "file" or managed_split(path) is None:
                     continue
-                canonical = operation.projection_decision(path)
-                if canonical is None:
+                if not operation.projection_present(path):
                     continue
                 decision = _decide_path(
                     vault_root, path, policy=operation.policy,
