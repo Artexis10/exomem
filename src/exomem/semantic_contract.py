@@ -2959,7 +2959,10 @@ def corpus_validity_token(
     """
     from .governance import egress
 
-    if status_dependencies is None or egress.owner_only_aggregate(root) is not None:
+    # The token discloses nothing, so it asks only whether the caller is restricted, not the
+    # aggregate's proof that every projected view is current: the corpus build's release filter
+    # already withheld an unproven view from the verdict this token lets the commit reuse.
+    if status_dependencies is None or egress.caller_restricted(root):
         return None
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in status_dependencies):
@@ -3015,7 +3018,8 @@ def validity_stamp_current(
     """
     from .governance import egress
 
-    if stamp is None or commit_generation is None or egress.owner_only_aggregate(root) is not None:
+    # As in `corpus_validity_token`: a restricted caller reuses nothing, and the owner's check walks no view.
+    if stamp is None or commit_generation is None or egress.caller_restricted(root):
         return False
     sc_token, captured_generation = stamp
     if sc_token is None or len(sc_token) != 4 or captured_generation is None:
