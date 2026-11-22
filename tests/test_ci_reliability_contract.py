@@ -121,10 +121,8 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
     )
     assert junit_step["uses"] == "actions/upload-artifact@v4"
     assert junit_step["if"] == "always()"
-    # A changed-tests group and a shard with the same number stay distinct artifacts.
     assert junit_step["with"]["name"] == (
-        f"{tier}-py${{{{ matrix.python-version }}}}-"
-        "${{ matrix.selection && 'changed' || 'shard' }}-${{ matrix.shard }}-junit"
+        f"{tier}-py${{{{ matrix.python-version }}}}-shard-${{{{ matrix.shard }}}}-junit"
     )
     assert junit_step["with"]["path"] == (
         f"test-results/junit-{tier}-"
@@ -657,7 +655,8 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     assert _triggers(workflow)["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     jobs = workflow["jobs"]
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
-    assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
+    scope_step = next(step for step in jobs["scope"]["steps"] if step.get("id") == "scope")
+    assert scope_step["run"] == "python3 scripts/release_evidence.py scope"
     for name in FULL_CI_JOBS:
         assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
         assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]
@@ -848,6 +847,13 @@ _HARNESS_MODULE = "tests/test_cjk_readiness.py"
             {("3.11", "changed"), ("3.13", "changed")},
             {("3.11", "changed")},
         ),
+        # A change to more tests than the shards hold runs the shards instead of more groups.
+        (
+            sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").glob("test_*.py")),
+            False,
+            {(python, shard) for python in ("3.11", "3.13") for shard in range(1, 25)},
+            {("3.11", "changed")},
+        ),
         # Docs-only runs the marked tests in one shard per tier.
         (["docs/guide.md"], False, {("3.11", 1)}, {("3.11", 1)}),
         # A push to main runs every shard on the floor.
@@ -860,7 +866,7 @@ _HARNESS_MODULE = "tests/test_cjk_readiness.py"
             {(python, shard) for python in ("3.11", "3.13") for shard in range(1, 7)},
         ),
     ],
-    ids=["pr-without-tests", "pr-with-core-and-harness-tests", "docs-only-pr", "push", "full"],
+    ids=["pr-without-tests", "pr-with-core-and-harness-tests", "pr-with-most-tests", "docs-only-pr", "push", "full"],
 )
 def test_change_scope_builds_each_events_test_matrices(
     paths: list[str] | None, full: bool, core: set, harness: set

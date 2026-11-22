@@ -36,7 +36,6 @@ Usage: ci_change_scope.py "<what this job omits on a docs-only change>"
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import math
 import os
@@ -59,7 +58,8 @@ _HARNESS_MODULES = Path("tests/harness_modules.txt")
 #: The measured test time one changed-tests group may carry. `--dist loadfile`
 #: can run one module's share on a single worker, so this stays below the core
 #: job's `--session-timeout` (1400 s) with room for one 180 s test and new tests.
-#: The slowest harness module measures under 250 s, so its 900 s cap holds too.
+#: The harness tier caps a worker at 900 s, which holds while no single harness
+#: module's measured share exceeds it; the full harness shards enforce the same bound.
 _GROUP_SECONDS = 1000
 
 #: Repository layout, not vocabulary: these trees hold prose and specifications,
@@ -163,19 +163,18 @@ def job_matrices(
     harness = [module for module in modules if module in listed]
     core = [module for module in modules if module not in listed]
     durations = json.loads((root / _DURATIONS).read_text(encoding="utf-8"))
-    core_entries = [entry for python in runtimes for entry in changed_test_groups(core, python, durations)]
-    harness_entries = [entry for python in floor for entry in changed_test_groups(harness, python, durations)]
-    return core_entries if core else [], harness_entries if harness else []
 
+    def entries(chosen: list[str], pythons: list[str], shards: int) -> list[dict]:
+        if not chosen:
+            return []
+        result = []
+        for python in pythons:
+            groups = changed_test_groups(chosen, python, durations)
+            # A change that needs more groups than the tier has shards runs the shards instead.
+            result += groups if len(groups) <= shards else _shards([python], shards)
+        return result
 
-def _full_events() -> tuple[str, ...]:
-    """Full's events, owned by `release_evidence.ci_scope`; loaded by path for test imports."""
-    spec = importlib.util.spec_from_file_location(
-        "release_evidence", Path(__file__).with_name("release_evidence.py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.FULL_EVENTS
+    return entries(core, runtimes, core_shards), entries(harness, floor, harness_shards)
 
 
 def main(omitted: str) -> int:
@@ -191,7 +190,8 @@ def main(omitted: str) -> int:
         output.write(f"changed_tests={' '.join(modules)}\n")
         # Only the scope job builds the test matrices; other callers read the docs decision.
         if "FULL_PYTHON_VERSIONS" in os.environ:
-            full = event in _full_events()
+            # release_evidence.py scope owns the Full decision; the workflow passes it here.
+            full = os.environ.get("FULL") == "true"
             runtimes = json.loads(os.environ["FULL_PYTHON_VERSIONS"])
             core, harness = job_matrices(
                 paths,

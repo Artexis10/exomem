@@ -47,9 +47,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - id: scope
+        run: python3 scripts/release_evidence.py scope
       - id: docs-scope
         env:
           EVENT_NAME: ${{ github.event_name }}
+          FULL: ${{ steps.scope.outputs.full }}
           # The one list of test runtimes and shard counts; the supported floor
           # (requires-python >=3.11) comes first. A pull request runs no shard,
           # only its own changed test modules: core ones on every runtime here,
@@ -59,8 +62,6 @@ jobs:
           CORE_SHARDS: "24"
           HARNESS_SHARDS: "6"
         run: python3 scripts/ci_change_scope.py "unmarked test cases and empty core/harness shard jobs"
-      - id: scope
-        run: python3 scripts/release_evidence.py scope
 
   timing-tests:
     needs: scope
@@ -284,7 +285,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: core-py${{ matrix.python-version }}-${{ matrix.selection && 'changed' || 'shard' }}-${{ matrix.shard }}-junit
+          name: core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
           path: test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}*.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
@@ -424,7 +425,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: harness-py${{ matrix.python-version }}-${{ matrix.selection && 'changed' || 'shard' }}-${{ matrix.shard }}-junit
+          name: harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
           path: test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
