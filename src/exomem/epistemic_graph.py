@@ -8806,10 +8806,12 @@ class EpistemicGraphIndex:
         sharing a stem or title could drop or redirect a visible page's edge;
         those links re-resolve in the reader's view (`_neighbor_rows`).
         `resolver` is the request's recall resolver for that re-resolution.
-        `refuse_unavailable` raises `GraphSnapshotUnavailable` when the read snapshot cannot be opened, for a caller
-        that must tell an unreadable graph from a seed with no edges; otherwise that case returns no neighbours.
-        `unread`, when given, receives the admitted pages whose selected interpretation this lookup could not read,
-        whose edges may therefore be missing from the neighbours returned.
+        `refuse_unavailable` raises `GraphSnapshotUnavailable` when the read
+        snapshot cannot be opened, for a caller that must tell an unreadable
+        graph from a seed with no edges; otherwise that case returns no
+        neighbours. `unread`, when given, receives the admitted pages whose
+        selected interpretation this lookup could not read, whose edges may
+        therefore be missing from the neighbours returned.
         """
         if not seeds:
             return []
