@@ -6153,6 +6153,7 @@ def _artifact_text_key(key: Any) -> bool:
 
 
 def _withheld_cross_check(
+    command_name: str,
     vault_root: Path,
     result: Any,
     *,
@@ -6177,10 +6178,16 @@ def _withheld_cross_check(
     `is_dir()`); `blocked` or an unresolved principal -> every path-bearing
     entry dropped; otherwise decide each named path.
     """
+    page_version_id = None
+    if command_name == "read_memory" and isinstance(result, Mapping) and "id" in result:
+        from .. import page_names
+
+        # The read producer's version token contains a dot but names no file.
+        page_version_id = page_names.id_of_read(result)
     return filter_withheld_entries(vault_root, result, principal=principal, purpose=purpose,
                                    _artifact_scan_demand=_artifact_scan_demand,
                                    _current_parent_binding=_current_parent_binding,
-                                   _item_receipt=_item_receipt)
+                                   _item_receipt=_item_receipt, _page_version_id=page_version_id)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -6438,7 +6445,8 @@ def _postfilter(
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         result = _withheld_cross_check(
-            vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
+            command_name, vault_root, result, purpose=view_purpose,
+            _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding, _item_receipt=item_receipt,
         )
     from ..collection_store import governance as canonical_governance
@@ -9259,6 +9267,7 @@ def filter_withheld_entries(
     explicit_reference_markup: bool = False,
     _current_parent_binding: tuple[str, str] | None = None,
     _item_receipt: bool = False,
+    _page_version_id: str | None = None,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -9644,6 +9653,8 @@ def filter_withheld_entries(
         # Only exact producer-bound metadata slots avoid physical-byte proof.
         # A sibling body or another occurrence of the same path remains ordinary.
         request_budget.checkpoint()
+        if location == ("id",) and _page_version_id is not None and entry == _page_version_id:
+            return []
         if metadata_references:
             if isinstance(entry, Mapping):
                 entry = {key: value for key, value in entry.items()
