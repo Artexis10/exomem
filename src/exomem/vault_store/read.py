@@ -922,16 +922,21 @@ def prefetch_pages(vault_root: Path, rels: Iterable[str]) -> None:
             view.prefetch_pages(rel for rel in wanted if pages[rel])
 
 
-def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
+def owned_page(vault_root: Path, rel: str, *, max_bytes: int | None = None) -> StoredPage | None:
     """The stored page at ``rel`` when the store serves that path, else None: read the file.
 
     A path that the store serves but holds no page for raises ``FileNotFoundError``, as a missing
-    file does.
+    file does. If a byte limit applies, the covering index measures the page before
+    the same snapshot reads its body.
     """
     root = _as_path(vault_root)
     if not serves(root, rel):
         return None
     with snapshot(root) as view:
+        if max_bytes is not None:
+            row = view.connection.execute(f"SELECT size FROM {_META_FROM} WHERE path = ?", (rel,)).fetchone()
+            if row is not None and row[0] > max_bytes:
+                raise vault._refuse_unbounded_leaf(rel, vault._over_limit_reason(row[0], max_bytes))
         page = view.page(rel)
     if page is None:
         raise FileNotFoundError(rel)

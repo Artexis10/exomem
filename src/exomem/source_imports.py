@@ -6,14 +6,18 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ValidationError
 
 from . import duplicates, memory_refs, private_state, reserved_paths, source_capture, vault
 from .governance.principal import effective_principal, owner_local_producer
+
+if TYPE_CHECKING:
+    from .governance.lifecycle import ReceiptLifecycle
 
 OWNER = "source_imports"
 _MAX_ID_CHARS = 256
@@ -297,19 +301,18 @@ class ImportCapture:
 class ResumableCapture(ImportCapture):
     """A delegated upload's receipt proves one publication, without repair or deduplication."""
 
-    file_witness: Path | None
+    file_witness: Path
+    store_root: Path | None
 
     def prepare(self, root: Path, receipt: Receipt) -> None:
         # The upload cannot retry an ambiguous writer claim. Only this batch's commit can prove the receipt.
         return None
 
-    def file_commit_witness(self, receipt: Receipt) -> vault._BatchFileWitness | None:
+    def file_commit_witness(self, receipt: Receipt) -> vault._BatchFileWitness:
         from .upload_sessions import pending_file_commit_witness
         from .writer_lease import _PostCommitOutcomeUncertain
 
         path = self.file_witness
-        if path is None:
-            return None
         pending = pending_file_commit_witness(path)
         receipt_hash = vault.content_hash(receipt.model_dump_json() + "\n")
         pending_created = False
@@ -331,6 +334,11 @@ class ResumableCapture(ImportCapture):
 
         def seal() -> None:
             nonlocal proof_linked
+            if self.store_root is not None:
+                # SQLite committed the receipt with the Source. It needs no file proof.
+                if pending_created:
+                    private_state.remove(pending)
+                return
             os.link(pending, path)
             proof_linked = True
             private_state.sync_directory(path.parent)
@@ -341,6 +349,8 @@ class ResumableCapture(ImportCapture):
         def retire_rolled_back() -> None:
             if not pending_created:
                 return
+            if self.store_root is not None and self._store_receipt_possible(self.store_root):
+                raise _PostCommitOutcomeUncertain()
             try:
                 if proof_linked:
                     path.unlink()
@@ -354,25 +364,24 @@ class ResumableCapture(ImportCapture):
 
         return vault._BatchFileWitness(begin, seal, retire_rolled_back)
 
-    def publication_may_have_started(self, root: Path) -> bool:
-        """Retain the upload if its exact publication left any evidence or cannot be checked."""
+    def _store_receipt_possible(self, root: Path) -> bool:
         from .collection_store.connection import CollectionStoreError
-        from .upload_sessions import pending_file_commit_witness
         from .vault_store import read as store_read
 
-        path = self._path(root)
-        if self.file_witness is not None:
-            return any(_publication_path_possible(item) for item in (
-                path, self.file_witness, pending_file_commit_witness(self.file_witness),
-            ))
+        rel = self._path(root).relative_to(root).as_posix()
         try:
-            with reserved_paths._subsystem_authority_scope(OWNER):
-                page = store_read.owned_page(root, path.relative_to(root).as_posix())
-            return page is not None or _publication_path_possible(path)
-        except FileNotFoundError:
-            return False
-        except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+            with store_read.snapshot(root, join_request=False) as current:
+                return current.page_meta(rel) is not None
+        except (OSError, ValueError, sqlite3.Error, CollectionStoreError):
             return True
+
+    def publication_may_have_started(self, root: Path) -> bool:
+        """Retain the upload if its exact publication left any evidence or cannot be checked."""
+        from .upload_sessions import pending_file_commit_witness
+
+        return any(_publication_path_possible(item) for item in (
+            self._path(root), self.file_witness, pending_file_commit_witness(self.file_witness),
+        )) or (self.store_root is not None and self._store_receipt_possible(root))
 
     def committed_upload_receipt(self, root: Path, *, size: int) -> dict | None:
         """Read the exact sealed Source and original under the upload's current principal."""
@@ -380,7 +389,7 @@ class ResumableCapture(ImportCapture):
         from .upload_sessions import pending_file_commit_witness
 
         try:
-            if self.file_witness is not None:
+            if self.store_root is None:
                 if _publication_path_possible(pending_file_commit_witness(self.file_witness)):
                     return None
                 with self.file_witness.open("rb") as source:
@@ -388,7 +397,7 @@ class ResumableCapture(ImportCapture):
             relative = self._path(root).relative_to(root).as_posix()
             with reserved_paths._subsystem_authority_scope(OWNER):
                 raw, _ = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_RECEIPT_BYTES)
-            if self.file_witness is not None and witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
+            if self.store_root is None and witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
                 return None
             receipt = self._read_receipt(raw)
             self._require_same_input(receipt)
@@ -442,8 +451,10 @@ def _released_upload_payload(
     return None
 
 
-def upload_receipt_releasable(root: Path, *, page: object, ref: object, artifact: object, sha256: object) -> bool:
-    """Decide release against current Source metadata without reading the original."""
+def upload_receipt_releasable(
+    root: Path, *, page: object, ref: object, artifact: object, sha256: object, lifecycle_view: ReceiptLifecycle,
+) -> bool | None:
+    """Decide current receipt release. None means a lifecycle snapshot is pending."""
     from . import document_containers, request_budget
     from .collection_store.connection import CollectionStoreError
     from .governance import egress, lifecycle, policy
@@ -457,7 +468,10 @@ def upload_receipt_releasable(root: Path, *, page: object, ref: object, artifact
     try:
         with request_budget.checking(checkpoint), policy.request_policy_snapshot():
             checkpoint()
-            tombstones = lifecycle.tombstoned_paths(root, checkpoint=checkpoint)
+            proof = lifecycle_view.snapshot(checkpoint)
+            if proof is None:
+                return None
+            tombstones = proof.tombstones
             if any(lifecycle.is_tombstoned_in(tombstones, value) for value in (page, ref, artifact)):
                 return False
             compiled = policy.load(root)
@@ -475,9 +489,11 @@ def upload_receipt_releasable(root: Path, *, page: object, ref: object, artifact
                 root, artifact, policy=compiled, tombstones=tombstones, resolve_bytes=False,
             ) != policy.DISCLOSURE_MAX:
                 return False
+            if not lifecycle_view.current(proof, checkpoint):
+                return None
             guard.recheck(root)
             checkpoint()
-            return True
+            return True if lifecycle_view.current(proof, checkpoint) else None
     except (request_budget.ReadBudgetExhausted, OSError, ValueError, CollectionStoreError,
             reserved_paths.ReservedPathLeafError, lifecycle.LifecycleError):
         return False
@@ -490,12 +506,13 @@ def resumable_capture(root: Path, record: dict) -> ResumableCapture:
 
     origin = record["source_handoff"]
     target = record["target"]
-    file_witness = None if store_mode_active(root) else file_commit_witness_path(root, record["id"])
+    store_root = root if store_mode_active(root) else None
+    file_witness = file_commit_witness_path(root, record["id"])
     key = _digest(["source-upload-commit/v1", record["id"], origin["binding"],
                    origin["deployment"], origin["ticket_sha256"]])
     # A file receipt copied into SQLite during a mode transition cannot stand for a store commit.
-    fingerprint = _digest([1, key, file_witness is not None, target, record["length"], record["sha256"]])
-    return ResumableCapture(key, fingerprint, record["sha256"], target["raw_protection"], file_witness)
+    fingerprint = _digest([1, key, store_root is None, target, record["length"], record["sha256"]])
+    return ResumableCapture(key, fingerprint, record["sha256"], target["raw_protection"], file_witness, store_root)
 
 
 def receipt_root(root: Path) -> Path:

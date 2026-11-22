@@ -44,7 +44,7 @@ from . import (
     upload_stage,
     upload_tokens,
 )
-from .governance import egress
+from .governance import egress, lifecycle
 from .governance import principal as principal_module
 from .vault import VaultPathError
 
@@ -287,7 +287,9 @@ def _source_outcome_unknown() -> upload_sessions.CommitFailed:
     )
 
 
-def _source_receipt_releasable(vault_root: Path, who: principal_module.RequestPrincipal, receipt: object) -> bool:
+def _source_receipt_releasable(
+    vault_root: Path, who: principal_module.RequestPrincipal, receipt: object, lifecycle_view: lifecycle.ReceiptLifecycle,
+) -> bool | None:
     from . import source_imports
 
     if not isinstance(receipt, dict):
@@ -296,6 +298,7 @@ def _source_receipt_releasable(vault_root: Path, who: principal_module.RequestPr
         return source_imports.upload_receipt_releasable(
             vault_root, page=receipt.get("path"), ref=receipt.get("ref"),
             artifact=receipt.get("artifact_path"), sha256=receipt.get("hash"),
+            lifecycle_view=lifecycle_view,
         )
 
 
@@ -1023,6 +1026,7 @@ def register_transfer_routes(
 ) -> TransferConfig:
     """Register /upload and /download routes and return their config."""
     config = load_transfer_config()
+    source_lifecycle = lifecycle.ReceiptLifecycle(vault_root)
     artifact_recovery.install_log_redaction()
 
     def _upload_lane(request: Request) -> str:
@@ -1558,12 +1562,17 @@ def register_transfer_routes(
         state = session.record["state"]
         if request.method == "GET":
             view = session.view()
-            if (who is not None and state == upload_sessions.COMMITTED
-                    and not await run_in_threadpool(_source_receipt_releasable, vault_root, who, view.get("receipt"))):
-                view = {
-                    "state": upload_sessions.RETRYABLE, "offset": session.length, "length": session.length,
-                    "code": "SOURCE_OUTCOME_UNKNOWN", "reason": "the Source receipt cannot be released",
-                }
+            if who is not None and state == upload_sessions.COMMITTED:
+                released = await run_in_threadpool(
+                    _source_receipt_releasable, vault_root, who, view.get("receipt"), source_lifecycle,
+                )
+                if released is not True:
+                    view = {
+                        "state": upload_sessions.RETRYABLE, "offset": session.length, "length": session.length,
+                        "code": (upload_sessions.SOURCE_RECEIPT_PENDING if released is None else "SOURCE_OUTCOME_UNKNOWN"),
+                        "reason": ("the Source receipt check is pending" if released is None
+                                   else "the Source receipt cannot be released"),
+                    }
             return JSONResponse(view, headers=_tus_headers(session))
         if request.method == "HEAD":
             if state == upload_sessions.FAILED:

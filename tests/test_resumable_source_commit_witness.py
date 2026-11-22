@@ -31,6 +31,9 @@ _WORKER = dedent(
         auth_sessions, private_state, server_auth, server_transfer, source_imports, upload_sessions,
         vault, writer_lease,
     )
+    from exomem.collection_store import connection, preview
+    from exomem.collection_store.writer import CollectionWriter
+    from exomem.vault_store import mode, write as store_write
 
     root, login_dir = (Path(value) for value in sys.argv[1:3])
     session_id, secret, cut = sys.argv[3:]
@@ -53,6 +56,31 @@ _WORKER = dedent(
             if Path(path).is_relative_to(vault.kb_root(root) / "Sources"):
                 os._exit(74)
         vault._after_batch_destination_published = stop_after_first_source_file
+    if cut == "store-first":
+        after_real = vault._after_batch_destination_published
+        def stop_after_original(path):
+            after_real(path)
+            published = Path(path)
+            if published.is_relative_to(vault.kb_root(root) / "Sources") and published.suffix == ".bin":
+                os._exit(74)
+        vault._after_batch_destination_published = stop_after_original
+    if cut == "store-pool-first":
+        from exomem import original_pool
+        publish_real = original_pool.PreparedOriginal.publish
+        def stop_after_pool_publish(self):
+            publish_real(self)
+            os._exit(76)
+        original_pool.PreparedOriginal.publish = stop_after_pool_publish
+    if cut in ("store-after", "store-rollback"):
+        commit_real = store_write.commit
+        def interrupt_store_receipt(writer, change):
+            if not any(source_imports.is_receipt_path(root, put.rel) for put in change.puts):
+                return commit_real(writer, change)
+            if cut == "store-rollback":
+                raise OSError("injected store failure before the Source transaction")
+            commit_real(writer, change)
+            os._exit(75)
+        store_write.commit = interrupt_store_receipt
     if cut == "after":
         log_real = writer_lease.log_active_mutation_phase
         def stop_after_commit(phase, **fields):
@@ -83,8 +111,18 @@ _WORKER = dedent(
                 return unlink_real(path, *args, **kwargs)
             Path.unlink = fail_witness_cleanup
 
+    def commit(part, record):
+        if not mode.store_mode_active(root):
+            return server_transfer.commit_session(root, part, record)
+        with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
+            token = preview._BOUND.set((root.resolve(), CollectionWriter(root, handle), False))
+            try:
+                return server_transfer.commit_session(root, part, record)
+            finally:
+                preview._BOUND.reset(token)
+
     session = upload_sessions.open_session(root, session_id, secret)
-    upload_sessions.start_commit(session, lambda part, record: server_transfer.commit_session(root, part, record))
+    upload_sessions.start_commit(session, commit)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         status = upload_sessions.open_session(root, session_id, secret).view()

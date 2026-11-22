@@ -90,6 +90,20 @@ class _ASGISyncTransport(httpx.BaseTransport):
         return httpx.Response(response.status_code, headers=response.headers, content=response.content)
 
 
+def _settled_source_receipt(client, location, headers):
+    from exomem import upload_sessions
+
+    deadline = time.monotonic() + 6
+    while True:
+        response = client.get(location, headers=headers)
+        body = response.json()
+        if body.get("code") != upload_sessions.SOURCE_RECEIPT_PENDING:
+            return response
+        assert "receipt" not in body
+        assert time.monotonic() < deadline
+        time.sleep(0.025)
+
+
 @pytest.mark.parametrize("endpoint", ["https://capture.example/upload", "http://127.0.0.1:9123/upload"])
 def test_cli_handoff_holds_exact_bytes_for_only_the_issuing_session(upload_env, tmp_path, capsys, endpoint):
     original = b"timestamp,reading\n00:01:12,7\n\x00\xff"
@@ -293,7 +307,9 @@ def test_resumable_ticket_uses_shared_login_when_optional_cache_cannot_open(vaul
 def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
     upload_env, tmp_path, monkeypatch, capsys,
 ):
-    from exomem import upload_handoff, upload_sessions
+    from exomem import reserved_paths, source_imports, upload_handoff, upload_sessions
+    from exomem.governance import lifecycle
+    from test_governance_receipts import _write_restricting_policy
 
     monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
     monkeypatch.setattr(upload_sessions, "MAX_PATCH_BYTES", 16)
@@ -303,10 +319,19 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
     handoff.write_text(json.dumps(descriptor))
     original = tmp_path / "recording.bin"
     original.write_bytes(data)
+    vault = upload_env[0]
+    old_note = "Knowledge Base/Notes/Insights/withdrawn.md"
+    (vault / old_note).write_text("# Withdrawn note\n", encoding="utf-8")
+    _write_restricting_policy(vault, old_note.removeprefix("Knowledge Base/"))
+    earlier_deletion = lifecycle.begin_deletion(
+        vault, source_rel=old_note, trash_rel="Knowledge Base/_trash/withdrawn.md",
+    )
+    assert earlier_deletion.tombstone_path is not None
 
     class InterruptedPart(_ASGISyncTransport):
         interrupted = False
         resumed = False
+        waited_for_receipt = False
         locator = None
 
         def handle_request(self, request):
@@ -321,12 +346,15 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
             if request.method == "HEAD":
                 assert response.headers["upload-offset"] == "8"
                 self.resumed = True
+            if request.method == "GET" and response.json().get("code") == upload_sessions.SOURCE_RECEIPT_PENDING:
+                assert "receipt" not in response.json()
+                self.waited_for_receipt = True
             return response
 
     transport = InterruptedPart(upload_env[-1])
     assert _attach_main(["--handoff-file", str(handoff), "--root", str(tmp_path), str(original)],
                         transport=transport) == 0
-    assert transport.interrupted and transport.resumed
+    assert transport.interrupted and transport.resumed and transport.waited_for_receipt
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["hash"] == hashlib.sha256(data).hexdigest()
     assert receipt["size"] == len(data)
@@ -338,24 +366,22 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
         transport=_ASGISyncTransport(upload_env[-1]),
     ) == 0
     assert json.loads(capsys.readouterr().out) == receipt
-    from exomem import reserved_paths, source_imports
-    from exomem.governance import lifecycle
-    from test_governance_receipts import _write_restricting_policy
 
     location, secret = transport.locator
-    vault = upload_env[0]
+    lifecycle.abort_deletion(earlier_deletion)
     _write_restricting_policy(vault, receipt["path"].removeprefix("Knowledge Base/"))
     with httpx.Client(transport=_ASGISyncTransport(upload_env[-1]), base_url="https://capture.example") as client:
         headers = {upload_sessions.SECRET_HEADER: secret}
         deletion = lifecycle.begin_deletion(vault, source_rel=receipt["path"],
                                             trash_rel="Knowledge Base/_trash/test-receipt.md")
         assert deletion.tombstone_path is not None
-        hidden = client.get(location, headers=headers)
-        assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+        hidden = _settled_source_receipt(client, location, headers).json()
+        assert "receipt" not in hidden
+        assert hidden["code"] == "SOURCE_OUTCOME_UNKNOWN"
         session = upload_sessions.open_session(vault, location.rsplit("/", 1)[-1], secret)
         assert session.record["state"] == upload_sessions.COMMITTED
         lifecycle.abort_deletion(deletion)
-        assert client.get(location, headers=headers).json()["receipt"] == receipt
+        assert _settled_source_receipt(client, location, headers).json()["receipt"] == receipt
 
         with monkeypatch.context() as withheld:
             withheld.setattr(source_imports, "_RECEIPT_READ_SECONDS", 0)
@@ -519,7 +545,11 @@ def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, mon
             break
         assert time.monotonic() < deadline, state
         time.sleep(0.03)
-    response = client.get(location, headers=headers)
+    session = upload_sessions.open_session(vault, session_id, secret)
+    # The terminal record can be visible while the commit still syncs directory cleanup.
+    with upload_sessions._session_lock(session.store, session_id).acquire(timeout=6):
+        pass
+    response = _settled_source_receipt(client, location, headers)
     if revoke_at is not None:
         if revoke_at == "publication":
             assert revoked

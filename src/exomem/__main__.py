@@ -1081,6 +1081,9 @@ def _send_upload_session(
             print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
             return 1
         if payload.get("state") == upload_sessions.RETRYABLE:
+            if delegated and payload.get("code") == upload_sessions.SOURCE_RECEIPT_PENDING:
+                time.sleep(0.25)
+                continue
             if payload.get("code") == "SOURCE_OUTCOME_UNKNOWN":
                 print("attach: the Source outcome is unknown. Run the same command again to check its receipt",
                       file=sys.stderr)

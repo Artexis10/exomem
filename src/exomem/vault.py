@@ -5182,13 +5182,11 @@ def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, Pa
     _require_read_limit(limit)
     rel = "/".join(_safe_guard_target(target))
     try:
-        page = read.owned_page(root, rel)
+        page = read.owned_page(root, rel, max_bytes=limit)
     except FileNotFoundError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
     if page is None:
         return None
-    if page.meta.size > limit:
-        raise _refuse_unbounded_leaf(target, _over_limit_reason(page.meta.size, limit))
     return page.body, _store_guard(rel, page.meta.sha256)
 
 
@@ -6255,8 +6253,6 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
-            if _file_commit_witness is not None:
-                raise ValueError("a file commit witness requires its native writer")
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
@@ -6268,6 +6264,7 @@ def batch_atomic_write(
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
                 publish_originals=_publish_originals, retained_original=_retained_original,
+                file_commit_witness=_file_commit_witness,
             )
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")

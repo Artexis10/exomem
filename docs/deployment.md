@@ -1996,9 +1996,11 @@ session; do not create a new identity for an uncertain Source commit.
 without recovering its complete receipt. That state needs reconciliation and
 does not authorize another Source publication.
 
-Receipt reads use current release policy and one bounded lifecycle check. The
-server may withhold a receipt when it cannot establish release from current
-metadata. The same session remains the way to check the original attempt.
+Receipt reads use current release policy and a bounded comparison against the
+validated lifecycle snapshot. When the marker namespace changes, the server
+validates it in the background. The client keeps polling the same session while
+the receipt check is pending. The server may withhold identifiers when current
+metadata cannot establish release.
 
 A Source receipt preserves the original and its Source page. Its
 `semantic_compilation` field remains `unassessed` until an agent compiles the

@@ -102,6 +102,7 @@ COMMITTED = "committed"
 FAILED = "failed"
 #: All bytes held and verified; the last commit failed for a reason other than the bytes.
 RETRYABLE = "retryable"
+SOURCE_RECEIPT_PENDING = "SOURCE_RECEIPT_PENDING"
 _LIVE = (RECEIVING, VERIFYING, COMMITTING, RETRYABLE)
 #: States a commit starts or resumes from.
 _COMMITTABLE = (VERIFYING, COMMITTING, RETRYABLE)

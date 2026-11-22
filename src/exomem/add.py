@@ -364,7 +364,7 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
     winner under the canonical boundary. A `prepared` stage that the caller made before the
     boundary (`upload_stage.stage(pooled=True)`, which also owns its pin) is published as it is.
     """
-    from . import held_fs, original_pool
+    from . import held_fs, original_pool, reserved_paths
 
     def chunks():
         stream.seek(0)
@@ -376,7 +376,8 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
 
     def publish() -> None:
         try:
-            prepared.publish()
+            with reserved_paths._subsystem_authority_scope(original_pool.OWNER):
+                prepared.publish()
         except original_pool.PublicationRace:
             raise PooledOriginalRaceLost(code="MUTATION_BUSY", missing=[],
                                          reason="an identical upload was stored at the same moment; retry") from None
