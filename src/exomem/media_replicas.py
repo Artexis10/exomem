@@ -129,10 +129,10 @@ _REPLICA_STATUS_TRIGGERS = {
     for prefix in (_REPLICA_COUNT_TRIGGER, "media_replicas_buckets")
     for event in _STATUS_TRIGGER_EVENTS
 }
+_QUEUE_STATUS_TRIGGERS = {f"media_replica_queue_buckets_{event.lower()}" for event in _STATUS_TRIGGER_EVENTS}
 _STATUS_REQUIRED_SCHEMA = {
-    *_STATUS_SOURCES, *_STATUS_TABLES, *_REPLICA_STATUS_TRIGGERS,
-    *(f"{prefix}_{event.lower()}"
-      for prefix in (_EXPORT_COUNT_TRIGGER, "media_replica_queue_buckets") for event in _STATUS_TRIGGER_EVENTS),
+    *_STATUS_SOURCES, *_STATUS_TABLES, *_REPLICA_STATUS_TRIGGERS, *_QUEUE_STATUS_TRIGGERS,
+    *(f"{_EXPORT_COUNT_TRIGGER}_{event.lower()}" for event in _STATUS_TRIGGER_EVENTS),
 }
 
 
@@ -179,8 +179,13 @@ def _replica_buckets(row: str) -> dict[str, tuple[str, str, str]]:
     }
 
 
+def _copy_member(row: str = "") -> str:
+    # A legacy row gets its membership from its original job kind until a write explicitly preserves membership.
+    return f"COALESCE({row}copy_member, {row}kind = '{REPLICATE}')"
+
+
 def _queue_buckets(row: str) -> dict[str, tuple[str, str, str]]:
-    return {"copy": ("''", f"{row}state", f"{row}kind = '{REPLICATE}'")}
+    return {"copy": ("''", f"{row}state", _copy_member(row))}
 
 
 def _bucket_triggers(conn: sqlite3.Connection, table: str,
@@ -352,11 +357,16 @@ def initialize(conn: sqlite3.Connection) -> None:
         conn.execute("DELETE FROM media_replica_census")
         conn.execute("UPDATE media_replica_generation SET value = value + 1 WHERE id = 1")
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_demands ("
-                 "store TEXT PRIMARY KEY, requested_at REAL NOT NULL, scanned_at REAL)")
+                 "store TEXT PRIMARY KEY, requested_at REAL NOT NULL, scanned_at REAL, scan_token INTEGER NOT NULL DEFAULT 0)")
+    # A lost queue invalidates earlier scans, including a scan whose final batch is already in memory.
+    if "scan_token" not in {row[1] for row in conn.execute("PRAGMA table_info(media_replica_demands)")}:
+        conn.execute("ALTER TABLE media_replica_demands ADD COLUMN scan_token INTEGER NOT NULL DEFAULT 0")
+    queue_lost = ("media_replica_queue" not in existing
+                  or bool(existing.intersection(_STATUS_TABLES)) and not _QUEUE_STATUS_TRIGGERS.issubset(existing))
     conn.execute("CREATE TABLE IF NOT EXISTS media_replica_queue ("
                  "store TEXT NOT NULL, binary_rel TEXT NOT NULL, state TEXT NOT NULL, code TEXT, "
                  "attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0, "
-                 f"kind TEXT NOT NULL DEFAULT '{REPLICATE}', token INTEGER NOT NULL DEFAULT 0, "
+                 f"kind TEXT NOT NULL DEFAULT '{REPLICATE}', token INTEGER NOT NULL DEFAULT 0, copy_member INTEGER, "
                  "PRIMARY KEY (store, binary_rel)) WITHOUT ROWID")
     queue_columns = {row[1] for row in conn.execute("PRAGMA table_info(media_replica_queue)")}
     if "kind" not in queue_columns:
@@ -365,6 +375,11 @@ def initialize(conn: sqlite3.Connection) -> None:
     # picked, so it never closes or overwrites a request made after it, even one that replaced a deleted row.
     if "token" not in queue_columns:
         conn.execute("ALTER TABLE media_replica_queue ADD COLUMN token INTEGER NOT NULL DEFAULT 0")
+    if "copy_member" not in queue_columns:
+        # The legacy counts already describe the same membership. Replace their triggers during the schema transaction.
+        conn.execute("ALTER TABLE media_replica_queue ADD COLUMN copy_member INTEGER")
+        for trigger in _QUEUE_STATUS_TRIGGERS:
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     # The drain's pick is `ORDER BY store, binary_rel` among the pending rows, so this order reads it with no sort;
     # `retry_at` only filters.
     conn.execute("CREATE INDEX IF NOT EXISTS media_replica_queue_pick ON media_replica_queue(state, store, binary_rel)")
@@ -383,6 +398,48 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS media_key_exports ("
                  "key_version TEXT PRIMARY KEY, confirmed_at REAL NOT NULL)")
     _initialize_status(conn, existing)
+    _restore_damage(conn)
+    if queue_lost:
+        # A surviving demand can safely rescan current bindings. Lost rows cannot say who belonged to its former scan.
+        conn.execute("UPDATE media_replica_demands SET scanned_at = NULL, scan_token = random()")
+        conn.execute("INSERT INTO media_replica_queue(store, binary_rel, state, kind, token) "
+                     f"SELECT store, binary_rel, '{PENDING}', '{RECOPY}', random() FROM media_replicas "
+                     f"WHERE state = '{QUARANTINED}' ON CONFLICT(store, binary_rel) DO UPDATE SET {_RENEW} "
+                     f"WHERE media_replica_queue.kind <> '{RECOPY}'")
+
+
+def _restore_damage(conn: sqlite3.Connection) -> None:
+    """Recover missing authority from surviving quarantines, without changing any surviving version record."""
+    # A lost table may already have been recreated by another runtime. Use the partial index of quarantines on
+    # schema initialization to recover missing rows in either case. No healthy filing participates in recovery.
+    digests = conn.execute(
+        "INSERT INTO media_damaged_digests(ciphertext_sha256, generation) SELECT digest, random() FROM ("
+        "SELECT ciphertext_sha256 AS digest FROM media_damaged_versions WHERE ciphertext_sha256 IS NOT NULL UNION "
+        f"SELECT ciphertext_sha256 FROM media_replicas WHERE state = '{QUARANTINED}' "
+        f"AND failure = '{PLAINTEXT_MISMATCH}' AND ciphertext_sha256 IS NOT NULL) WHERE true "
+        "ON CONFLICT(ciphertext_sha256) DO NOTHING"
+    ).rowcount
+    versions = conn.execute(
+        "INSERT INTO media_damaged_versions(store, object, version, level, failure, ciphertext_sha256) "
+        "SELECT store, object, version, level, failure, proved_digest FROM ("
+        "SELECT r.store, r.object, r.version, r.level, r.failure, d.ciphertext_sha256 AS proved_digest, "
+        "ROW_NUMBER() OVER (PARTITION BY r.store, r.object, r.version "
+        f"ORDER BY (r.failure = '{PLAINTEXT_MISMATCH}'), r.checked_at DESC, r.binary_rel) AS rank "
+        "FROM media_replicas AS r LEFT JOIN media_damaged_digests AS d ON d.ciphertext_sha256 = r.ciphertext_sha256 "
+        f"WHERE r.state = '{QUARANTINED}' AND r.level IS NOT NULL AND r.failure IS NOT NULL "
+        "AND NOT EXISTS (SELECT 1 FROM media_damaged_versions AS old "
+        "WHERE (old.store, old.object, old.version) = (r.store, r.object, r.version))) WHERE rank = 1"
+    ).rowcount
+    if versions:
+        # A sample can clear plaintext evidence. The record of an absent or differing version must still gate its filings.
+        conn.execute(
+            "UPDATE media_replicas AS r SET (level, failure) = (d.level, d.failure) FROM media_damaged_versions AS d "
+            f"WHERE r.state = '{QUARANTINED}' AND (d.store, d.object, d.version) = (r.store, r.object, r.version) "
+            "AND (r.level, r.failure) IS NOT (d.level, d.failure)"
+        )
+    if digests or versions:
+        conn.execute(_INHERIT_ALL)
+        _quarantine_listing(conn, time.time())
 
 
 def _iso(value: float | None) -> str | None:
@@ -430,13 +487,18 @@ def record(vault: Path, binary_rel: str, replica: originals.StoredObject, *, ver
     the row through its digest (`quarantine_all`).
     """
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
-        conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
-                                         replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED,
-                                         replica.ciphertext_sha256))
-        conn.execute(_INHERIT_OF, {"digest": replica.ciphertext_sha256})
-        changed = _quarantine_listing(conn, time.time(), replica, binary_rel=binary_rel)
+        changed = _record_replica(conn, binary_rel, replica, verified_at=verified_at)
     if changed:
         wake()
+
+
+def _record_replica(conn: sqlite3.Connection, binary_rel: str, replica: originals.StoredObject, *,
+                    verified_at: float | None) -> bool:
+    conn.execute(_UPSERT_PUBLISHED, (binary_rel, replica.store, replica.object, replica.version,
+                                     replica.key_version, replica.ciphertext_size, verified_at, UPLOAD_VERIFIED,
+                                     replica.ciphertext_sha256))
+    conn.execute(_INHERIT_OF, {"digest": replica.ciphertext_sha256})
+    return _quarantine_listing(conn, time.time(), replica, binary_rel=binary_rel)
 
 
 def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *, level: str, failure: str) -> None:
@@ -445,7 +507,8 @@ def quarantine(vault: Path, binary_rel: str, replica: originals.StoredObject, *,
 
 
 #: A request that is made again: pending, with no attempt spent and a new token.
-_RENEW = "state = excluded.state, kind = excluded.kind, code = NULL, attempts = 0, retry_at = 0, token = excluded.token"
+_RENEW = (f"copy_member = ({_copy_member('media_replica_queue.')} AND media_replica_queue.state = '{PENDING}'), "
+          "state = excluded.state, kind = excluded.kind, code = NULL, attempts = 0, retry_at = 0, token = excluded.token")
 
 
 def _record_damage(conn: sqlite3.Connection, replica: originals.StoredObject, level: str, failure: str) -> None:
@@ -570,11 +633,11 @@ def repaired_via(vault: Path, replica: originals.StoredObject) -> str | None:
 
 
 #: Whether any of the (store, object, version, ciphertext digest) quadruples of one JSON array is damaged: a primary-key
-#: probe of `media_damaged_versions` for the version, and a probe of its digest index for the ciphertext, for each, and no
-#: scan. The quadruples travel as one value, so the statement is the same for one and for thousands.
+#: probe each of the version and ciphertext records. The quadruples travel as one value, so the statement is the
+#: same for one and for thousands.
 _RECORDED = ("FROM json_each(?) AS wanted WHERE EXISTS (SELECT 1 FROM media_damaged_versions "
              "WHERE store = json_extract(wanted.value, '$[0]') AND object = json_extract(wanted.value, '$[1]') "
-             "AND version = json_extract(wanted.value, '$[2]')) OR EXISTS (SELECT 1 FROM media_damaged_versions "
+             "AND version = json_extract(wanted.value, '$[2]')) OR EXISTS (SELECT 1 FROM media_damaged_digests "
              "WHERE ciphertext_sha256 = json_extract(wanted.value, '$[3]'))")
 
 
@@ -594,9 +657,8 @@ def _inherit(recorded: str) -> str:
 
 
 _INHERIT_OF = _inherit(
-    "SELECT :digest AS digest WHERE EXISTS (SELECT 1 FROM media_damaged_versions WHERE ciphertext_sha256 = :digest)")
-_INHERIT_ALL = _inherit("SELECT DISTINCT ciphertext_sha256 AS digest FROM media_damaged_versions "
-                        "WHERE ciphertext_sha256 IS NOT NULL")
+    "SELECT :digest AS digest WHERE EXISTS (SELECT 1 FROM media_damaged_digests WHERE ciphertext_sha256 = :digest)")
+_INHERIT_ALL = _inherit("SELECT ciphertext_sha256 AS digest FROM media_damaged_digests")
 _DAMAGED = f"SELECT 1 {_RECORDED} LIMIT 1"
 _DAMAGED_AMONG = ("SELECT json_extract(wanted.value, '$[0]'), json_extract(wanted.value, '$[1]'), "
                   f"json_extract(wanted.value, '$[2]') {_RECORDED}")
@@ -1294,19 +1356,20 @@ def request(vault: Path, store: str) -> dict[str, int]:
     media_store.require_replica_store(vault, store)
     now = time.time()
     with closing(MediaJobStore(vault)._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
         active = conn.execute(
             "SELECT 1 FROM media_replica_demands WHERE store = ? AND (scanned_at IS NULL OR EXISTS "
             "(SELECT 1 FROM media_replica_buckets WHERE store = ? AND kind = 'copy' AND key_version = '' AND token = ?))",
             (store, store, PENDING)).fetchone()
         if active is None:
-            conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND state = ? AND kind = ?",
-                         (store, DONE, REPLICATE))
+            conn.execute(f"DELETE FROM media_replica_queue WHERE store = ? AND state = ? AND {_copy_member()}",
+                         (store, DONE))
             conn.execute("UPDATE media_replica_queue SET state = ?, attempts = 0, retry_at = 0, code = NULL, "
-                         "token = random() WHERE store = ? AND state = ? AND kind = ?",
-                         (PENDING, store, REFUSED, REPLICATE))
-            conn.execute("INSERT INTO media_replica_demands(store, requested_at, scanned_at) VALUES (?, ?, NULL) "
-                         "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, scanned_at = NULL",
-                         (store, now))
+                         f"token = random() WHERE store = ? AND state = ? AND {_copy_member()}",
+                         (PENDING, store, REFUSED))
+            conn.execute("INSERT INTO media_replica_demands(store, requested_at, scan_token) VALUES (?, ?, random()) "
+                         "ON CONFLICT(store) DO UPDATE SET requested_at = excluded.requested_at, "
+                         "scanned_at = NULL, scan_token = excluded.scan_token", (store, now))
     wake()
     return progress(vault, store)
 
@@ -1336,14 +1399,26 @@ def scan(vault: Path, store: str) -> int:
     from . import media_store
 
     ledger = MediaJobStore(vault)
+    with closing(ledger._connect(readonly=True)) as conn:
+        demand = conn.execute("SELECT scan_token FROM media_replica_demands WHERE store = ? AND scanned_at IS NULL",
+                              (store,)).fetchone()
+    if demand is None:
+        return 0
+    scan_token = demand["scan_token"]
     queued = 0
     batch: list[tuple[str, str]] = []
 
-    def flush() -> None:
+    def flush() -> bool:
         with closing(ledger._connect()) as conn, conn:
-            conn.executemany("INSERT INTO media_replica_queue(store, binary_rel, state, token) "
-                             "VALUES (?, ?, 'pending', random()) ON CONFLICT(store, binary_rel) DO NOTHING", batch)
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM media_replica_demands WHERE store = ? AND scan_token = ? AND scanned_at IS NULL",
+                            (store, scan_token)).fetchone() is None:
+                return False
+            conn.executemany("INSERT INTO media_replica_queue(store, binary_rel, state, token, copy_member) "
+                             "VALUES (?, ?, 'pending', random(), 1) ON CONFLICT(store, binary_rel) "
+                             f"DO UPDATE SET copy_member = 1 WHERE NOT {_copy_member()}", batch)
         batch.clear()
+        return True
 
     for snapshot in foreground_priority.yielding(media_store.bound_originals(
             vault, unconfirmed=media_store.skip_unknown_original)):
@@ -1351,11 +1426,13 @@ def scan(vault: Path, store: str) -> int:
             continue
         batch.append((store, snapshot.path.relative_to(vault).as_posix()))
         queued += 1
-        if len(batch) >= _SCAN_BATCH:
-            flush()
-    flush()
+        if len(batch) >= _SCAN_BATCH and not flush():
+            return 0
+    if not flush():
+        return 0
     with closing(ledger._connect()) as conn, conn:
-        conn.execute("UPDATE media_replica_demands SET scanned_at = ? WHERE store = ?", (time.time(), store))
+        conn.execute("UPDATE media_replica_demands SET scanned_at = ? WHERE store = ? AND scan_token = ? "
+                     "AND scanned_at IS NULL", (time.time(), store, scan_token))
     return queued
 
 
@@ -1391,15 +1468,20 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
         code = None
         try:
             if row["kind"] == RECOPY:
-                media_store.recopy(vault, vault / row["binary_rel"], row["store"])
+                try:
+                    media_store.recopy(vault, vault / row["binary_rel"], row["store"])
+                    _reconcile_recopy(ledger, row)
+                except sqlite3.Error as error:
+                    raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE,
+                                                      "the repair's replica record could not be settled") from error
             else:
                 media_store.replicate(vault, vault / row["binary_rel"], row["store"])
+                _settle(ledger, row, DONE, None)
         except media_store.MediaStoreError as error:
             code = error.code
         except (OSError, ValueError, sqlite3.Error) as error:
             code = type(error).__name__
         if code is None:
-            _settle_done(ledger, row)
             settled += 1
         elif code == media_store.STORE_BUSY_CODE:
             # Ordinary contention with a foreground write: it spends no attempt, and the round ends so that the
@@ -1424,14 +1506,47 @@ def drain(vault: Path, *, deadline: float | None = None) -> int:
     return settled
 
 
-def _settle_done(ledger: MediaJobStore, row: sqlite3.Row) -> None:
-    """A finished copy leaves a done row for the scan's progress; a finished copy again leaves nothing to count."""
-    if row["kind"] != RECOPY:
-        _settle(ledger, row, DONE, None)
-        return
-    with closing(ledger._connect()) as conn, conn:
-        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND token = ?",
-                     (row["store"], row["binary_rel"], row["token"]))
+def _complete_repairs(conn: sqlite3.Connection, matches: str, parameters: dict[str, object]) -> None:
+    """Complete matching first-copy members. Remove standalone repairs."""
+    where = f"kind = '{RECOPY}' AND ({matches})"
+    conn.execute(f"DELETE FROM media_replica_queue WHERE {where} AND NOT {_copy_member()}", parameters)
+    conn.execute(f"UPDATE media_replica_queue SET state = '{DONE}', code = NULL "
+                 f"WHERE {where} AND {_copy_member()}", parameters)
+
+
+def _reconcile_recopy(ledger: MediaJobStore, row: sqlite3.Row) -> None:
+    """Project the current binding and settle the picked request under the publication boundary."""
+    from . import media_store
+
+    vault = ledger.vault_root
+
+    def reconcile() -> None:
+        snapshot = originals.original_state(vault, row["binary_rel"])
+        current = next((replica for replica in _replicas_of(snapshot) if replica.store == row["store"]), None)
+        identity = {"store": row["store"], "path": row["binary_rel"], "token": row["token"]}
+        matches = "store = :store AND binary_rel = :path AND token = :token"
+        with closing(ledger._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                f"SELECT 1 FROM media_replica_queue WHERE {matches} AND kind = '{RECOPY}' AND state = '{PENDING}'",
+                identity,
+            ).fetchone() is None:
+                return  # A newer finding or a completed repair owns the row.
+            if current is not None:
+                # A surviving upload timestamp belongs to this exact version. A binding alone has no timestamp.
+                exact = conn.execute(
+                    "SELECT 1 FROM media_replicas WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
+                    "AND key_version = ? AND size = ? AND ciphertext_sha256 = ?",
+                    (row["binary_rel"], current.store, current.object, current.version, current.key_version,
+                     current.ciphertext_size, current.ciphertext_sha256),
+                ).fetchone()
+                if exact is None:
+                    _record_replica(conn, row["binary_rel"], current, verified_at=None)
+                if quarantined_in(conn, (current,)):
+                    return  # This binding still requires a repair, under its current token.
+            _complete_repairs(conn, matches, identity)
+
+    media_store._publishing(vault, "media_store_replica_recopy_settle", reconcile)
 
 
 def _settle(ledger: MediaJobStore, row: sqlite3.Row, state: str, code: str | None, *, attempts: int | None = None) -> None:
@@ -1617,32 +1732,32 @@ def _due(ledger: MediaJobStore, store: str, cycle: float, limit: int) -> list[sq
         return conn.execute(_DUE, (store, time.time() - cycle, limit)).fetchall()
 
 
-def _store_budget(ledger: MediaJobStore, store: str, cycle: float) -> tuple[int, int]:
-    """The replicas and the bytes that one round may check in `store`: its share of the cycle, as of the last rebuild."""
+# One indexed budget row and one first due row per store, in a single snapshot.
+_CHECK_PLAN = (
+    "SELECT wanted.value AS store, COALESCE(t.replicas, 0) AS replicas, COALESCE(t.bytes, 0) AS bytes, "
+    "(SELECT check_from FROM media_replicas WHERE store = wanted.value "
+    f"AND state <> '{QUARANTINED}' AND check_from <= ? ORDER BY check_from LIMIT 1) AS oldest "
+    "FROM json_each(?) AS wanted LEFT JOIN media_replica_store_totals AS t ON t.store = wanted.value "
+    "ORDER BY oldest NULLS LAST, wanted.key"
+)
+
+
+def _check_plan(ledger: MediaJobStore, stores: Iterable[str], cycle: float) -> dict[str, tuple[int, int]]:
+    """The round's shares, in oldest-due order. A store with no due replica goes last."""
     from . import original_fixity
 
     with closing(ledger._connect(readonly=True)) as conn:
-        held = conn.execute("SELECT replicas, bytes FROM media_replica_store_totals WHERE store = ?", (store,)).fetchone()
-    replicas, size = (held["replicas"], held["bytes"]) if held is not None else (0, 0)
-    return (max(_CHECK_FLOOR_ROWS, math.ceil(replicas * _CHECK_INTERVAL / cycle)),
-            original_fixity.budget_for([size], interval=_CHECK_INTERVAL, cycle=cycle))
+        rows = conn.execute(_CHECK_PLAN, (time.time() - cycle, json.dumps(list(stores)))).fetchall()
+    return {
+        row["store"]: (max(_CHECK_FLOOR_ROWS, math.ceil(row["replicas"] * _CHECK_INTERVAL / cycle)),
+                       original_fixity.budget_for([row["bytes"]], interval=_CHECK_INTERVAL, cycle=cycle))
+        for row in rows
+    }
 
 
-def _round_seconds(ledger: MediaJobStore, content_stores: list[str], cycle: float, rate: float) -> float:
-    """How long a check round may run to read the byte shares of all its content stores at the one read cap."""
-    shares = sum(_store_budget(ledger, name, cycle)[1] for name in content_stores)
-    return min(_CHECK_ROUND_MAX, max(_CHECK_ROUND_SECONDS, _CHECK_ROUND_FACTOR * shares / rate))
-
-
-def _longest_waiting_first(ledger: MediaJobStore, stores: list[str], cycle: float) -> list[str]:
-    """The stores in the order of their oldest due replica, a store with nothing due last.
-
-    A round that the shared cap ends before its last store would leave that store behind every time in a fixed order.
-    Here the store that was left waits longest, so it comes first in the next round: the order rotates by itself, and
-    keeps no state to lose.
-    """
-    waiting = {name: (due[0]["check_from"] if (due := _due(ledger, name, cycle, 1)) else math.inf) for name in stores}
-    return sorted(stores, key=waiting.__getitem__)
+def _round_seconds(content_bytes: int, rate: float) -> float:
+    """How long the content shares take at the round's one read cap, within its allowed window."""
+    return min(_CHECK_ROUND_MAX, max(_CHECK_ROUND_SECONDS, _CHECK_ROUND_FACTOR * content_bytes / rate))
 
 
 def check(vault: Path, *, deadline: float | None = None) -> int:
@@ -1662,15 +1777,15 @@ def check(vault: Path, *, deadline: float | None = None) -> int:
     cycle, rate = check_cycle(), check_read_rate()
     levels = {name: level for name, entry in originals.store_entries(config).items()
               if (level := scheduled_level(entry)) is not None}
-    content = [name for name, level in levels.items() if level == CONTENT]
-    limit = time.monotonic() + _round_seconds(ledger, content, cycle, rate) if deadline is None else deadline
+    plan = _check_plan(ledger, levels, cycle)
+    content_bytes = sum(share[1] for name, share in plan.items() if levels[name] == CONTENT)
+    limit = time.monotonic() + _round_seconds(content_bytes, rate) if deadline is None else deadline
     cap = _ReadCap(rate, limit, (vault, "check"))
-    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit)
-               for name in _longest_waiting_first(ledger, list(levels), cycle))
+    return sum(_check_store(vault, ledger, name, levels[name], cycle, cap, limit, share) for name, share in plan.items())
 
 
 def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycle: float, cap: _ReadCap,
-                 limit: float) -> int:
+                 limit: float, share: tuple[int, int]) -> int:
     """One store's part of a check round: the replicas attempted."""
     from . import media_store
 
@@ -1678,7 +1793,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
         _note_reach(vault, name, answer)
     if answer is False:
         return 0
-    rows, budget = _store_budget(ledger, name, cycle)
+    rows, budget = share
     attempted = spent = failing = 0
     while attempted < rows:
         picked = _due(ledger, name, cycle, min(rows - attempted, _CHECK_BATCH))
@@ -1795,12 +1910,11 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
                 "UPDATE media_replicas SET state = ?, level = NULL, failure = NULL, checked_at = 0, check_from = 0, "
                 "decrypted_at = ?, sample_from = ? WHERE binary_rel = ? AND store = ? AND object = ? AND version = ? "
                 f"AND state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' "
-                "AND (SELECT generation FROM media_damaged_digests WHERE ciphertext_sha256 = ?) IS ?",
+                "AND (SELECT generation FROM media_damaged_digests WHERE ciphertext_sha256 = ?) = ?",
                 (UPLOAD_VERIFIED, now, now, row["binary_rel"], store, name, version, replica.ciphertext_sha256,
                  row["generation"])).rowcount:
             return
-        conn.execute("DELETE FROM media_replica_queue WHERE store = ? AND binary_rel = ? AND kind = ?",
-                     (store, row["binary_rel"], RECOPY))
+        _complete_repairs(conn, "store = :store AND binary_rel = :path", {"store": store, "path": row["binary_rel"]})
         # Clear the shared plaintext finding. Each version still needs its own proof of a successful read.
         # Keep other causes and records that a remaining quarantine depends on.
         digest = replica.ciphertext_sha256
@@ -1808,8 +1922,8 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
                 "(SELECT object, version, store FROM media_damaged_versions "
                 f"WHERE ciphertext_sha256 = :digest AND failure = '{PLAINTEXT_MISMATCH}')")
         proved_at = "CASE WHEN (store, object, version) = (:store, :object, :version) THEN :now ELSE 0 END"
-        conn.execute("DELETE FROM media_replica_queue WHERE kind = :recopy AND (store, binary_rel) IN "
-                     f"(SELECT store, binary_rel FROM media_replicas {same})", {"recopy": RECOPY, "digest": digest})
+        _complete_repairs(conn, f"(store, binary_rel) IN (SELECT store, binary_rel FROM media_replicas {same})",
+                          {"digest": digest})
         conn.execute("UPDATE media_replicas SET state = :healthy, level = NULL, failure = NULL, checked_at = 0, "
                      f"check_from = 0, decrypted_at = {proved_at}, sample_from = {proved_at} {same}",
                      {"healthy": UPLOAD_VERIFIED, "store": store, "object": name, "version": version,

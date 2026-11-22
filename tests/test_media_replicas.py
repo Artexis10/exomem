@@ -1445,6 +1445,129 @@ def _entry(vault: Path, path: Path | str, store: str) -> originals.StoredObject:
     return next(entry for entry in (snapshot.reference, *snapshot.replicas) if entry is not None and entry.store == store)
 
 
+@pytest.mark.parametrize("recreate", [False, True])
+def test_eviction_keeps_local_bytes_when_a_lost_damage_table_is_recovered(
+        vault: Path, selected_store, recreate: bool) -> None:
+    original = _preserved(vault)
+    pointer = _offload(vault, original)
+    media_replicas.quarantine(vault, original.relative_to(vault).as_posix(), pointer,
+                              level=media_replicas.CONTENT, failure="absent")
+    with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as conn, conn:
+        [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_damaged_versions'").fetchone()
+        conn.execute("DROP TABLE media_damaged_versions")
+        if recreate:
+            conn.execute(schema)
+
+    # The provider can answer again. Its read does not lift an earlier definitive quarantine.
+    assert not media_store.evict(vault, original)
+    assert original.is_file()
+    assert media_replicas.has_quarantined(vault, (pointer,))
+
+
+def test_a_lost_queue_resumes_its_scan_and_repairs_after_an_older_process_recreates_it(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, damaged = _replicated(vault)
+    missing = _preserved(vault, category="missing")
+    media_replicas.request(vault, MIRROR)
+    media_replicas.quarantine(vault, relative, damaged, level=media_replicas.CONTENT, failure="digest_mismatch")
+    walk = media_store.bound_originals
+    path = media_jobs.MediaJobStore(vault).path
+
+    def lose_the_queue_mid_scan(root, **options):
+        for snapshot in walk(root, **options):
+            yield snapshot
+            if snapshot.path == missing:
+                assert media_replicas.progress(vault, MIRROR)["remaining"] == 1
+                with closing(sqlite3.connect(path)) as conn, conn:
+                    [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_replica_queue'").fetchone()
+                    conn.execute("DROP TABLE media_replica_queue")
+                    conn.execute(schema)
+                media_replicas.progress(vault, MIRROR)  # Recover while the older scan still holds its snapshot.
+
+    with monkeypatch.context() as lost:
+        lost.setattr(media_store, "bound_originals", lose_the_queue_mid_scan)
+        lost.setattr(media_replicas, "_SCAN_BATCH", 1)
+        media_replicas.scan(vault, MIRROR)
+
+    assert media_replicas.progress(vault, MIRROR)["scan"] == "running"
+    assert (relative, media_replicas.RECOPY) in _requests(vault)
+    assert media_replicas.work(vault)  # Re-run the admitted first-copy scan.
+    _recopy_all(vault)
+
+    assert _entry(vault, relative, MIRROR) != damaged
+    assert _entry(vault, missing, MIRROR).store == MIRROR
+    assert media_replicas.progress(vault, MIRROR) == {
+        "store": MIRROR, "queued": 1, "copied": 1, "refused": 0, "remaining": 0, "scan": "complete",
+    }
+
+
+@pytest.mark.parametrize("false_alarm", [False, True], ids=["new-copy", "sample-releases"])
+def test_a_finding_after_the_first_copy_lands_keeps_its_active_request_until_the_repair_settles(
+        vault: Path, selected_store, mirrored: Path, false_alarm: bool) -> None:
+    original = _preserved(vault)
+    relative = original.relative_to(vault).as_posix()
+    media_replicas.rebuild(vault)
+    media_replicas.request(vault, MIRROR)
+    media_replicas.scan(vault, MIRROR)
+
+    # The first copy landed and its worker has not yet settled the queued job.
+    published = media_store.replicate(vault, original, MIRROR)
+    level, failure = ((media_replicas.DECRYPTED, media_replicas.PLAINTEXT_MISMATCH) if false_alarm
+                      else (media_replicas.CONTENT, "digest_mismatch"))
+    media_replicas.quarantine(vault, relative, published, level=level, failure=failure)
+
+    assert media_replicas.request(vault, MIRROR) == {
+        "store": MIRROR, "queued": 1, "copied": 0, "refused": 0, "remaining": 1, "scan": "complete",
+    }
+    assert _mirror_stats(vault)["copy"]["remaining"] == 1
+    if false_alarm:
+        _unproven(vault)
+        assert media_replicas.sample(vault) == 1
+        assert _entry(vault, relative, MIRROR) == published
+    else:
+        _recopy_all(vault)
+        assert _entry(vault, relative, MIRROR) != published
+    assert media_replicas.progress(vault, MIRROR)["copied"] == 1
+
+
+@pytest.mark.parametrize("interrupted", [False, True], ids=["projection-unavailable", "process-interrupted"])
+def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool) -> None:
+    relative, damaged = _replicated(vault)
+    media_replicas.quarantine(vault, relative, damaged, level=media_replicas.CONTENT, failure="digest_mismatch")
+    path = media_jobs.MediaJobStore(vault).path
+    if interrupted:
+        def interrupted_after_binding(*_args):
+            raise RuntimeError("stopped after the binding committed")
+
+        with monkeypatch.context() as stopped:
+            stopped.setattr(media_store, "_note_replica", interrupted_after_binding)
+            with pytest.raises(RuntimeError, match="stopped after the binding committed"):
+                media_replicas.drain(vault)
+    else:
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("CREATE TRIGGER test_projection_down BEFORE INSERT ON media_replicas "
+                         "BEGIN SELECT RAISE(ABORT, 'simulated projection failure'); END")
+        assert media_replicas.drain(vault) == 0
+        with closing(sqlite3.connect(path)) as conn, conn:
+            conn.execute("DROP TRIGGER test_projection_down")
+
+    replacement = _entry(vault, relative, MIRROR)
+    assert replacement != damaged and _replica_row(vault)["version"] == damaged.version
+    assert _queued(vault)[0][1:3] == (media_replicas.RECOPY, media_replicas.PENDING)
+    versions = _objects(mirrored)
+
+    assert media_replicas.drain(vault) == 1
+
+    assert _entry(vault, relative, MIRROR) == replacement
+    assert _objects(mirrored) == versions
+    row = _replica_row(vault)
+    assert (row["object"], row["version"], row["state"], row["verified_at"]) == (
+        replacement.object, replacement.version, media_replicas.UPLOAD_VERIFIED, None,
+    )
+    assert not _queued(vault)
+
+
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The drill's end: a finding that nothing repaired would leave the owner with one copy for good."""
@@ -3100,6 +3223,31 @@ def test_a_sample_releases_the_plaintext_finding_without_proving_an_unread_versi
     assert (views[MIRROR]["state"], views[MIRROR]["last_check"]) == (media_replicas.UPLOAD_VERIFIED, None)
 
 
+@pytest.mark.parametrize("lost", ["media_damaged_versions", "media_damaged_digests"])
+def test_recovered_damage_keeps_a_confirmed_absence_when_a_shared_plaintext_finding_clears(
+        vault: Path, selected_store, mirrored: Path, lost: str) -> None:
+    relative, pointer, mirror = _evicted_with_a_pointer_found_wrong(vault)
+    media_replicas.quarantine(vault, relative, mirror, level=media_replicas.CONTENT, failure="absent")
+    _declare(vault, selected_store, mirrored, sample_bytes_per_month=0)
+    _unproven(vault)
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        old_generation = conn.execute("SELECT generation FROM media_damaged_digests").fetchone()[0]
+        conn.execute(f"DROP TABLE {lost}")
+
+    with closing(media_jobs.MediaJobStore(vault)._connect(readonly=True)) as conn:
+        generation = conn.execute("SELECT generation FROM media_damaged_digests").fetchone()
+    assert generation is not None
+    if lost == "media_damaged_digests":
+        assert generation[0] != old_generation
+    assert media_replicas.sample(vault) == 1
+
+    assert not media_replicas.has_quarantined(vault, (pointer,))
+    assert media_replicas.has_quarantined(vault, (mirror,))
+    assert _replica_row(vault)["failure"] == "absent"
+    assert [(store, kind) for store, kind, _state, _code in _queued(vault)] == [(MIRROR, media_replicas.RECOPY)]
+
+
 def test_a_pointer_is_not_copied_back_from_a_replica_that_was_a_copy_of_the_version_found_wrong(
         vault: Path, selected_store, mirrored: Path) -> None:
     """The mirror holds the pointer's ciphertext under another name: its bytes decrypt wrong exactly as the pointer's do."""
@@ -3427,12 +3575,13 @@ def test_the_round_at_the_default_settings_checks_two_stores_of_the_sizing_targe
                          (store, 500_000, 25 * 10**12))
     cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
 
-    rows, size = media_replicas._store_budget(ledger, MIRROR, cycle)
+    plan = media_replicas._check_plan(ledger, stores, cycle)
+    rows, size = plan[MIRROR]
     rounds = cycle / media_replicas._CHECK_INTERVAL
 
     # The byte share is a whole number of bytes, so it is short of the exact share by under a millionth.
     assert (rows * rounds >= 500_000, size * rounds >= 25 * 10**12 * 0.999999) == (True, True)
-    assert media_replicas._round_seconds(ledger, stores, cycle, rate) * rate >= 2 * size  # both shares, under the one cap
+    assert media_replicas._round_seconds(sum(share[1] for share in plan.values()), rate) * rate >= 2 * size  # both shares, under the one cap
 
 
 def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_store_takes(
@@ -3460,13 +3609,13 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
         1, row["store"], "1", row["object"], row["version"], size, "0" * 64)))
     monkeypatch.setattr(media_store, "check_replica", read_by_the_store)
     cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
-    limit = clock[0] + media_replicas._round_seconds(ledger, [MIRROR], cycle, rate)
-    share, _bytes = media_replicas._store_budget(ledger, MIRROR, cycle)
+    share = media_replicas._check_plan(ledger, [MIRROR], cycle)[MIRROR]
+    limit = clock[0] + media_replicas._round_seconds(share[1], rate)
 
     checked = media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle,
-                                          media_replicas._ReadCap(rate, limit), limit)
+                                          media_replicas._ReadCap(rate, limit), limit, share)
 
-    assert checked == share == 116
+    assert checked == share[0] == 116
     assert clock[0] < limit  # the whole share, at the cap, fits the round with the margin that sizes it
 
 
@@ -3530,7 +3679,8 @@ def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
     cycle, rate = media_replicas.check_cycle(), media_replicas.check_read_rate()
     cap = media_replicas._ReadCap(rate, 10**9)
 
-    attempted = media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle, cap, 10**9)
+    share = media_replicas._check_plan(ledger, [MIRROR], cycle)[MIRROR]
+    attempted = media_replicas._check_store(vault, ledger, MIRROR, media_replicas.CONTENT, cycle, cap, 10**9, share)
 
     assert attempted == 3
     assert cap.due == pytest.approx(3 * 10 * gib / rate)

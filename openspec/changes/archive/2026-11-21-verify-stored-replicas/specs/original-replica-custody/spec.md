@@ -6,6 +6,8 @@
 
 The replica worker SHALL check every replica in a store with a declared descriptor on a cycle, with a default of 30 days. The check SHALL use the store's `head`. For a store whose descriptor gives `head_recomputes: true`, the check SHALL be a content check: the returned size and SHA-256 SHALL equal the entry's ciphertext size and ciphertext SHA-256. For a store whose descriptor gives `head_recomputes: false`, the check SHALL be a presence check of the same values, and its result SHALL be labelled `presence`. A store whose descriptor does not state `head_recomputes` SHALL get no scheduled check, and the status SHALL report it as not scheduled, with the reason. Each round SHALL take the replicas checked longest ago first, never-checked first, through an index, and SHALL be bounded in time and bytes. A content check SHALL read under a read-rate cap. A check SHALL NOT hold the vault mutation guard. Code SHALL branch on the descriptor value, never on a store's or an adapter's name.
 
+A round SHALL read the configured stores' budgets and earliest due times in one indexed ledger snapshot.
+
 #### Scenario: A rotted replica on a NAS
 
 - **WHEN** one byte of a replica's ciphertext changes in a `filesystem` store whose `head` recomputes content
@@ -52,6 +54,30 @@ The replica worker SHALL download, decrypt and hash sampled replicas, and SHALL 
 A replica SHALL be quarantined when its store answers that the version is absent, when the store returns another size or SHA-256 than the entry records, or when a sample's plaintext does not match the binding. A store that is unavailable, does not answer as itself or times out SHALL NOT quarantine a replica. A quarantined replica SHALL NOT be a repair candidate, and eviction SHALL NOT drop an original's local bytes while its pointer is quarantined. When eviction's own `head` of the store serving eviction does not match the pointer, eviction SHALL quarantine that pointer and the status SHALL report the finding.
 
 The worker SHALL then write a new version into the same store. The source SHALL be the local original when its bytes hash to the binding, or else another replica that is not quarantined, copied as ciphertext and hashed against its own recorded digest. During replication or re-copy, a source read that confirms the version is absent SHALL quarantine that version. An unusable locator SHALL leave any remaining candidates eligible. After a verified source is found, a failed target upload SHALL end the attempt. The publication SHALL replace exactly the quarantined entry in the binding, compared by object and version, under the vault mutation guard. The damaged version SHALL stay in its store, and the finding SHALL name it. With no verified source, the replica SHALL stay quarantined, and the finding SHALL read `no_verified_source`. Check results SHALL live in the derived replica table. A rebuild SHALL keep them for a row whose object and version are unchanged.
+
+Schema recovery SHALL restore missing damage records from surviving quarantines and surviving digest evidence before the ledger gates eviction or reuse. A confirmed absence or ciphertext mismatch SHALL remain a finding of its stored version when a shared plaintext finding clears.
+
+A pending first-copy job SHALL keep its request membership when a finding turns it into a repair. The owner status SHALL count the same member pending until the repair completes, a sample clears its finding, or the repair refuses. After loss of the queue, the worker SHALL rescan surviving copy demands and requeue surviving quarantines. Only the current scan SHALL report completion.
+
+Before settling a repair, the worker SHALL reconcile the exact current binding with the replica row under the publication guard and compare the picked request token. A ledger failure SHALL keep the repair retryable. The worker SHALL keep an already published replacement. It SHALL report an upload time only when the ledger has a receipt for that version.
+
+#### Scenario: A damage table is lost
+
+- **WHEN** a damage table is lost and its quarantine evidence survives
+- **THEN** schema recovery restores the evidence to the eviction gate
+- **AND** a matching read does not by itself allow eviction of the quarantined version
+
+#### Scenario: A first copy needs repair before its request settles
+
+- **WHEN** a finding turns a pending first-copy job into a repair
+- **THEN** the owner still sees that member pending on the same request
+- **AND** when the repair settles or a sample clears the finding, the owner sees that member's result
+
+#### Scenario: A replacement is published before its row can be written
+
+- **WHEN** a repair publishes a replacement but its replica row is unavailable
+- **THEN** the worker leaves the job retryable
+- **AND** the retry projects the replacement already in the binding and settles the job under its current token
 
 #### Scenario: The drill's damaged stored copy
 
