@@ -291,7 +291,8 @@ def _login_state(principal: Any) -> Any:
     from .governance import principal as principal_module
 
     login = auth_sessions.OriginLogin.VALID
-    if principal.origin_session is not None:
+    # A Cloud cell's gateway proves its login per request, so outside one only the binding below applies.
+    if auth_sessions.origin_revalidates_in_background(principal):
         login = auth_sessions.origin_login_state_sync(principal)
     issuer = principal.issuer_family
     if login is not auth_sessions.OriginLogin.NOT_VALID and cloud_cell.is_cloud_issuer_family(issuer):
@@ -534,19 +535,20 @@ class Drainer:
                 self._condition.wait(min(remaining, 1.0))
             return True
 
-    def lookup(self, origin: str) -> str | None:
-        """The intake id of the open save, or of the applied save still in its retry window, with this origin."""
+    def lookup(self, origin: str) -> tuple[str, str] | None:
+        """The intake id and state (open or applied) of the save with this origin, while it is open
+        or its applied answer is still in the original identity's retry window."""
         with self._condition:
             intake_id = self._open_origins.get(origin)
             if intake_id is not None:
-                return intake_id
+                return intake_id, QUEUED
             applied = self._applied_origins.get(origin)
             if applied is None:
                 return None
             if applied[1] <= time.time():
                 del self._applied_origins[origin]
                 return None
-            return applied[0]
+            return applied[0], APPLIED
 
     def note_accepted(self, origin: str | None, intake_id: str) -> None:
         with self._condition:
@@ -964,10 +966,15 @@ class Admission:
     def _indexed_answer(self) -> dict[str, Any] | None:
         if self.origin is None:
             return None
-        intake_id = self.drainer.lookup(self.origin)
-        if intake_id is None:
+        known = self.drainer.lookup(self.origin)
+        if known is None:
             return None
-        return _with_store_retry(lambda: self._stored_answer(intake_id))
+        intake_id, state = known
+        try:
+            return _with_store_retry(lambda: self._stored_answer(intake_id))
+        except Exception:  # noqa: BLE001 - a known save is answered from the index, never run again
+            log.warning("write intake answered a resend from its index", exc_info=True)
+            return _index_answer(intake_id, state)
 
     def _stored_answer(self, intake_id: str) -> dict[str, Any] | None:
         try:
@@ -1086,6 +1093,30 @@ def _receipt(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         ),
         "queued_write": {"ref": ref, "position": position, "accepted_at": _iso(row["accepted_at"])},
         "route": {"tool": "review_memory", "args": {"mode": MODE, "ref": ref}},
+    }
+
+
+def _index_answer(intake_id: str, state: str) -> dict[str, Any]:
+    """The answer to a resend of a known save when its row cannot be read: its ref, never a rerun."""
+    ref = ref_for(intake_id)
+    route = {"tool": "review_memory", "args": {"mode": MODE, "ref": ref}}
+    if state == APPLIED:
+        return {
+            "success": True,
+            "committed": True,
+            "user_summary": "Saved earlier from the queue; its outcome could not be read just now. "
+            "Do not resend it; check it with the route below.",
+            "queued_write": {"ref": ref, "state": APPLIED},
+            "route": route,
+        }
+    return {
+        "success": True,
+        "state": QUEUED,
+        "committed": False,
+        "user_summary": "Queued, not saved yet: this save is already held and will be applied in "
+        "arrival order. Do not resend it; check its outcome with the route below.",
+        "queued_write": {"ref": ref},
+        "route": route,
     }
 
 

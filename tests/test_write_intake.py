@@ -19,12 +19,13 @@ from _public_call import public_call
 from conftest import _drain_background_threads
 from fastmcp import Client
 
-from exomem import auth_sessions, call_ledger, commands, write_intake, writer_lease
+from exomem import auth_sessions, call_ledger, cloud_cell, commands, write_intake, writer_lease
 from exomem import schema as schema_module
 from exomem import server as server_module
 from exomem.cli_ops import OpError
 from exomem.commands import op_remember
 from exomem.edit_operations import ReplaceStringOperation
+from exomem.governance import principal as principal_module
 from exomem.governance.principal import (
     OriginSessionBinding,
     RequestPrincipal,
@@ -529,3 +530,41 @@ def test_a_queued_save_whose_login_has_ended_fails_with_its_arguments(
     assert failed["error"]["code"] == write_intake.LOGIN_REVOKED
     assert failed["arguments"]["slug"] == "queued-save-19"
     assert _pages_titled(vault, "Queued save 19") == []
+
+
+def test_a_cloud_owners_queued_save_is_applied_without_a_live_request(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Cloud cell's gateway proves the login per request; the drainer has no request, so only
+    # the cell binding is rechecked before the replay.
+    _writer, holder = managers
+    monkeypatch.setattr(principal_module, "cloud_owner_binding_matches", lambda _cell: True)
+    cloud_owner = replace(
+        local_owner_principal(surface="mcp"),
+        issuer_family=cloud_cell.issuer_family("cell-123"),
+        origin_session=OriginSessionBinding(session_id="login-2", generation="1", audience="mcp"),
+    )
+    (receipt,) = _hold_and_queue(
+        holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 24), principal=cloud_owner)
+    )
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 24")) == 1
+
+
+def test_a_resend_of_a_known_save_is_answered_from_the_index_when_its_row_cannot_be_read(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _writer, holder = managers
+    remember = _command("remember")
+    kwargs = _remember_kwargs(vault, 25)
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(remember, vault, kwargs))
+    ref = receipt["queued_write"]["ref"]
+    _wait_for_state(vault, ref, "applied")
+
+    def unreadable(_self, _intake_id):
+        raise OSError("intake store unreadable")
+
+    monkeypatch.setattr(write_intake.Admission, "_stored_answer", unreadable)
+    resend = _send(remember, vault, kwargs)
+    assert resend["queued_write"] == {"ref": ref, "state": "applied"}
+    assert len(_pages_titled(vault, "Queued save 25")) == 1
