@@ -3205,10 +3205,10 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     original = receipts.event_records
     calls = 0
 
-    def counted(root: Path) -> list[dict]:
+    def counted(root: Path, **kwargs) -> list[dict]:
         nonlocal calls
         calls += 1
-        return original(root)
+        return original(root, **kwargs)
 
     monkeypatch.setattr(receipts, "event_records", counted)
     hits = [
@@ -3222,6 +3222,80 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     assert calls == 1
     assert lifecycle.is_tombstoned(vault, rel) is True
     assert calls == 1
+
+
+def test_marker_revision_tracks_pending_edits_but_skips_ordinary_disclosure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import lifecycle
+
+    empty = lifecycle.tombstone_snapshot(vault)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert empty.marker_revision is not None
+    assert lifecycle.tombstone_marker_revision(vault) == empty.marker_revision
+
+    rel = "Knowledge Base/Notes/Insights/pending-marker.md"
+    (vault / rel).write_text("# Pending deletion\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/pending-marker.md")
+
+    def leave_pending(point: str) -> None:
+        if point == "deletion_tombstone":
+            raise RuntimeError("stop after pending marker")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, "_checkpoint", leave_pending)
+        with library_scope(), pytest.raises(RuntimeError, match="stop after pending marker"):
+            delete_file.delete_file(vault, path=rel, confirm=True)
+    pending = lifecycle.tombstone_snapshot(vault)
+    assert rel in pending.paths
+    assert pending.marker_revision != empty.marker_revision
+
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    with monkeypatch.context() as patch:
+        def replay(*args, **kwargs):
+            pytest.fail("the marker witness must not replay the receipt chain")
+
+        patch.setattr(receipts, "event_records", replay)
+        assert lifecycle.tombstone_marker_revision(vault) == pending.marker_revision
+
+    marker = next(lifecycle._tombstone_root(vault).glob("*.json"))
+    previous = marker.stat()
+    raw = marker.read_bytes()
+    modified = raw.replace(b'"pending"', b'"damaged"', 1)
+    assert modified != raw and len(modified) == len(raw)
+    marker.write_bytes(modified)
+    os.utime(marker, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    assert lifecycle.tombstone_marker_revision(vault) != pending.marker_revision
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstone_snapshot(vault).paths
+
+
+def test_tombstone_replay_honors_a_background_stop_without_a_read_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import foreground_priority
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/stopped-replay.md"
+    (vault / rel).write_text("# Retired\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/stopped-replay.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    stop = threading.Event()
+    read_chain = receipts.event_records
+
+    def stop_before_replay(*args, **kwargs):
+        stop.set()
+        return read_chain(*args, **kwargs)
+
+    def opened_evidence(*args, **kwargs):
+        pytest.fail("a stopped proof opened a receipt")
+
+    monkeypatch.setattr(receipts, "event_records", stop_before_replay)
+    monkeypatch.setattr(receipts, "_open_month_fd", opened_evidence)
+    with foreground_priority.cancellable(stop), pytest.raises(foreground_priority.BulkCancelled):
+        lifecycle.tombstone_snapshot(vault)
 
 
 def test_reconcile_refuses_marker_redirected_away_from_original_source(

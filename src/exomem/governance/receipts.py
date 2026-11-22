@@ -517,7 +517,7 @@ def _open_windows_month_fd(
 
 
 def _monthly_evidence_names(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
     names: list[str] = []
     issues: list[dict[str, str]] = []
@@ -640,7 +640,7 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
 
 
 def _read_records(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
@@ -713,7 +713,7 @@ def _read_records(
 
 
 def _chain_state(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records, issues = _read_records(instance_dir, checkpoint=checkpoint)
     valid_records: list[dict[str, Any]] = []
@@ -2093,7 +2093,7 @@ def unregister_state_resolver(operation: str) -> None:
 
 
 def event_records(
-    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    vault_root: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     """Return verified content-free records without mutating chain or sidecar."""
     root = _events_root(Path(vault_root))

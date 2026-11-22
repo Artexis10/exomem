@@ -16,7 +16,7 @@ import stat
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -24,6 +24,8 @@ from urllib.parse import unquote
 
 from .. import (
     find_corpus,
+    foreground_priority,
+    held_fs,
     index_paths,
     media_types,
     memory_refs,
@@ -933,7 +935,7 @@ def _marker_shape_valid(
 
 def _evidence_paths(root: Path, pattern: str) -> Iterator[Path]:
     for path in root.glob(pattern):
-        request_budget.checkpoint()
+        foreground_priority.check_cancelled()
         yield path
 
 
@@ -955,18 +957,24 @@ def _verified_lifecycle_markers(vault_root: Path) -> list[dict[str, Any]] | None
     if not any(paths for paths, _allowed in marker_sets):
         return []
     try:
-        records = receipts.event_records(vault_root, checkpoint=request_budget.current_checkpoint())
+        cooperative = (
+            request_budget.current_checkpoint() is not None
+            or foreground_priority.cancellation_event() is not None
+        )
+        records = receipts.event_records(
+            vault_root, checkpoint=foreground_priority.check_cancelled if cooperative else None,
+        )
     except Exception:  # noqa: BLE001 - unverifiable guard evidence must fail closed
         return None
     intents: dict[str, list[dict[str, Any]]] = {}
     for record in records:
-        request_budget.checkpoint()
+        foreground_priority.check_cancelled()
         if record["event_type"] == "critical" and record["phase"] == "intent":
             intents.setdefault(record["event_id"], []).append(record)
     markers = []
     for paths, allowed in marker_sets:
         for path in paths:
-            request_budget.checkpoint()
+            foreground_priority.check_cancelled()
             try:
                 marker = _read_json(vault_root, path)
             except LifecycleError:
@@ -1741,18 +1749,41 @@ def _entry_signature(path: Path) -> tuple[Any, ...]:
         entry.st_size,
         entry.st_mtime_ns,
         entry.st_ctime_ns,
+        getattr(entry, "st_file_attributes", 0),
     )
 
 
-def _tombstone_generation(vault_root: Path) -> tuple[tuple[Any, ...], ...]:
+def _marker_file_signature(vault_root: Path, path: Path) -> tuple[Any, ...]:
+    signature = _entry_signature(path)
+    if os.name != "nt" or len(signature) < 8 or not stat.S_ISREG(signature[3]):
+        return signature
+    # Windows stat reports creation time. Read the ordinary-write witness
+    # from the exact non-following file handle instead.
+    try:
+        with held_fs.acquire(vault_root).require() as filesystem:
+            with filesystem.parent(path.parent.relative_to(vault_root).as_posix()).require() as parent:
+                with filesystem.file(parent, path.name, access="identity").require() as file:
+                    version = file.version()
+    except (OSError, held_fs.HeldFsError) as exc:
+        return (str(path), "error", type(exc).__name__)
+    return (*signature, version.change_time_ns)
+
+
+class _MarkerGeneration(NamedTuple):
+    entries: tuple[tuple[Any, ...], ...]
+    requires_receipts: bool
+    revision: str | None
+
+
+def _marker_generation(vault_root: Path) -> _MarkerGeneration:
+    foreground_priority.check_cancelled()
     tombstone_root, recovery_root = _tombstone_root(vault_root), _recovery_root(vault_root)
     governance_root = _governance_root(vault_root)
     # Every directory _validated_operational_directory walks to a marker root: a link swapped in
     # for one of them fails the state closed, with no marker file to show for it.
-    entries: list[tuple[Any, ...]] = [
-        _entry_signature(path)
-        for path in (governance_root.parent, governance_root, tombstone_root, recovery_root)
-    ]
+    protected = (governance_root.parent, governance_root, tombstone_root, recovery_root)
+    directories = tuple(_entry_signature(path) for path in protected)
+    entries: list[tuple[Any, ...]] = []
     markers = False
     for root in (tombstone_root, recovery_root):
         try:
@@ -1760,24 +1791,66 @@ def _tombstone_generation(vault_root: Path) -> tuple[tuple[Any, ...], ...]:
                 found = sorted(_evidence_paths(root, "*.json"))
                 markers = markers or bool(found)
                 for path in found:
-                    request_budget.checkpoint()
-                    entries.append(_entry_signature(path))
+                    foreground_priority.check_cancelled()
+                    entries.append(_marker_file_signature(vault_root, path))
         except FileNotFoundError:
             pass
         except OSError as exc:
             # An unscannable marker directory keeps the full evidence, as it always did.
             markers = True
             entries.append((str(root), "scan-error", type(exc).__name__))
-    if not markers:
+
+    anchor = _entry_signature(vault_root)
+    revision = None
+    after = tuple(_entry_signature(path) for path in protected)
+    if (
+        len(anchor) == 8 and stat.S_ISDIR(anchor[3])
+        and not anchor[7] & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        and directories[2:] == after[2:]
+        and tuple(entry[:4] for entry in directories[:2]) == tuple(entry[:4] for entry in after[:2])
+        and all(
+            entry[1] == "missing" or (
+                len(entry) == 8 and stat.S_ISDIR(entry[3])
+                and not entry[7] & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            )
+            for entry in directories
+        )
+        and all(
+            len(entry) >= 8 and stat.S_ISREG(entry[3])
+            and not entry[7] & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            for entry in entries
+        )
+    ):
+        leaves = directories[2:]
+        # A receipt may create the initially absent governance ancestry.
+        # Once a lifecycle directory exists, bind the identity of every
+        # ancestor. Sibling receipt writes do not change those identities.
+        ancestry = () if all(entry[1] == "missing" for entry in leaves) else tuple(
+            entry[:4] for entry in directories[:2]
+        )
+        revision = _digest((anchor[:4], ancestry, leaves, entries))
+    foreground_priority.check_cancelled()
+    return _MarkerGeneration((*directories, *entries), markers, revision)
+
+
+class _TombstoneGeneration(NamedTuple):
+    entries: tuple[tuple[Any, ...], ...]
+    marker_revision: str | None
+
+
+def _tombstone_generation(vault_root: Path) -> _TombstoneGeneration:
+    marker = _marker_generation(vault_root)
+    if not marker.requires_receipts:
         # With no marker file the answer is the empty set whatever the event log or sidecar hold:
         # _compute_tombstoned_paths reads them only to validate a marker. They are no evidence here.
-        return tuple(entries)
-    events_root = governance_root / "events"
+        return _TombstoneGeneration(marker.entries, marker.revision)
+    entries = list(marker.entries)
+    events_root = _governance_root(vault_root) / "events"
     entries.append(_entry_signature(events_root))
     try:
         if not stat.S_ISLNK(os.lstat(events_root).st_mode):
             for path in sorted(_evidence_paths(events_root, "*/*.jsonl")):
-                request_budget.checkpoint()
+                foreground_priority.check_cancelled()
                 entries.append(_entry_signature(path))
     except FileNotFoundError:
         pass
@@ -1787,22 +1860,23 @@ def _tombstone_generation(vault_root: Path) -> tuple[tuple[Any, ...], ...]:
     entries.extend(
         _entry_signature(Path(f"{sidecar}{suffix}")) for suffix in ("", "-wal", "-shm")
     )
-    return tuple(entries)
+    return _TombstoneGeneration(tuple(entries), marker.revision)
 
 
 @dataclass(frozen=True)
 class TombstoneSnapshot:
     paths: frozenset[str]
     fingerprint: str
+    marker_revision: str | None = field(default=None, compare=False)
 
 
 @lru_cache(maxsize=128)
 def _cached_tombstone_snapshot(
-    vault_root: str, _generation: tuple[tuple[Any, ...], ...]
+    vault_root: str, generation: _TombstoneGeneration
 ) -> TombstoneSnapshot:
     paths = _compute_tombstoned_paths(Path(vault_root))
-    request_budget.checkpoint()
-    return TombstoneSnapshot(paths, _digest(sorted(paths)))
+    foreground_priority.check_cancelled()
+    return TombstoneSnapshot(paths, _digest(sorted(paths)), generation.marker_revision)
 
 
 def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
@@ -1812,17 +1886,17 @@ def _compute_tombstoned_paths(vault_root: Path) -> frozenset[str]:
     values: set[str] = set()
     for marker in markers:
         for item in marker.get("manifest", []):
-            request_budget.checkpoint()
+            foreground_priority.check_cancelled()
             if not isinstance(item, Mapping):
                 continue
-            for field in ("source_path", "trash_path", "affected_ref"):
-                value = item.get(field)
+            for key in ("source_path", "trash_path", "affected_ref"):
+                value = item.get(key)
                 if isinstance(value, str) and not (
-                    field == "affected_ref" and value.startswith("sha256:")
+                    key == "affected_ref" and value.startswith("sha256:")
                 ):
                     values.add(_normalize_rel(value))
         for value in marker.get("residue_paths", []):
-            request_budget.checkpoint()
+            foreground_priority.check_cancelled()
             if isinstance(value, str):
                 values.add(_normalize_rel(value))
     return frozenset(values)
@@ -1838,6 +1912,18 @@ def tombstone_snapshot(vault_root: Path) -> TombstoneSnapshot:
 
     root = state_paths.resolved_vault_path(vault_root, expanduser=False)
     return _cached_tombstone_snapshot(str(root), _tombstone_generation(root))
+
+
+def tombstone_marker_revision(vault_root: Path) -> str | None:
+    """Recheck only the physical markers after a request's own receipt append.
+
+    A missing witness requires a fresh full proof. This check cannot establish
+    receipt binding for a new request or for an unverified marker set.
+    """
+    from .. import state_paths
+
+    root = state_paths.resolved_vault_path(vault_root, expanduser=False)
+    return _marker_generation(root).revision
 
 
 def tombstoned_paths(vault_root: Path) -> frozenset[str]:
