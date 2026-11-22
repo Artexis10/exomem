@@ -325,6 +325,42 @@ def test_a_card_unreadable_while_the_service_starts_is_found_once_it_reads(vault
     assert dataset_values.LANE in during_start["warming"]["components"]
 
 
+def test_a_card_unreadable_once_the_service_has_started_is_not_read_on_every_search(vault, monkeypatch):
+    # With the private-identity inventory built, no start-up wait explains a card that reads
+    # nothing (a linked or refused file). Reading it again on every search would be cost without end.
+    from exomem import reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = reserved_paths.read_generic_bytes
+    original_resolve = find._resolve_page
+    card_resolutions = []
+
+    def refused_card(vault_root, relative, **options):
+        if relative == result.sidecar_path:
+            raise reserved_paths.ReservedPathLeafError("RESERVED_PATH")
+        return original_read(vault_root, relative, **options)
+
+    def counted_resolve(vault_root, rel, *args, **options):
+        if rel == result.sidecar_path:
+            card_resolutions.append(rel)
+        return original_resolve(vault_root, rel, *args, **options)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", refused_card)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: True)
+    monkeypatch.setattr(find, "_resolve_page", counted_resolve)
+
+    first = _find_response(vault, ACCOUNT)
+    resolutions_after_first = len(card_resolutions)
+    second = _find_response(vault, ACCOUNT)
+
+    assert resolutions_after_first > 0
+    assert len(card_resolutions) == resolutions_after_first
+    for reply in (first, second):
+        hits = reply["hits"] if isinstance(reply, dict) else reply
+        assert result.path not in _paths(hits)
+        assert not isinstance(reply, dict) or dataset_values.LANE not in reply.get("warming", {}).get("components", ())
+
+
 def test_a_reply_that_could_not_read_an_original_while_the_service_starts_says_so(vault, monkeypatch):
     # The original's read also waits on the private-identity inventory. A search that misses
     # the dataset for that reason says that its results may be incomplete.

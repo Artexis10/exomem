@@ -366,20 +366,23 @@ def _cards_in_scope(
     key = (str(vault_root.resolve()), walk_scope)
     version = snapshot.projection_key(walk_scope)
     known = _CARDS.get(key)
+    # Card reads wait on the private-identity inventory. A card that gave no page before the
+    # inventory existed may only have waited out its budget, so the next search reads it again;
+    # remembering it as absent would hide its dataset for the life of the process. Once the
+    # inventory existed before the read, no wait explains a missing page (a linked, refused or
+    # unparsable card), so it is not read again until the projection key moves.
+    settled = reserved_paths.identity_catalogue_ready(vault_root)
     if known is None or known[0] != version:
         # Reading every card on every search would cost more than the lane. The projection key
         # moves whenever a card is added, changed or removed, or the access policy changes, so
         # a search with no change reads no card.
         paths = sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
         qualified, unread = _qualify(vault_root, paths)
-        _CARDS[key] = known = (version, tuple(qualified), tuple(unread))
+        _CARDS[key] = known = (version, tuple(qualified), () if settled else tuple(unread))
     elif known[2]:
-        # A projected card that gave no page may only have been unreadable for now, such as
-        # while a starting service still builds its identity inventory. Remembering it as
-        # absent would hide its dataset for the life of the process, so it is read again.
         found, unread = _qualify(vault_root, known[2])
         merged = tuple(sorted(known[1] + tuple(found), key=lambda card: card.card_path))
-        _CARDS[key] = known = (version, merged, tuple(unread))
+        _CARDS[key] = known = (version, merged, () if settled else tuple(unread))
     cards = {
         card.original: card
         for card in known[1]
@@ -835,12 +838,8 @@ def search(
                 matches = _match(conn, groups, needles, indexed)
             finally:
                 conn.close()
-        # Card and original reads wait on the private-identity inventory; until it exists, a
-        # read that gave nothing is still loading. Once it exists, it is a page that does not
-        # parse or an original that is not the recorded bytes, which no wait changes.
-        loading = (unread or missed) and not reserved_paths.identity_catalogue_ready(vault_root)
         if not cards:
-            return Lane(warming=(LANE,) if loading else ())
+            return Lane(warming=_loading(vault_root, unread))
     except (sqlite3.Error, OSError) as error:
         log.warning("dataset value search unavailable: %s", error)
         return Lane(failed=(LANE,))
@@ -863,7 +862,19 @@ def search(
         for original, match in ordered
         if (hit := _hit(vault_root, cards[original], match, needles)) is not None
     ]
-    return Lane(hits, warming=(LANE,) if unindexed or loading else ())
+    # A hit drops when its original reads nothing at this point, as a build read can.
+    loading = _loading(vault_root, unread or missed or len(hits) < len(ordered))
+    return Lane(hits, warming=(LANE,) if unindexed else loading)
+
+
+def _loading(vault_root: Path, read_nothing: bool) -> tuple[str, ...]:
+    """The lane as warming when a card or original read gave nothing while it may still load.
+
+    Those reads wait on the private-identity inventory; until it exists, a read that gave nothing
+    is still loading. Once it exists, it is a card that does not parse or an original that is not
+    the recorded bytes, which no wait changes.
+    """
+    return (LANE,) if read_nothing and not reserved_paths.identity_catalogue_ready(vault_root) else ()
 
 
 def fuse(pages: list[Hit], values: Iterable[Hit], *, limit: int, rrf_k: int) -> list[Hit]:
