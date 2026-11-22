@@ -43,6 +43,16 @@ The constraints first written for this phase follow. The delivered design supers
 
 The delivered design had its own review in `add-curation-relocation-protocol`.
 
+### 6. A large managed preview produces a paged approval report
+
+Bound candidate collection and response size in the interactive request. A positive overflow starts or rejoins a read-only preview through the maintenance job runner. A current publication must still prove the candidate set. Contention or incomplete evidence yields the existing warming response.
+
+Use the existing job receipt and its cursor to report one bounded page at a time. Publish the summary and approval digest after the job proves the complete report. Bind the job to the requesting owner and recheck current authority and the connector ceiling before releasing any result. A failed or interrupted job cannot expose staged rows.
+
+The paged approval digest binds the Source, destination, full referrer report, and pointer-write proof. The writer checks it against the current plan before the first write. The existing inline approval digest stays readable.
+
+The product load target is 20,000 pages, about 100,000 units, and 120,000 edges, with a hub of 10,000 links. Use the existing request deadline and maintenance receipt response bound. Prove that a large preview leaves Records responsive and can report all 10,000 referrers over bounded pages.
+
 ## Controls and costs
 
 - The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.

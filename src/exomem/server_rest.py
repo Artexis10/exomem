@@ -507,7 +507,7 @@ def register_rest_facade(
                             if is_preview_call(_cmd.name, kwargs):
                                 check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
                                     seconds=request_budget.budget_seconds(), entry=entered,
-                                ))
+                                ), bound_disclosure=True)
                                 with request_budget.checking(check):
                                     stop = await run_in_threadpool(
                                         managed_preview_stop, vault_root, bound_principal,

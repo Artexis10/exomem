@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import freshness, lexstore, request_budget
+from exomem import freshness, lexstore, path_mentions, request_budget
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -279,6 +279,25 @@ def test_published_substrings_answer_existing_wal_rows(
 
 
 @needs_fts5
+def test_published_prose_candidate_limit_applies_to_the_whole_query_batch(
+    vault: Path, warm_managed_cell,
+) -> None:
+    first, second = "Sources/Documents/first.csv", "Sources/Documents/second.csv"
+    a, b = "Knowledge Base/Notes/a.md", "Knowledge Base/Notes/b.md"
+    _write_page(vault, a, first)
+    _write_page(vault, b, second)
+    warm_managed_cell(vault, prebuild_refs=False)
+
+    complete = path_mentions.find_pages(vault, [first, second], candidate_limit=2)
+    assert complete.complete and complete.pages == (a, b)
+    assert not complete.overflow
+
+    overflow = path_mentions.find_pages(vault, [first, second], candidate_limit=1)
+    assert overflow.overflow and not overflow.complete
+    assert not overflow.pages
+
+
+@needs_fts5
 @pytest.mark.parametrize("digest_cached", [False, True], ids=["cold-digest", "lagged-sidecar"])
 def test_published_substrings_never_derive_or_catch_up_on_request(
     vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, digest_cached: bool
@@ -392,8 +411,9 @@ def test_published_substrings_decline_a_sqlite_lock_during_proof(
 
 
 @needs_fts5
+@pytest.mark.parametrize("candidate_limit", [None, 0])
 def test_published_substrings_drop_rows_if_a_watcher_event_arrives_during_query(
-    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, candidate_limit: int | None,
 ) -> None:
     referrer = _write_page(vault, "Knowledge Base/Notes/referrer.md", "published-needle")
     warm_managed_cell(vault, prebuild_refs=False)
@@ -407,9 +427,12 @@ def test_published_substrings_drop_rows_if_a_watcher_event_arrives_during_query(
         return rows
 
     monkeypatch.setattr(store, "_matched_substring_paths", read_then_observe_change)
-    result = lexstore.search_current_published_substrings(vault, ["published-needle"])
+    result = lexstore.search_current_published_substrings(
+        vault, ["published-needle"], candidate_limit=candidate_limit,
+    )
 
     assert not result.readiness.complete
+    assert result.readiness.status == "stale"
     assert result.value is None
 
 

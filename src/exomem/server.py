@@ -624,46 +624,23 @@ class CallTraceMiddleware(Middleware):
             # Read before `call_next` consumes or translates the message, so the
             # ledger records the call that was actually made.
             ledger_args = _extract_tool_args(context.message)
-            check = None
+            check = request_budget.current_checkpoint()
             try:
                 try:
-                    if self.vault_root is not None and tool_name == "manage_memory_file":
-                        from .governance.principal import effective_principal
-                        from .reclassify_source import is_preview_call, managed_preview_stop
-
-                        budget = request_budget.current()
-                        if budget is not None and is_preview_call(tool_name, ledger_args):
-                            check = request_budget.ReadCheckpoint(budget)
-                            with request_budget.checking(check):
-                                stop = await asyncio.to_thread(
-                                    managed_preview_stop, self.vault_root, effective_principal(),
-                                )
-                            if stop is None:
-                                check = None
-                    with request_budget.checking(check) if check is not None else nullcontext():
-                        result = await call_next(context)
-                        if check is not None:
-                            check()
+                    result = await call_next(context)
+                    if check is not None:
+                        check()
                 except request_budget.ReadBudgetExhausted:
                     if check is None:
                         raise
-                    from .cli_ops import public_refusal
-                    from .command_surface import _log_tool_failure, agent_refusal_result
+                    from .command_surface import _log_tool_failure, mcp_preview_warming
                     from .reclassify_source import preview_warming
 
                     error = preview_warming()
                     _log_tool_failure(tool=tool_name, request_id=request_id, code=error.code,
                                       duration_ms=round((time.perf_counter() - t0) * 1000, 2),
                                       message=str(error))
-                    tool = await context.fastmcp_context.fastmcp.get_tool(tool_name)
-                    surface = (
-                        capabilities.active_surface(self.surface_descriptor)
-                        if self.surface_descriptor is not None else nullcontext()
-                    )
-                    with surface:
-                        result = tool.convert_result(agent_refusal_result(
-                            public_refusal(error), error, tool_name, ledger_args, ledger_args, write=False,
-                        ))
+                    result = await mcp_preview_warming(context, ledger_args, self.surface_descriptor)
                 dur = round((time.perf_counter() - t0) * 1000, 2)
                 # A ContextVar set inside the synchronous tool wrapper (which
                 # runs in FastMCP's anyio threadpool) does not propagate back
@@ -1135,7 +1112,9 @@ def build_server(
         ) if cloud else (),
     )
     mcp.add_middleware(PublicCommandNameMiddleware(product_commands, runtime.vault_root))
-    mcp.add_middleware(AuthorizationSessionMiddleware(runtime.vault_root))
+    mcp.add_middleware(AuthorizationSessionMiddleware(
+        runtime.vault_root, surface_descriptor=surface_descriptor,
+    ))
     # Cloud traces retain their content-free form after name normalization.
     mcp.add_middleware(CallTraceMiddleware(
         hosted=cloud, vault_root=runtime.vault_root, surface_descriptor=surface_descriptor,

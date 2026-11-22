@@ -29,9 +29,12 @@ plausible guess for approval is how a fallback becomes permanent.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -592,6 +595,8 @@ def propose(
     *,
     source_kind: str | None = None,
     domain: str | None = None,
+    candidate_limit: int | None = None,
+    paged: bool = False,
 ) -> ReclassifyProposal:
     """Report what a correction would do, without writing anything.
 
@@ -622,12 +627,15 @@ def propose(
         # The transport selected whether to manage this preview before the leaf.
         raise preview_warming()
     if owner is None:
+        if paged:
+            raise preview_warming()
         return _propose(vault_root, path, source_kind=source_kind, domain=domain)
 
     try:
-        with foreground_priority.cancellable(owner):
+        with nullcontext() if paged else foreground_priority.cancellable(owner):
             foreground_priority.check_cancelled()
-            result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner)
+            result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner,
+                              candidate_limit=candidate_limit, paged=paged)
             foreground_priority.check_cancelled()
             if managed_preview_stop(vault_root, who) is not owner:
                 raise preview_warming()
@@ -638,6 +646,7 @@ def propose(
 
 def _propose(
     vault_root: Path, path: str, *, source_kind: str | None, domain: str | None, owner: Event | None = None,
+    candidate_limit: int | None = None, paged: bool = False,
 ) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
     text, source_guard = read_guarded_text(vault_root, absolute)
@@ -694,10 +703,11 @@ def _propose(
         _refuse_unchosen_kind(proposed_kind)
     effective_domain = proposed_domain or current_domain
     destination: str | None = None
+    classification = None
     relocation_required = False
     if proposed_kind is not None or proposed_domain is not None:
         try:
-            _, _, destination = _projection(
+            kind, resolved_domain, destination = _projection(
                 vault_root,
                 rel,
                 taxonomy,
@@ -705,6 +715,7 @@ def _propose(
                 effective_domain,
                 supplied=domain is not None,
             )
+            classification = (kind.key, resolved_domain.key if resolved_domain else None)
             relocation_required = destination != rel
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
@@ -713,10 +724,12 @@ def _propose(
     read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
     inbound = (
         _visible_inbound(vault_root, rel) if owner is None
-        else _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes)
+        else _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
+                                     candidate_limit=candidate_limit)
     )
     outcome = (
-        _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes)
+        _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes,
+                          candidate_limit=candidate_limit, paged_classification=classification if paged else None)
         if destination is not None
         else _ReferrerOutcome()
     )
@@ -727,7 +740,8 @@ def _propose(
         except PathGuardError:
             raise preview_warming() from None
         if (
-            _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes) != inbound
+            _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
+                                     candidate_limit=candidate_limit) != inbound
             or _preview_generation(vault_root) != generation
         ):
             raise preview_warming()
@@ -748,7 +762,7 @@ def _propose(
         refusals=outcome.refusals,
         warnings=() if outcome.mentions_checked else (path_mentions.NOT_CHECKED,),
         preview_digest=(
-            pointer_write.preview_digest({rel: destination}, outcome.repoints)
+            (outcome.paged_digest if paged else pointer_write.preview_digest({rel: destination}, outcome.repoints))
             if destination is not None and destination != rel and not outcome.refusals
             else None
         ),
@@ -797,6 +811,7 @@ class _ReferrerOutcome:
     refusals: tuple[Mapping[str, str], ...] = ()
     #: False when the catalogue could not say which pages cite the source's path in prose.
     mentions_checked: bool = True
+    paged_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -824,10 +839,16 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
 
 def _managed_preview_inbound(
     vault_root: Path, rel: str, owner: Event, *, read_hashes: Mapping[str, str | None] | None = None,
+    candidate_limit: int | None = None,
 ) -> list[InboundLink]:
     from . import find
 
-    inbound = vault.cached_inbound_wikilinks(vault_root, rel, read_hashes=read_hashes)
+    try:
+        inbound = vault.cached_inbound_wikilinks(
+            vault_root, rel, read_hashes=read_hashes, candidate_limit=candidate_limit,
+        )
+    except vault.InboundCandidatesExceeded:
+        raise PreviewNeedsJob() from None
     if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
         if inbound is not None:
             return inbound
@@ -842,6 +863,42 @@ def preview_warming() -> OpError:
         "The source's references are still being checked. Retry the same preview shortly.",
         details={"retry_after_ms": 1000},
     )
+
+
+class PreviewNeedsJob(Exception):
+    """Current evidence exceeds the interactive admission bound."""
+
+
+_PAGED_APPROVAL_PREFIX = "reclassification-report-v1:"
+
+
+class _PagedPlanProof:
+    """Bind the Source and the ordered effects that produce every row of a paged report."""
+
+    def __init__(
+        self, path: str, destination: str, text: str, inbound: Sequence[InboundLink],
+        classification: tuple[str | None, str | None],
+    ) -> None:
+        self.moves = {path: destination}
+        self._hash = hashlib.sha256(_PAGED_APPROVAL_PREFIX.encode())
+        self._add([path, destination, vault.content_hash(text), classification])
+        for hit in sorted((link.path, link.line_number, link.raw_target) for link in inbound):
+            self._add(hit)
+
+    def _add(self, value: Any) -> None:
+        self._hash.update(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+        self._hash.update(b"\n")
+
+    def examine(self, item: move_file_module.InboundRewrite, *, visible: bool, writable: bool) -> None:
+        self._add([
+            item.path, item.guard.expected_content_hash, vault.content_hash(item.content),
+            item.changes, item.mentions, item.left_mentions, item.append_only, item.refusal,
+            pointer_write.preview_digest(self.moves, (item.repoint,)) if item.repoint is not None else None,
+            visible, writable,
+        ])
+
+    def digest(self) -> str:
+        return _PAGED_APPROVAL_PREFIX + self._hash.hexdigest()
 
 
 def _link_form(raw_target: str) -> str:
@@ -862,6 +919,8 @@ def _referrer_outcome(
     *,
     undo: bool = False,
     read_hashes: dict[str, str | None] | None = None,
+    candidate_limit: int | None = None,
+    paged_classification: tuple[str | None, str | None] | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -891,7 +950,10 @@ def _referrer_outcome(
         if read_hashes is None:
             lookup = path_mentions.find_pages(vault_root, targets)
         else:
-            lookup = path_mentions.find_pages(vault_root, targets, current_published=True)
+            lookup = path_mentions.find_pages(vault_root, targets, current_published=True,
+                                             candidate_limit=candidate_limit)
+            if lookup.overflow:
+                raise PreviewNeedsJob()
             if lookup.unsupported:
                 raise OpError(
                     "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
@@ -913,7 +975,12 @@ def _referrer_outcome(
     repoints: list[Any] = []
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
-    plans = move_file_module.plan_inbound_rewrites(
+    proof = (
+        _PagedPlanProof(rel, destination, text, inbound, paged_classification)
+        if paged_classification is not None else None
+    )
+    planner = move_file_module.iter_inbound_rewrites if proof is not None else move_file_module.plan_inbound_rewrites
+    plans = planner(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
         check=foreground_priority.check_cancelled if read_hashes is not None else None,
         resolver_factory=borrow_resolver if read_hashes is not None else None,
@@ -921,7 +988,10 @@ def _referrer_outcome(
     for item in plans:
         if read_hashes is not None:
             read_hashes[item.path] = item.guard.expected_content_hash
-        if not writable_page(item.path):
+        writable = writable_page(item.path)
+        if proof is not None:
+            proof.examine(item, visible=visible is None or visible(item.path), writable=writable)
+        if not writable:
             continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0
         if relocating and item.left_mentions:
@@ -964,6 +1034,7 @@ def _referrer_outcome(
         append_only_unchanged={form: tuple(paths) for form, paths in sorted(unchanged.items())},
         refusals=tuple(refusals),
         mentions_checked=lookup is None or lookup.complete,
+        paged_digest=proof.digest() if proof is not None else None,
     )
 
 
@@ -982,6 +1053,7 @@ def _write_correction(
     lineage_entry: Mapping[str, Any] | None = None,
     undo_lineage: bool = False,
     preview_digest: str | None = None,
+    classification: tuple[str | None, str | None] = (None, None),
 ) -> _Written:
     """Commit a correction and return where the source is and what the relocation rewrote.
 
@@ -993,6 +1065,9 @@ def _write_correction(
     referrers only with the preview's `preview_digest`, and its lineage entry names the
     move's operation, by which an undo finds their pointer-write records and restores each.
     """
+    paged = preview_digest is not None and preview_digest.startswith(_PAGED_APPROVAL_PREFIX)
+    if paged and (destination == rel or not egress.unrestricted_content_access(vault_root, effective_principal())):
+        raise _stale_paged_approval()
     if destination == rel:
         batch_atomic_write(
             [
@@ -1003,12 +1078,24 @@ def _write_correction(
             _validate_prepared_bindings=_validate_prepared_bindings,
         )
         return _Written(rel)
-    outcome = _referrer_outcome(
-        vault_root, rel, text, destination, _visible_inbound(vault_root, rel), undo=undo_lineage
-    )
-    if outcome.refusals:
-        refusal = outcome.refusals[0]
-        raise ReclassifyError(refusal["code"], refusal["reason"])
+    if not paged:
+        outcome = _referrer_outcome(
+            vault_root, rel, text, destination, _visible_inbound(vault_root, rel), undo=undo_lineage
+        )
+        if outcome.refusals:
+            refusal = outcome.refusals[0]
+            raise ReclassifyError(refusal["code"], refusal["reason"])
+
+    def verify_referrers(inbound, named_in, plans, visible, writable, complete):
+        candidates = {hit.path for hit in inbound}.union(named_in)
+        planned = {rel, *(item.path for item in plans)}
+        if not complete or not candidates.issubset(planned):
+            raise _stale_paged_approval()
+        proof = _PagedPlanProof(rel, destination, text, inbound, classification)
+        for item in plans:
+            proof.examine(item, visible=visible is None or visible(item.path), writable=writable(item.path))
+        if proof.digest() != preview_digest:
+            raise _stale_paged_approval()
 
     def bound_transform(current: str) -> str:
         # Refuse stale history instead of overwriting an external metadata edit.
@@ -1028,6 +1115,7 @@ def _write_correction(
             content_transform=bound_transform,
             extra_writes=extra_writes,
             _validate_prepared_bindings=_validate_prepared_bindings,
+            _verify_referrers=verify_referrers if paged else None,
             lineage_entry=lineage_entry,
             undo_lineage=undo_lineage,
             preview_digest=preview_digest,
@@ -1040,6 +1128,13 @@ def _write_correction(
     return _Written(
         result.new_path, result.wikilinks_updated, result.path_mentions_updated,
         tuple(result.warnings), tuple(result.pointer_repointed),
+    )
+
+
+def _stale_paged_approval() -> ReclassifyError:
+    return ReclassifyError(
+        "RECLASSIFICATION_PREVIEW_STALE",
+        "The current correction does not match its paged preview. Preview it again before applying.",
     )
 
 
@@ -1173,6 +1268,7 @@ def reclassify(
         ),
         lineage_entry=entry_extra if changed and destination != rel else None,
         preview_digest=preview_digest,
+        classification=(kind_key, corrected_domain),
     )
     return ReclassifyResult(
         old_path=rel,

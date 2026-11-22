@@ -19,7 +19,7 @@ import datetime as dt
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from functools import partial
@@ -509,6 +509,12 @@ class InboundRewrite:
     refusal: tuple[str, str] | None = None
 
 
+ReferrerProof = Callable[[
+    Sequence[InboundLink], Sequence[str], Sequence[InboundRewrite],
+    Callable[[str], bool] | None, Callable[[str], bool], bool,
+], None]
+
+
 #: The outcome a move preview gives each referrer; the command-surface specification fixes the set.
 REWRITTEN = "rewritten"
 REPOINTED = "pointer-repointed (append-only page)"
@@ -548,6 +554,24 @@ def plan_inbound_rewrites(
     check: Callable[[], None] | None = None,
     resolver_factory: Callable[[], WikilinkResolver] | None = None,
 ) -> list[InboundRewrite]:
+    return list(iter_inbound_rewrites(
+        vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired,
+        undo=undo, check=check, resolver_factory=resolver_factory,
+    ))
+
+
+def iter_inbound_rewrites(
+    vault_root: Path,
+    old_rel: str,
+    new_rel: str,
+    inbound: list[InboundLink],
+    *,
+    named_in: Sequence[str] = (),
+    paired: tuple[str, str] | None = None,
+    undo: bool = False,
+    check: Callable[[], None] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
+) -> Iterator[InboundRewrite]:
     """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
     The move and its preview both read their referrer outcomes from here. A
@@ -562,7 +586,6 @@ def plan_inbound_rewrites(
     """
     from . import page_fields, pointer_write
 
-    plans: list[InboundRewrite] = []
     pages = sorted({hit.path for hit in inbound} | set(named_in))
     moves = path_mentions.renames(
         vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
@@ -653,14 +676,11 @@ def plan_inbound_rewrites(
             new_text, moves, apply=not body_immutable
         )
         left = n_mentions if body_immutable else 0
-        plans.append(
-            InboundRewrite(
-                rel, abs_file, append_tree, n_changed, new_text, guard,
-                mentions=0 if body_immutable else n_mentions, left_mentions=left,
-                repoint=repoint, restored=restored, refusal=refusal,
-            )
+        yield InboundRewrite(
+            rel, abs_file, append_tree, n_changed, new_text, guard,
+            mentions=0 if body_immutable else n_mentions, left_mentions=left,
+            repoint=repoint, restored=restored, refusal=refusal,
         )
-    return plans
 
 
 def move_file(
@@ -676,6 +696,7 @@ def move_file(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _verify_referrers: ReferrerProof | None = None,
     lineage_entry: Mapping[str, Any] | None = None,
     undo_lineage: bool = False,
     preview: bool = False,
@@ -714,7 +735,7 @@ def move_file(
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
         try:
-            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
+            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, _verify_referrers=_verify_referrers, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
         except originals.RetirementUnconfirmed as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
 
@@ -899,6 +920,7 @@ def _move_file_local(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _verify_referrers: ReferrerProof | None = None,
     originals_context: ExitStack,
     mutation_context: ExitStack,
     lineage_entry: Mapping[str, Any] | None = None,
@@ -1330,11 +1352,14 @@ def _move_file_local(
     repoints: list[Any] = []
     restored: list[Any] = []
     refused: list[MoveFileError] = []
-    if update_wikilinks and (inbound or named_in):
-        for item in plan_inbound_rewrites(
-            vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary,
-            undo=undo_lineage,
-        ):
+    if update_wikilinks:
+        plans = plan_inbound_rewrites(
+            vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary, undo=undo_lineage,
+        ) if inbound or named_in else []
+        if _verify_referrers is not None:
+            _verify_referrers(inbound, named_in, plans, visible, writable_page,
+                              mention_lookup is not None and mention_lookup.complete)
+        for item in plans:
             rel = item.path
             shown = visible is None or visible(rel)
             unchanged = KEPT if keeps_lineage else KEPT_DANGLING
@@ -1396,7 +1421,7 @@ def _move_file_local(
     if not validate_only:
         try:
             pointer_write.require_preview(
-                moves, repoints, preview_digest,
+                moves, repoints, digest if _verify_referrers is not None else preview_digest,
                 preview_call=capabilities.active_call_text("manage_memory_file", _preview_call),
             )
         except pointer_write.PointerWriteError as error:

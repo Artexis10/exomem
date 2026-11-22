@@ -189,7 +189,119 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
         watcher.stop()
 
 
-@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning", "policy-release"])
+def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
+    vault, source_schema, monkeypatch,
+):
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+
+    from exomem import file_watcher, freshness, maintenance_jobs, reclassification_preview, server
+    from exomem import vault as vault_module
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 3)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    paths = {f"{KB}/Notes/measurement-{index}.md" for index in range(6)}
+    for path in paths:
+        (vault / path).write_text(f"See [[{source}]].\n", encoding="utf-8")
+    evidence = f"{KB}/Evidence/field-log.md"
+    (vault / evidence).parent.mkdir(parents=True, exist_ok=True)
+    (vault / evidence).write_text(f"# Field log\n\nSee [[{source}]].\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    from exomem import find
+
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    mcp = server.build_server(require_auth=False)
+    started, resume = threading.Event(), threading.Event()
+    build = reclassification_preview._build
+
+    def pause_build(*args, **kwargs):
+        started.set()
+        assert resume.wait(10)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(reclassification_preview, "_build", pause_build)
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            async def call(tool, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            args = {"path": source, "source_kind": "dataset-export"}
+
+            async def preview(**extra):
+                return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
+
+            async def ready(run_id):
+                async with asyncio.timeout(12):
+                    while (status := await preview(preview_run_id=run_id))["state"] == "running":
+                        assert "preview_digest" not in status and "result" not in status
+                        await asyncio.sleep(0.1)
+                assert status["state"] == "completed", status
+                return status
+
+            queued = await preview()
+            assert queued["state"] == "running" and "preview_digest" not in queued, queued
+            run_id = queued["run_id"]
+            assert await asyncio.to_thread(started.wait, 5)
+            try:
+                assert (await preview())["run_id"] == run_id
+                assert (await call("query_records", collection="Meter readings", limit=1))["rows"]
+            finally:
+                resume.set()
+
+            terminal = await ready(run_id)
+            digest = terminal["result"]["preview_digest"]
+            cursor = terminal["next_cursor"]
+            seen = set()
+            while cursor is not None:
+                page = await preview(preview_run_id=run_id, cursor=cursor)
+                seen.update((entry["kind"], entry["path"]) for entry in page["entries"])
+                cursor = page["next_cursor"]
+            assert {("rewritten", path) for path in paths}.issubset(seen)
+            assert ("pointer_repointed", evidence) in seen
+
+            changed = sorted(paths)[-1]
+            changed_path = vault / changed
+            changed_path.write_text(f"See [[{source}]] and [[{source}]].\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[changed_path])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[changed], deleted_rels=[])
+            lexstore.ensure_fresh(vault)
+            refused = await call("manage_memory_file", operation="reclassify", **args,
+                                 reason="Correct the Source kind", preview_digest=digest)
+            assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
+            assert (vault / source).is_file() and source in (vault / evidence).read_text()
+
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            refreshed = await ready((await preview())["run_id"])
+            corrected = await call("manage_memory_file", operation="reclassify", **args,
+                                   reason="Correct the Source kind", preview_digest=refreshed["result"]["preview_digest"])
+            destination = refreshed["result"]["destination"]
+            assert corrected.get("path") == destination, corrected
+            assert (vault / destination).is_file() and f"[[{destination.removesuffix('.md')}]]" in (vault / evidence).read_text()
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        resume.set()
+        stop.set()
+        maintenance_jobs.stop_all(vault)
+
+
+@pytest.mark.parametrize("hold_at", ["after-verification", "after-planning", "policy-release", "receipt-release"])
 def test_rest_preview_retries_while_verified_session_authority_is_busy(
     vault, source_schema, monkeypatch, hold_at,
 ):
@@ -207,11 +319,14 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
         authorization_session_lifecycle,
         egress,
         principal,
+        receipts,
         store,
     )
 
     source = _capture(vault, source_schema, title="Field measurements").path
     _configure_v4_authority(vault, vault.parent / "custody", monkeypatch)
+    if hold_at == "receipt-release":
+        (vault / KB / "Notes" / "field-log.md").write_text(f"See [[{source}]].\n", encoding="utf-8")
     for scope, root in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
             (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
@@ -229,10 +344,15 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
     stop = threading.Event()
     locked, release = threading.Event(), threading.Event()
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+
     def hold_authority():
-        with writer_lease.active_manager().reserved_identity_guard(
-            vault, domains=("governance-store",), exclusive=False, advance_generation=False,
-        ):
+        lock = (
+            receipts._receipt_lock(vault) if hold_at == "receipt-release"
+            else writer_lease.active_manager().reserved_identity_guard(
+                vault, domains=("governance-store",), exclusive=False, advance_generation=False,
+            )
+        )
+        with lock:
             locked.set()
             assert release.wait(10)
 
@@ -242,6 +362,8 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
         target, name = authorization_request, "verify_authorization_context"
     elif hold_at == "policy-release":
         target, name = egress, "_postfilter"
+    elif hold_at == "receipt-release":
+        target, name = egress, "emit_boundary_receipt"
     else:
         target, name = rc, "_propose"
     operation = getattr(target, name)
@@ -251,15 +373,17 @@ def test_rest_preview_retries_while_verified_session_authority_is_busy(
             holder.start()
             assert locked.wait(3)
 
+    hold_before = hold_at in ("policy-release", "receipt-release")
+
     def interleave_hold(*args, **kwargs):
-        if hold_at == "policy-release":
+        if hold_before:
             start_holder()
         result = operation(*args, **kwargs)
-        if hold_at != "policy-release":
+        if not hold_before:
             start_holder()
         return result
 
-    # Hold the actual governance identity domain across the authority recheck and response.
+    # Keep a real governance or receipt lock held through the response.
     monkeypatch.setattr(target, name, interleave_hold)
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
     body = {"operation": "propose-reclassification", "path": source, "source_kind": "dataset-export"}

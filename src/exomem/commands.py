@@ -14347,6 +14347,8 @@ def op_propose_reclassification(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Report what correcting one source would do, without writing anything.
 
@@ -14363,13 +14365,14 @@ def op_propose_reclassification(
     IS means reading it — a plausible guess presented for approval is how a
     fallback becomes permanent.
     """
-    from . import reclassify_source as reclassify_module
+    from . import reclassification_preview, reclassify_source
 
     try:
-        return reclassify_module.propose(
-            vault_root, path, source_kind=source_kind, domain=domain
-        ).as_dict()
-    except reclassify_module.ReclassifyError as error:
+        return reclassification_preview.report(
+            vault_root, path, source_kind=source_kind, domain=domain,
+            preview_run_id=preview_run_id, cursor=cursor,
+        )
+    except reclassify_source.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
 
 
@@ -14432,6 +14435,8 @@ def op_manage_memory_file(
     relation_review_reason: str | None = None,
     promotion_reason: str | None = None,
     preview_digest: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
@@ -14460,6 +14465,8 @@ def op_manage_memory_file(
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
         preview_digest: A move or reclassify that repoints Source or Evidence pages passes
             its preview's `preview_digest`.
+        preview_run_id: Follow a background reclassification preview for the same Source.
+        cursor: Read the next page of that preview's completed reference report.
     """
     creation_review_requested = any(
         value is not None
@@ -14557,7 +14564,8 @@ def op_manage_memory_file(
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
         if operation == "propose-reclassification":
             return op_propose_reclassification(
-                vault_root, path=target, source_kind=source_kind, domain=domain
+                vault_root, path=target, source_kind=source_kind, domain=domain,
+                preview_run_id=preview_run_id, cursor=cursor,
             )
         if operation == "revert-reclassification":
             return op_revert_reclassification(vault_root, path=target, reason=reason)

@@ -53,6 +53,10 @@ The read-only mode SHALL accept a caller-supplied kind and domain and preview th
 
 A served file-mode preview for an unrestricted owner with a live observer ready for background recovery SHALL use complete inbound evidence and check the prose candidates available to the shared rewrite planner. The prose query SHALL prove current published rows and read those rows on one deadline-bound catalogue transaction. The observer settles pending changes or restores evidence in the background. A managed preview that cannot establish completeness or finish within its request deadline SHALL return `RECLASSIFICATION_PREVIEW_WARMING` with a retry delay. A search backend that cannot provide this proof SHALL return `RECLASSIFICATION_PREVIEW_UNAVAILABLE` without a retry delay. Both refusals SHALL omit reference counts and the preview digest. Evidence of zero references counts as complete.
 
+When complete candidate evidence exceeds the interactive work or response bound, the managed preview SHALL start or rejoin a read-only job and return its handle. The completed receipt SHALL expose the full report through bounded pages. The job SHALL release a digest only after checking the complete report. It SHALL verify the requesting owner's current authorization and connector access before releasing any report data. Partial, failed, or interrupted work SHALL expose no report or digest.
+
+The paged report's approval digest SHALL bind all referrer outcomes and the pointer-write proof. Before applying a correction with that digest, the writer SHALL verify the same report against the current plan. A changed report SHALL refuse the correction before any write.
+
 Restricted callers, and callers before a live observer is ready or without a live observer, retain the synchronous file preview. Its latency and behavior under concurrent file changes are unverified by this change.
 
 When no values are supplied, evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
@@ -76,6 +80,14 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 - **THEN** the response asks the caller to retry the same preview after the reported delay
 - **AND** the response omits the reference count and approval digest
 - **AND** a retry with complete evidence returns the normal preview
+
+#### Scenario: The report fills several pages
+
+- **WHEN** a managed owner previews a Source whose complete reference report exceeds the interactive bound
+- **THEN** the response gives a job handle without an approval digest
+- **AND** a concurrent Records read can finish while the job is running
+- **AND** the completed job reports every outcome through bounded pages under one approval digest
+- **AND** a change to a later referrer makes that digest stale before apply writes anything
 
 #### Scenario: Evidence accompanies a proposed value
 

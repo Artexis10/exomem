@@ -8476,6 +8476,10 @@ class InboundLink:
         }
 
 
+class InboundCandidatesExceeded(Exception):
+    """The current inbound index holds more candidates than the caller can process."""
+
+
 # ---------------- inbound-link index ----------------
 # One full-vault read pass builds normalized-target -> entry buckets plus a
 # basename count map; `find_inbound_wikilinks` becomes a lookup with output
@@ -9089,16 +9093,31 @@ def _inbound_target_forms(target_rel_path: str) -> tuple[str, str, str, str]:
     return target, full, managed_relative(full), target.rsplit("/", 1)[-1]
 
 
-def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _InboundIndexData:
+def _inbound_candidate_keys(
+    full: str, stripped: str, basename: str, *, basename_unique: bool,
+) -> tuple[str, ...]:
+    keys = (full,) if stripped == full else (full, stripped)
+    if basename_unique and basename not in keys:
+        return (*keys, basename)
+    return keys
+
+
+def _snapshot_inbound(
+    data: _InboundIndexData, target_rel_path: str, *, owner_keys: tuple[str, ...] | None = None,
+) -> _InboundIndexData:
     """Copy only this target's evidence. The caller holds `_INBOUND_INDEX_LOCK`.
 
     Visibility checks and ordering then run on the copy, outside the lock.
     """
     _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+    keys = (full, stripped, basename) if owner_keys is None else owner_keys
     return _InboundIndexData(
-        buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
+        buckets={key: list(data.buckets.get(key, ())) for key in keys},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
-        sources={rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())},
+        sources=(
+            {rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())}
+            if owner_keys is None else {}
+        ),
     )
 
 
@@ -9497,6 +9516,7 @@ def cached_inbound_wikilinks(
     *,
     visible: Callable[[str], bool] | None = None,
     read_hashes: Mapping[str, str | None] | None = None,
+    candidate_limit: int | None = None,
 ) -> list[InboundLink] | None:
     """Borrow complete current evidence without a walk, build or cache wait.
 
@@ -9508,10 +9528,16 @@ def cached_inbound_wikilinks(
 
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
+
+    A candidate limit applies to an unrestricted file-mode read. Current
+    evidence exceeding the limit raises InboundCandidatesExceeded.
     """
-    stored = _store_inbound(vault_root, (target_rel_path,), visible)
-    if stored is not None:
-        return stored[target_rel_path]
+    if candidate_limit is None:
+        stored = _store_inbound(vault_root, (target_rel_path,), visible)
+        if stored is not None:
+            return stored[target_rel_path]
+    elif visible is not None or _store_inbound_mode(vault_root):
+        return None
     from .governance import egress
     from .published_admission import admission_of
 
@@ -9523,7 +9549,7 @@ def cached_inbound_wikilinks(
     state.demanded.set()
 
     def registry_state(*, pending: bool = False) -> tuple[str, int | None, int | None] | None:
-        if read_hashes is not None:
+        if read_hashes is not None or candidate_limit is not None:
             sample = freshness.preview_reference_generation(vault_root)
             if sample is None:
                 return None
@@ -9554,7 +9580,16 @@ def cached_inbound_wikilinks(
         ):
             return None
         cache_generation = state.generation
-        snapshot = _snapshot_inbound(cached[1], target_rel_path)
+        data = cached[1]
+        owner_keys = None
+        exceeded = False
+        if candidate_limit is not None:
+            _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+            owner_keys = _inbound_candidate_keys(
+                full, stripped, basename, basename_unique=data.stem_counts.get(basename) == 1,
+            )
+            exceeded = sum(len(data.buckets.get(key, ())) for key in owner_keys) > max(0, candidate_limit)
+        snapshot = None if exceeded else _snapshot_inbound(data, target_rel_path, owner_keys=owner_keys)
     finally:
         _INBOUND_INDEX_LOCK.release()
 
@@ -9629,7 +9664,7 @@ def cached_inbound_wikilinks(
 
     if not current():
         return None
-    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading)
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading) if snapshot is not None else None
     if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9644,6 +9679,8 @@ def cached_inbound_wikilinks(
             return None
     finally:
         _INBOUND_INDEX_LOCK.release()
+    if exceeded:
+        raise InboundCandidatesExceeded()
     return result
 
 
@@ -9669,18 +9706,10 @@ def _select_inbound_wikilinks(
         stem_count += 1
     basename_unique = stem_count == 1
 
-    candidates: list[_InboundEntry] = []
-    candidates.extend(data.buckets.get(target_full, ()))
-    if target_stripped != target_full:
-        candidates.extend(data.buckets.get(target_stripped, ()))
-    # The basename bucket only contributes when it isn't already one of the
-    # path-form buckets (e.g. a KB-root file where stripped == basename).
-    if (
-        basename_unique
-        and "/" not in target_basename
-        and target_basename not in (target_full, target_stripped)
-    ):
-        candidates.extend(data.buckets.get(target_basename, ()))
+    keys = _inbound_candidate_keys(
+        target_full, target_stripped, target_basename, basename_unique=basename_unique,
+    )
+    candidates = [entry for key in keys for entry in data.buckets.get(key, ())]
 
     self_keys = (target_full, target_stripped)
     return [

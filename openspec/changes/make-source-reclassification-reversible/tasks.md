@@ -51,6 +51,13 @@ A move of raw bytes beside an unpaired card left the card and its referrers nami
   - "path mentions were not checked" appeared on 2 of the 4 operations, because the search index was not current.
   - Still open, so this task stays unchecked: on that vault the audit category stops at its 50 s budget with coverage `unknown`, and it takes no scope. The vault-wide finding count before and after is therefore unknown.
 
+## 6. Bounded managed preview and paged approval
+
+- [ ] 6.1 Prove current inbound links and published prose candidates on the request deadline. Leave incomplete evidence to the existing recovery workers.
+- [ ] 6.2 Send proven overflow to the maintenance job runner. Release the complete summary and bounded report pages under the same live owner authority.
+- [ ] 6.3 Bind the approval digest to the complete report. Refuse stale approval before the first write and verify a fresh approval through the normal apply operation.
+- [ ] 6.4 Exercise a 20,000-page vault with 10,000 referrers to one Source. Verify all report pages and a concurrent Records read. Obtain exact independent review, required CI, and installed proof.
+
 ## Phase 1 released delivery evidence
 
 [PR #1632](https://github.com/Artexis10/exomem/pull/1632) merged as

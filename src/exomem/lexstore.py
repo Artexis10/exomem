@@ -1675,6 +1675,7 @@ class CatalogReadiness:
     ``status`` is one of ``available`` (this exact projection is present),
     ``stale`` (well-formed but not yet at the requested freshness, or missing),
     ``unsupported`` (the ``python`` kill switch retired the catalog),
+    ``overflow`` (current evidence exceeds the caller's candidate allowance),
     ``transient_failure`` (a passing lock/interrupt), ``deadline`` (the request budget
     stopped the query, see ``stopping_at_budget``), ``definitions_unavailable``
     (an admitted page's selected definitions are missing, so dependent unit
@@ -4183,7 +4184,7 @@ def search_substrings_result(
 
 
 def search_current_published_substrings(
-    vault_root: Path, queries: Sequence[str]
+    vault_root: Path, queries: Sequence[str], *, candidate_limit: int | None = None,
 ) -> CatalogQueryResult[dict[str, list[str]]]:
     """Search one already-published file catalogue against a live KB checkpoint."""
     from . import freshness, state_migration
@@ -4199,7 +4200,9 @@ def search_current_published_substrings(
     token = request_budget.set_current(budget)
     try:
         with request_budget.checking(check), stopping_at_budget() as stop:
-            result = get_store(vault_root)._search_current_published_substrings(queries, stop)
+            result = get_store(vault_root)._search_current_published_substrings(
+                queries, stop, candidate_limit=candidate_limit,
+            )
             # These catalogue verdicts prove a replacement is needed. The
             # transaction has closed before the worker can take publication.
             if result.readiness.status in ("missing", "incompatible", "fatal_failure"):
@@ -13636,7 +13639,7 @@ class LexicalStore:
         )
 
     def _search_current_published_substrings(
-        self, queries: Sequence[str], stop: BudgetStop
+        self, queries: Sequence[str], stop: BudgetStop, *, candidate_limit: int | None = None,
     ) -> CatalogQueryResult[dict[str, list[str]]]:
         from . import freshness, state_migration
         from .cli_ops import OpError
@@ -13682,14 +13685,26 @@ class LexicalStore:
                         return stale
                 with call_spans.span("lexical.query"):
                     tokens = {query: query.split() for query in queries}
-                    value = {
-                        query: self._matched_substring_paths(conn, words, "kb") if words else []
-                        for query, words in tokens.items()
-                    }
+                    # One extra row establishes overflow. All terms share
+                    # the allowance, including pages that match several terms.
+                    remaining = None if candidate_limit is None else max(0, candidate_limit) + 1
+                    value: dict[str, list[str]] = {}
+                    for query, words in tokens.items():
+                        matches = (
+                            self._matched_substring_paths(conn, words, "kb", limit=remaining)
+                            if words else []
+                        )
+                        value[query] = matches
+                        if remaining is not None:
+                            remaining -= len(matches)
+                            if remaining == 0:
+                                break
                 if state_migration.vault_store_recorded(self.vault_root):
                     return unsupported
                 if freshness.cached_live_recall_checkpoint(self.vault_root, "kb") != target:
                     return stale
+            if remaining == 0:
+                return CatalogQueryResult(None, CatalogReadiness("overflow", False, backend_name))
             return CatalogQueryResult(value, CatalogReadiness("available", True, backend_name))
         except (_CatalogueDeadline, request_budget.ReadBudgetExhausted):
             return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend_name))
@@ -13728,14 +13743,16 @@ class LexicalStore:
 
     def _matched_substring_paths(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str,
-        allowed_paths: Set[str] | None = None,
+        allowed_paths: Set[str] | None = None, *, limit: int | None = None,
     ) -> list[str]:
         """Read exact matches in batches without a SQLite sort."""
         clauses, params = self._substring_predicate(tokens, scope)
-        rows = conn.execute(
-            "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
-            + " AND ".join(clauses), params,
-        )
+        sql = "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
+        sql += " AND ".join(clauses)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = conn.execute(sql, params)
         matches: list[str] = []
         try:
             while batch := rows.fetchmany(request_budget.CHECKPOINT_EVERY):

@@ -36,6 +36,7 @@ from exomem import (
     memory_refs,
     mutation_lock,
     query_data,
+    request_budget,
     writer_lease,
 )
 from exomem import server as server_module
@@ -56,6 +57,104 @@ def server(vault, monkeypatch, tmp_path):
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
     yield server_module.build_server(require_auth=False)
     writer_lease.reset_managers_for_tests()
+
+
+def test_a_source_preview_only_releases_its_complete_result_to_its_request(server, vault):
+    started, release = threading.Event(), threading.Event()
+    outcomes = [("rewritten", f"Notes/page-{i:03}.md", None) for i in range(225)]
+    outcomes[0] = ("refused", outcomes[0][1], "é" * 13_000)
+    outcomes[1] = ("refused", outcomes[1][1], "é" * 8_000)
+    digest = "preview-digest"
+
+    def build(_stop):
+        started.set()
+        assert release.wait(_DEADLINE_SECONDS)
+        return {"preview_digest": digest}, outcomes
+
+    identity = {"binding": "owner-binding", "request_key": "source-request"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert started.wait(_DEADLINE_SECONDS)
+    run_id = handle["run_id"]
+    status_args = {**identity, "run_id": run_id}
+    try:
+        assert handle == {"run_id": run_id, "state": "running"}
+        assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == handle
+        assert maintenance_jobs.source_preview_status(vault, **status_args, cursor="0") == handle
+        for different in ({"binding": "other-owner"}, {"request_key": "other-source"}):
+            with pytest.raises(OpError, match="No Source preview matches this request") as refusal:
+                maintenance_jobs.source_preview_status(vault, **{**status_args, **different})
+            assert refusal.value.code == "NOT_FOUND"
+        with principal_module.library_scope():
+            assert maintenance_jobs.job_list(vault) == {"jobs": []}
+            with pytest.raises(OpError) as refusal:
+                maintenance_jobs.job_status(vault, run_id)
+            assert refusal.value.code == "NOT_FOUND"
+            with pytest.raises(OpError) as refusal:
+                maintenance_jobs.request_cancel(vault, run_id, "Stop this job")
+            assert refusal.value.code == "NOT_FOUND"
+            ordinary = maintenance_jobs.start_leaf(
+                SimpleNamespace(name="maintain_memory"), (vault,), {"mode": "backfill-ids"},
+            )
+            with pytest.raises(OpError) as refusal:
+                ordinary()
+            assert refusal.value.code == "MAINTENANCE_JOB_ACTIVE"
+            assert run_id not in str(refusal.value.details)
+    finally:
+        release.set()
+
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    while (status := maintenance_jobs.source_preview_status(vault, **status_args))["state"] == "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert status == {"run_id": run_id, "state": "completed", "result": {"preview_digest": digest}, "next_cursor": "0"}
+    assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == {
+        "run_id": run_id, "state": "completed",
+    }
+    received = []
+    cursor = status["next_cursor"]
+    while cursor is not None:
+        page = maintenance_jobs.source_preview_status(vault, **status_args, cursor=cursor)
+        assert page.keys() == {"run_id", "state", "entries", "next_cursor"}
+        assert len(page["entries"]) <= 128
+        encoded = json.dumps(page["entries"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        assert len(encoded) <= query_data.MAX_RESPONSE_BYTES // 2 + 1
+        received.extend((entry["kind"], entry["path"], entry.get("value")) for entry in page["entries"])
+        cursor = page["next_cursor"]
+    assert received == outcomes
+
+
+def test_an_interrupted_source_preview_never_publishes_its_staged_result(server, vault):
+    staging = threading.Event()
+
+    def build(stop):
+        def entries():
+            yield "rewritten", "Notes/later.md", None
+            staging.set()
+            assert stop.wait(_DEADLINE_SECONDS)
+            yield "rewritten", "Notes/last.md", None
+
+        return {"preview_digest": "unpublished"}, entries()
+
+    identity = {"binding": "owner-binding", "request_key": "source-request"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert staging.wait(_DEADLINE_SECONDS)
+    maintenance_jobs.stop_all(vault, wait=_DEADLINE_SECONDS)
+    assert maintenance_jobs.source_preview_status(vault, **identity, run_id=handle["run_id"], cursor="0") == {
+        "run_id": handle["run_id"], "state": "interrupted",
+    }
+
+
+def test_a_source_preview_claim_does_not_wait_for_a_busy_job_store(server, vault):
+    def unexpected_build(_stop):
+        pytest.fail("the busy store must leave the worker unstarted")
+
+    with maintenance_jobs._store(vault, create=True) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        with request_budget.checking(request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5))):
+            with pytest.raises(request_budget.ReadBudgetExhausted):
+                maintenance_jobs.start_source_preview(
+                    vault, binding="owner-binding", request_key="source-request", build=unexpected_build,
+                )
 
 
 def _session(server, scenario):

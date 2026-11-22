@@ -999,6 +999,11 @@ def _receipt_lock(vault_root: Path):
     machine writer-state root and keeps the same canonical identity/path as the
     former ``VaultMutationCoordinator.hold`` implementation.
     """
+    check = request_budget.current_checkpoint()
+    if check is not None and not check.bound_disclosure:
+        check = None
+    if check is not None:
+        check()
     root = Path(vault_root).resolve()
     state_root = LeaseConfig.from_env().state_dir
     try:
@@ -1013,8 +1018,16 @@ def _receipt_lock(vault_root: Path):
     with _RECEIPT_LOCAL_LOCKS_GUARD:
         local_lock = _RECEIPT_LOCAL_LOCKS.setdefault(lock_path, threading.RLock())
     deadline = time.monotonic() + _RECEIPT_LOCK_TIMEOUT_SECONDS
-    if not local_lock.acquire(timeout=_RECEIPT_LOCK_TIMEOUT_SECONDS):
+    if check is not None:
+        deadline = min(deadline, check.budget.deadline)
+
+    def timed_out():
+        if check is not None:
+            check()
         raise ReceiptError("receipt append lock timed out")
+
+    if not local_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        timed_out()
     depths = getattr(_RECEIPT_LOCK_DEPTH, "depths", None)
     if depths is None:
         depths = {}
@@ -1022,6 +1035,8 @@ def _receipt_lock(vault_root: Path):
     if depths.get(lock_path, 0):
         depths[lock_path] += 1
         try:
+            if check is not None:
+                check()
             yield
         finally:
             depths[lock_path] -= 1
@@ -1043,7 +1058,7 @@ def _receipt_lock(vault_root: Path):
             while not _try_os_lock(handle):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ReceiptError("receipt append lock timed out")
+                    timed_out()
                 time.sleep(min(0.01, remaining))
             locked = True
         except OSError as exc:
@@ -1059,6 +1074,8 @@ def _receipt_lock(vault_root: Path):
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
         depths[lock_path] = 1
+        if check is not None:
+            check()
         yield
     finally:
         if handle is not None:
