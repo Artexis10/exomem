@@ -502,10 +502,15 @@ def _outcome_for_decision(
         if ref is not None:
             value["ref"] = ref
     else:
-        raw = _receipt_bytes(vault_root, rel_path)
-        if raw is not None:
-            value["content_hash"] = hashlib.sha256(raw).hexdigest()
-            value["size"] = len(raw)
+        held = _held_fast_evidence(vault_root, rel_path)
+        if held is not None:
+            value["content_hash"] = held.sha256
+            value["size"] = held.size
+        else:
+            raw = _receipt_bytes(vault_root, rel_path)
+            if raw is not None:
+                value["content_hash"] = hashlib.sha256(raw).hexdigest()
+                value["size"] = len(raw)
     _record_outcome(value)
 
 
@@ -2138,6 +2143,13 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
                     artifact_copy: reserved_paths.GenericFileCopy | None = None,
                     on_unavailable: Callable[[], None] | None = None) -> bool:
     """Apply current container dependencies and independent content floors to a real path."""
+    if snapshot is None and artifact_copy is None and not derived:
+        held = _held_fast_evidence(vault_root, path)
+        if held is not None:
+            # A held proof means these exact bytes have no container binding; its scopes replay
+            # against the live ceiling so a connector change still narrows the row.
+            return (connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))
+                    and raw_protection.permits(vault_root, path, who))
     return (_container_parents_permit(vault_root, path, who, snapshot=snapshot, artifact_copy=artifact_copy,
                                       on_unavailable=on_unavailable)
             and _independent_content_permits(vault_root, path, who, snapshot=snapshot, derived=derived, artifact_copy=artifact_copy))
@@ -2457,18 +2469,23 @@ def _decide_path(
         return None
 
     raw: bytes | None = None
+    held = _held_fast_evidence(vault_root, rel_path) if page_snapshot is None else None
     live_content_hash: str | None = artifact_copy.sha256 if artifact_copy is not None else None
     if _is_markdown_path(rel_path) and artifact_copy is None:
-        try:
-            raw = _page_bytes(vault_root, rel_path) if page_snapshot is None else page_snapshot
-        except OSError:
-            return None
-        live_content_hash = hashlib.sha256(raw).hexdigest()
+        if held is not None:
+            live_content_hash = held.sha256
+        else:
+            try:
+                raw = _page_bytes(vault_root, rel_path) if page_snapshot is None else page_snapshot
+            except OSError:
+                return None
+            live_content_hash = hashlib.sha256(raw).hexdigest()
         note_checked_hash(rel_path, live_content_hash)
         if expected_content_hash is not None and expected_content_hash != live_content_hash:
             return None
-    if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who,
-                                   purpose=purpose, content=raw, artifact_copy=artifact_copy):
+    if held is None and not container_parent_allows(
+            vault_root, rel_path, policy=policy, principal=who,
+            purpose=purpose, content=raw, artifact_copy=artifact_copy):
         return Decision(DISCLOSURE_MIN)
     canonical = projection_decision(
         vault_root, rel_path, policy=policy, audience=audience, purpose=purpose,
@@ -2498,27 +2515,30 @@ def _decide_path(
 
         # A memo hit still yields before reading current registry authority.
         checkpoint(vault_root)
-        try:
-            scope_ids = membership_module.cached_snapshot_membership(
-                vault_root, find_corpus.page_relative_path(full_path, vault_root), policy,
-                content_hash=live_content_hash or "",
-            )
-            if scope_ids is None:
-                page = find_corpus._parse_page_after_checkpoint(
-                    full_path, mtime, vault_root, content=raw
+        if held is not None:
+            scope_ids = held.scopes[0]
+        else:
+            try:
+                scope_ids = membership_module.cached_snapshot_membership(
+                    vault_root, find_corpus.page_relative_path(full_path, vault_root), policy,
+                    content_hash=live_content_hash or "",
                 )
-                if page is None:
-                    # Undecodable Markdown retains the ordinary read refusal.
-                    return None
-                scope_ids = membership_module.evaluate_snapshot(
-                    page, policy, content_hash=live_content_hash or ""
-                )
-        except membership_module.MembershipUnresolved:
-            # Same fail-closed signal as the stat failure above: no decision,
-            # so every consumer withholds. Reached on a TOCTOU race — the page
-            # was stattable one line ago and is not now — which is exactly
-            # when guessing is least defensible.
-            return None
+                if scope_ids is None:
+                    page = find_corpus._parse_page_after_checkpoint(
+                        full_path, mtime, vault_root, content=raw
+                    )
+                    if page is None:
+                        # Undecodable Markdown retains the ordinary read refusal.
+                        return None
+                    scope_ids = membership_module.evaluate_snapshot(
+                        page, policy, content_hash=live_content_hash or ""
+                    )
+            except membership_module.MembershipUnresolved:
+                # Same fail-closed signal as the stat failure above: no decision,
+                # so every consumer withholds. Reached on a TOCTOU race — the page
+                # was stattable one line ago and is not now — which is exactly
+                # when guessing is least defensible.
+                return None
     if live_content_hash is None and authorization_context is not None:
         try:
             live_content_hash = hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()
@@ -6199,6 +6219,69 @@ def exact_report_paths(paths: frozenset[str]) -> Iterator[None]:
         yield
     finally:
         _EXACT_REPORT_PATHS.reset(token)
+
+
+class _HeldEvidenceScope:
+    """One request's held release proofs plus its lazily computed release identity."""
+
+    __slots__ = ("evidence", "identity", "identity_ready")
+
+    def __init__(self, evidence: Mapping[str, Any]) -> None:
+        self.evidence = evidence
+        self.identity: str | None = None
+        self.identity_ready = False
+
+
+_HELD_REPORT_EVIDENCE: ContextVar[_HeldEvidenceScope | None] = ContextVar(
+    "held_report_evidence", default=None,
+)
+
+
+@contextmanager
+def held_report_evidence(evidence: Mapping[str, Any]) -> Iterator[None]:
+    """The release proofs a completed preview job held privately for its report rows."""
+    token = _HELD_REPORT_EVIDENCE.set(_HeldEvidenceScope(evidence))
+    try:
+        yield
+    finally:
+        _HELD_REPORT_EVIDENCE.reset(token)
+
+
+def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
+    """The held release proof for ``rel_path`` while every terminal dependency still matches.
+
+    Held evidence is accepted only for an exact report row whose file is byte-identical to the one
+    the job proved: not on native Windows, not tombstoned now, the same stat witness as the job
+    read, and a release-admission identity recomputed under the current policy, principal, purpose
+    and tombstones that equals the one held. Anything else — and any error — means None, which
+    sends the row down the ordinary full-proof path.
+    """
+    try:
+        scope = _HELD_REPORT_EVIDENCE.get()
+        if scope is None or rel_path not in _EXACT_REPORT_PATHS.get():
+            return None
+        held = scope.evidence.get(rel_path)
+        if held is None or receipts._is_windows() or len(held.scopes) != 1:
+            return None
+        if lifecycle.is_tombstoned(vault_root, rel_path):
+            return None
+        info = os.stat(Path(vault_root) / rel_path)
+        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != tuple(held.witness):
+            return None
+        if not scope.identity_ready:
+            scope.identity_ready = True
+            compiled = policy_module.load(Path(vault_root))
+            who = effective_principal()
+            scope.identity = _frozen_release_identity(_release_admission_identity(
+                Path(vault_root), compiled, who,
+                _declared_purpose(vault_root, who, None),
+                _grants_hash(compiled), lifecycle.tombstoned_paths(Path(vault_root)),
+            ))
+        if scope.identity is None or scope.identity != held.identity:
+            return None
+        return held
+    except Exception:  # noqa: BLE001 - any unprovable dependency takes the full path
+        return None
 
 
 def _withheld_cross_check(

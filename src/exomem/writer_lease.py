@@ -9075,6 +9075,7 @@ def invoke_command(
         disclosure_boundary,
         emit_boundary_receipt,
         exact_report_paths,
+        held_report_evidence,
         is_vault_root,
         postfilter,
         postfilter_error,
@@ -9332,6 +9333,8 @@ def invoke_command(
                 with (
                     call_spans.span("command.terminal_filter"), published_admission.deciding(own=True),
                     exact_report_paths(retained_report.exact_paths) if retained_report is not None else nullcontext(),
+                    held_report_evidence(retained_report.held_evidence)
+                    if retained_report is not None else nullcontext(),
                 ):
                     result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
                                         checkpoint=checkpoint, reprove_aggregate=audit_checkpoint is not None)
