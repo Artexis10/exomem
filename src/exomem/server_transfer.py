@@ -353,7 +353,10 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             return None
         _require_source_origin(vault_root, record)
         recovered = capture.committed_upload_receipt(vault_root, size=record["length"])
-        return None if recovered is None else _source_upload_receipt(vault_root, recovered)
+        if recovered is None:
+            return None
+        # A recovered receipt replays an earlier commit, so this attempt cannot know its derived work.
+        return {**_source_upload_receipt(vault_root, recovered), "derived_sync": "pending"}
 
     def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
         def confirm_origin() -> None:

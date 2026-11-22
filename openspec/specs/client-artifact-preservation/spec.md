@@ -402,7 +402,16 @@ When a Source request to `upload_files` specifies `size_bytes` above the one-sho
 
 ### Requirement: A resumable Source preserves the upload's issuing authority
 
-A resumable Source handoff SHALL bind the expected digest, byte limit, owner, issuing MCP login and deployment. One ticket SHALL open at most one session. The session SHALL accept only the bound digest and permitted Source metadata. The service SHALL recheck the current owner binding and issuing login before session operations and at canonical publication. Refreshing an access token SHALL preserve authority while its login remains active. An unreadable authority SHALL leave an unspent ticket available for retry.
+A resumable Source handoff SHALL bind the expected digest, byte limit, owner, issuing MCP login and deployment. One ticket SHALL open at most one session. The session SHALL accept only the bound digest and permitted Source metadata.
+
+#### Scenario: A client replays the ticket or sends a different digest
+
+- **WHEN** a client tries to reuse the ticket or sends a declaration or bytes with another digest
+- **THEN** it cannot open a second session or publish a different Source
+
+### Requirement: A resumable Source rechecks its issuing authority until publication
+
+The service SHALL recheck the current owner binding and issuing login before session operations and at canonical publication. Refreshing an access token SHALL preserve authority while its login remains active. An unreadable authority SHALL leave an unspent ticket available for retry.
 
 #### Scenario: A transfer stops before the final byte
 
@@ -413,11 +422,6 @@ A resumable Source handoff SHALL bind the expected digest, byte limit, owner, is
 
 - **WHEN** the login has closed or the account has lost its owner binding by the final authorization check
 - **THEN** the listener refuses session access and does not publish any pending Source
-
-#### Scenario: A client replays the ticket or sends a different digest
-
-- **WHEN** a client tries to reuse the ticket or sends a declaration or bytes with another digest
-- **THEN** it cannot open a second session or publish a different Source
 
 ### Requirement: A verified resumable Source enters custody once
 
