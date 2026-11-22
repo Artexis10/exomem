@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.198.0](https://github.com/Artexis10/exomem/compare/v0.197.0...v0.198.0) (2026-11-22)
+
+
+### Features
+
+* **media-replicas:** verify stored replicas on a cycle, quarantine and copy again ([#2978](https://github.com/Artexis10/exomem/issues/2978)) ([c91290c](https://github.com/Artexis10/exomem/commit/c91290ce3e541071c1097c540c92333823311def))
+* **media:** persist governed previews ([#3016](https://github.com/Artexis10/exomem/issues/3016)) ([14f3f3d](https://github.com/Artexis10/exomem/commit/14f3f3db648324d395fca019f128cedaddde49c0))
+* **records:** retract a store-backed row from current state, keeping its history (store schema 19) ([#2988](https://github.com/Artexis10/exomem/issues/2988)) ([d9c3727](https://github.com/Artexis10/exomem/commit/d9c37275500446f808997c8b82d397b1541ce316))
+
+
+### Performance
+
+* **governance:** avoid resolving page version IDs as file paths ([#3019](https://github.com/Artexis10/exomem/issues/3019)) ([cb3f040](https://github.com/Artexis10/exomem/commit/cb3f0401da43d8dd657c89673b72fabc9012d4d2))
+
 ## [0.197.0](https://github.com/Artexis10/exomem/compare/v0.196.0...v0.197.0) (2026-11-22)
 
 
