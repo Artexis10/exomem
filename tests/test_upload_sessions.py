@@ -290,7 +290,9 @@ def test_a_source_session_replays_its_capture_after_the_upload_acknowledgement_i
     first = server_transfer.commit_session(vault, session.part, session.record)
     with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
         state = _settled(client, f"/upload/sessions/{session.id}", secret)
-    assert state["receipt"] == first
+    assert {**state["receipt"], "derived_sync": None} == {**first, "derived_sync": None}
+    # The replay ran no derived fan-out of its own, so it cannot report one as completed.
+    assert (first["derived_sync"], state["receipt"]["derived_sync"]) == ("completed", "pending")
     assert [path for path in (vault / target["destination"]).glob("*.bin")] == [vault / first["artifact_path"]]
     assert (vault / first["artifact_path"]).read_bytes() == data
 

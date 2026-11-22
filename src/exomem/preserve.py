@@ -565,6 +565,7 @@ def preserve(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    defer_fanout_to_terminal: bool = False,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -584,6 +585,10 @@ def preserve(
     `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
     (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
     `content_stream`: nothing is copied here, and the batch renames the stage into place.
+
+    `defer_fanout_to_terminal` is the upload doors' opt-in. The pages' full-refresh custody is recorded
+    before the install, and the derived fan-out waits for the caller's `fanout_after_release` scope, so
+    the boundary is held only to plan and install.
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
@@ -1032,10 +1037,26 @@ def preserve(
                     prepared=staged.pool if staged is not None else None)
                 # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
                 pooled_guards = (PathGuard.capture(vault_root, rel_artifact, leaf_policy="absent"),)
-            batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
-                               _prepare=prepare_final if _prepare is not None else None,
-                               _validate_prepared_bindings=_validate_inputs,
-                               _publish_originals=publish_original)
+            if defer_fanout_to_terminal and _prepare is None:
+                from . import add as add_module
+
+                publication_intents: list[object] = []
+                created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
+                custody = add_module.full_refresh_custody(vault_root, writes)
+                committed = batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                                               post_commit_fanout=False,
+                                               publication_intents_out=publication_intents,
+                                               _validate_prepared_bindings=_validate_inputs,
+                                               _publish_originals=publish_original)
+                assert isinstance(committed, list)
+                # Queued now, so a catalog refusal below still leaves the committed pages their fan-out.
+                add_module.deferred_fanout(vault_root, committed, created_paths=created_paths,
+                                           publication_intents=publication_intents, receipts=custody)
+            else:
+                batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                                   _prepare=prepare_final if _prepare is not None else None,
+                                   _validate_prepared_bindings=_validate_inputs,
+                                   _publish_originals=publish_original)
         written_artifact = True
         from . import lexstore
 
@@ -1103,6 +1124,7 @@ def preserve_stream(
     raw_protection: bool = False,
     media_pending: bool = False,
     diarize: bool | None = None,
+    defer_fanout_to_terminal: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
 
@@ -1135,6 +1157,7 @@ def preserve_stream(
         raw_protection=raw_protection,
         media_pending=media_pending,
         diarize=diarize,
+        defer_fanout_to_terminal=defer_fanout_to_terminal,
     )
 
 
