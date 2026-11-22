@@ -62,7 +62,7 @@ from . import (
 )
 from . import move_file as move_file_module
 from .cli_ops import OpError
-from .governance import authorization_session_authority, egress, lifecycle, policy, store
+from .governance import authorization_session_authority, bridges, egress, lifecycle, policy, store
 from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
 from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
@@ -879,6 +879,9 @@ def _preview_referrer_view(
     def unavailable() -> None:
         raise (failure or preview_warming)()
 
+    def large() -> None:
+        raise PreviewNeedsJob()
+
     def read_inline_page(path: str) -> bytes:
         try:
             return _read_inline_text(vault_root, vault_root.resolve() / path)[0].encode()
@@ -893,7 +896,10 @@ def _preview_referrer_view(
 
     def visible(path: str) -> bool:
         request_budget.checkpoint()
-        return not lifecycle.is_tombstoned_in(tombstones, path) and keep(path)
+        if lifecycle.is_tombstoned_in(tombstones, path):
+            return False
+        with bridges.preview_read_bound(_INLINE_MARKDOWN_BYTES if bounded else None, unavailable, large):
+            return keep(path)
 
     return visible
 

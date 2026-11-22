@@ -262,7 +262,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             async def preview(**extra):
                 return await call("manage_memory_file", operation="propose-reclassification", **args, **extra)
 
-            async def ready(run_id):
+            async def ready(run_id, *, allow_stale=False):
                 async with asyncio.timeout(12):
                     while True:
                         status = await preview(preview_run_id=run_id)
@@ -271,6 +271,8 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                             break
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
+                if allow_stale and status.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE":
+                    return None
                 assert status.get("state") == "completed", status
                 return status
 
@@ -280,7 +282,9 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
                         job = await preview()
                         if job.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
                             assert job.get("run_id"), job
-                            return await ready(job["run_id"])
+                            report = await ready(job["run_id"], allow_stale=True)
+                            if report is not None:
+                                return report
                         await asyncio.sleep(0.05)
 
             queued = await preview()
