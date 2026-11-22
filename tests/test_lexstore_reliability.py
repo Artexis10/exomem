@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 from exomem import find as find_module
-from exomem import lexstore, request_budget
+from exomem import freshness, lexstore, request_budget
 
 needs_fts5 = pytest.mark.skipif(
     not lexstore.fts5_available(), reason="this SQLite build lacks FTS5"
@@ -241,6 +241,127 @@ def test_unrelated_sqlite_error_keeps_its_meaning_at_the_deadline() -> None:
             assert not stop.hit
         finally:
             request_budget.reset_current(token)
+
+
+@needs_fts5
+def test_published_substrings_answer_existing_wal_rows(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/referrer.md"
+    _write_page(vault, rel, "Sources/Documents/a.csv")
+    warm_managed_cell(vault, prebuild_refs=False)
+    store = lexstore.get_store(vault)
+    # A published checkpoint in the WAL must be read even when the main file
+    # has a different stamp.
+    real_connect = lexstore._sqlite_connect_owned
+    with closing(real_connect(store.path)) as writer:
+        assert writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("UPDATE meta SET value = 'old' WHERE key = 'recall_checkpoint:kb'")
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        target = freshness.live_recall_checkpoint(vault, "kb")
+        assert target is not None
+        writer.execute(
+            "UPDATE meta SET value = ? WHERE key = 'recall_checkpoint:kb'", (repr(tuple(target)),)
+        )
+        writer.commit()
+        monkeypatch.setattr(store, "_connect", lambda: pytest.fail("ordinary reader opened"))
+
+        result = lexstore.search_current_published_substrings(
+            vault, ["sources/documents/a.csv", "sources/documents/missing.csv"]
+        )
+
+    assert result.readiness.complete
+    assert result.value == {"sources/documents/a.csv": [rel], "sources/documents/missing.csv": []}
+
+
+@needs_fts5
+@pytest.mark.parametrize("digest_cached", [False, True], ids=["cold-digest", "lagged-sidecar"])
+def test_published_substrings_never_derive_or_catch_up_on_request(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, digest_cached: bool
+) -> None:
+    _write_page(vault, "Knowledge Base/Notes/referrer.md", "old-needle")
+    warm_managed_cell(vault, prebuild_refs=False)
+    changed = _write_page(vault, "Knowledge Base/Notes/referrer.md", "replacement-needle")
+    freshness.on_files_changed(vault, changed=[changed])
+    if digest_cached:
+        assert freshness.live_recall_checkpoint(vault, "kb") is not None
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("published lookup started foreground index work")
+
+    monkeypatch.setattr(freshness, "triple_from_entries", unexpected)
+    monkeypatch.setattr(freshness, "live_recall_entries", unexpected)
+    monkeypatch.setattr(freshness, "recall_checkpoint", unexpected)
+    monkeypatch.setattr(freshness, "recall_delta_since_live", unexpected)
+    monkeypatch.setattr(lexstore.get_store(vault), "catalog_readiness", unexpected)
+    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", unexpected)
+
+    result = lexstore.search_current_published_substrings(vault, ["old-needle"])
+
+    assert result.readiness.status == "stale"
+    assert not result.readiness.complete
+    assert result.value is None
+
+
+@needs_fts5
+@pytest.mark.parametrize("expire_at_open", [False, True])
+def test_published_substrings_decline_a_sqlite_lock_during_proof(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch, expire_at_open: bool
+) -> None:
+    rel = "Knowledge Base/Notes/referrer.md"
+    _write_page(vault, rel, "published-needle")
+    warm_managed_cell(vault, prebuild_refs=False)
+    path = lexstore.get_store(vault).path
+    real_connect = lexstore._sqlite_connect_owned
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=30))
+    with closing(real_connect(path, timeout=0)) as writer, monkeypatch.context() as patch:
+        assert writer.execute("PRAGMA locking_mode=EXCLUSIVE").fetchone() == ("exclusive",)
+
+        def lock_after_open(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+            conn = real_connect(*args, **kwargs)
+            writer.execute("BEGIN EXCLUSIVE")
+            if expire_at_open:
+                check.budget.deadline = time.monotonic()
+            return conn
+
+        patch.setattr(lexstore, "_sqlite_connect_owned", lock_after_open)
+        started = time.monotonic()
+        with request_budget.checking(check):
+            result = lexstore.search_current_published_substrings(vault, ["published-needle"])
+        assert time.monotonic() - started < 1.0
+        assert result.readiness.status == (
+            lexstore.DEADLINE_STATUS if expire_at_open else "transient_failure"
+        )
+        assert result.value is None
+
+    recovered = lexstore.search_current_published_substrings(vault, ["published-needle"])
+    assert recovered.readiness.complete
+    assert recovered.value == {"published-needle": [rel]}
+
+
+@needs_fts5
+def test_published_substrings_drop_rows_if_a_watcher_event_arrives_during_query(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    referrer = _write_page(vault, "Knowledge Base/Notes/referrer.md", "published-needle")
+    warm_managed_cell(vault, prebuild_refs=False)
+    store = lexstore.get_store(vault)
+    query = store._substring_query
+
+    def read_then_observe_change(*args: Any, **kwargs: Any) -> list[str]:
+        rows = query(*args, **kwargs)
+        assert rows == ["Knowledge Base/Notes/referrer.md"]
+        freshness.mark_external_pending(vault, paths=[referrer])
+        return rows
+
+    monkeypatch.setattr(store, "_substring_query", read_then_observe_change)
+    result = lexstore.search_current_published_substrings(vault, ["published-needle"])
+
+    assert not result.readiness.complete
+    assert result.value is None
 
 
 # --------------------------------------------------------------------------- #

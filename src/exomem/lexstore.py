@@ -4177,6 +4177,24 @@ def search_substrings_result(
     return CatalogQueryResult({**empty, **answer.value}, answer.readiness)
 
 
+def search_current_published_substrings(
+    vault_root: Path, queries: Sequence[str]
+) -> CatalogQueryResult[dict[str, list[str]]]:
+    """Search one already-published file catalogue against a live KB checkpoint."""
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    check = request_budget.current_checkpoint()
+    budget = request_budget.current()
+    if check is not None and (budget is None or check.budget.deadline < budget.deadline):
+        budget = check.budget
+    token = request_budget.set_current(budget)
+    try:
+        with stopping_at_budget() as stop:
+            return get_store(vault_root)._search_current_published_substrings(queries, stop)
+    finally:
+        request_budget.reset_current(token)
+
+
 def search_keyword_groups_result(
     vault_root: Path, query_norm: str, *, scope: str, freshness: tuple | None,
     limit: int, allowed_paths: set[str] | None, pending_rows: list[dict[str, Any]],
@@ -9716,6 +9734,29 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
+    def _connect_published_catalog(self, *, deadline: float | None = None) -> sqlite3.Connection:
+        """Open the existing owner-bound sidecar with normal SQLite WAL locking."""
+        conn: sqlite3.Connection | None = None
+        try:
+            with (
+                reserved_paths._subsystem_authority_scope("lexstore"),
+                reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=("lexical-store",),
+                    identity_may_change=False,
+                    deadline=deadline,
+                ),
+                reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root, self.path, "lexical-store", create=False
+                ) as retained_path,
+            ):
+                conn = _sqlite_connect_owned(f"{retained_path.as_uri()}?mode=ro", uri=True, timeout=0)
+            return conn
+        except BaseException:
+            if conn is not None:
+                conn.close()
+            raise
+
     def assess_live_catalog(
         self, *, require_live_projection: bool = True
     ) -> CatalogAssessment:
@@ -9746,21 +9787,7 @@ class LexicalStore:
         }
         conn: sqlite3.Connection | None = None
         try:
-            with reserved_paths._subsystem_authority_scope("lexstore"):
-                with reserved_paths._identity_coordination_scope(
-                    self.vault_root,
-                    descriptor_ids=("lexical-store",),
-                    identity_may_change=False,
-                ):
-                    with reserved_paths._sqlite_owner_target_scope(
-                        self.vault_root, self.path, "lexical-store", create=False
-                    ) as retained_path:
-                        # Read the live WAL with normal locking; immutable is unsafe
-                        # for a changing database.
-                        conn = _sqlite_connect_owned(
-                            f"{retained_path.as_uri()}?mode=ro", uri=True
-                        )
-            conn.execute("PRAGMA busy_timeout=0")
+            conn = self._connect_published_catalog()
             conn.execute("BEGIN")
             if not self._schema_is_current(conn, raise_errors=True):
                 assessment = CatalogAssessment("incompatible")
@@ -13582,6 +13609,69 @@ class LexicalStore:
             },
             "lexical sidecar substring query failed (%s)",
         )
+
+    def _search_current_published_substrings(
+        self, queries: Sequence[str], stop: BudgetStop
+    ) -> CatalogQueryResult[dict[str, list[str]]]:
+        from . import freshness, state_migration
+        from .cli_ops import OpError
+        from .vocabulary.registry import RegistryError
+
+        backend_name = backend()
+        stale = CatalogQueryResult(None, CatalogReadiness("stale", False, backend_name))
+        unsupported = CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend_name))
+        budget = request_budget.current()
+        try:
+            if budget is not None and budget.remaining() <= 0:
+                raise _CatalogueDeadline(stop)
+            # A store record also covers interrupted transitions; neither case
+            # can prove a current file catalogue without opening the store.
+            if state_migration.vault_store_recorded(self.vault_root):
+                return unsupported
+            if self._failed:
+                return CatalogQueryResult(None, CatalogReadiness("fatal_failure", False, backend_name))
+            target = freshness.cached_live_recall_checkpoint(self.vault_root, "kb")
+            if target is None:
+                return stale
+            try:
+                conn = self._connect_published_catalog(
+                    deadline=budget.deadline if budget is not None else None
+                )
+            except (OSError, RuntimeError):
+                return stale
+            with contextlib.closing(conn), _interrupt_at_budget(conn):
+                with call_spans.span("lexical.proof"):
+                    conn.execute("BEGIN")
+                    if (
+                        not self._schema_is_current(conn, raise_errors=True)
+                        or self._meta_catalog_identity(conn) != catalog_semantic_identity(self.vault_root)
+                        or checkpoint_state(self._meta_checkpoint(conn, "kb")) != checkpoint_state(target)
+                    ):
+                        return stale
+                with call_spans.span("lexical.query"):
+                    value = {
+                        query: self._substring_query(conn, words, "kb") if (words := query.split()) else []
+                        for query in dict.fromkeys(queries)
+                    }
+                if state_migration.vault_store_recorded(self.vault_root):
+                    return unsupported
+                if freshness.cached_live_recall_checkpoint(self.vault_root, "kb") != target:
+                    return stale
+            return CatalogQueryResult(value, CatalogReadiness("available", True, backend_name))
+        except (_CatalogueDeadline, request_budget.ReadBudgetExhausted):
+            return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend_name))
+        except RegistryError:
+            return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, backend_name))
+        except sqlite3.Error as error:
+            return CatalogQueryResult(
+                None, self._catalog_readiness_error(error, backend_name, schedule_repair=False)
+            )
+        except (OSError, state_migration.StateMigrationManifestError):
+            return stale
+        except OpError as error:
+            if not _is_repair_contention(error):
+                raise
+            return CatalogQueryResult(None, CatalogReadiness("transient_failure", False, backend_name))
 
     @staticmethod
     def _substring_predicate(

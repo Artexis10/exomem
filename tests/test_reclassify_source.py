@@ -128,6 +128,9 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             finally:
                 release.set()
             assert await asyncio.to_thread(find.await_recall_resolver_warm)
+            await asyncio.to_thread(_until, lambda: lexstore.search_current_published_substrings(
+                vault, [captured.path.removeprefix(f"{KB}/").lower()]
+            ).readiness.complete)
             warm = await call("manage_memory_file", **preview)
             assert warm.get("references") == 2, warm
             assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
@@ -152,6 +155,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
 
     try:
         assert watcher.wait_until_seeded(10)
+        lexstore.ensure_fresh(vault)
         watcher.arm_optional_recovery()
         asyncio.run(exercise())
         assert builders == ["exomem-inbound-index-warm"]
@@ -161,7 +165,8 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
 
 
 @pytest.mark.parametrize("fault", [
-    "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link", "catalogue-candidates",
+    "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link",
+    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported",
 ])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
@@ -195,15 +200,13 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         "catalogue-candidates": "The field log identifies the samples.",
     }.get(fault, link)
     (vault / referrer).write_text(f"# Field log\n\n{original_reference}\n", encoding="utf-8")
-    freshness.seed(vault, "vault", (
-        (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
-    ))
-    assert vault_module.prime_inbound_index(vault, eager=True)
-    if fault in ("catalogue-link", "catalogue-candidates"):
-        freshness.seed(vault, "kb", (
-            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault / KB)
+    for scope, root in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
         ))
-        lexstore.ensure_fresh(vault)
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    if fault in ("catalogue-link", "catalogue-candidates", "catalogue-unavailable"):
         lookup = path_mentions.find_pages(vault, [source])
         assert lookup.complete
         assert lookup.pages == ((referrer,) if fault == "catalogue-link" else ())
@@ -238,6 +241,11 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             return plan(*args, **kwargs)
 
         monkeypatch.setattr(move_file, "plan_inbound_rewrites", edit_during_planning)
+    elif fault == "catalogue-unavailable":
+        # Current inbound links cannot prove that the catalogue checked prose references.
+        monkeypatch.setattr(path_mentions, "find_pages", lambda *a, **kw: path_mentions.Lookup((), False))
+    elif fault == "catalogue-unsupported":
+        monkeypatch.setattr(lexstore, "_usable", lambda: False)
     elif fault == "catalogue-candidates":
         find_pages = path_mentions.find_pages
 
@@ -260,7 +268,12 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
                 "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
             })
             retry = await _call(client, *call)
-            assert retry.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
+            error = retry.get("error", {})
+            if fault == "catalogue-unsupported":
+                assert error.get("code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", retry
+                assert "retry" not in error
+            else:
+                assert error.get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
             assert "references" not in retry and "preview_digest" not in retry
             if fault == "render":
                 assert retry["error"]["retry"]["tool"] == "inspect_memory"

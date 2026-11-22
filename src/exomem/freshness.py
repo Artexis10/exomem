@@ -604,6 +604,35 @@ def live_recall_checkpoint(
     return checkpoint
 
 
+def cached_live_recall_checkpoint(
+    vault_root: Path, scope: str
+) -> RecallFreshnessCheckpoint | None:
+    """Read one exact checkpoint only if its digest is already available."""
+    from . import recall_policy
+
+    if not event_indexes_enabled():
+        return None
+    key = _key(vault_root, scope)
+    identity = recall_policy.recall_publication_policy_identity(vault_root)
+    # Other readers can derive a corpus-wide digest while holding this lock.
+    if identity is None or not _lock.acquire(blocking=False):
+        return None
+    try:
+        triple = _recall_triples.get(key)
+        if (
+            key[0] in _external_pending
+            or key not in _recall_live
+            or triple is None
+            or _recall_identities.get(key) != identity
+        ):
+            return None
+        return RecallFreshnessCheckpoint(
+            _instance_id, _recall_generations.get(key, 0), triple, *identity
+        )
+    finally:
+        _lock.release()
+
+
 def recall_checkpoint_is_current(
     vault_root: Path,
     scope: str,
@@ -1093,6 +1122,25 @@ def external_pending_epoch(vault_root: Path) -> int | None:
     """Return the latest observed unpublished generation for one vault."""
     with _lock:
         return _external_pending.get(_canon(vault_root))
+
+
+def preview_reference_generation(
+    vault_root: Path,
+) -> tuple[str, int | None, int | None, int | None]:
+    """Sample the generations of both reference indexes and pending events."""
+    from . import request_budget
+
+    root = _canon(vault_root)
+    broad = (root, "vault")
+    projected = (root, "kb")
+    with request_budget.locked(_lock):
+        enabled = event_indexes_enabled()
+        return (
+            _instance_id,
+            _generations.get(broad, 0) if enabled and broad in _live else None,
+            _recall_generations.get(projected, 0) if enabled and projected in _recall_live else None,
+            _external_pending.get(root),
+        )
 
 
 def registry_rel(vault_root: Path, registry_path: str) -> str | None:

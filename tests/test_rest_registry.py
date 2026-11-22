@@ -123,7 +123,7 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     import time
     from types import SimpleNamespace
 
-    from exomem import file_watcher, freshness, move_file, request_budget, server_rest
+    from exomem import file_watcher, freshness, lexstore, move_file, request_budget, server_rest
     from exomem.governance import authorization_request, egress
 
     source = "Knowledge Base/Sources/Other/field-samples.md"
@@ -132,14 +132,17 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     page.write_text("---\nsource_type: other\n---\n# Field samples\n", encoding="utf-8")
     (vault / "Knowledge Base/Notes/sampling-log.md").write_text(f"[[{source}]]\n", encoding="utf-8")
     if stage != "no-observer":
-        freshness.seed(vault, "vault", (
-            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(vault)
-        ))
+        for scope, root in (("vault", vault), ("kb", vault / "Knowledge Base")):
+            freshness.seed(vault, scope, (
+                (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
+            ))
         assert vault_module.prime_inbound_index(vault, eager=True)
+        lexstore.ensure_fresh(vault)
         stop = threading.Event()
         monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     elapsed = 0.0
+    reached = False
     release_completed = False
     clock = SimpleNamespace(monotonic=lambda: elapsed, time=time.time, perf_counter=time.perf_counter)
     monkeypatch.setattr(request_budget, "time", clock)
@@ -155,7 +158,9 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
     original = getattr(target, operation)
 
     def expire_after(*args, **kwargs):
-        nonlocal elapsed, release_completed
+        nonlocal elapsed, reached, release_completed
+        if stage != "response" or args[1].get("success") is True:
+            reached = True
         if stage in ("planning", "release", "no-observer"):
             elapsed = 2.0
         result = original(*args, **kwargs)
@@ -169,6 +174,7 @@ def test_one_rest_preview_deadline_spans_admission_to_rendered_response(vault, m
         "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
     })
 
+    assert reached, answer.json()
     if stage == "release":
         assert not release_completed
     if stage == "no-observer":

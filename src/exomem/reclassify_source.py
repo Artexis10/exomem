@@ -42,7 +42,6 @@ from . import (
     file_watcher,
     foreground_priority,
     freshness,
-    lexstore,
     originals,
     page_lineage,
     path_mentions,
@@ -778,11 +777,8 @@ def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | Non
 def _preview_generation(vault_root: Path) -> tuple:
     """Bind both the literal inbound index and the projected prose candidates."""
     return (
-        freshness.consumer_checkpoint_instance(),
-        freshness.generation(vault_root, "vault"),
-        freshness.recall_generation(vault_root, "kb"),
+        freshness.preview_reference_generation(vault_root),
         recall_policy.recall_policy_identity(vault_root),
-        freshness.external_pending_epoch(vault_root),
     )
 
 
@@ -889,12 +885,16 @@ def _referrer_outcome(
         targets = [rel, *([paired[0]] if paired else [])]
         if read_hashes is None:
             lookup = path_mentions.find_pages(vault_root, targets)
-        elif (checkpoint := freshness.live_recall_checkpoint(vault_root, "kb")) is not None:
-            with lexstore.admitted_catalog_scope(vault_root):
-                lexstore.bind_admitted_catalog(vault_root, {"kb": checkpoint})
-                lookup = path_mentions.find_pages(vault_root, targets)
         else:
-            lookup = path_mentions.Lookup((), False)
+            lookup = path_mentions.find_pages(vault_root, targets, current_published=True)
+            if lookup.unsupported:
+                raise OpError(
+                    "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+                    "The current search backend cannot check prose references to the source.",
+                    remediation="Use a server with the maintained lexical index to preview the move.",
+                )
+            if not lookup.complete:
+                raise preview_warming()
     named_in = [
         page
         for page in (lookup.pages if lookup is not None else ())
