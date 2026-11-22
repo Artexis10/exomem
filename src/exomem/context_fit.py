@@ -335,10 +335,9 @@ def select_methods(
         by_label: dict[str, dict[str, Any]] = {}
         listed: list[dict[str, str]] = []
         omitted = 0
+        # Each carrier is judged against the room left on its own, so one oversized description costs only itself;
+        # the judgment deadline bounds how many are read.
         for carrier in carriers:
-            if omitted:
-                omitted += 1
-                continue
             judgment_timeout()
             released = _released_for_model(
                 root, carrier["path"], caller, provider, judgment_timeout, carrier["description_of"], sources,

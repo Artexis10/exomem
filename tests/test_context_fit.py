@@ -367,3 +367,36 @@ def test_method_fit_reading_and_model_call_share_one_deadline_of_half_the_reques
         request_budget.reset_current(token)
     assert chosen == [] and status["state"] == "unavailable"
     assert elapsed < 3.5 and not asked  # stopped at the 3 s judgment deadline, before any model call
+
+
+def test_one_oversized_method_description_does_not_hide_the_ones_after_it(vault: Path) -> None:
+    """The first build stopped offering at the first carrier that overflowed, so later carriers that fit were lost."""
+    small = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    big = _page(vault, "glaze-library", body="Glaze. " * 800 + "\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=1000,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "fixture-runtime"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "fixture-model", "digest": "fixture-digest"}]})
+        sent.append(json.loads(json.loads(request.content)["messages"][1]["content"]))
+        return httpx.Response(200, json={"model": "fixture-model", "message": {"content": json.dumps({"methods": []})}})
+
+    carriers = [
+        {"name": name, "path": path, "kind": "skill", "description_of": context_task._body_text, "max_chars": 6000}
+        for name, path in (("first", small), ("oversized", big), ("last", small))
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        _chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+            limit=1, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert [item["label"] for item in sent[0]["methods"]] == ["first", "last"]
+    assert status["considered"] == 2 and status["omitted"] == 1
