@@ -55,6 +55,8 @@ A served file-mode preview for an unrestricted owner with a live observer ready 
 
 When complete candidate evidence exceeds the interactive work or response bound, the managed preview SHALL start or rejoin a read-only job and return its handle. The completed receipt SHALL expose the full report through bounded pages with report-local cursors. It SHALL mark the snapshot as current, changed, or unknown. The job SHALL release a digest only after checking the complete report. The service SHALL verify the requesting owner's current authorization and connector access before releasing any report data. Partial, failed, or interrupted work SHALL expose no report or digest.
 
+Managed report delivery SHALL work with governed erasures and concurrent disclosure receipt appends. An ordinary append SHALL preserve reusable verification of unchanged receipt evidence. A pending erasure or changed receipt evidence SHALL withhold affected report facts before release, including the summary and digest. Page delivery SHALL check current evidence for the paths it releases within the request deadline, even when the job processed an oversized referrer.
+
 The paged report's approval digest SHALL bind all referrer outcomes and the pointer-write proof. Before applying a correction with that digest, the writer SHALL verify the same report against the current plan. A changed report SHALL refuse the correction before any write.
 
 Restricted callers, and callers before a live observer is ready or without a live observer, retain the synchronous file preview. Its latency and behavior under concurrent file changes are unverified by this change.
@@ -90,6 +92,13 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 - **AND** a concurrent Records read can finish while the job is running
 - **AND** the completed job reports every outcome through bounded pages under one approval digest
 - **AND** a change to a later referrer makes that digest stale before apply writes anything
+
+#### Scenario: Governed report pages stay available across disclosure appends
+
+- **WHEN** a completed report belongs to a vault with a governed erasure and a long valid receipt history
+- **THEN** ordinary disclosure receipts can append while the owner reads every report page within its request deadline
+- **AND** changing older evidence after disclosure recording withholds the result before the service releases it
+- **AND** a pending erasure withholds the affected report before any referrer moves
 
 #### Scenario: Evidence accompanies a proposed value
 

@@ -57,6 +57,8 @@ A move of raw bytes beside an unpaired card left the card and its referrers nami
 - [ ] 6.2 Send proven overflow to the maintenance job runner. Release the complete summary and bounded report pages under the same live owner authority.
 - [ ] 6.3 Bind the approval digest to the complete report. Refuse stale approval before the first write and verify a fresh approval through the normal apply operation.
 - [ ] 6.4 Exercise a 20,000-page vault with 10,000 referrers to one Source. Verify all report pages and a concurrent Records read. Obtain exact independent review, required CI, and installed proof.
+- [ ] 6.5 Prove governed paging with a long receipt history and concurrent disclosure appends. Withhold all report facts after historical receipt edits or a pending erasure.
+- [ ] 6.6 Prove bounded terminal release for an oversized governed referrer, including its custody and any bridge dependencies.
 
 ## Phase 1 released delivery evidence
 

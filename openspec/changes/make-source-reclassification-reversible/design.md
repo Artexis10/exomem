@@ -55,6 +55,16 @@ The paged approval digest binds the Source, destination, full referrer report, a
 
 The product load target is 20,000 pages, about 100,000 units, and 120,000 edges, with a hub of 10,000 links. Use the existing request deadline and maintenance receipt response bound. Prove that a large preview leaves Records responsive and can report all 10,000 referrers over bounded pages.
 
+### 7. Governed pages reuse exact evidence
+
+Receipt verification must survive ordinary concurrent appends. A current tail or an unchanged erasure marker does not prove the integrity of older receipt bytes. Verify the historical evidence on bounded physical segments and carry the verified chain endpoint to the next segment. Reuse proof while the held segment identity is current. Reverify changed segments before releasing a report. Keep legacy evidence readable and preserve the ordinary full audit across storage formats.
+
+Bound the size of any segment that an ordinary append can change. Use the existing receipt writer, chain checks, and recovery worker. Verify old oversized evidence off the request path. Keep the final report gate after disclosure recording so an edit to a prior receipt can still withhold the whole response. Keep the verification state separate from the retained report body.
+
+For page-local release, retain the page evidence that the background job already checked. Use the existing guarded generation and simple-page proof. The terminal gate must still check current policy, the connector ceiling, RAW authority, custody, and erasure evidence. Referrers with external dependencies need current evidence for those dependencies too. Feed the already proved byte hash and size to the disclosure receipt rather than reopening the referrer to calculate them.
+
+The release check covers a production-sized reference report, existing governed erasures, a long receipt history, and independent disclosure appends. Compare the same route with and without the change. Require every bounded page to finish within its deadline. Edit historical evidence between disclosure recording and release, and verify that no report facts reach the caller.
+
 ## Controls and costs
 
 - The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.
