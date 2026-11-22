@@ -113,6 +113,8 @@ The brief is additive and read-only, so it ships first. An evaluation then decid
 
 The run files stay outside this repository.
 
+Outcome, 2026-11-22: the development round could not measure the routing line. A line in the client skill reaches the model only when the model opens the skill, and no run did. Given directly, the line made the model call the brief, but every call answered `index_warming` while the service's graph read snapshot waited on its background cold proof. The routing decision moves to its own change, which puts the line in the server's instructions that every client receives.
+
 ## Risks
 
 - **A wrong seed for vague topic text.** Mitigation: `related` lists the other candidates, and the seed is named in the response.
