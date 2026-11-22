@@ -136,6 +136,31 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
             assert warm["preview_digest"]
 
+            admission_started, release_admission = threading.Event(), threading.Event()
+            check_owner = rc.managed_preview_stop
+
+            def hold_owner_check(*args, **kwargs):
+                admission_started.set()
+                assert release_admission.wait(8)
+                return check_owner(*args, **kwargs)
+
+            with monkeypatch.context() as admission_patch:
+                admission_patch.setattr(rc, "managed_preview_stop", hold_owner_check)
+                waiting = asyncio.create_task(call("manage_memory_file", **preview))
+                try:
+                    assert await asyncio.to_thread(admission_started.wait, 2)
+                    records = await call("query_records", collection="Meter readings", limit=1)
+                    assert records.get("rows"), records
+                    assert not waiting.done()
+                finally:
+                    release_admission.set()
+                resumed = await waiting
+                if "error" in resumed:
+                    assert resumed["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                    assert "preview_digest" not in resumed
+                else:
+                    assert resumed.get("preview_digest") == warm["preview_digest"]
+
             expired = threading.Event()
             plan = move_file.plan_inbound_rewrites
 
@@ -166,7 +191,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
 
 @pytest.mark.parametrize("fault", [
     "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link",
-    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported",
+    "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "inbound-freshness-lock",
 ])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
     from _public_call import public_call
@@ -215,6 +240,8 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
     mcp = server.build_server(require_auth=False)
     expired = threading.Event()
+    release_freshness = threading.Event()
+    holder = None
 
     class Budget(request_budget.RequestBudget):
         def remaining(self):
@@ -246,6 +273,23 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         monkeypatch.setattr(path_mentions, "find_pages", lambda *a, **kw: path_mentions.Lookup((), False))
     elif fault == "catalogue-unsupported":
         monkeypatch.setattr(lexstore, "_usable", lambda: False)
+    elif fault == "inbound-freshness-lock":
+        lookup_inbound = vault_module.cached_inbound_wikilinks
+        held = threading.Event()
+
+        def hold_freshness():
+            with freshness._lock:
+                held.set()
+                release_freshness.wait(8)
+
+        holder = threading.Thread(target=hold_freshness, daemon=True)
+
+        def borrow_while_freshness_held(*args, **kwargs):
+            holder.start()
+            assert held.wait(2)
+            return lookup_inbound(*args, **kwargs)
+
+        monkeypatch.setattr(vault_module, "cached_inbound_wikilinks", borrow_while_freshness_held)
     elif fault == "catalogue-candidates":
         find_pages = path_mentions.find_pages
 
@@ -287,6 +331,9 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         asyncio.run(exercise())
     finally:
         stop.set()
+        release_freshness.set()
+        if holder is not None and holder.ident is not None:
+            holder.join(2)
 
 
 @pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])

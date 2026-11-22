@@ -9521,8 +9521,24 @@ def cached_inbound_wikilinks(
         return None
     # Owner registration makes this signal stable even while evidence is contended.
     state.demanded.set()
-    instance = freshness.consumer_checkpoint_instance()
-    generation = freshness.generation(vault_root, "vault")
+
+    def registry_state(*, pending: bool = False) -> tuple[str, int | None, int | None] | None:
+        if read_hashes is not None:
+            sample = freshness.preview_reference_generation(vault_root)
+            if sample is None:
+                return None
+            instance, generation, _, epoch = sample
+            return instance, generation, epoch
+        return (
+            freshness.consumer_checkpoint_instance(),
+            freshness.generation(vault_root, "vault"),
+            freshness.external_pending_epoch(vault_root) if pending else None,
+        )
+
+    before = registry_state()
+    if before is None:
+        return None
+    instance, generation, _ = before
     if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9552,11 +9568,7 @@ def cached_inbound_wikilinks(
             return False
         target, pending_epoch = checked
         # Instance and generation identify this exact endpoint without rehashing the registry map.
-        return (
-            freshness.consumer_checkpoint_instance() == target.instance_id
-            and freshness.generation(vault_root, "vault") == target.generation
-            and freshness.external_pending_epoch(vault_root) == pending_epoch
-        )
+        return registry_state(pending=True) == (target.instance_id, target.generation, pending_epoch)
 
     def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
         if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
@@ -9581,13 +9593,14 @@ def cached_inbound_wikilinks(
             current_admission = admission_of(reader)
             if reader is None or current_admission is None or current_admission.identity() != authority:
                 return False
-        pending_epoch = freshness.external_pending_epoch(vault_root)
+        live = registry_state(pending=True)
+        if live is None:
+            return False
+        _, _, pending_epoch = live
         target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
-            and freshness.consumer_checkpoint_instance() == instance
-            and freshness.generation(vault_root, "vault") == generation
-            and not freshness.external_pending(vault_root)
+            and live == (instance, generation, None)
         ):
             held = frozenset()
         elif visible is None:

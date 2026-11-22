@@ -631,7 +631,9 @@ class CallTraceMiddleware(Middleware):
 
                 budget = request_budget.current()
                 if (budget is not None and is_preview_call(tool_name, ledger_args)
-                        and managed_preview_stop(self.vault_root, effective_principal()) is not None):
+                        and await asyncio.to_thread(
+                            managed_preview_stop, self.vault_root, effective_principal(),
+                        ) is not None):
                     check = request_budget.ReadCheckpoint(budget)
             try:
                 try:

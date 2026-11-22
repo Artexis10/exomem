@@ -1126,14 +1126,14 @@ def external_pending_epoch(vault_root: Path) -> int | None:
 
 def preview_reference_generation(
     vault_root: Path,
-) -> tuple[str, int | None, int | None, int | None]:
-    """Sample the generations of both reference indexes and pending events."""
-    from . import request_budget
-
+) -> tuple[str, int | None, int | None, int | None] | None:
+    """Sample both reference generations and pending events without waiting."""
     root = _canon(vault_root)
     broad = (root, "vault")
     projected = (root, "kb")
-    with request_budget.locked(_lock):
+    if not _lock.acquire(blocking=False):
+        return None
+    try:
         enabled = event_indexes_enabled()
         return (
             _instance_id,
@@ -1141,6 +1141,8 @@ def preview_reference_generation(
             _recall_generations.get(projected, 0) if enabled and projected in _recall_live else None,
             _external_pending.get(root),
         )
+    finally:
+        _lock.release()
 
 
 def registry_rel(vault_root: Path, registry_path: str) -> str | None:

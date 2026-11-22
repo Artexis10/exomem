@@ -710,11 +710,11 @@ def _propose(
             destination = None
 
     generation = _preview_generation(vault_root) if owner is not None else None
+    read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
     inbound = (
         _visible_inbound(vault_root, rel) if owner is None
-        else _managed_preview_inbound(vault_root, rel, owner)
+        else _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes)
     )
-    read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
     outcome = (
         _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes)
         if destination is not None
@@ -776,10 +776,10 @@ def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | Non
 
 def _preview_generation(vault_root: Path) -> tuple:
     """Bind both the literal inbound index and the projected prose candidates."""
-    return (
-        freshness.preview_reference_generation(vault_root),
-        recall_policy.recall_policy_identity(vault_root),
-    )
+    generation = freshness.preview_reference_generation(vault_root)
+    if generation is None:
+        raise preview_warming()
+    return generation, recall_policy.recall_policy_identity(vault_root)
 
 
 @dataclass(frozen=True)
@@ -869,9 +869,9 @@ def _referrer_outcome(
     from .vault_store import read as store_read
 
     def borrow_resolver() -> vault.WikilinkResolver:
-        from .find import borrow_query_resolver
+        from .find import borrow_preview_resolver
 
-        resolver = borrow_query_resolver(vault_root)
+        resolver = borrow_preview_resolver(vault_root)
         if resolver is None:
             raise preview_warming()
         return resolver

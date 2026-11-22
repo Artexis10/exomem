@@ -8757,13 +8757,12 @@ def schedule_inbound_rebuild(vault_root: Path, *, stop: threading.Event | None =
     from . import readiness
     from . import vault as vault_module
 
-    if stop is not None and (
-        readiness.is_warming()
-        or freshness.generation(vault_root, "vault") is None
-        or freshness.external_pending(vault_root)
-        or not vault_module.inbound_rebuild_needed(vault_root, check_patch_chain=True)
-    ):
-        return
+    if stop is not None:
+        observed = freshness.preview_reference_generation(vault_root)
+        if readiness.is_warming() or observed is None or observed[1] is None or observed[3] is not None:
+            return
+    # The worker checks patch history. Borrowing this proof in the request can
+    # wait behind a writer computing a new freshness digest.
     _schedule_resolver_warm(
         vault_root,
         _INBOUND_INDEX_REBUILDS,
@@ -8932,6 +8931,29 @@ def borrow_query_resolver(
             return cached[1]
     if schedule_rebuild:
         _schedule_query_resolver_rebuild(root)
+    return None
+
+
+def borrow_preview_resolver(vault_root: Path):
+    """Borrow the current file-mode resolver without hashing or waiting for a build."""
+    root = Path(vault_root)
+    live = freshness.preview_reference_generation(root)
+    if live is None or live[1] is None or live[3] is not None:
+        return None
+    if not _RESOLVER_LOCK.acquire(blocking=False):
+        return None
+    try:
+        cached = _RESOLVER_CACHE.get(root)
+        checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+        if (
+            cached is not None and checkpoint is not None
+            and checkpoint.triple == cached[0]
+            and (checkpoint.instance_id, checkpoint.generation) == live[:2]
+        ):
+            return cached[1]
+    finally:
+        _RESOLVER_LOCK.release()
+    _schedule_query_resolver_rebuild(root)
     return None
 
 

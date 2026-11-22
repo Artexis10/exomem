@@ -1145,7 +1145,7 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: Full-repair observations made while the full pass is active, tagged with the
 #: exact live recall generation pair the caller observed. They are acknowledged
 #: only when the pass's promotion proof covers that pair. The sentinel is used
-#: by the explicit event-index rollback, where no live generation exists.
+#: when the caller has no live generation or defers sampling it to the worker.
 #: Each observation also keeps whether every request that made it was lag-only.
 _UNKNOWN_REPAIR_GENERATION = object()
 _FULL_REBUILD_REOBSERVED: dict[Path, dict[object, bool]] = {}
@@ -1216,6 +1216,7 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    PUBLISHED_CATALOGUE_UNUSABLE = "published_catalogue_unusable"
     # A strict recall resolver refused: no admitted checkpoint names its
     # request, or the catalogue holds no rows for the checkpoint it names.
     RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
@@ -2378,8 +2379,8 @@ def _repair_generation_covers(
     if covered is None:
         return False
     if observed is _UNKNOWN_REPAIR_GENERATION:
-        # Rollback mode has no event generation to compare. A successful exact
-        # catalogue proof is the strongest available acknowledgement.
+        # No event generation was supplied. A successful exact catalogue proof
+        # is the strongest available acknowledgement.
         return True
     if not isinstance(observed, tuple) or len(covered) != len(observed):
         return False
@@ -2830,6 +2831,7 @@ def _schedule_repair(
     pending_only: bool = False,
     lag_only: bool = False,
     cause: RepairCause | None = None,
+    defer_generation: bool = False,
 ) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
@@ -2855,6 +2857,9 @@ def _schedule_repair(
     `cause` names why the caller asked; the worker logs it with the pass it
     starts, so a whole-corpus pass is attributable.
 
+    `defer_generation` admits a proven failure without sampling the foreground
+    recall generation. Queue admission stays within the caller's read budget.
+
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
@@ -2872,12 +2877,12 @@ def _schedule_repair(
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
     observation: object = _UNKNOWN_REPAIR_GENERATION
-    if not pending_only and not deferred_paths:
+    if not pending_only and not deferred_paths and not defer_generation:
         try:
             observation = _live_repair_generation(vault_root) or observation
         except Exception:  # noqa: BLE001 - scheduling must remain best-effort
             pass
-    with _REPAIRS_LOCK:
+    with request_budget.locked(_REPAIRS_LOCK) if defer_generation else _REPAIRS_LOCK:
         if cause is not None:
             _REPAIR_CAUSES.setdefault(key, set()).add(cause)
         if pending_only:
@@ -4181,16 +4186,36 @@ def search_current_published_substrings(
     vault_root: Path, queries: Sequence[str]
 ) -> CatalogQueryResult[dict[str, list[str]]]:
     """Search one already-published file catalogue against a live KB checkpoint."""
+    from . import freshness, state_migration
+
     if not _usable():
         return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     check = request_budget.current_checkpoint()
     budget = request_budget.current()
     if check is not None and (budget is None or check.budget.deadline < budget.deadline):
         budget = check.budget
+    elif budget is not None and (check is None or check.budget is not budget):
+        check = request_budget.ReadCheckpoint(budget)
     token = request_budget.set_current(budget)
     try:
-        with stopping_at_budget() as stop:
-            return get_store(vault_root)._search_current_published_substrings(queries, stop)
+        with request_budget.checking(check), stopping_at_budget() as stop:
+            result = get_store(vault_root)._search_current_published_substrings(queries, stop)
+            # These catalogue verdicts prove a replacement is needed. The
+            # transaction has closed before the worker can take publication.
+            if result.readiness.status in ("missing", "incompatible", "fatal_failure"):
+                with contextlib.suppress(OSError, state_migration.StateMigrationManifestError):
+                    if (
+                        not state_migration.vault_store_recorded(vault_root)
+                        and freshness.cached_live_recall_checkpoint(vault_root, "kb") is not None
+                    ):
+                        _schedule_repair(
+                            vault_root,
+                            cause=RepairCause.PUBLISHED_CATALOGUE_UNUSABLE,
+                            defer_generation=True,
+                        )
+            return result
+    except request_budget.ReadBudgetExhausted:
+        return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend()))
     finally:
         request_budget.reset_current(token)
 
@@ -13619,6 +13644,7 @@ class LexicalStore:
 
         backend_name = backend()
         stale = CatalogQueryResult(None, CatalogReadiness("stale", False, backend_name))
+        incompatible = CatalogQueryResult(None, CatalogReadiness("incompatible", False, backend_name))
         unsupported = CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend_name))
         budget = request_budget.current()
         try:
@@ -13628,15 +13654,17 @@ class LexicalStore:
             # can prove a current file catalogue without opening the store.
             if state_migration.vault_store_recorded(self.vault_root):
                 return unsupported
-            if self._failed:
-                return CatalogQueryResult(None, CatalogReadiness("fatal_failure", False, backend_name))
             target = freshness.cached_live_recall_checkpoint(self.vault_root, "kb")
             if target is None:
                 return stale
+            if self._failed:
+                return CatalogQueryResult(None, CatalogReadiness("fatal_failure", False, backend_name))
             try:
                 conn = self._connect_published_catalog(
                     deadline=budget.deadline if budget is not None else None
                 )
+            except FileNotFoundError:
+                return CatalogQueryResult(None, CatalogReadiness("missing", False, backend_name))
             except (OSError, RuntimeError):
                 return stale
             with contextlib.closing(conn), _interrupt_at_budget(conn):
@@ -13645,13 +13673,18 @@ class LexicalStore:
                     if (
                         not self._schema_is_current(conn, raise_errors=True)
                         or self._meta_catalog_identity(conn) != catalog_semantic_identity(self.vault_root)
-                        or checkpoint_state(self._meta_checkpoint(conn, "kb")) != checkpoint_state(target)
                     ):
+                        return incompatible
+                    stored = checkpoint_state(self._meta_checkpoint(conn, "kb"))
+                    if stored is None:
+                        return incompatible
+                    if stored != checkpoint_state(target):
                         return stale
                 with call_spans.span("lexical.query"):
+                    tokens = {query: query.split() for query in queries}
                     value = {
-                        query: self._substring_query(conn, words, "kb") if (words := query.split()) else []
-                        for query in dict.fromkeys(queries)
+                        query: self._matched_substring_paths(conn, words, "kb") if words else []
+                        for query, words in tokens.items()
                     }
                 if state_migration.vault_store_recorded(self.vault_root):
                     return unsupported
@@ -13663,6 +13696,8 @@ class LexicalStore:
         except RegistryError:
             return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, backend_name))
         except sqlite3.Error as error:
+            if classify_sqlite_error(error) == "rebuildable":
+                return incompatible
             return CatalogQueryResult(
                 None, self._catalog_readiness_error(error, backend_name, schedule_repair=False)
             )
@@ -13692,18 +13727,23 @@ class LexicalStore:
         return clauses, params
 
     def _matched_substring_paths(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str, allowed_paths: Set[str],
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str,
+        allowed_paths: Set[str] | None = None,
     ) -> list[str]:
-        """Intersect exact matches without enumerating the allowed corpus or sorting hidden rows."""
+        """Read exact matches in batches without a SQLite sort."""
         clauses, params = self._substring_predicate(tokens, scope)
         rows = conn.execute(
             "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
             + " AND ".join(clauses), params,
         )
+        matches: list[str] = []
         try:
-            return [path for (path,) in rows if path in allowed_paths]
+            while batch := rows.fetchmany(request_budget.CHECKPOINT_EVERY):
+                request_budget.checkpoint()
+                matches.extend(path for (path,) in batch if allowed_paths is None or path in allowed_paths)
         finally:
             rows.close()
+        return matches
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,

@@ -18,6 +18,7 @@ retiring the store, and ordinary reads no longer negotiate journal mode.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import closing
@@ -297,13 +298,60 @@ def test_published_substrings_never_derive_or_catch_up_on_request(
     monkeypatch.setattr(freshness, "recall_checkpoint", unexpected)
     monkeypatch.setattr(freshness, "recall_delta_since_live", unexpected)
     monkeypatch.setattr(lexstore.get_store(vault), "catalog_readiness", unexpected)
-    monkeypatch.setattr(lexstore, "_schedule_runtime_catalog_repair", unexpected)
+    monkeypatch.setattr(lexstore, "_schedule_repair", unexpected)
 
     result = lexstore.search_current_published_substrings(vault, ["old-needle"])
 
     assert result.readiness.status == "stale"
     assert not result.readiness.complete
     assert result.value is None
+
+
+@needs_fts5
+def test_missing_published_catalogue_recovers_with_one_background_repair(
+    vault: Path, warm_managed_cell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/referrer.md"
+    _write_page(vault, rel, "recovery-needle")
+    warm_managed_cell(vault, prebuild_refs=False)
+    store = lexstore.get_store(vault)
+    store.path.unlink()
+    caller = threading.current_thread()
+    attempts: list[threading.Thread] = []
+    started = threading.Event()
+    release = threading.Event()
+    real_rebuild = store.rebuild_atomic
+    real_generation = lexstore._live_repair_generation
+
+    def rebuild() -> bool:
+        attempts.append(threading.current_thread())
+        started.set()
+        assert release.wait(5)
+        return real_rebuild()
+
+    def generation(root: Path) -> tuple[object, ...] | None:
+        if threading.current_thread() is caller:
+            pytest.fail("the foreground request sampled a repair generation")
+        return real_generation(root)
+
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+    monkeypatch.setattr(lexstore, "_live_repair_generation", generation)
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=20))
+    try:
+        with request_budget.checking(check):
+            first = lexstore.search_current_published_substrings(vault, ["recovery-needle"])
+            assert not first.readiness.complete and first.value is None
+            assert started.wait(2), "the missing sidecar did not start repair"
+            second = lexstore.search_current_published_substrings(vault, ["recovery-needle"])
+            assert not second.readiness.complete and second.value is None
+    finally:
+        release.set()
+        assert lexstore.await_repairs_idle(vault, timeout=10)
+
+    recovered = lexstore.search_current_published_substrings(vault, ["recovery-needle"])
+    assert recovered.readiness.complete
+    assert recovered.value == {"recovery-needle": [rel]}
+    assert len(attempts) == 1 and attempts[0] is not caller
 
 
 @needs_fts5
@@ -328,6 +376,7 @@ def test_published_substrings_decline_a_sqlite_lock_during_proof(
             return conn
 
         patch.setattr(lexstore, "_sqlite_connect_owned", lock_after_open)
+        patch.setattr(lexstore, "_schedule_repair", lambda *a, **kw: pytest.fail("a busy reader queued repair"))
         started = time.monotonic()
         with request_budget.checking(check):
             result = lexstore.search_current_published_substrings(vault, ["published-needle"])
@@ -349,7 +398,7 @@ def test_published_substrings_drop_rows_if_a_watcher_event_arrives_during_query(
     referrer = _write_page(vault, "Knowledge Base/Notes/referrer.md", "published-needle")
     warm_managed_cell(vault, prebuild_refs=False)
     store = lexstore.get_store(vault)
-    query = store._substring_query
+    query = store._matched_substring_paths
 
     def read_then_observe_change(*args: Any, **kwargs: Any) -> list[str]:
         rows = query(*args, **kwargs)
@@ -357,7 +406,7 @@ def test_published_substrings_drop_rows_if_a_watcher_event_arrives_during_query(
         freshness.mark_external_pending(vault, paths=[referrer])
         return rows
 
-    monkeypatch.setattr(store, "_substring_query", read_then_observe_change)
+    monkeypatch.setattr(store, "_matched_substring_paths", read_then_observe_change)
     result = lexstore.search_current_published_substrings(vault, ["published-needle"])
 
     assert not result.readiness.complete
