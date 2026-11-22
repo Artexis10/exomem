@@ -29,7 +29,8 @@ The default margin frees an extra tenth of the requested space. The upload floor
 Use `--margin-bytes` and `--upload-floor-bytes` to set those values. An upload at the floor returns `MEDIA_SPACE_BUSY` with a retry hint.
 The final part of a resumable upload reserves space for its commit stages. The service keeps accepted parts if commit must wait.
 Hydration, signed-container extraction and each final storage copy use the same vault-volume budget.
-Moving a stored Markdown original also uses that budget for database and search index writes. Its projected file keeps the floor protection.
+The budget covers database, search and graph writes for stored Markdown originals. Their projected files keep the floor protection.
+When an outside rename meets the floor, the next retry checks both paths. Other imports continue.
 
 After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
 The service flushes the version directory and store root before relying on that copy for eviction.

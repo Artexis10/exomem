@@ -60,7 +60,7 @@ Before a filesystem version authorizes eviction, the service SHALL flush its con
 
 The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume. This includes multipart spools, resumable parts, final storage copies, signed-container extraction, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
 
-Moving a stored Markdown original SHALL reserve room for its database and search index writes before the move commits. A move that updates lineage SHALL keep the original's floor protection for later projection.
+The floor SHALL cover the database, search and graph writes derived directly from a stored Markdown original. A move that updates lineage SHALL keep the original's floor protection for later projection.
 
 #### Scenario: An upload that would cross the floor
 
@@ -78,7 +78,8 @@ Moving a stored Markdown original SHALL reserve room for its database and search
 
 - **WHEN** the importer pairs an outside rename of a stored Markdown original and the move would cross the floor
 - **THEN** it retains the source and destination pairing across restart and continues unrelated imports
-- **AND** a retry revalidates both paths before committing the move
+- **AND** a retry revalidates both paths immediately before committing the move
+- **AND** a replacement file with the same verified bytes retains the floor protection
 
 ### Requirement: The owner status shows what eviction keeps and why
 

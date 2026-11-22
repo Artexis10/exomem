@@ -13,7 +13,7 @@ import json
 import logging
 import sqlite3
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -363,9 +363,6 @@ def _lexical_allocation_bytes(rows: lexstore.PageRows | None) -> int:
             for value in unit.values())
         for unit in units
     ) + structure_size
-    if rows.columns["in_kb"] and epistemic_graph._is_graph_page(rows.columns["path"]):
-        # The file graph node embeds the same JSON summary in its metadata.
-        records += structure_size
     if not lexstore.fts5_available():
         return records
     content = sum(len(text.encode()) for text in (*documents, *columns))
@@ -511,21 +508,64 @@ def _source_derived_scrub_pages(tx: Connection, sources: tuple[str, ...], usable
     return pages
 
 
+def _incoming_graph_pages(
+    tx: Connection, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
+    *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]],
+) -> tuple[int, int]:
+    """Return the graph bindings' new page allowance and number of tree entries."""
+    overflow_pages = local_bytes = trees = entries = 0
+    for table in records:
+        if not table.values:
+            continue
+        shapes = layouts.get(table.table)
+        if shapes is None:
+            positions = {column: ordinal for ordinal, column in enumerate(table.columns)}
+            shapes = [(tuple(positions.values()), usable + 4 - 35)]
+            for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table.table,)):
+                indexed = []
+                for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
+                    if cid != -1 and name not in positions:
+                        raise ValueError("cannot size an unbound graph index column")
+                    indexed.append(len(positions) if cid == -1 else positions[name])
+                shapes.append((tuple(indexed), (usable + 4 - 12) * 64 // 255 - 23))
+            layouts[table.table] = shapes
+        trees += len(shapes)
+        entries += len(table.values) * len(shapes)
+        for record in table.values:
+            sizes = tuple(
+                len(value) if isinstance(value, str) and encoding == "UTF-8" and value.isascii()
+                else len(value.encode(encoding)) if isinstance(value, str)
+                else len(value) if isinstance(value, bytes)
+                else 0 if value is None else 8
+                for value in record
+            ) + (8,)  # SQLite appends the integer rowid to ordinary secondary indexes.
+            for columns, limit in shapes:
+                size = 9 * (len(columns) + 1) + sum(sizes[column] for column in columns)
+                # The inline portion also needs its cell pointer, varints and child/overflow pointers.
+                local_bytes += min(size, limit) + 32
+                if size > limit:
+                    overflow_pages += (size + usable - 1) // usable
+    # Leave room for uneven packing and internal pages. All existing pages that
+    # balancing can redistribute are budgeted separately from these new cells.
+    local_pages = (4 * local_bytes + usable - 1) // usable + 2 * trees
+    return overflow_pages + local_pages, entries
+
+
 @contextmanager
 def _reserve_payload_pages(
     writer: CollectionWriter, puts: tuple[PagePut, ...], moves: dict[str, PageMove],
-) -> Iterator[dict[str, _PreparedOriginal]]:
+) -> Iterator[tuple[dict[str, _PreparedOriginal], derive.ReserveGraph | None]]:
     """Protect original payload allocation and its direct write metadata on the vault device."""
     from .. import media_capacity
 
     originals = tuple(put for put in puts if put.media_allocation)
     if not originals and not moves:
-        yield {}
+        yield {}, None
         return
     database = writer.handle.path
     with media_capacity.upload_room(writer.root, device=database.stat().st_dev, reserve=True) as room:
         if room is None:
-            yield {}
+            yield {}, None
             return
         conn = writer.connection
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
@@ -555,7 +595,7 @@ def _reserve_payload_pages(
             # frontmatter. Lexical allocation follows the exact admitted index inputs.
             record_size = (
                 len(body) + 2 * len((fields or "").encode()) + trees * len(rel.encode())
-                + _lexical_allocation_bytes(lexical[1])
+                + _lexical_allocation_bytes(lexical.rows)
             )
             overflow_pages += (record_size + usable - 1) // usable
         removed_postings, removed_content = _source_fts_delete_bytes(conn, moves, scrub=scrub)
@@ -568,13 +608,33 @@ def _reserve_payload_pages(
         if scrub:
             scrub_pages += _source_derived_scrub_pages(conn, tuple(moves), usable)
         wal_pages = overflow_pages + scrub_pages + 6 * btree_paths + 1  # Includes the revision row.
-        room.reserve_store_pages(
-            database, target_bytes=(before + database_pages) * page_size,
-            wal_bytes=32 + wal_pages * (page_size + 24),
-            upload_size=upload_size,
-        )
+        graph_pages = graph_entries = 0
+        graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
+        encoding, = conn.execute("PRAGMA encoding").fetchone()
+
+        def reserve() -> None:
+            # WAL writes each dirty page once per transaction. The real starting
+            # page count bounds the existing pages that any number of splits can
+            # rewrite, while the paths bound the cost for small graph writes.
+            redistributed = min(before, 6 * levels * graph_entries)
+            room.reserve_store_pages(
+                database, target_bytes=(before + database_pages + graph_pages + redistributed) * page_size,
+                wal_bytes=32 + (wal_pages + graph_pages + 2 * redistributed) * (page_size + 24),
+                upload_size=upload_size,
+            )
+
+        def reserve_graph(records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
+            nonlocal graph_pages, graph_entries
+            pages, entries = _incoming_graph_pages(
+                conn, records, usable, encoding=encoding, layouts=graph_layouts,
+            )
+            graph_pages += pages
+            graph_entries += entries
+            reserve()
+
+        reserve()
         try:
-            yield prepared
+            yield prepared, reserve_graph
         finally:
             try:
                 target = conn.execute("PRAGMA page_count").fetchone()[0] * page_size
@@ -584,7 +644,9 @@ def _reserve_payload_pages(
                 log.warning("could not refresh the store checkpoint allocation (%s)", type(error).__name__)
 
 
-def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
+def commit(
+    writer: CollectionWriter, change: StoreChange, *, before_move_commit: Callable[[], None] | None = None,
+) -> CommitResult:
     """Apply ``change`` in one transaction on the store thread's writer, and return its revision.
 
     The statements run in this order, so that a kill at any point leaves the old state whole: the
@@ -597,7 +659,9 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     _require_owned(change)
     # Close the transaction before releasing capacity, including on rollback. The
     # source lookup and admission run before the first canonical mutation.
-    with ExitStack() as allocations, writer.handle.transaction() as tx:
+    transaction = (writer.handle.transaction() if before_move_commit is None
+                   else writer.handle.transaction(before_commit=before_move_commit))
+    with ExitStack() as allocations, transaction as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
         if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
@@ -610,7 +674,9 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
             ).fetchone():
                 raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
         retained_moves = _marked_moves(tx, change)
-        prepared = allocations.enter_context(_reserve_payload_pages(writer, change.puts, retained_moves))
+        prepared, reserve_graph = allocations.enter_context(
+            _reserve_payload_pages(writer, change.puts, retained_moves),
+        )
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
         now = timestamp()
@@ -631,6 +697,7 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         delta = derive.apply(
             tx, writer.root, change, existing, before=before,
             prepared_lexical={rel: original.lexical for rel, original in prepared.items()},
+            reserve_graph=reserve_graph,
         )
         # The pages above derived with the overlay that the disk still holds; the job settles them.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)

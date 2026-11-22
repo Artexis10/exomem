@@ -270,3 +270,55 @@ def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
         assert read.owned_bytes(served, destination) == original and not read.page_exists(served, source)
         with closing(connection.open_reader(database)) as current:
             assert current.execute("SELECT path FROM pages WHERE path IN (?, ?)", (source, destination)).fetchall() == []
+
+
+def test_original_reserves_resolved_graph_records_before_writing_them(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 4 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(free=free[0]))
+    folder = "Knowledge Base/Notes/" + "/".join(
+        f"catalogue-section-{index:02}-" + "region-" * 9 for index in range(31)
+    )
+    targets = tuple(f"Station-{index:03}" for index in range(420))
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "prepare catalogue targets",
+        puts=tuple(write.PagePut(f"{folder}/{name}.md", f"# {name}\n".encode()) for name in targets),
+    ))
+    original = ("# Field directory\n\n" + "\n".join(f"- [[{name}]]" for name in targets)).encode()
+    source = "Knowledge Base/Evidence/Tests/Minutes/directory.md"
+    change = write.StoreChange(write.Origin.GOVERNED, "file directory",
+                               puts=(write.PagePut(source, original, media_allocation=True),))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        original_pages, = reader.execute("PRAGMA page_count").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        wal_size = wal.stat().st_size
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, change)
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and not read.page_exists(served, source)
+        assert wal.stat().st_size == wal_size
+        assert writer.connection.execute(
+            "SELECT COUNT(*) FROM graph_edges WHERE source_path = ?", (source,),
+        ).fetchone() == (0,)
+
+        free[0] = floor + 256 * floor
+        write.commit(writer, change)
+        count, longest = writer.connection.execute(
+            "SELECT COUNT(*), MAX(length(dst_key)) FROM graph_edges WHERE source_path = ?", (source,),
+        ).fetchone()
+        assert count == len(targets) and longest > 2000
+        growth = (writer.connection.execute("PRAGMA page_count").fetchone()[0] - original_pages) * page_size
+        assert growth + wal.stat().st_size - wal_size > 4 * floor
+        assert read.owned_bytes(served, source) == original
