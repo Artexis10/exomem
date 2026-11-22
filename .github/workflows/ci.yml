@@ -813,11 +813,11 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.20"
       - name: Validate all OpenSpec records
         run: |
           source infra/tool-versions.env
-          npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} -- validate --all --strict
+          node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} --
       - name: Refuse task-complete active changes
         run: python scripts/check_openspec_archive_discipline.py
 

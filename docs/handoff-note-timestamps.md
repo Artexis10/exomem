@@ -126,7 +126,7 @@ means reissuing the release.
 - Lean test command:
   `EXOMEM_DISABLE_EMBEDDINGS=1 uv run pytest tests/ -q --timeout=60`
 - Follow repo contribution instructions and OpenSpec conventions; validate any
-  OpenSpec change with `openspec validate <name> --strict`.
+  OpenSpec work with the strict gate: `source infra/tool-versions.env` then `node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --`.
 
 ## Acceptance
 
