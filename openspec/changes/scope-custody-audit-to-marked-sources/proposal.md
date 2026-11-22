@@ -6,7 +6,7 @@ A `maintenance.audit` call that asks only for `custody_source` cannot finish on 
 
 ## What Changes
 
-- An audit that selects only `custody_source` chooses its pages from the frontmatter of append-only pages before it authorizes or parses any of them. It authorizes and parses only pages that record `custody_only: true`.
+- An audit that selects only `custody_source` chooses its pages from the frontmatter of Knowledge Base pages before it authorizes or parses any of them. It authorizes and parses only pages that record `custody_only: true`, plus any page whose frontmatter it cannot read or bound, which the ordinary path then decides.
 - The pages that a custody Source names, its derivatives in `ingested_into` and its predecessors in `supersedes`, are read only when the check asks for them, through the same admission as the corpus parse.
 - The findings equal those of the same check over the full corpus. A page that the caller may not see still contributes nothing and still reports as missing when a Source names it.
 - Any other selection, including `custody_source` combined with another category, keeps its existing corpus read.

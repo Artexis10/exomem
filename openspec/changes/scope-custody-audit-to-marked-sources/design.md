@@ -8,7 +8,7 @@ A cProfile run of a custody-only audit on a text snapshot of a personal vault (1
 
 ### D1. Choose custody candidates from frontmatter before authorization
 
-For a selection of exactly `{custody_source}`, `_parse_all` takes a selector that runs before admission. It keeps a page only when the page is in the append-only tree and its frontmatter records `custody_only: true`. The selector reads the page's stored bytes, or the stored body in a store-served vault, and parses only the frontmatter. Admission and the full parse then run for the few pages that pass, as they do today.
+For a selection of exactly `{custody_source}`, `_parse_all` takes a selector that runs before admission. It drops a page only when it has read the page's frontmatter and the frontmatter does not record `custody_only: true`. It reads only the fenced frontmatter block from the file, or the stored body in a store-served vault, and parses it as the full parse does. A page it cannot decide (unreadable, unterminated or over the header bound) stays in. It applies to every corpus page, not only the append-only tree, because the custody check selects captured Sources by type role, wherever they are. Admission and the full parse then run for the few pages that pass, as they do today.
 
 Rejected:
 - An append-only parse, as #2995 does for pointer drift. It still admits and parses about 14,100 pages on the measured vault, so it still exhausts the allowance.
@@ -27,5 +27,5 @@ The selector applies only to exactly `{custody_source}`. `unprocessed_source` ne
 
 ## Risks
 
-- A Source whose frontmatter cannot be parsed is dropped by the selector. The full parse would also give it no `custody_only` field, so neither path reports it as a custody Source.
-- Expected cost on the measured vault: frontmatter reads of the append-only pages, the cold resolver, and a handful of admissions and parses, well inside the 50 s allowance. The proof task measures it.
+- A Source whose frontmatter holds invalid YAML or is not a mapping is dropped by the selector. The full parse would also give it no `custody_only` field, so neither path reports it as a custody Source.
+- Expected cost on the measured vault: frontmatter reads of every corpus page, the cold resolver, and a handful of admissions and parses, well inside the 50 s allowance. The proof task measures it.

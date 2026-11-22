@@ -1,6 +1,6 @@
 ## 1. Custody-only corpus read
 
-- [x] 1.1 Give `_parse_all` a selector that runs before admission; for a selection of exactly `{custody_source}`, keep only append-only pages whose frontmatter records `custody_only: true`, in file and store-served vaults.
+- [x] 1.1 Give `_parse_all` a selector that runs before admission; for a selection of exactly `{custody_source}`, keep only corpus pages whose frontmatter records `custody_only: true`, and keep any page whose frontmatter it cannot decide, in file and store-served vaults.
 - [x] 1.2 Pass the custody check an on-demand lookup that admits and parses one named path, caches it for the call, checks the request budget, and returns `None` where the full parse would have no page.
 - [x] 1.3 Leave every other selection on its existing read.
 
