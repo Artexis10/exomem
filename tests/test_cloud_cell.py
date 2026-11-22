@@ -745,7 +745,7 @@ def test_cloud_tool_list_allows_staged_adoption(
         assert {"imports.start", "imports.apply"} <= writes
         # Media status remains available; Cloud still omits the video-frame command.
         assert "media.status" in reads
-        assert not {"media.video", "media.image"} & reads
+        assert not {"media.video", "media.image", "media.preview"} & reads
         assert "media.process" in writes
         assert {"settings.set"} <= writes
         assert "recall_context" in names

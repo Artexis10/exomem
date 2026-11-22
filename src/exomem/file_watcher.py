@@ -55,6 +55,7 @@ from . import (
     freshness,
     graph_read_publication,
     index_sync,
+    media_previews,
     media_processing,
     mode,
     mutation_lock,
@@ -91,6 +92,7 @@ def _reconcile_background_media(vault_root: Path, binary: Path) -> object:
         binary,
         explicit=False,
         commit_guard=lambda: _media_mutation_guard(vault_root),
+        enqueue_preview=False,
     )
 
 
@@ -1329,6 +1331,7 @@ class FileWatcher:
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
+        self._pending_preview_removals: set[str] = set()
         self._managed_media_events: dict[Path, bool] = {}
         self._pending_publication_intents: dict[Path, _PublicationIntent] = {}
         self._pending_external_epoch = 0
@@ -1635,10 +1638,18 @@ class FileWatcher:
             # the trashed note under its trash path.
             return
         if path.suffix.lower() != ".md":
-            if deleted or not self._is_kb(path) or media_processing.classify_media(path) is None:
+            if not self._is_kb(path):
+                return
+            if deleted:
+                if not path.is_relative_to(self._vault_root) or not media_previews.supports(path):
+                    return
+            elif media_processing.classify_media(path) is None:
                 return
             with self._lock:
-                self._pending_media.add(path)
+                if deleted:
+                    self._pending_preview_removals.add(path.relative_to(self._vault_root).as_posix())
+                else:
+                    self._pending_media.add(path)
                 self._last_change = time.monotonic()
             self._wake.set()
             return
@@ -1707,6 +1718,14 @@ class FileWatcher:
             self._managed_media_events = {}
         for path, deleted in managed.items():
             self._record(path, deleted=deleted)
+        with self._lock:
+            preview_removals, self._pending_preview_removals = self._pending_preview_removals, set()
+        if preview_removals:
+            # Hand binary removals straight to the guarded preview cleanup.
+            try:
+                media_previews.retire(self._vault_root, preview_removals)
+            except Exception as error:  # noqa: BLE001 - the periodic sweep retries failed cleanup
+                log.warning("file watcher: preview cleanup deferred (%s)", type(error).__name__)
         media, ups, del_rels, pending_epoch, access_policy = self._drain()
         if access_policy:
             self._reconcile_access_policy(pending_epoch)

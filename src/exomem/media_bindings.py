@@ -63,6 +63,8 @@ class ObjectFacts:
     owner_read: float | None
     pinned: bool
     references: tuple[originals.StoredObject, ...]
+    #: One filing that holds each reference, in the same order: the first by path.
+    owners: tuple[str, ...]
     checkpoint: Checkpoint
 
 
@@ -795,8 +797,11 @@ def object_facts(conn: sqlite3.Connection, key: str) -> ObjectFacts | None:
         "OR EXISTS(SELECT 1 FROM jobs WHERE pinned = 1 AND state IN ('pending', 'running') "
         "AND (object_key = ? OR object_key IS NULL)) "
         "OR EXISTS(SELECT 1 FROM media_drain WHERE latched = 1 AND proof_version = 1)", (key, key)).fetchone()[0])
-    references = tuple(originals.stored_reference(json.loads(item[0])) for item in conn.execute(
-        "SELECT DISTINCT reference FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL ORDER BY reference", (key,)))
+    pointers = conn.execute(
+        "SELECT reference, MIN(binary_rel) FROM media_bindings WHERE object_key = ? AND reference IS NOT NULL "
+        "GROUP BY reference ORDER BY reference", (key,)).fetchall()
+    references = tuple(originals.stored_reference(json.loads(item[0])) for item in pointers)
     if any(reference is None for reference in references):
         return None
-    return ObjectFacts(key, row[1], row[3], row[0], bool(row[5]), bool(row[6]), row[7], pinned, references, state)
+    return ObjectFacts(key, row[1], row[3], row[0], bool(row[5]), bool(row[6]), row[7], pinned, references,
+                       tuple(item[1] for item in pointers), state)

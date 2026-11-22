@@ -244,6 +244,10 @@ IMMEDIATE = "immediate"
 RETRIEVAL_CLASSES: tuple[str, ...] = (IMMEDIATE, "minutes", "hours")
 #: The configuration key that lists the declared stores beside the kept `store` key.
 STORES = "stores"
+#: The optional descriptor field that bounds the bytes a store's sampled decrypt checks may download in a calendar month.
+#: An older release ignores it, as it ignores any field it does not read.
+SAMPLE_BYTES_FIELD = "sample_bytes_per_month"
+DEFAULT_SAMPLE_BYTES = 1024**3
 #: The optional configuration key that states who holds the decryption identity, and its one value: a platform that
 #: wraps it. Without the key, the owner's confirmed export of the identity is the only evidence of custody.
 KEY_CUSTODY = "key_custody"
@@ -270,10 +274,17 @@ class StoreEntry:
     serves_eviction: bool = False
     #: Whether the entry came from the `stores` list (a declared store) and not from the legacy top-level fields.
     declared: bool = False
+    #: The owner's monthly byte budget for sampled decrypt checks of this store's replicas; None means the default.
+    sample_bytes: int | None = None
 
     @property
     def available(self) -> bool:
         return not self.missing and not self.invalid
+
+    @property
+    def sample_bytes_per_month(self) -> int:
+        """The monthly budget for sampled checks of this store: the owner's figure, or the default; zero turns sampling off."""
+        return DEFAULT_SAMPLE_BYTES if self.sample_bytes is None else self.sample_bytes
 
 
 def _descriptor(entry: dict[str, object], *, require_adapter: bool) -> tuple[dict[str, object], tuple[str, ...], tuple[str, ...]]:
@@ -298,6 +309,12 @@ def _descriptor(entry: dict[str, object], *, require_adapter: bool) -> tuple[dic
             missing.append("adapter")
         elif not isinstance(entry["adapter"], str) or not entry["adapter"]:
             invalid.append("adapter")
+    if SAMPLE_BYTES_FIELD in entry:  # optional: absent is the default, a wrong value makes the store unavailable
+        budget = entry[SAMPLE_BYTES_FIELD]
+        if type(budget) is int and 0 <= budget < 2**63:  # SQLite binds the budget as a signed 64-bit integer.
+            given[SAMPLE_BYTES_FIELD] = budget
+        else:
+            invalid.append(SAMPLE_BYTES_FIELD)
     return given, tuple(missing), tuple(invalid)
 
 
@@ -324,7 +341,8 @@ def store_entries(config: dict[str, object]) -> dict[str, StoreEntry]:
     else:
         given, missing, invalid = _descriptor(selected, require_adapter=False)
         found[primary] = StoreEntry(primary, config, given.get("failure_domain"), given.get("retrieval_class"),
-                                    given.get("head_recomputes"), missing, invalid, True, True)
+                                    given.get("head_recomputes"), missing, invalid, True, True,
+                                    given.get(SAMPLE_BYTES_FIELD))
     seen: set[str] = set()
     for name, item in listed:
         if name in seen:
@@ -338,7 +356,8 @@ def store_entries(config: dict[str, object]) -> dict[str, StoreEntry]:
         if "name" not in item:
             missing = ("name", *missing)
         found[name] = StoreEntry(name, item, given.get("failure_domain"), given.get("retrieval_class"),
-                                 given.get("head_recomputes"), missing, invalid, False, True)
+                                 given.get("head_recomputes"), missing, invalid, False, True,
+                                 given.get(SAMPLE_BYTES_FIELD))
     return found
 
 
@@ -583,6 +602,7 @@ class ArchiveReads:
 def original_state(
     vault: Path, path: str | Path, *, binding: StoreBinding | None = None,
     companions: Mapping[str, bytes] | None = None, archive: ArchiveReads | None = None,
+    strict_companion: bool = False,
 ) -> OriginalSnapshot:
     """Resolve local, cached, evicted or missing from one exact sibling binding.
 
@@ -590,6 +610,7 @@ def original_state(
     Foreign references deliberately confer no presence in the selected vault.
     ``companions`` is ``companion_candidates``'s: pages that the caller has already read. A walk passes one
     ``archive`` for all its bindings, so it reads the store binding and the pool marker once.
+    Strict companion readers refuse a malformed binding even when the original is resident.
     """
     from . import reserved_paths
     from .vault import FrontmatterError
@@ -620,6 +641,8 @@ def original_state(
     try:
         found = bound_companion(vault, relative, companions=companions)
     except (UnicodeError, FrontmatterError):
+        if strict_companion:
+            raise
         found = None
     if found is None:
         from .governance.raw_protection import marked

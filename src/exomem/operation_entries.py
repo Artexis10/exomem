@@ -30,7 +30,7 @@ Effect = Literal["read", "write"]
 #: What a completed write did, in the one word the user-facing summary leads with. This is a closed
 #: contract set, not vault vocabulary: the summary sentence is built from it, and each write
 #: operation declares exactly one (a write that declares none gets no summary).
-OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored"]
+OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored", "retracted"]
 
 #: How the MCP surface publishes a converted command. `public` lists the typed tools and
 #: the two doors of `public_surface`, and `grouped` names the grouped command itself.
@@ -372,9 +372,9 @@ RECORDS = CommandOperations(
             CHANGE_RECORDS,
             "write",
             "Change records",
-            "Change human-owned Records: create a collection, append, update or bulk-upsert "
-            "items, discard a held candidate, revise or rebaseline a manifest, or start or "
-            "cancel an import. `operation.kind` selects the operation. Propose a new collection "
+            "Change human-owned Records: create a collection, append, update, retract or "
+            "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
+            "start or cancel an import. `operation.kind` selects the operation. Propose a new collection "
             "before creating it. Guarded writes need the hashes that the matching read returns. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
@@ -425,6 +425,14 @@ RECORDS = CommandOperations(
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
+        ),
+        # A retraction takes the row out of current state and keeps its history; the page it names stays.
+        _entry(
+            "retract", CHANGE_RECORDS,
+            ("collection", "item_id", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
+            effect="write", destructive=True, outcome_verb="retracted",
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,
@@ -551,7 +559,7 @@ _TOOL_HELP = {
     "preserve_evidence": ("write", "Preserve evidence", "Preserve original text or attached files as governed Evidence. File attachments stay in top-level files."),
     "read_review": ("read", "Read review", "Read review queues, provenance, drift, backlog or one review item's bounded context. Submit meaning questions through triage_memory."),
     "triage_memory": ("write", "Triage memory", "Save a review decision or submit a meaning question. These writes do not grant mutation authority."),
-    "read_media": ("read", "Read media", "Show stored images or video frames to the model, or inspect media processing status."),
+    "read_media": ("read", "Read media", "Show images, video frames or stored previews, or inspect media processing status."),
     "change_media": ("write", "Change media", "Process, retry, reprocess or replicate media."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
@@ -635,12 +643,13 @@ _REMAINING = {
     "read_media": ("media", (
         _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec", "max_side"), ("path",)),
         _row("image", "read_media", ("path", "paths", "max_side", "region")),
+        _row("preview", "read_media", ("path",), ("path",)),
     )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths", "language", "multilingual"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("process", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("replicate", "change_media", ("store",), ("store",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "triage_memory": (None, (

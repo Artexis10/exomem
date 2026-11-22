@@ -62,7 +62,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | preserve_evidence | Direct inputs | preserve_evidence |
 | process_media | Direct inputs | process_media |
 | query_dataset | Direct inputs | query_dataset |
-| read_media | video, image | read_media |
+| read_media | video, image, preview | read_media |
 | read_memory | page | read_memory |
 | recall_context | Direct inputs | activate_context |
 | record_memory | Direct inputs | record_memory |
@@ -103,7 +103,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, raw_protection, response_detail | Preserve text as append-only proof. |
 | preserve_artifacts | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, files*, adoption, transcriptions, raw_protection, archive, response_detail | Preserve client file handles as append-only Evidence. |
 | transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation, lane, artifact, expected_sha256, hold, artifacts, uploads, import_identity, response_detail | Prepare a file transfer or cancel owned waiting uploads. |
-| process_media | 1 | MCP, REST, CLI | write | no | - | - | path, paths, operation, language, multilingual, store, response_detail | Check governed media; retry after remediation; extract again; replicate originals. |
+| process_media | 1 | MCP, REST, CLI | write | no | - | - | path, paths, operation, language, multilingual, store, diarize, response_detail | Check governed media; retry after remediation; extract again; replicate originals. |
 | review_memory | 1 | MCP, REST, CLI | write | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, continuation, query, sources, suggested_title, tag, key, value, path, state, ref, detail, legacy_sample_limit, family, window_days, response_detail | Review health, provenance, drift and backlog. |
 | review_item_context | 1 | MCP, REST, CLI | read | no | ref | review_item_context | ref*, expected_fingerprint, max_body_chars, max_related_pages, max_graph_nodes, max_graph_edges, max_history, max_evolution_versions, continuation | Read one review item's target, provenance, relations and history. |
 | triage_memory | 1 | MCP, REST, CLI | write | no | ref | attention | ref, action, until, why, expected_fingerprint, source_path, decision, item_id, response_detail | Save review decisions or attention settings; use returned refs and fingerprints. |
@@ -118,7 +118,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, expand_child, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, expected_manifest_hash, acknowledged_gap_codes, body, delivery, changes, expected_item_version, refresh_presentation, held, hold, rows, source, on_reject, import_request, query, item_id, response_detail | Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence. |
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, item_id, response_detail | Manage intent; record_memory holds outcomes. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a vault CSV, TSV or JSON dataset. |
-| read_media | 2 | MCP | read | no | path | get_video_frames | path, media, paths, max_frames, start_sec, end_sec, max_side, region | Show stored images or sampled video frames inline (MCP only). |
+| read_media | 2 | MCP | read | no | path | get_video_frames | path, media, paths, max_frames, start_sec, end_sec, max_side, region | Show images, sampled video frames or a stored preview inline (MCP only). |
 | observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check imports into and exports out of this Exomem Cloud memory, and how to send files. |
 | transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Exomem Cloud memory. |
 

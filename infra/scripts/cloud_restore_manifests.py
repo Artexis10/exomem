@@ -11,7 +11,8 @@ process memory only and never prints it.
     scratch                restore a snapshot into a new scratch namespace beside the cell
     in-place               restore a snapshot onto the stopped cell's own volume
     helper-pod             start a pod on the cell's volume or a scratch volume
-    idle                   exit 0 only when the cell runs no Job and carries no hold
+    idle                   exit 0 only when the cell has no conflicting Job or hold
+    running-pods           print the Pods that could still use the cell volume
     outside-backup-window  exit 0 only outside the live cellctl's nightly backup window
     backup-paths           print the paths a backup covers and a restore rewrites
     restore-job-selector   print the label selector of cellctl's restore Jobs
@@ -48,11 +49,14 @@ from cellctl.manifests import (  # noqa: E402
     BACKUP_PATHS,
     HOLD_ANNOTATION,
     JOB_KIND_LABEL,
+    JOB_KIND_RESTIC_VERIFY,
     JOB_KIND_RESTORE,
+    RESTIC_VERIFICATION_JOB_NAME_RE,
     SNAPSHOT_ID_RE,
     CellManifestSpec,
     _container_security_context,
     _pod_security_context,
+    is_restic_verification_pod_spec,
     namespace_name,
     render_cell_manifests,
     render_restore_job,
@@ -77,6 +81,8 @@ SCRATCH_DOCUMENTS = {
 }
 # Pod phases in which a pod no longer runs and so no longer uses the volume.
 FINISHED_PHASES = {"Succeeded", "Failed"}
+WORKLOAD_REQUEST_SECONDS = 10
+WORKLOAD_COMMAND_SECONDS = 12
 
 
 @dataclass(frozen=True)
@@ -88,10 +94,16 @@ class PlatformSettings:
     job_egress_except: tuple[str, ...]
 
 
-def _kubectl(context: str, *args: str, payload: str | None = None, quiet: bool = False) -> str:
-    result = subprocess.run(
-        ["kubectl", "--context", context, *args], input=payload, text=True, capture_output=True, check=False
-    )
+def _kubectl(
+    context: str, *args: str, payload: str | None = None, quiet: bool = False, timeout: int | None = None,
+) -> str:
+    try:
+        result = subprocess.run(
+            ["kubectl", "--context", context, *args], input=payload, text=True, capture_output=True,
+            check=False, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"kubectl {' '.join(args)} timed out") from error
     if result.returncode:
         # A Secret apply can echo its payload in an error; say only what failed.
         detail = "" if quiet else ": " + (result.stderr.strip().splitlines() or [""])[-1]
@@ -101,7 +113,8 @@ def _kubectl(context: str, *args: str, payload: str | None = None, quiet: bool =
 
 def _get(context: str, kind: str, name: str, namespace: str | None = None) -> dict:
     args = (["-n", namespace] if namespace else []) + ["get", kind, name, "-o", "json"]
-    return json.loads(_kubectl(context, *args))
+    return json.loads(_kubectl(context, *args, f"--request-timeout={WORKLOAD_REQUEST_SECONDS}s",
+                               timeout=WORKLOAD_COMMAND_SECONDS))
 
 
 def _apply(context: str, document: dict, field_manager: str) -> None:
@@ -324,8 +337,7 @@ def apply_in_place(context: str, cell_id: str, snapshot: str, field_manager: str
     # unless both are scaled to zero and no pod still runs beside the volume.
     if statefulset["spec"].get("replicas") != 0 or deployment["spec"].get("replicas") != 0:
         raise ValueError("the cell and cellctl must both be scaled to zero")
-    pods = json.loads(_kubectl(context, "-n", source, "get", "pods", "-o", "json"))["items"]
-    if any(pod["status"].get("phase") not in FINISHED_PHASES for pod in pods):
+    if _running_pods(context, source, statefulset=statefulset):
         raise ValueError("a pod still runs in the cell namespace")
     job = in_place_job(
         cell_id=cell_id, statefulset=statefulset, snapshot=snapshot,
@@ -345,16 +357,100 @@ def apply_helper_pod(context: str, cell_id: str, name: str, field_manager: str, 
     _apply(context, pod, field_manager)
 
 
+def _verifier_label(document: dict) -> bool:
+    return (document["metadata"].get("labels") or {}).get(JOB_KIND_LABEL) == JOB_KIND_RESTIC_VERIFY
+
+
+def _verifier_spec(pod: dict, image_repository: str) -> bool:
+    if not is_restic_verification_pod_spec(pod):
+        return False
+    image = pod["containers"][0].get("image", "")
+    return bool(DIGEST_IMAGE_RE.search(image) and image.rpartition("@")[0] == image_repository)
+
+
+def _verifier_pod(pod: dict, image_repository: str) -> bool:
+    metadata = pod["metadata"]
+    labels = metadata.get("labels") or {}
+    name = labels.get("batch.kubernetes.io/job-name", "")
+    uid = labels.get("batch.kubernetes.io/controller-uid")
+    if not isinstance(uid, str) or not uid:
+        return False
+    owners = metadata.get("ownerReferences") or []
+    # When Kubernetes orphans a Pod, it removes the Job owner reference and retains Job labels.
+    return (_verifier_label(pod) and bool(RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(name))
+            and (not owners or any(_job_owner(owner, name, uid) for owner in owners))
+            and _verifier_spec(pod["spec"], image_repository))
+
+
+def _job_owner(owner: dict, name: str, uid: str) -> bool:
+    return (owner.get("apiVersion") == "batch/v1" and owner.get("kind") == "Job"
+            and owner.get("name") == name and owner.get("uid") == uid and owner.get("controller") is True)
+
+
+def _list_workloads(context: str, namespace: str, kind: str) -> list[dict]:
+    return json.loads(_kubectl(context, "-n", namespace, "get", kind, "-o", "json",
+                               f"--request-timeout={WORKLOAD_REQUEST_SECONDS}s", timeout=WORKLOAD_COMMAND_SECONDS))["items"]
+
+
+def _running_pods(context: str, namespace: str, *, except_pod: str = "", statefulset: dict | None = None) -> list[str]:
+    blockers = []
+    image_repository = None
+    for pod in _list_workloads(context, namespace, "pods"):
+        name = pod["metadata"]["name"]
+        if name == except_pod or pod["status"].get("phase") in FINISHED_PHASES:
+            continue
+        if _verifier_label(pod):
+            if image_repository is None:
+                sts = statefulset if statefulset is not None else _get(context, "statefulset", "cell", namespace)
+                image_repository = runtime_of(sts)[0].rpartition("@")[0]
+            if _verifier_pod(pod, image_repository):
+                continue
+        blockers.append(name)
+    return blockers
+
+
+def print_running_pods(context: str, cell_id: str, except_pod: str) -> None:
+    if not CELL_ID_RE.fullmatch(cell_id):
+        raise ValueError("not a cell ID")
+    if except_pod and not POD_NAME_RE.fullmatch(except_pod):
+        raise ValueError("not a pod name")
+    for name in _running_pods(context, namespace_name(cell_id), except_pod=except_pod):
+        print(name)
+
+
 def check_idle(context: str, cell_id: str) -> None:
     if not CELL_ID_RE.fullmatch(cell_id):
         raise ValueError("not a cell ID")
     source = _check_cell_namespace(context, cell_id)
-    annotations = _get(context, "statefulset", "cell", source)["metadata"].get("annotations") or {}
+    statefulset = _get(context, "statefulset", "cell", source)
+    annotations = statefulset["metadata"].get("annotations") or {}
     if HOLD_ANNOTATION in annotations:
         raise ValueError(f"the cell carries a {annotations[HOLD_ANNOTATION]} hold")
-    jobs = json.loads(_kubectl(context, "-n", source, "get", "jobs", "-o", "json"))["items"]
-    if any(job.get("status", {}).get("active") for job in jobs):
-        raise ValueError("a Job is running in the cell namespace")
+    verifiers = {}
+    image_repository = None
+    for job in _list_workloads(context, source, "jobs"):
+        if not job.get("status", {}).get("active"):
+            continue
+        metadata = job["metadata"]
+        template = job["spec"]["template"] if _verifier_label(job) else None
+        if (not template or not metadata.get("uid") or not RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(metadata["name"])
+                or not any(owner.get("apiVersion") == "apps/v1" and owner.get("kind") == "StatefulSet"
+                           and owner.get("name") == "cell" and owner.get("uid") == statefulset["metadata"]["uid"]
+                           for owner in metadata.get("ownerReferences") or [])
+                or not _verifier_label(template)):
+            raise ValueError("a Job is running in the cell namespace")
+        if image_repository is None:
+            image_repository = runtime_of(statefulset)[0].rpartition("@")[0]
+        if not _verifier_spec(template["spec"], image_repository):
+            raise ValueError("a Job is running in the cell namespace")
+        verifiers[metadata["uid"]] = metadata["name"]
+    if verifiers and image_repository is not None:  # the first admitted verifier Job set the repository
+        for pod in _list_workloads(context, source, "pods"):
+            owners = pod["metadata"].get("ownerReferences") or []
+            if (any(uid in verifiers and _job_owner(owner, verifiers[uid], uid)
+                    for owner in owners if (uid := owner.get("uid")))
+                    and not _verifier_pod(pod, image_repository)):
+                raise ValueError("a Job is running in the cell namespace")
 
 
 def check_outside_backup_window(context: str) -> None:
@@ -366,7 +462,7 @@ def check_outside_backup_window(context: str) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("scratch", "in-place", "helper-pod", "idle", "outside-backup-window"):
+    for name in ("scratch", "in-place", "helper-pod", "idle", "running-pods", "outside-backup-window"):
         command = commands.add_parser(name)
         command.add_argument("--context", required=True)
         if name == "outside-backup-window":
@@ -374,8 +470,10 @@ def main(argv: list[str]) -> int:
         command.add_argument("--cell-id", required=True)
         if name in ("scratch", "in-place"):
             command.add_argument("--snapshot", required=True)
-        if name != "idle":
+        if name in ("scratch", "in-place", "helper-pod"):
             command.add_argument("--field-manager", required=True)
+        if name == "running-pods":
+            command.add_argument("--except-pod", default="")
         if name == "scratch":
             command.add_argument("--scratch", required=True)
         if name == "helper-pod":
@@ -393,6 +491,8 @@ def main(argv: list[str]) -> int:
             apply_helper_pod(args.context, args.cell_id, args.name, args.field_manager, args.scratch)
         elif args.command == "idle":
             check_idle(args.context, args.cell_id)
+        elif args.command == "running-pods":
+            print_running_pods(args.context, args.cell_id, args.except_pod)
         elif args.command == "outside-backup-window":
             check_outside_backup_window(args.context)
         elif args.command == "restore-job-selector":

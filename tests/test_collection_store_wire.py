@@ -382,7 +382,7 @@ def test_markdown_log_query_preserves_declared_order_and_notes(paired, insertion
                    item={"title": title, "details": [], "note": "Authored note"},
                    item_key=key, why="capture")
     with handle.transaction() as conn:
-        conn.execute("UPDATE items SET values_json=json_set(values_json, '$.undeclared', 'Private metadata')")
+        conn.execute("UPDATE item_rows SET values_json=json_set(values_json, '$.undeclared', 'Private metadata')")
     pages = []
     for mode in (0, 1):
         first = invoke(mode, "records", "query", collection=CID, limit=1)

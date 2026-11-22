@@ -186,7 +186,7 @@ def _descriptor(raw: bytes) -> dict[str, object]:
     try:
         text = raw.decode("utf-8")
         frontmatter, _body, marker = vault.parse_frontmatter(text, strict=True)
-    except (UnicodeDecodeError, vault.FrontmatterError) as error:
+    except vault.MALFORMED_FRONTMATTER_ERRORS as error:
         raise CompanionClassificationError("descriptor_invalid") from error
     if "stored_object" in frontmatter:
         reference = originals.stored_reference(frontmatter["stored_object"])

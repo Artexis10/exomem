@@ -215,6 +215,42 @@ def test_a_fresh_media_upload_is_stored_pending_so_reconciliation_commits_nothin
     assert frontmatter["processing_state"] == "pending"
 
 
+@pytest.mark.parametrize(("choice", "expected"), [("false", False), ("true", True)])
+def test_audio_upload_pins_its_speaker_label_choice(vault, monkeypatch, choice, expected) -> None:
+    from exomem.vault import parse_frontmatter
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    response = client.post(
+        "/upload",
+        files={"file": ("recording.m4a", b"original audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "diarize": choice},
+        headers={"Authorization": "Bearer test-upload-token"},
+    )
+
+    assert response.status_code == 201, response.text
+    receipt = response.json()
+    fields = parse_frontmatter((vault / receipt["sidecar_path"]).read_text())[0]
+    assert fields["diarize_requested"] is expected
+    assert (vault / receipt["path"]).read_bytes() == b"original audio bytes"
+
+
+@pytest.mark.parametrize("lane", ["evidence", "source"])
+def test_audio_upload_refuses_labeling_a_supplied_transcript(vault, monkeypatch, lane) -> None:
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    token = upload_tokens.mint_for_endpoint("test-upload-token", "https://example.invalid", lane=lane)["token"]
+    response = client.post(
+        "/upload", files={"file": ("recording.m4a", b"audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "source_kind": "session", "diarize": "true", "text": "Caller transcript"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "DIARIZE_NOT_APPLICABLE"
+    assert not list(vault.rglob("recording.m4a*"))
+
+
 def test_upload_reconciles_when_media_worker_is_unavailable(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

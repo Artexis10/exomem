@@ -142,6 +142,18 @@ def maintain_item(conn, collection_id, row_id, item_key, row_version, values: Ma
     _maintain_indexes(conn, collection_id, [(row_id, item_key, row_version, values)])
 
 
+def forget_item(conn, collection_id, row_id, item_key, previous: Mapping) -> None:
+    """Take a retracted row out of every ready and building index and rollup, in its transaction.
+
+    ``previous`` is the row's values as they were current. A later revival maintains the row afresh.
+    """
+    _transaction(conn)
+    query_freshness.advance_all(conn, collection_id)
+    rollups.forget(conn, collection_id, row_id, item_key, previous)
+    for _, plan in _projection_plans(conn, collection_id):
+        conn.execute(f"DELETE FROM {plan.table_name} WHERE row_id=?", (row_id,))  # noqa: S608 - the plan names its own table
+
+
 def maintain_new_items(conn, collection_id, rows) -> None:
     """Maintain one all-new batch without reloading declarations for each row."""
     _transaction(conn)
@@ -150,12 +162,17 @@ def maintain_new_items(conn, collection_id, rows) -> None:
     _maintain_indexes(conn, collection_id, rows, many=True)
 
 
+def _projection_plans(conn, collection_id):
+    """Each ready and building query projection of a collection as ``(state, plan)``."""
+    return [(state, _ready_plan(conn, collection_id, (generation, encoded, digest)) if state == "ready"
+             else _plan(collection_id, generation, encoded, connection=conn))
+            for generation, state, encoded, digest in conn.execute(
+                "SELECT generation,state,plan_json,plan_hash FROM query_projection_mappings "
+                "WHERE collection_id=? AND state IN ('ready','building')", (collection_id,)).fetchall()]
+
+
 def _maintain_indexes(conn, collection_id, rows, *, many=False) -> None:
-    mappings = [(state, _ready_plan(conn, collection_id, (generation, encoded, digest)) if state == "ready"
-                 else _plan(collection_id, generation, encoded, connection=conn))
-                for generation, state, encoded, digest in conn.execute(
-                    "SELECT generation,state,plan_json,plan_hash FROM query_projection_mappings "
-                    "WHERE collection_id=? AND state IN ('ready','building')", (collection_id,)).fetchall()]
+    mappings = _projection_plans(conn, collection_id)
     for state, plan in mappings:
         from .native_projections import NativeProjectionPlan
 
@@ -301,7 +318,7 @@ def backfill_batch(conn, collection_id: str, *, limit: int = 128) -> bool:
                 values = typed[row_id] if size <= _MAX_CELL_BYTES else None
             else:
                 # The blob handle gives the stored byte length without loading a cell too large to index.
-                with raw.blobopen("items", "values_json", row_id, readonly=True) as cell:
+                with raw.blobopen("item_rows", "values_json", row_id, readonly=True) as cell:
                     size = len(cell)
                     values = cell.read() if size <= _MAX_CELL_BYTES else None
             if values is None:

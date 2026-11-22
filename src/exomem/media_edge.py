@@ -53,6 +53,7 @@ from .media_edge_b2 import (
     stream_body,
 )
 from .media_edge_protocol import (
+    ABSENT_CODE,
     ADMIT_ACTION,
     AUDIENCE,
     COLLECTOR_AUDIENCE,
@@ -697,7 +698,7 @@ class MediaEdge:
     async def _head(self, key: str, version: str, response: _Response) -> None:
         info: FileInfo | None = await self.provider.file_info(version)
         if info is None or info.name != key or info.action != "upload":
-            raise Reply(STATUS_ABSENT, "MEDIA_EDGE_ABSENT")
+            raise Reply(STATUS_ABSENT, ABSENT_CODE)
         sha256 = info.info.get(_SHA256_INFO, "")
         if not is_sha256(sha256):
             raise Reply(503, _UNAVAILABLE)
@@ -710,14 +711,14 @@ class MediaEdge:
         byte_range = headers.get("range")
         async with self.provider.download(version, byte_range) as upstream:
             if upstream.status_code == 404:
-                raise Reply(STATUS_ABSENT, "MEDIA_EDGE_ABSENT")
+                raise Reply(STATUS_ABSENT, ABSENT_CODE)
             if upstream.status_code == 416:
                 raise Reply(416, "MEDIA_EDGE_RANGE")
             if upstream.status_code not in (200, 206):
                 raise Reply(503, _UNAVAILABLE)
             # The provider names the version's file, so another cell's version ID reads nothing here.
             if unquote(upstream.headers.get("x-bz-file-name", "")) != key:
-                raise Reply(STATUS_ABSENT, "MEDIA_EDGE_ABSENT")
+                raise Reply(STATUS_ABSENT, ABSENT_CODE)
             forwarded = [("content-length", upstream.headers["content-length"]), ("accept-ranges", "bytes"),
                          ("content-type", "application/octet-stream")]
             if "content-range" in upstream.headers:

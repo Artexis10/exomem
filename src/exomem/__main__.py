@@ -602,6 +602,11 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         help="with --scope/--category: keep the original owner-only until a whole-artifact release",
     )
     parser.add_argument(
+        "--diarize",
+        action=argparse.BooleanOptionalAction,
+        help="with --scope/--category: request or skip speaker labels for this recording",
+    )
+    parser.add_argument(
         "--archive",
         choices=("members",),
         default="",
@@ -633,7 +638,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     )
     args = parser.parse_args(argv)
     if args.handoff_file:
-        if (args.scope or args.category or args.description or args.raw_protection
+        if (args.scope or args.category or args.description or args.raw_protection or args.diarize is not None
                 or args.archive or args.resumable or args.token_file or args.port):
             parser.error("--handoff-file accepts only a held file, --root, --filename and its bound --lane")
         return _attach_handoff(args, transport=transport)
@@ -660,6 +665,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     if hold and args.raw_protection:
         parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
+    if hold and args.diarize is not None:
+        parser.error("--diarize and --no-diarize need --scope/--category; a held file takes the choice when redeemed")
     if hold and (args.archive or args.resumable):
         parser.error("--archive and --resumable need --scope/--category")
     fields = {
@@ -676,6 +683,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         }.items()
         if value
     }
+    if args.diarize is not None:
+        fields["diarize"] = "true" if args.diarize else "false"
 
     import httpx
 
@@ -858,7 +867,7 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
     size = source.stat().st_size
     # nosemgrep: ep-word-set -- the session metadata keys that `/upload/sessions` defines.
     destination = {key: fields[key] for key in ("scope", "category", "description",
-                                                "raw_protection", "archive") if key in fields}
+                                                "raw_protection", "archive", "diarize") if key in fields}
     key = hashlib.sha256(json.dumps(
         {"sha256": sha256, "target": base, "filename": name, **destination}, sort_keys=True
     ).encode()).hexdigest()
@@ -1146,9 +1155,8 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--rediarize",
         action="store_true",
-        help="re-extract audio/video transcribed before diarization (extracted_by without "
-        "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
-        "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
+        help="add speaker labels to existing unlabeled recordings. An explicit recording choice "
+        "takes precedence over EXOMEM_DIARIZE in this shell.",
     )
     parser.add_argument(
         "--retime",
@@ -1157,8 +1165,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
         "does not read .env). One re-extraction serves --retime and --rediarize together. "
-        "Already-diarized recordings are SKIPPED unless EXOMEM_DIARIZE is also set, so "
-        "re-timing never drops their speaker labels.",
+        "Re-timing a labeled recording requires an enabled speaker-label choice so it keeps its labels.",
     )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -5189,7 +5196,8 @@ def _media_replicas_main(argv: list[str]) -> int:
     """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
     parser = argparse.ArgumentParser(
         prog="exomem media-replicas",
-        description="Declare a replica store, confirm that you exported its key, or list the replicas by original.",
+        description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
+                    "the replicas that a check found damaged.",
     )
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
@@ -5204,6 +5212,10 @@ def _media_replicas_main(argv: list[str]) -> int:
     listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
     listing.add_argument("--after", help="the path that the previous page ended on")
     listing.add_argument("--limit", type=int, default=100)
+    found = actions.add_parser("findings", parents=[common], help="list the replicas that a check found damaged")
+    found.add_argument("--after-path", help="the path that the previous page ended on")
+    found.add_argument("--after-store", default="", help="the store that the previous page ended on")
+    found.add_argument("--limit", type=int, default=100)
     args = parser.parse_args(argv)
     if not args.vault:
         print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
@@ -5219,6 +5231,9 @@ def _media_replicas_main(argv: list[str]) -> int:
             print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
         elif args.action == "confirm-key-export":
             print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "findings":
+            cursor = None if args.after_path is None else (args.after_path, args.after_store)
+            print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
         else:
             print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
     except (media_store.MediaStoreError, ValueError) as error:

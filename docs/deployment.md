@@ -308,6 +308,18 @@ On macOS the JSON also reports Activity Monitor's physical-footprint metric via
 limit. That limit is evaluated only when every server PID has a native sample,
 while `--max-rss-mb` keeps its existing RSS meaning.
 
+### Linux service with a one-core quota
+
+Under `CPUQuota=100%`, serving and media threads can use up the same period's
+CPU budget in parallel when they run across several cores. Place the whole
+service on one assigned logical CPU. The media child inherits the service's
+affinity and runs at lower priority. It continues existing speech jobs as
+foreground demand falls. [systemd scheduling options](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#CPUAffinity=)
+
+1. Assign one logical CPU from the service's allowed CPU set. Use the host's CPU placement for other services.
+2. Set `CPUAffinity=` to that CPU in the service's systemd drop-in, then apply it through the normal service deployment.
+3. Verify the serving worker and media child share the CPU and cgroup. The media child has the higher nice value.
+
 **macOS (launchd) — does not work today:**
 
 Kept for the darwin held-filesystem backend that does not exist yet. The
@@ -1011,6 +1023,13 @@ manifest before it migrates the store. A failed migration removes the ID again.
 A release that does not support the ID then refuses at its own startup. Schema
 11 has no ID, because every release since 0.114.0 treats an unknown ID the same
 way, so an ID would also refuse 0.119.0 and later.
+
+Schema 19 makes a Records row retractable. It renames the table that holds every
+row to `item_rows`, adds a `retracted_txn` column, and puts a view named `items`
+over the current rows. The migration keeps every row and every history entry. A
+release before the one that introduced schema 19 cannot open the migrated store: it
+refuses a store schema newer than it supports, as it does for any newer schema. Back
+up the store with the release that you run now before you upgrade.
 
 If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
 or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
@@ -1853,6 +1872,14 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
+- For direct audio or video preservation, `exomem attach --diarize` requests
+  speaker labels and `--no-diarize` skips them. The choice also applies to
+  resumable uploads. Set `diarize` on the file handle when you redeem a held
+  upload. Use `kb process-media --operation reprocess` with `--path` and
+  the same flags to change an existing recording's choice. When labels are requested
+  and the optional diarizer is unavailable, Exomem keeps the timed transcript
+  and reports that speaker labels are unavailable. Bulk backfill honors each
+  saved choice and leaves explicitly queued work to the media worker.
 - A remote client with a shell or a networked sandbox imports a folder by
   sending it as one plain or gzip tar or zip: `upload_files(lane="import")`
   returns a one-use upload, and `manage_memory` `imports.file` with its
@@ -1891,6 +1918,7 @@ on that listener. The credential fixes the lane; metadata cannot change it.
 Evidence requires `filename`, `sha256` (of the whole file), `scope` and
 `category`. Source requires `filename` and `sha256`; its optional fields are
 `title`, `source_kind`, `domain`, `url`, `content_type` and `raw_protection`.
+Both lanes accept `diarize` as `true` or `false` for audio and video.
 Source uses the canonical Source writer and stores its original beside the
 Source page. It does not accept `archive=members`. Evidence also accepts
 `raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most

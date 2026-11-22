@@ -119,7 +119,7 @@ def existing(conn, collection_id: str, bindings: Sequence[Binding]) -> frozenset
         "json_extract(value,'$[1]') AS row_version,json_extract(value,'$[2]') AS canonical_ref FROM json_each(?)) "
         "SELECT r.item_key,r.row_version,r.canonical_ref FROM requested r "
         # CROSS JOIN keeps the request driving: stores keep no planner statistics, which would scan the collection.
-        "CROSS JOIN items i ON i.collection_id=? AND i.item_key=r.item_key "
+        "CROSS JOIN item_rows i ON i.collection_id=? AND i.item_key=r.item_key "
         "JOIN version_source_bindings b ON b.row_id=i.row_id AND b.row_version=r.row_version "
         "AND b.canonical_ref=r.canonical_ref", (requested, collection_id)))
 
@@ -160,7 +160,7 @@ def reconstruct(conn, txn: Mapping) -> list[Binding]:
         "v.txn_id,creation.transition_id,b.canonical_ref,b.dep_epoch,b.dep_operation,"
         "e.row_id,e.item_key,e.version_before,e.version_after,b.row_id "
         "FROM version_source_bindings b "
-        "LEFT JOIN items i ON i.row_id=b.row_id "
+        "LEFT JOIN item_rows i ON i.row_id=b.row_id "
         "LEFT JOIN version_identity v ON v.row_id=b.row_id AND v.row_version=b.row_version "
         "LEFT JOIN txns creation ON creation.txn_id=v.txn_id "
         "LEFT JOIN audit_effects e ON e.txn_id=b.auth_txn_id AND e.ordinal=b.auth_effect_ordinal "

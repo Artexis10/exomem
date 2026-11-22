@@ -251,8 +251,12 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-Pull requests, draft or ready, run the partial tier on Python 3.11, the
-supported floor. Docs-only pull requests narrow it to the tests that read docs.
+Pull requests, draft or ready, run the partial tier without its core and harness
+shards. A pull request runs the test modules that it adds or changes instead:
+core modules on Python 3.11, the supported floor, and on 3.13, and harness
+modules on 3.11. Docs-only pull requests narrow the tier to the tests that read
+docs. Every push to main runs all core and harness shards on Python 3.11. A
+failure that only those shards or the Full tier catch is fixed forward on main.
 Full coverage runs only on schedule or dispatch, on main or on a source branch
 on request. It covers Python 3.11 and 3.13, every specialized Full job, and the
 latency gate. Paired recall uses four

@@ -19,24 +19,19 @@ FULL_CI_JOBS = {
     "frozen-verifier",
     "cloud-cellctl",
     "retrieval-quality",
-    "retrieval-latency",
-    "recall-latency-series",
-    "recall-latency-paired",
-    "recall-latency-aggregate",
-    "governance-projection-wire",
-    "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
     "graph-convergence",
     "docker",
 }
 
-#: The two PR test tiers: (job id, shard count, EXOMEM_TEST_TIER value).
+#: The two sharded test tiers: (job id, the scope step's shard-count variable,
+#: EXOMEM_TEST_TIER value).
 #: Together with the nightly-owned tests/test_latency_gate.py (the
 #: `retrieval-latency` job) they cover exactly the previous lean suite —
 #: pinned below by test_pr_tiers_partition_the_lean_suite_exactly.
 PR_TIER_JOBS = (
-    ("core-tests", 24, "core"),
-    ("harness-tests", 6, "harness"),
+    ("core-tests", "CORE_SHARDS", "core"),
+    ("harness-tests", "HARNESS_SHARDS", "harness"),
 )
 
 #: Wall-clock session caps, enforced by pytest in each parallel worker lane.
@@ -72,6 +67,13 @@ def _workflow() -> dict:
     return yaml.safe_load(_workflow_text())
 
 
+def _latency_workflow() -> dict:
+    # Latency measurements run nightly and on dispatch; the Full gate does not wait for them.
+    return yaml.safe_load(
+        (ROOT / ".github/workflows/latency-measurements.yml").read_text(encoding="utf-8")
+    )
+
+
 def _cross_platform_workflow() -> dict:
     return yaml.safe_load(
         (ROOT / ".github/workflows/cross-platform.yml").read_text(encoding="utf-8")
@@ -96,7 +98,7 @@ def test_pr_tiers_exercise_native_mcp_sdk_fields(job_id: str) -> None:
 
 @pytest.mark.parametrize("job_id,shards,tier", PR_TIER_JOBS)
 def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
-    job_id: str, shards: int, tier: str
+    job_id: str, shards: str, tier: str
 ) -> None:
     workflow = _workflow()
     job = workflow["jobs"][job_id]
@@ -133,41 +135,36 @@ def test_pr_tier_lanes_have_time_bounds_and_versioned_timing_evidence(
 
 @pytest.mark.parametrize("job_id,shards,tier", PR_TIER_JOBS)
 def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
-    job_id: str, shards: int, tier: str
+    job_id: str, shards: str, tier: str
 ) -> None:
     workflow = _workflow()
     job = workflow["jobs"][job_id]
     matrix = job["strategy"]["matrix"]
 
-    # PRs run the supported floor only; the newest runtime joins on nightly/manual
-    # full runs. The runtime matrix never names the release branch.
-    versions = " ".join(str(matrix["python-version"]).split())
-    assert "needs.scope.outputs.full == 'true'" in versions
-    assert "release-please" not in versions
-    assert "head_ref" not in versions
-    assert '["3.11", "3.13"]' in versions
-    assert "fromJSON('[\"3.11\"]')" in versions
+    # The scope job alone chooses runtimes, shards and changed-test groups
+    # (test_change_scope_builds_each_events_test_matrices covers each event).
+    # An empty matrix is a pull request without test changes, so the job skips.
+    assert matrix == {"include": f"${{{{ fromJSON(needs.scope.outputs.{tier}_matrix) }}}}"}
+    condition = " ".join(job["if"].split())
+    assert f"needs.scope.outputs.{tier}_matrix != '[]'" in condition
+    assert "needs.scope.outputs.release != 'true'" in condition
+    scope_env = next(
+        step for step in workflow["jobs"]["scope"]["steps"] if step.get("id") == "docs-scope"
+    )["env"]
+    assert int(scope_env[shards]) > 1
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert pyproject["project"]["requires-python"] == ">=3.11", "the PR leg is the supported floor"
+    assert json.loads(scope_env["FULL_PYTHON_VERSIONS"])[0] == "3.11", "the floor is listed first"
+    # The matrices take Full from release_evidence.py's decision, which must run first.
+    steps = [step.get("id") for step in workflow["jobs"]["scope"]["steps"]]
+    assert steps.index("scope") < steps.index("docs-scope")
+    assert scope_env["FULL"] == "${{ steps.scope.outputs.full }}"
 
-    shard_label = (
-        "${{ matrix.selection || format('shard {0}/24', matrix.shard) }}"
-        if job_id == "core-tests"
-        else f"shard ${{{{ matrix.shard }}}}/{shards}"
-    )
+    shard_label = "${{ matrix.selection || format('shard {0}/{1}', matrix.shard, matrix.splits) }}"
     assert job["name"] == f"{tier} tests (py${{{{ matrix.python-version }}}}, {shard_label})"
-    if job_id == "core-tests":
-        # A pull request's own test modules add 3.13 jobs; a full run's 3.13 shards
-        # must stay full shards, so the extra jobs never join a full run.
-        include = " ".join(str(matrix["include"]).split())
-        assert "needs.scope.outputs.full != 'true'" in include
-        assert "fromJSON(needs.scope.outputs.changed_tests_include)" in include
-        # The changed tests run on the full run's newest runtime, so a runtime bump updates both.
-        scope_step = next(step for step in workflow["jobs"]["scope"]["steps"] if step.get("id") == "docs-scope")
-        assert f', "{scope_step["env"]["CHANGED_TESTS_PYTHON"]}"]' in versions
 
     command = _run_step(job)["run"]
-    assert f"--splits={shards}" in command
+    assert "--splits=${{ matrix.splits }}" in command
     assert "--group=${{ matrix.shard }}" in command
     algorithm = "least_duration" if tier == "core" else "duration_based_chunks"
     assert f"--splitting-algorithm={algorithm}" in command
@@ -199,7 +196,7 @@ def test_pr_tier_lanes_use_duration_balanced_isolated_shards(
 
 @pytest.mark.parametrize("job_id,shards,tier", PR_TIER_JOBS)
 def test_nightly_full_runs_store_and_upload_refreshed_durations(
-    job_id: str, shards: int, tier: str
+    job_id: str, shards: str, tier: str
 ) -> None:
     """The durations file must be refreshable from evidence, never hand-edited.
 
@@ -338,8 +335,9 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     timing_job = workflow["jobs"]["timing-tests"]
     # Job-level environment values select timing cases; runtime defaults live on the steps.
     assert timing_job["env"] == core_job["env"]
+    # The scope job names the runtimes that every shard of this run uses.
     assert timing_job["strategy"]["matrix"] == {
-        "python-version": core_job["strategy"]["matrix"]["python-version"]
+        "python-version": "${{ fromJSON(needs.scope.outputs.python_versions) }}"
     }
     assert timing_job["needs"] == core_job["needs"] == "scope", "timing checks must overlap the worker pools"
     serial_selections = list(core_job["env"].values())
@@ -365,7 +363,7 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     serial = _collect_items("serial core checks", "core", serial_selections)
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
-    latency_job = workflow["jobs"]["retrieval-latency"]
+    latency_job = _latency_workflow()["jobs"]["retrieval-latency"]
     latency_step = next(
         step for step in latency_job["steps"] if step.get("name", "").startswith("Per-lane")
     )
@@ -514,26 +512,42 @@ def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> N
 
 def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     jobs = _workflow()["jobs"]
+    latency_jobs = _latency_workflow()["jobs"]
 
     assert "retrieval-eval" not in jobs
     assert "pytest -m embeddings -v" in jobs["retrieval-quality"]["steps"][-1]["run"]
     assert any(
         "tests/test_latency_gate.py -q" in step.get("run", "")
-        for step in jobs["retrieval-latency"]["steps"]
+        for step in latency_jobs["retrieval-latency"]["steps"]
     )
     semantic_command = jobs["semantic-write-latency"]["steps"][-1]["run"]
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
+def test_latency_measurements_run_nightly_and_do_not_gate_the_release() -> None:
+    workflow = _workflow()
+    latency = _latency_workflow()
+    triggers = _triggers(latency)
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    moved = set(latency["jobs"])
+    assert moved == {
+        "retrieval-latency", "recall-latency-series", "recall-latency-paired",
+        "recall-latency-aggregate", "governance-projection-wire",
+        "governance-projection-wire-vector-cpu",
+    }
+    assert not moved & set(workflow["jobs"]), "a moved job is still defined in ci.yml"
+    assert not moved & set(workflow["jobs"]["gate"]["needs"]), "the Full gate waits for latency jobs"
+
+
 def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> None:
-    jobs = _workflow()["jobs"]
+    jobs = _latency_workflow()["jobs"]
     discovery, sampler, aggregate = (jobs[name] for name in (
         "recall-latency-series", "recall-latency-paired", "recall-latency-aggregate",
     ))
     assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
-    assert discovery["needs"] == "scope"
-    assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
-    assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
+    assert "needs" not in discovery
+    assert set(sampler["needs"]) == {"recall-latency-series"}
+    assert set(aggregate["needs"]) == {"recall-latency-series", "recall-latency-paired"}
     assert "!cancelled()" in aggregate["if"]
     assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
     assert sampler["strategy"]["fail-fast"] is False
@@ -552,8 +566,6 @@ def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> N
     assert compare["env"]["PRODUCER_OUTCOME"] == "${{ needs.recall-latency-paired.result }}"
     assert '--producer-outcome "$PRODUCER_OUTCOME"' in compare["run"]
     assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
-    for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
-        assert name in jobs["gate"]["needs"]
     instrument_jobs = [name for name, job in jobs.items() if any(
         "tests/test_recall_latency_gate.py" in step.get("run", "") for step in job.get("steps", [])
     )]
@@ -580,8 +592,7 @@ def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None
 
 
 def test_governance_wire_characterization_runs_every_registered_route() -> None:
-    workflow = _workflow()
-    job = workflow["jobs"]["governance-projection-wire"]
+    job = _latency_workflow()["jobs"]["governance-projection-wire"]
 
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == 8
@@ -609,12 +620,10 @@ def test_governance_wire_characterization_runs_every_registered_route() -> None:
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
-    assert "governance-projection-wire" in workflow["jobs"]["gate"]["needs"]
 
 
-def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> None:
-    workflow = _workflow()
-    job = workflow["jobs"]["governance-projection-wire-vector-cpu"]
+def test_governance_vector_cpu_wire_characterization_is_exact() -> None:
+    job = _latency_workflow()["jobs"]["governance-projection-wire-vector-cpu"]
 
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == 12
@@ -652,9 +661,6 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
         "MKL_NUM_THREADS": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"][
-        "needs"
-    ]
 
 
 def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
@@ -662,13 +668,15 @@ def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() 
     assert _triggers(workflow)["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     jobs = workflow["jobs"]
     assert "needs" not in jobs["scope"] and "if" not in jobs["scope"]
-    assert jobs["scope"]["steps"][-1]["run"] == "python3 scripts/release_evidence.py scope"
+    scope_step = next(step for step in jobs["scope"]["steps"] if step.get("id") == "scope")
+    assert scope_step["run"] == "python3 scripts/release_evidence.py scope"
     for name in FULL_CI_JOBS:
         assert "scope" in ([jobs[name]["needs"]] if isinstance(jobs[name]["needs"], str) else jobs[name]["needs"])
         assert "needs.scope.outputs.full == 'true'" in jobs[name]["if"]
     for name in RELEASE_PR_SKIPPED_JOBS:
         assert jobs[name]["needs"] == "scope"
-        assert jobs[name]["if"] == "${{ needs.scope.outputs.release != 'true' }}"
+        # The tier jobs also skip on an empty matrix; every one skips on a release PR.
+        assert "needs.scope.outputs.release != 'true'" in jobs[name]["if"]
     assert "if" not in jobs["release-evidence"]
 
 
@@ -695,7 +703,9 @@ def _scope_fixture_git(repository: Path, *args: str) -> None:
 SCOPED_JOBS = ("scope", "product-e2e")
 
 
-def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
+def _change_scope(
+    repository: Path, event: str, matrices: dict[str, str] | None = None
+) -> tuple[dict[str, str], str]:
     output = repository / "scope-output"
     summary = repository / "scope-summary"
     subprocess.run(
@@ -704,7 +714,7 @@ def _change_scope(repository: Path, event: str) -> tuple[dict[str, str], str]:
         env={
             **os.environ,
             "EVENT_NAME": event,
-            "CHANGED_TESTS_PYTHON": "3.13",
+            **(matrices or {}),
             "GITHUB_OUTPUT": str(output),
             "GITHUB_STEP_SUMMARY": str(summary),
         },
@@ -769,7 +779,6 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
             "docs_only": "true",
             "pytest_args": "-m reads_repository_docs --splits=1 --group=1",
             "changed_tests": "",
-            "changed_tests_include": "[]",
         }
         assert "shard 1 each run all their marked tests" in summary
         assert "Docs-only change: the example check did not run" in summary
@@ -778,13 +787,12 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
             "docs_only": "false",
             "pytest_args": "",
             "changed_tests": "",
-            "changed_tests_include": "[]",
         }
         assert not summary
 
 
 def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups(tmp_path: Path) -> None:
-    """Catches a deleted or crafted module name reaching the 3.13 jobs, and one job too long for its timeout."""
+    """Catches a deleted or crafted module name reaching the changed-tests jobs, and one job too long for its timeout."""
     repository = tmp_path / "repository"
     repository.mkdir()
     _scope_fixture_git(repository, "init", "-b", "main")
@@ -797,6 +805,7 @@ def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups
         "tests/test_unchanged.py::test_slow": 5000.0,
     }
     (repository / ".test_durations.json").write_text(json.dumps(durations))
+    (repository / "tests/harness_modules.txt").write_text("# no harness modules\n")
     _scope_fixture_git(repository, "add", ".")
     _scope_fixture_git(repository, "commit", "-m", "initial")
     _scope_fixture_git(repository, "checkout", "-b", "topic")
@@ -811,26 +820,105 @@ def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups
     _scope_fixture_git(repository, "checkout", "main")
     _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
 
-    decision, _ = _change_scope(repository, "pull_request")
+    decision, _ = _change_scope(
+        repository,
+        "pull_request",
+        {"FULL": "false", "FULL_PYTHON_VERSIONS": '["3.11"]', "CORE_SHARDS": "24", "HARNESS_SHARDS": "6"},
+    )
 
     assert decision["docs_only"] == "false"
     assert decision["changed_tests"] == "tests/store/test_added.py tests/test_changed.py"
     # 1400 measured seconds need two groups; the unchanged module's time does not count.
-    assert json.loads(decision["changed_tests_include"]) == [
-        {"python-version": "3.13", "shard": 1, "splits": 2, "selection": "changed tests 1/2"},
-        {"python-version": "3.13", "shard": 2, "splits": 2, "selection": "changed tests 2/2"},
+    assert json.loads(decision["core_matrix"]) == [
+        {"python-version": "3.11", "shard": 1, "splits": 2, "selection": "changed tests 1/2"},
+        {"python-version": "3.11", "shard": 2, "splits": 2, "selection": "changed tests 2/2"},
     ]
+    assert json.loads(decision["harness_matrix"]) == []
+
+
+def _load_change_scope():
+    spec = importlib.util.spec_from_file_location("ci_change_scope", ROOT / "scripts" / "ci_change_scope.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: A core module and a harness module that exist in this checkout.
+_CORE_MODULE = "tests/test_ci_reliability_contract.py"
+_HARNESS_MODULE = "tests/test_cjk_readiness.py"
+
+
+@pytest.mark.parametrize(
+    "paths,full,core,harness",
+    [
+        # A pull request that changes no test module runs no core or harness job.
+        (["src/exomem/__init__.py"], False, set(), set()),
+        # Its own modules run: core on every runtime, harness on the floor only.
+        (
+            ["src/exomem/__init__.py", _CORE_MODULE, _HARNESS_MODULE],
+            False,
+            {("3.11", "changed"), ("3.13", "changed")},
+            {("3.11", "changed")},
+        ),
+        # A change to more tests than the shards hold still runs changed-test groups, capped below.
+        (
+            sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / "tests").glob("test_*.py")),
+            False,
+            {("3.11", "changed"), ("3.13", "changed")},
+            {("3.11", "changed")},
+        ),
+        # Docs-only runs the marked tests in one shard per tier.
+        (["docs/guide.md"], False, {("3.11", 1)}, {("3.11", 1)}),
+        # A push to main runs every shard on the floor.
+        (None, False, {("3.11", shard) for shard in range(1, 25)}, {("3.11", shard) for shard in range(1, 7)}),
+        # Full runs every shard on every runtime.
+        (
+            None,
+            True,
+            {(python, shard) for python in ("3.11", "3.13") for shard in range(1, 25)},
+            {(python, shard) for python in ("3.11", "3.13") for shard in range(1, 7)},
+        ),
+    ],
+    ids=["pr-without-tests", "pr-with-core-and-harness-tests", "pr-with-most-tests", "docs-only-pr", "push", "full"],
+)
+def test_change_scope_builds_each_events_test_matrices(
+    paths: list[str] | None, full: bool, core: set, harness: set
+) -> None:
+    """Catches a pull request running every shard again, and a main push or Full run losing shards."""
+    if _HARNESS_MODULE not in _harness_modules_from_file():
+        pytest.fail(f"{_HARNESS_MODULE} left the harness tier; pick another harness module")
+    scope = _load_change_scope()
+
+    built = scope.job_matrices(
+        paths, full=full, runtimes=["3.11", "3.13"], core_shards=24, harness_shards=6, root=ROOT
+    )
+
+    for entries, shard_count in zip(built, (24, 6)):
+        for python in {entry["python-version"] for entry in entries}:
+            # More groups than shards would put more jobs on a pull request than a push runs.
+            assert sum(entry["python-version"] == python for entry in entries) <= shard_count
+    for entries, expected in zip(built, (core, harness)):
+        assert {
+            (entry["python-version"], "changed" if "selection" in entry else entry["shard"])
+            for entry in entries
+        } == expected
+        shards = [entry for entry in entries if "selection" not in entry]
+        for entry in shards:
+            # A split count above the runtime's shard count leaves groups that no job runs.
+            assert entry["splits"] == sum(other["python-version"] == entry["python-version"] for other in shards)
 
 
 @pytest.mark.timeout(300)
 def test_changed_tests_selection_keeps_the_tier_and_ignore_rules() -> None:
-    """Catches the 3.13 jobs running a module that the core tier, the TUI job or a serial job owns."""
+    """Catches the changed-tests jobs running a module that another tier, the TUI job or a serial job owns."""
     workflow = _workflow()
     core_job = workflow["jobs"]["core-tests"]
     run = _run_step(core_job)["run"]
     tui_directory = workflow["env"]["EXOMEM_TUI_TEST_DIRECTORY"]
     assert '--ignore="$EXOMEM_TUI_TEST_DIRECTORY"' in run
     assert '--changed-tests="$EXOMEM_CHANGED_TESTS"' in run
+    # Without it a harness changed-tests group would run the whole harness tier.
+    assert '--changed-tests="$EXOMEM_CHANGED_TESTS"' in _run_step(workflow["jobs"]["harness-tests"])["run"]
     serial_module = core_job["env"]["EXOMEM_SERIAL_CORE_MODULE"]
     harness_module = next(
         line
@@ -875,7 +963,6 @@ def test_change_scope_runs_everything_for_unknown_history_and_non_pr_events(
         "docs_only": "false",
         "pytest_args": "",
         "changed_tests": "",
-        "changed_tests_include": "[]",
     }
     assert not summary
 
@@ -907,12 +994,17 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-    report, checkout, install, scope, step = job["steps"]
+    report, checkout, install, scope, step, reconcile_checkout, *_, reconcile = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
     assert "scripts/check_release_pr_files.py" in scope["run"]
-    assert step["if"] == "needs.scope.outputs.release == 'true'"
+    assert step["if"] == (
+        "needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'"
+    )
+    # A reconciliation PR is checked by code from its base, never from its own head.
+    assert reconcile_checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert "release_cuts.py check-reconciliation" in reconcile["run"]
     assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert step["env"]["GH_REPO"] == "${{ github.repository }}"
     assert step["run"] == 'python3 scripts/release_evidence.py select --source "$BASE_SHA"'

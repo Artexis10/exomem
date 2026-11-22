@@ -662,7 +662,7 @@ def test_owned_unproven_projection_is_absent_with_empty_policy(store, kind):
     else:
         receipt = store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
         path = receipt["affected_paths"][0]
-        store.connection.execute("UPDATE items SET view_path=? WHERE item_key=?",
+        store.connection.execute("UPDATE item_rows SET view_path=? WHERE item_key=?",
                                  (path.replace(KEY, "moved"), KEY))
     page = store.root / path
     page.parent.mkdir(parents=True, exist_ok=True)

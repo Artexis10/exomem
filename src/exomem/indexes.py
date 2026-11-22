@@ -273,6 +273,7 @@ def _loose_index_entries(
 
     folders = set()
     pages = set()
+    owns_page = ownership.page_classifier()
     pending = [(os.fspath(directory), "")]
     while pending:
         current, parent = pending.pop()
@@ -280,7 +281,7 @@ def _loose_index_entries(
             with os.scandir(current) as entries:
                 for entry in entries:
                     rel = parent + entry.name
-                    if ownership.classify(prefix + rel) is ownership.Ownership.PAGE:
+                    if owns_page(prefix + rel):
                         continue
                     if entry.name.endswith(".md") and entry.name != "index.md":
                         pages.add(rel)
@@ -1079,7 +1080,8 @@ def compute_subindex_writes(
     count_dirs: tuple[Path, ...] = (notes_dir, entities_dir)
     if sources_counts is None:
         count_dirs = (sources_dir, *count_dirs)
-    stored_folders = _stored_index_folders(*count_dirs) or {}
+    with call_spans.span("indexes.stored_folder_counts"):
+        stored_folders = _stored_index_folders(*count_dirs) or {}
 
     if sources_counts is None:
         with call_spans.span("indexes.source_census"):

@@ -64,9 +64,10 @@ def capacity() -> dict:
 
 
 def populated(conn: sqlite3.Connection, collection_id: str) -> bool:
-    """Rows, which are never deleted, held state or an imported member make a collection populated.
+    """Current rows, held state or an imported member make a collection populated.
 
-    A derived collection's rows are outside the store, so its import log stands for them.
+    A derived collection's rows are outside the store, so its import log stands for them. A retracted row
+    does not count: only a summary or a log collection can hold one, and neither can change its view mode.
     """
     return conn.execute(
         "SELECT EXISTS(SELECT 1 FROM items WHERE collection_id=?) "

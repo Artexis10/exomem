@@ -2343,6 +2343,7 @@ def _stored_admission_many(
     scope_sets = {} if named is None else page_admission.scopes_many(root, paths, policy)
     classes = memo.setdefault(("scope-admission", named, content_only), {})
     denied = connector_boundary.admission_identity(root, who, policy)[0] if scope_sets else frozenset()
+    check_tombstones = bool(tombstones) and not content_only
     answers = {}
     for path in paths:
         scopes = scope_sets.get(path)
@@ -2361,7 +2362,7 @@ def _stored_admission_many(
                 permitted = decision.level >= RELEASE_FLOOR
             classes[scopes] = (permitted, decision)
         permitted, decision = classes[scopes]
-        tombstoned = not content_only and lifecycle.is_tombstoned_in(tombstones, path)
+        tombstoned = check_tombstones and lifecycle.is_tombstoned_in(tombstones, path)
         allowed = permitted and not tombstoned
         if record_outcomes and not tombstoned and decision is not None and recording:
             content_hash, size = page_admission.evidence(root, path)
@@ -6152,6 +6153,7 @@ def _artifact_text_key(key: Any) -> bool:
 
 
 def _withheld_cross_check(
+    command_name: str,
     vault_root: Path,
     result: Any,
     *,
@@ -6176,10 +6178,16 @@ def _withheld_cross_check(
     `is_dir()`); `blocked` or an unresolved principal -> every path-bearing
     entry dropped; otherwise decide each named path.
     """
+    page_version_id = None
+    if command_name == "read_memory" and isinstance(result, Mapping) and "id" in result:
+        from .. import page_names
+
+        # The read producer's version token contains a dot but names no file.
+        page_version_id = page_names.id_of_read(result)
     return filter_withheld_entries(vault_root, result, principal=principal, purpose=purpose,
                                    _artifact_scan_demand=_artifact_scan_demand,
                                    _current_parent_binding=_current_parent_binding,
-                                   _item_receipt=_item_receipt)
+                                   _item_receipt=_item_receipt, _page_version_id=page_version_id)
 
 
 def _scrub_tool_result(result: Any, vault_root: Path) -> tuple[Any, bool]:
@@ -6437,7 +6445,8 @@ def _postfilter(
     # own `egress.artifact_gate`) and the scrub.
     with call_spans.span("egress.cross_check"):
         result = _withheld_cross_check(
-            vault_root, result, purpose=view_purpose, _artifact_scan_demand=artifact_scan_demand,
+            command_name, vault_root, result, purpose=view_purpose,
+            _artifact_scan_demand=artifact_scan_demand,
             _current_parent_binding=parent_binding, _item_receipt=item_receipt,
         )
     from ..collection_store import governance as canonical_governance
@@ -6964,6 +6973,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "append": "mutation",
         "bulk_upsert": "mutation",
         "update": "mutation",
+        "retract": "mutation",
         "revise": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
@@ -8365,8 +8375,7 @@ def owner_only_aggregate(
                 # A collection projects only into the knowledge base; the marker refuses any path outside it as invalid.
                 if entry.kind != "file" or managed_split(path) is None:
                     continue
-                canonical = operation.projection_decision(path)
-                if canonical is None:
+                if not operation.projection_present(path):
                     continue
                 decision = _decide_path(
                     vault_root, path, policy=operation.policy,
@@ -8743,6 +8752,39 @@ def reader_view(
     return ReaderView(
         vault_root, pages, principal=who if who is not None else effective_principal(),
         purpose=purpose, unit_identity_only=unit_identity_only,
+    )
+
+
+def preview_may_materialize(vault_root: Path, path: str, who: RequestPrincipal) -> bool:
+    """Stop a known preview denial using only the selected path and current policy."""
+    if (not who.resolved or reserved_paths.classify_logical(path).blocked
+            or not _identity_path_accessible(vault_root, path)
+            or raw_protection.permits(vault_root, path, who, derived=True, resolve_bytes=False) is False):
+        return False
+    policy = policy_module.load(vault_root)
+    if policy.blocked:
+        return False
+    try:
+        boundary = connector_boundary.snapshot(vault_root, policy)
+    except connector_boundary.BoundaryUnavailable:
+        return False
+    if policy.empty or bound_writer(vault_root) is not None:
+        return True
+    try:
+        # Unresolved scopes can only narrow the result. Known scopes still supply their applicable ceilings.
+        scopes = membership_module.evaluate_path_only(vault_root, path, policy, resolve_bytes=False).scope_ids
+    except membership_module.MembershipUnresolved:
+        return False
+    if boundary is not None and boundary.denied_scopes(who).intersection(scopes):
+        return False
+    decision = decide(
+        scopes, audience=who.audience_id, purpose=_declared_purpose(vault_root, who, None), policy=policy,
+    )
+    if decision.level >= LEVEL_FULL:
+        return True
+    # A byte-bound grant can raise the standing floor. Organization caps still apply to it.
+    return who.verified_authorization_session is not None and all(
+        scope.organization_cap >= LEVEL_FULL for scope in decision.scope_contributions
     )
 
 
@@ -9226,6 +9268,7 @@ def filter_withheld_entries(
     explicit_reference_markup: bool = False,
     _current_parent_binding: tuple[str, str] | None = None,
     _item_receipt: bool = False,
+    _page_version_id: str | None = None,
 ) -> Any:
     """Drop list entries naming an item released below the floor.
 
@@ -9611,6 +9654,8 @@ def filter_withheld_entries(
         # Only exact producer-bound metadata slots avoid physical-byte proof.
         # A sibling body or another occurrence of the same path remains ordinary.
         request_budget.checkpoint()
+        if location == ("id",) and _page_version_id is not None and entry == _page_version_id:
+            return []
         if metadata_references:
             if isinstance(entry, Mapping):
                 entry = {key: value for key, value in entry.items()

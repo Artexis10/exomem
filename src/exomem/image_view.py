@@ -17,9 +17,10 @@ import io
 import math
 import os
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from . import artifact_recovery, image_codecs, media_types, mode, request_budget, reserved_paths
 
@@ -187,11 +188,12 @@ def _rgb(image):
 
 
 def _render(
-    data: bytes, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int, inline_side: int
+    source: BinaryIO, suffix: str, max_side: int | None, region: Region | None, inline_bytes: int, inline_side: int,
+    *, pixels_only: bool = False,
 ) -> tuple[tuple[int, int], tuple[int, int], str | None, bytes, bool]:
     from PIL import Image, ImageOps
 
-    with image_codecs.open_image(io.BytesIO(data), suffix=suffix, max_pixels=MAX_DECODE_PIXELS) as opened:
+    with image_codecs.open_image(source, suffix=suffix, max_pixels=MAX_DECODE_PIXELS) as opened:
         # The stored size, before a reduced-scale decode changes what `size` reports.
         stored = opened.size
         if max_side is not None:
@@ -234,20 +236,37 @@ def _render(
         shrunk = max(image.size) > inline_side
         image.thumbnail((inline_side, inline_side), Image.Resampling.LANCZOS)
         image = _rgb(image)
-        jpeg = _jpeg(image)
-        for _ in range(_SHRINK_ATTEMPTS):
-            if wire_bytes(jpeg) <= inline_bytes:
-                break
-            # JPEG size grows about with the pixel count; aim a little under the limit.
-            scale = math.sqrt(inline_bytes / wire_bytes(jpeg)) * 0.9
-            image.thumbnail(
-                (max(1, int(image.size[0] * scale)), max(1, int(image.size[1] * scale))),
-                Image.Resampling.LANCZOS,
-            )
-            jpeg, shrunk = _jpeg(image), True
-        if wire_bytes(jpeg) > inline_bytes:
-            raise _TooLarge(smaller_helps=True)
-        return original, image.size, taken_at, jpeg, shrunk
+        if pixels_only:
+            image.info.clear()  # Pillow otherwise takes the JPEG comment from the decoded image.
+        jpeg, shrank_to_fit = fit_jpeg(image, inline_bytes, _jpeg)
+        return original, image.size, taken_at, jpeg, shrunk or shrank_to_fit
+
+
+def fit_jpeg(image, inline_bytes: int, encode: Callable[..., bytes]) -> tuple[bytes, bool]:
+    """Encode within the base64 budget, shrinking the supplied image if needed."""
+    from PIL import Image
+
+    jpeg = encode(image)
+    shrunk = False
+    for _ in range(_SHRINK_ATTEMPTS):
+        if wire_bytes(jpeg) <= inline_bytes:
+            break
+        # JPEG size grows about with the pixel count; aim a little under the limit.
+        scale = math.sqrt(inline_bytes / wire_bytes(jpeg)) * 0.9
+        image.thumbnail(
+            (max(1, int(image.size[0] * scale)), max(1, int(image.size[1] * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        jpeg, shrunk = encode(image), True
+    if wire_bytes(jpeg) > inline_bytes:
+        raise _TooLarge(smaller_helps=True)
+    return jpeg, shrunk
+
+
+def render_preview(source: BinaryIO, suffix: str, *, max_side: int, inline_bytes: int) -> bytes:
+    """Render the upright pixels of a held source within the preview's smaller budget."""
+    with _DECODE:
+        return _render(source, suffix, max_side, None, inline_bytes, max_side, pixels_only=True)[3]
 
 
 def _jpeg(image) -> bytes:
@@ -345,7 +364,7 @@ def show(
 
         try:
             with _DECODE:
-                original, size, taken_at, jpeg, shrunk = _render(data, suffix, side, crop, inline_bytes, inline_side)
+                original, size, taken_at, jpeg, shrunk = _render(io.BytesIO(data), suffix, side, crop, inline_bytes, inline_side)
         except ImportError as error:
             raise ImageViewError("IMAGE_DEPS_MISSING", str(error)) from error
         except _TooLarge as error:

@@ -5,12 +5,14 @@ from sqlalchemy.dialects.sqlite import insert
 
 metadata = MetaData()
 # These names are the closed installation schema, never user-defined fields.
-items = Table("items", metadata,
+# The row table. `items`, the view of its current rows, is read-only and has no declaration here.
+item_rows = Table("item_rows", metadata,
     Column("row_id", Integer, primary_key=True), Column("collection_id", Text),
     Column("item_key", Text), Column("natural_key", Text), Column("row_version", Integer),
     Column("schema_version", Integer), Column("values_json", Text), Column("body", Text),
     Column("payload_hash", Text), Column("view_path", Text), Column("created_txn", Integer),
-    Column("updated_txn", Integer), Column("governance_json", Text), Column("encoding", Text))
+    Column("updated_txn", Integer), Column("governance_json", Text), Column("encoding", Text),
+    Column("retracted_txn", Integer))
 collections = Table("collections", metadata,
     Column("collection_id", Text, primary_key=True), Column("generation", Integer),
     Column("audit_head", Text), Column("updated_txn", Integer))
@@ -52,10 +54,18 @@ store_meta = Table("store_meta", metadata,
 alembic_version = Table("alembic_version", metadata,
     Column("version_num", Text, primary_key=True), sqlite_strict=True)
 
-INSERT_ITEM = items.insert()
-UPDATE_ITEM = items.update().where(items.c.row_id == bindparam("target_row_id")).values(
+INSERT_ITEM = item_rows.insert()
+UPDATE_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
     **{name: bindparam(name) for name in (
         "natural_key", "row_version", "values_json", "body", "payload_hash", "updated_txn", "governance_json")})
+# A retracted row leaves current state and keeps its identity, its collection and its view path.
+# A retraction clears the natural key, so no other row finds it; a revival sets it again.
+RETRACT_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
+    natural_key=None, retracted_txn=bindparam("retracted_txn"))
+REVIVE_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
+    **{name: bindparam(name) for name in (
+        "natural_key", "row_version", "values_json", "body", "payload_hash", "updated_txn", "governance_json")},
+    retracted_txn=None)
 INSERT_VERSION = item_versions.insert()
 INSERT_IDENTITY = version_identity.insert()
 INSERT_SOURCE = item_sources.insert()

@@ -49,6 +49,9 @@ CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
 #: that a write accepts (`visible_snapshot`).
 UNLIMITED_WRITE_ROUTES = ("from the owner's CLI or a stdio connection, or from a client whose entry in the host's "
                           "connector boundary configuration denies it no scope")
+_PROJECTION_RELEASE_ERRORS = (
+    collections.CollectionError, membership.MembershipUnresolved, ValueError, TypeError, KeyError, sqlite3.Error,
+)
 
 
 def _json(value: Any) -> str:
@@ -96,6 +99,21 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
         for name in candidate.get("delete_fields", ()):
             attempted.pop(name, None)
     return row_metadata(schema, attempted, metadata)
+
+
+def reprojected(captured: str, metadata: str) -> str:
+    """``captured`` metadata under a revised manifest: its own tags and classes, the manifest's projects.
+
+    A revise gives this to material it does not validate again, so its release follows the new projects.
+    """
+    preserved = _metadata(captured)
+    preserved["projects"] = _metadata(metadata)["projects"]
+    return _json(preserved)
+
+
+def projects_changed(before: str, after: str) -> bool:
+    """Whether two manifest metadata values name different projects."""
+    return _metadata(before)["projects"] != _metadata(after)["projects"]
 
 
 def _pass_release_limit(error: collections.CollectionError) -> None:
@@ -534,8 +552,12 @@ def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
                   view_path=None, row_key=None, include_held=True, batch_size=128,
-                  query_order=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata; a row key selects no manifest or held candidate."""
+                  query_order=False, retained=False) -> Iterator[CanonicalSubject]:
+    """Stream canonical metadata; a row key selects no manifest or held candidate.
+
+    ``retained`` also yields a retracted row, which only a reader that judges that row's history or holds
+    may ask for; every other caller sees the current rows of the ``items`` view.
+    """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
     if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
@@ -561,7 +583,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     item_order = "item_key" if query_order else "row_id"
     with closing(conn.execute(
         "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-        "FROM items WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
+        "FROM " + ("item_rows" if retained else "items") + " WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
@@ -612,16 +634,21 @@ def held_shows_every_row(candidate_json: str) -> bool:
 
 
 def held_targets(conn: sqlite3.Connection, hold: CanonicalSubject) -> tuple[CanonicalSubject, ...]:
-    """The existing items a hold would change or show: its one item, every row for a whole log view,
-    or none when it proposes a new item."""
+    """The items a hold would change or show: its one item, every row for a whole log view,
+    or none when it proposes a new item.
+
+    A retracted row stays a target: the held values were written against it, so its release still bounds them.
+    """
     row = conn.execute("SELECT candidate_json FROM held_candidates WHERE collection_id=? AND held_id=?",
                        (hold.collection_id, hold.row_id)).fetchone()
     key = None if row is None else held_item_key(row[0])
     if key is not None:
-        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), 1))
+        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key,
+                                          retained=True), 1))
     if row is not None and held_shows_every_row(row[0]):
         return tuple(subject for subject in iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id,
-                                                          include_held=False) if subject.basis.domain == "row")
+                                                          include_held=False, retained=True)
+                     if subject.basis.domain == "row")
     return ()
 
 
@@ -1932,6 +1959,13 @@ class OperationAuthorization:
             return ()
         return catalog
 
+    def projection_present(self, path: str) -> bool:
+        """Which paths need the full projection release check, including unresolved paths."""
+        try:
+            return self.projection_subjects(path) is not None
+        except _PROJECTION_RELEASE_ERRORS:
+            return True
+
     def projection_decision(self, path: str, *, content: bytes | None = None,
                             manifest_for=None) -> Decision | None:
         """Authorize canonical subjects, then prove any bytes are their current render."""
@@ -1996,8 +2030,7 @@ class OperationAuthorization:
                         decide(extra, audience=self.who.audience_id, purpose=self.purpose,
                                policy=self.policy, active_grants=self.policy.grants)))
             return decision
-        except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
-                TypeError, KeyError, sqlite3.Error):
+        except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
 
     def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:

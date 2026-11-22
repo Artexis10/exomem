@@ -630,7 +630,7 @@
     }
   },
   "inspect_memory": {
-    "description": "Read-only operations that no typed tool covers: files, schema, governance, imports, maintenance, connections, review context, episodes, media, collection and plan details.",
+    "description": "Read-only fallback for files, schema, governance, imports, maintenance, connections, reviews, episodes, media, collections and plans.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -657,6 +657,7 @@
             "imports.work_item",
             "media.video",
             "media.image",
+            "media.preview",
             "media.status",
             "review.item_context",
             "review.item",
@@ -773,6 +774,7 @@
           "type": "string",
           "enum": [
             "records.create",
+            "records.retract",
             "records.bulk_upsert",
             "records.discard",
             "records.revise",
@@ -1295,6 +1297,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1364,6 +1370,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
