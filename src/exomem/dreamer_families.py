@@ -25,11 +25,11 @@ import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses, note_types
+from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses, note_types, temporal
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -681,23 +681,10 @@ def _stamp(updated: Any, origin: Any) -> str:
     return str(value) if value else ""
 
 
-def _instant(value: str) -> datetime | None:
-    """A date with a time as one UTC instant; None for a bare date, which names no time of day."""
-    if len(value) <= 10:
-        return None
-    try:
-        moment = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return moment.astimezone(UTC) if moment.tzinfo else moment.replace(tzinfo=UTC)
-
-
 def _after(value: str, since: str) -> bool:
-    """Whether `value` is later than `since`: to the second when both carry a time, otherwise by day."""
-    later, bound = _instant(value), _instant(since)
-    if later is not None and bound is not None:
-        return later > bound
-    return value[:10] > since[:10]
+    """Whether `value` is known to be later than `since`; two values that share a day order only when both have a time."""
+    later, bound = temporal.parse(value), temporal.parse(since)
+    return later is not None and bound is not None and temporal.compare(later, bound) is temporal.Order.AFTER
 
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
@@ -2181,7 +2168,7 @@ _CURATION_PROFILES_SQL = (
 _CURATION_UNIT_PAGES_SQL = (
     "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
     "WHERE f.node_key IN ({keys}) AND f.kind = 'file' "
-    # The profile's own day too: a page saved later that day is newer, which `_after` decides to the second.
+    # From the day before the profile's: `_after` then decides each page to the second before any read.
     "AND substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) >= ? "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
@@ -2361,12 +2348,15 @@ def _curation_candidates(
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
+    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_after`.
+    bound = temporal.parse(since)
+    floor = (bound.day - timedelta(days=1)).isoformat() if bound is not None else since[:10]
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
     for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
         chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
         sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), labels=labels)
         keys = [f"file:{path}" for path in chunk]
-        rows = graph.execute(sql, (*keys, since[:10], epistemic_graph.CANDIDATE_KIND, *params))
+        rows = graph.execute(sql, (*keys, floor, epistemic_graph.CANDIDATE_KIND, *params))
         yield from sorted(
             (str(path), _stamp(updated, origin))
             for path, updated, origin, status in rows
@@ -2425,10 +2415,8 @@ def _new_units(
 
 
 def _unit_newer(as_of: str, page_date: str, since: str) -> bool:
-    """A unit's own date decides by day; with no date of its own, or on the profile's own day, its page's time does."""
-    if as_of and as_of[:10] != since[:10]:
-        return as_of[:10] > since[:10]
-    return _after(page_date, since)
+    """A unit's own date decides by day; a unit with no date of its own takes its page's time."""
+    return as_of[:10] > since[:10] if as_of else _after(page_date, since)
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
@@ -2515,7 +2503,10 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     if not new and not stale:
         if units_partial and keep is None:
             # Silence here is a partial read, not an empty one; the log is what shows the design's revisit trigger firing.
-            logging.getLogger(__name__).info("profile curation for %s stopped before it found evidence", subject)
+            reason = "the catalogue cannot name its domain's pages" if _curation_scope(
+                ctx, subject, scope, taxonomy
+            ).members is None else f"it used its {_CURATION_READS} reads"
+            logging.getLogger(__name__).info("profile curation for %s found nothing: %s", subject, reason)
         return None
     roles = {**dict.fromkeys(new, "unit"), **counterparts}
     subject_entry = _member_entry(ctx, subject, "subject")
