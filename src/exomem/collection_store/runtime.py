@@ -2232,11 +2232,9 @@ class StoreServer:
         ``VIEW_BATCH_PATHS`` paths, so one collection's summary pages at their bounds. A
         view installed by one pass is confirmed current by the next, so two passes follow
         each maintenance wake; views still pending then, which cannot publish yet, wait for
-        the next wake or the retry interval. After an adoption or a takeover starts a new store
-        instance, a tick queues every current view once (``queue_views_for_instance``) and runs
-        both passes, so each view publishes under the new instance. Import status polling
-        preserves these passes and retry deadlines. Watcher notifications force exact-path
-        reads. Every edit-back or census turn uses one bounded window. While no request waits (``_aside``), one checkout
+        the next wake or the retry interval. Import status polling preserves these passes
+        and retry deadlines. Watcher notifications force exact-path reads. Every edit-back or
+        census turn uses one bounded window. While no request waits (``_aside``), one checkout
         runs further windows for up to ``VIEW_SLICE_SECONDS``, so a census pays its checkout,
         policy and release checks once per slice, not once per window.
 
@@ -2349,19 +2347,11 @@ class StoreServer:
                 wait = 0.0
         try:
             from . import history
-            from .views import instance_to_stamp
 
             # Every file-held input of a history release, not the policy alone: no census render repairs the rest.
             inputs = history.release_inputs(self.root)
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 queued = self._history_queued(reader, inputs)
-                restamp = instance_to_stamp(reader) is not None
-            if restamp:
-                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    self._write(writer.queue_views_for_instance)
-                # Like a wake, the views queued here need their own install and confirmation passes now,
-                # not after the retry interval that an earlier, finished pass set.
-                self._views_after, self._views_passes = None, 0
             if not queued:
                 with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                     inputs = self._write(writer.invalidate_history_pages)

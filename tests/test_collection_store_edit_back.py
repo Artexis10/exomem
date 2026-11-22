@@ -2236,34 +2236,66 @@ def test_a_view_the_store_rendered_since_its_stat_was_recorded_is_not_an_owner_e
         assert manifest_path() in edit_back.changed_views(reader, store.root)[0]
 
 
-def test_a_view_held_through_an_adoption_publishes_under_the_new_instance_once_restored(store):
-    """Defect: a view held while an adoption started a new instance kept the old stamp. When the
-    owner put the published bytes back, the hold resolved straight to current, and the release
-    proof withheld that view from every caller until its rows changed."""
-    _, path = appended(store, count=1)
-    store.reconcile_views()
-    published = path.read_bytes()
-    path.write_bytes(published.replace(b"count: 1", b"count: broken"))
-    store.reconcile_views()
-    view = path.relative_to(store.root).as_posix()
-    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (view,)).fetchone() == ("held",)
+def adopted(store):
+    """Start a new store instance as an adoption or a takeover does; returns the instance it replaced.
 
-    old = store.connection.execute("SELECT value FROM store_meta WHERE key='instance_id'").fetchone()[0]
-    assert old.encode() in published
+    Only the store's identity and lineage matter to a view, so the rest of the fork record is left out.
+    """
+    old, lineage = (store.connection.execute("SELECT value FROM store_meta WHERE key=?", (key,)).fetchone()[0]
+                    for key in ("instance_id", "lineage"))
     new = "00000000-0000-4000-8000-00000000ad09"
-    # An adoption starts a new instance; here only its identity matters.
+    lineage = [*json.loads(lineage), {"instance_id": new, "adopted_from": old,
+                                      "adopted_at_commit_seq": 1, "head_hash": "0" * 64}]
     store.connection.execute("UPDATE store_meta SET value=? WHERE key='instance_id'", (new,))
+    store.connection.execute("UPDATE store_meta SET value=? WHERE key='lineage'", (json.dumps(lineage),))
     store.connection.commit()
-    store.queue_views_for_instance()
+    return old
 
-    path.write_bytes(published)  # the owner restores the published view
-    store.reconcile_views()  # resolves the hold
-    store.reconcile_views()  # installs the new render
-    store.reconcile_views()  # confirms it
 
-    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (view,)).fetchone() == ("current",)
-    restamped = path.read_bytes()
-    assert new.encode() in restamped and old.encode() not in restamped
+def owner_reads(store, view):
+    """Whether the owner's governed read of ``view`` returns it, rather than withholding it as not found."""
+    from exomem import commands
+    from exomem.collection_store.preview import preview_store
+    from exomem.governance.principal import owner_principal, request_scope
+
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        try:
+            return commands.op_get(store.root, path=view)["path"] == view
+        except ValueError as error:
+            assert "NOT_FOUND" in str(error)
+            return False
+
+
+def test_an_adoption_leaves_a_view_readable_but_not_an_edit_of_it_or_a_foreign_instances_render(store):
+    """Defect: an adoption starts a new store instance and rewrites no view, and the release proof
+    wanted the render under the new instance, so the owner could read no unchanged view. Only the
+    instance may differ: an edit of those bytes, or the exact render under an instance outside the
+    store's lineage, stays withheld."""
+    _, path = appended(store)
+    view = path.relative_to(store.root).as_posix()
+    published = path.read_bytes()
+    old = adopted(store)
+    assert old.encode() in published
+
+    assert owner_reads(store, view)
+    path.write_bytes(published.replace(b"title: One", b"title: Forged"))
+    assert not owner_reads(store, view)
+    path.write_bytes(published.replace(old.encode(), b"00000000-0000-4000-8000-0000000f0e19"))
+    assert not owner_reads(store, view)
+
+
+def test_a_view_installed_before_an_adoption_and_confirmed_after_it_is_readable(store):
+    """Defect: a view installed under one instance and confirmed after an adoption started the next
+    stays withheld, because the confirmation keeps the installed bytes and their earlier stamp."""
+    _, path = appended(store)
+    view = path.relative_to(store.root).as_posix()
+    state = "SELECT state FROM projection_state WHERE path=?"
+    assert store.connection.execute(state, (view,)).fetchone() == ("pending",)
+    old = adopted(store)
+    store.reconcile_views()
+
+    assert store.connection.execute(state, (view,)).fetchone() == ("current",)
+    assert old.encode() in path.read_bytes() and owner_reads(store, view)
 
 
 def test_an_owner_restoring_a_held_views_published_bytes_is_found_by_the_sweep(store):

@@ -177,6 +177,33 @@ def _stamp(frontmatter) -> dict | None:
     return stamp
 
 
+def owned_stamp(conn) -> Callable[[Mapping], bool]:
+    """A test for view stamps of this store under any instance of its lineage; any other stamp is foreign.
+
+    An adoption or a takeover starts a new instance and rewrites no view, so an unchanged view
+    keeps the stamp of the earlier instance that rendered it.
+    """
+    store_id = views.store_identity(conn)["store_id"]
+    lineage = {entry["instance_id"] for entry in json.loads(
+        conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+    return lambda stamp: stamp["s"] == store_id and stamp["i"] in lineage
+
+
+def earlier_identity(conn, projection, manifest, raw: bytes) -> dict[str, str] | None:
+    """The identity of the earlier instance of this store whose stamp view bytes ``raw`` carry, else None."""
+    try:
+        if projection["kind"] == "log":
+            stamp = log_view.split_frame_stamp(manifest, raw)[1]
+        else:
+            stamp = _stamp(vault.parse_frontmatter(raw.decode(), strict=True)[0])
+    except (UnicodeError, ValueError, collections.CollectionError):
+        return None
+    identity = views.store_identity(conn)
+    if stamp is None or stamp["i"] == identity["instance_id"] or not owned_stamp(conn)(stamp):
+        return None
+    return {**identity, "instance_id": stamp["i"]}
+
+
 def current_version(conn, projection) -> int | None:
     """The row or manifest version a view of ``projection`` renders now."""
     if projection["kind"] == "item":
@@ -212,9 +239,7 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = (), edit_back: 
         # Only the exact imported bytes may be unstamped, and those are the published digest.
         return Classification(INVALID, None, None, current_version(conn, projection)
                               if projection["kind"] in EDITABLE_KINDS else None)
-    identity = views.store_identity(conn)
-    lineage = json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
-    if stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}:
+    if not owned_stamp(conn)(stamp):
         return Classification(FOREIGN, stamp, stamp["v"])
     if projection["kind"] == "summary":
         from . import derived_rows
@@ -359,11 +384,9 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
     proposed = log_view.capture(manifest, authored, parsed.records)
     blocks = [(record, authored[record.span.start:record.span.end]) for record in parsed.records]
     stamps = [record_formats.read_log_block_stamp(block) for _, block in blocks]
-    identity = views.store_identity(conn)
-    lineage = {entry["instance_id"] for entry in
-               json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+    owned = owned_stamp(conn)
     for stamp in [frame_stamp, *stamps]:
-        if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+        if stamp is not None and not owned(stamp):
             return Classification(FOREIGN, stamp, stamp["v"])
     if refusals.get(None):
         return Classification(INVALID, None, generation, generation, issues=tuple(refusals[None]))
@@ -509,12 +532,10 @@ def resumed_update(writer, held, manifest, before) -> dict:
             raise records._held_not_found()
         record = log_view.decode_block(writer.root, manifest, held["held_bytes"])
         stamp = record_formats.read_log_block_stamp(held["held_bytes"])
-        identity = views.store_identity(writer.connection)
-        lineage = json.loads(writer.connection.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
         version = writer.connection.execute("SELECT payload_hash FROM item_versions WHERE row_id=? AND row_version=?",
                                             (before["row_id"], held["base_row_version"])).fetchone()
         if (record.identity.inferred or record.identity.key != before["item_key"] or stamp is None
-                or stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}
+                or not owned_stamp(writer.connection)(stamp)
                 or stamp["v"] != held["base_row_version"] or version is None or version[0][:12] != stamp["h"]):
             raise records._held_not_found()
         base = typed_storage.version_values(writer.connection, before["row_id"], stamp["v"])[0]

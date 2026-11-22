@@ -563,33 +563,24 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
             "MAINTENANCE_REQUIRES_CLI")
 
 
-@pytest.fixture
-def prompt_service(monkeypatch, request):
-    """``service`` whose views tick comes back after 0.2 s instead of the 30 s retry interval, set before it starts."""
-    monkeypatch.setattr(runtime, "IMPORT_RETRY_SECONDS", 0.2)
-    return request.getfixturevalue("service")
-
-
-def test_an_adoption_republishes_every_view_under_the_new_instance(prompt_service):
-    """Defect: an adoption starts a new store instance and rewrote no view. The publisher counted
-    each view file as current, but the release proof wants the render under the new instance, so
-    the views stayed withheld from every caller, the owner included, until a row change."""
-    root = prompt_service.root
+def test_an_adoption_leaves_every_view_readable_by_its_owner(service):
+    """Defect: an adoption starts a new store instance and rewrites no view. The release proof
+    wanted the render under the new instance, so every view was withheld from every caller, the
+    owner included, until a row change rendered it again."""
+    root = service.root
     descriptor = capabilities.ActiveSurfaceDescriptor(
         surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
     )
 
-    def stamped_views():
+    def views():
+        # History pages carry no instance stamp, so an adoption cannot strand them.
         with closing(connection.open_reader(connection.store_path(root))) as reader:
-            rows = reader.execute("SELECT path,state FROM projection_state WHERE kind!='history'").fetchall()
-        return {path: (state, (root / path).read_text(encoding="utf-8")) for path, state in rows}
+            return dict(reader.execute("SELECT path,state FROM projection_state WHERE kind!='history'"))
 
     found = SimpleNamespace(root=root, meta=lambda: store_meta(root))
     _published(found)
+    _until(lambda: views() and set(views().values()) == {"current"})
     before = store_meta(root)[schema.META_INSTANCE_ID]
-    _until(lambda: stamped_views() and all(state == "current" for state, _ in stamped_views().values()))
-    assert all(before in text for _, text in stamped_views().values())
-
     path = replica.replica_path(root)
     path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
     _preserved(found)
@@ -598,11 +589,10 @@ def test_an_adoption_republishes_every_view_under_the_new_instance(prompt_servic
         applied = call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
                        plan_id=preview["plan_id"], why="adopt the copy this host holds")
     assert applied["status"] == "adopted", applied.get("reason")
-    after = store_meta(root)[schema.META_INSTANCE_ID]
-    assert after != before
+    assert store_meta(root)[schema.META_INSTANCE_ID] != before
 
-    _until(lambda: all(state == "current" and after in text and before not in text
-                       for state, text in stamped_views().values()))
+    for view in views():
+        assert call(root, "read_memory", path=view)["path"] == view
 
 
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(

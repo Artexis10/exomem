@@ -1501,18 +1501,15 @@ class CollectionWriter:
             projection = (None if item is None else self._publication.previous(item["view_path"]))
             if outside and (projection is None or projection["path"] != facts["old_path"]):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "moved source basis changed")
-            stamp, identity = facts["stamp"], self._publication.identity
-            lineage = {entry["instance_id"] for entry in json.loads(self.connection.execute(
-                "SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+            stamp, owned = facts["stamp"], edit_back.owned_stamp(self.connection)
             code = edit_back.MOVED if outside else edit_back.UNBOUND if item is None else edit_back.CONFLICT
-            current = bool(item is not None and projection is not None and stamp is not None
-                           and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
+            current = bool(item is not None and projection is not None and stamp is not None and owned(stamp)
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
             legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
                 self.connection, projection)
             legacy_exact = legacy is not None and legacy[0] == facts["digest"]
             current = current or legacy_exact
-            if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+            if stamp is not None and not owned(stamp):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
                 code = edit_back.CONFLICT if stamp and stamp["v"] < item["row_version"] else edit_back.INVALID
@@ -1858,11 +1855,9 @@ class CollectionWriter:
                             self._execute("UPDATE projection_state SET state='current',pending_row_version=NULL,"
                                           "pending_sha256=NULL WHERE path=?", (projection["path"],))
                         if projection["state"] == "held":
-                            # The owner restored the published view, which resolves its in-place hold. Those
-                            # bytes may carry the stamp of an instance an adoption replaced while the view was
-                            # held, so the drain renders it again instead of trusting them as current.
+                            # The owner restored the published view, which resolves its in-place hold.
                             self._resolve_in_place(projection["path"], edit_back.current_version(self.connection, projection))
-                            self._execute("UPDATE projection_state SET state='pending' WHERE path=?", (projection["path"],))
+                            self._execute("UPDATE projection_state SET state='current' WHERE path=?", (projection["path"],))
                         continue
                     source = {
                         "source_pairs": projection["source_pairs"],
@@ -1940,27 +1935,6 @@ class CollectionWriter:
         with self._mutation(reconcile=True):
             self._execute("UPDATE projection_state SET state='pending' WHERE kind='history' AND state!='pending'")
             return inputs
-
-    def queue_views_for_instance(self):
-        """Queue every current view again when the store's instance is not the one they carry.
-
-        A view's stamp names the instance that rendered it (`views.stamp`). An adoption or a takeover
-        starts a new instance and rewrites no view, and the publisher counts a file that still holds
-        its published bytes as current. The release proof wants the exact current render, so each
-        such view stayed withheld, from the owner too, until something else changed it. Queued here,
-        the normal drain renders and publishes each one under the new instance. A store that never
-        recorded an instance queues them once, which repairs views an earlier adoption left stale.
-        A held view keeps the owner's bytes until its hold resolves, so it is not queued.
-        """
-        with self._mutation(reconcile=True):
-            instance = views.instance_to_stamp(self.connection)
-            if instance is None:
-                return
-            # History pages carry no instance stamp, so an adoption leaves them current.
-            self._execute("UPDATE projection_state SET state='pending' WHERE state='current' AND kind!='history'")
-            self._execute("INSERT INTO store_meta(key,value) VALUES (?,?) "
-                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                          (schema.META_VIEWS_INSTANCE, instance))
 
     def apply_view_edit(self, observation, found):
         """Apply one settled, valid view edit as ONE governed update through the ordinary leaf.
@@ -2050,10 +2024,6 @@ class CollectionWriter:
                 if row[1] == "held":
                     self._resolve_in_place(observation.path,
                                            edit_back.current_version(self.connection, observation.projection))
-                    # Restored published bytes may name an instance an adoption replaced: render them again.
-                    self._execute("UPDATE projection_state SET stat_identity=?,state='pending' WHERE path=?",
-                                  (observation.stat, observation.path))
-                    continue
                 self._execute("UPDATE projection_state SET stat_identity=?,state='current' WHERE path=?",
                               (observation.stat, observation.path))
 
