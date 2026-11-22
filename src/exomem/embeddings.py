@@ -481,6 +481,11 @@ def get_clip_model():
 def get_clip_query_model():
     """Lazy multilingual query tower aligned to the existing image vectors."""
     global _CLIP_QUERY_MODEL
+    resident = _CLIP_QUERY_MODEL
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        CLIP_GUARD.touch()
+        return resident
     with runtime_resources.model_execution():
         with _CLIP_LOCK:
             if _CLIP_QUERY_MODEL is None:
@@ -539,12 +544,19 @@ def embed_image(path: Path) -> np.ndarray:
 
 def embed_clip_text(query: str) -> np.ndarray:
     """Encode a text query into CLIP space → float32 (512,), L2-normalized."""
-    with CLIP_GUARD.active(), runtime_resources.model_execution():
+    with CLIP_GUARD.active():
         try:
             model = get_clip_query_model()
         except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
             raise ClipUnavailable(f"multilingual image query encoder unavailable: {error}") from error
-        vec = model.encode([query])[0]
+        lane = _QUERY_TURN.get()
+        # Inside `query_turn`, an encoder that runs inferences side by side takes the query's lane.
+        if lane is not None and getattr(model, "concurrent_encodes", False):
+            execution = lane.execution
+        else:
+            execution = runtime_resources.model_execution
+        with execution():
+            vec = model.encode([query])[0]
     return vec.astype(np.float32, copy=False)
 
 

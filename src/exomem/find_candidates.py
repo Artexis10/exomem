@@ -77,7 +77,8 @@ def _prepare_clip_query(vault_root: Path, query: str) -> PreparedQuery:
             return PreparedQuery(index, non_applicable_reason="no_image_vectors")
         if readiness.should_defer("clip"):
             return PreparedQuery(index, deferred=True)
-        return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
+        with embeddings.query_turn():
+            return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
     except Exception as error:  # noqa: BLE001 - the image lane reports the retained failure.
         return PreparedQuery(error=error)
 
