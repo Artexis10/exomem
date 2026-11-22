@@ -1293,7 +1293,7 @@ def activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
-    positions: Callable[[CallerView, str | None], dict[str, Any]] | None = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1319,9 +1319,9 @@ def activation_packet(
     that takes nothing from `max_chars`. `snapshot` is the request's freshness snapshot: the keyword query reads the
     lexical catalogue at its pinned checkpoint, as the turn slice does, and walks no vault. Without one it does not run.
 
-    `positions` compiles the recorded-positions block once the task context is served, from the caller view and the
-    reason task discovery stopped short of the turn's reach, if it did. It reads no page that supplies the stance or
-    a domain profile. The block has its own bound and takes nothing from `max_chars`.
+    `positions` compiles the recorded-positions block once the task context is served, from the caller view. It
+    reads no page that supplies the stance or a domain profile. The block has its own bound and takes nothing from
+    `max_chars`.
     """
     with working_set_runtime.turn_vector_scope():
         if purpose is not None:
@@ -1349,7 +1349,7 @@ def _activation_packet(
     spent_after: int = 0,
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
-    positions: Callable[[CallerView, str | None], dict[str, Any]] | None = None,
+    positions: Callable[[CallerView], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1464,8 +1464,6 @@ def _activation_packet(
             )
             return frozenset(item["ref"] for item in slice_block["items"]), slice_packet_chars(slice_block)
 
-        # Why the pages task discovery served may fall short of the turn's reach: positions read only those pages.
-        discovery_gap: str | None = None
         if task_context is not None:
             from . import context_task
 
@@ -1474,10 +1472,6 @@ def _activation_packet(
             task_chars = context_task.packet_chars(task_block)
             packet["budget"]["used_chars"] += task_chars
             reserve = max(0, reserve - task_chars)
-            if task_block.get("state") == "unavailable":
-                discovery_gap = "lane_failed"
-            elif context_task.discovery_cut_short():
-                discovery_gap = "budget"
         if turn_leads is not None:
             if slice_block is None:
                 prepare_slice()
@@ -1508,7 +1502,7 @@ def _activation_packet(
             # `positions_max_chars`, so it neither reduces `max_chars` nor counts as spent from it.
             with find_types.timing_span(timings, "working_set.positions"):
                 try:
-                    packet["positions"] = positions(prepared.caller, discovery_gap)
+                    packet["positions"] = positions(prepared.caller)
                 except Exception:  # noqa: BLE001 - optional positions must leave the map and the task context available
                     log.warning("positions unavailable", exc_info=True)
                     packet["positions"] = positions_block._empty("unavailable")  # noqa: SLF001

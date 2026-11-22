@@ -11,7 +11,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -217,16 +217,36 @@ def _deadline_check() -> None:
 DISCOVERY_STAGE_PREFIX = "working_set.task_context"
 
 
-def discovery_cut_short() -> bool:
-    """Whether this request's deadline skipped or stopped a stage of task discovery.
+@dataclass
+class Reach:
+    """The pages this response's task context serves for the turn, and why discovery stopped short of them, if it did.
 
-    Then the pages the task context served are not all the turn would reach. The block's `budget` reason cannot say
-    this: it also names a lead that did not fit the character allowance, which is a bound by design.
+    A lane that decides which pages are served records its failure here as it happens. A deadline is read from the
+    request budget's own record, which names every discovery stage it skipped or stopped. The block's `budget`
+    reason cannot stand in for either: it also names a lead that did not fit the character allowance, a bound by
+    design that leaves the served pages complete.
     """
-    budget = request_budget.current()
-    return budget is not None and any(
-        stage.startswith(DISCOVERY_STAGE_PREFIX) for stage in (*budget.skipped, *budget.truncated)
-    )
+
+    paths: set[str] = field(default_factory=set)
+    stopped: str | None = None
+
+    def stop(self, reason: str) -> None:
+        if self.stopped is None:
+            self.stopped = reason
+
+    def gap(self) -> str | None:
+        if self.stopped is not None:
+            return self.stopped
+        budget = request_budget.current()
+        cut = budget is not None and any(
+            stage.startswith(DISCOVERY_STAGE_PREFIX) for stage in (*budget.skipped, *budget.truncated)
+        )
+        return "budget" if cut else None
+
+
+#: The discovery reason that a lane deciding the served pages failed, as `working_set.task_candidates` and
+#: `working_set.attach_task_links` report it. Their other reasons are deadlines, read from the budget, or bounds.
+_LANE_FAILED = "lane_failed"
 
 
 def _serve_without_deadline() -> None:
@@ -548,12 +568,13 @@ def compile_context(
     timings: find_types.FindTimings | None = None,
     index_token: tuple[int, int, int] | None = None,
     prepare_slice: Callable[[], tuple[frozenset[str], int]] | None = None,
-    reach: set[str] | None = None,
+    reach: Reach | None = None,
 ) -> dict[str, Any]:
     """Revalidate before selection, then allocate complete source-bound read routes.
 
     `reach`, when given, receives the paths of the pages this response serves for the turn: each lead that this
-    block or the turn slice routes, and each link target that the block lists.
+    block or the turn slice routes, and each link target that the block lists. It also learns when a lane that
+    decides those pages failed, or discovery did not run.
     """
     from . import working_set_runtime
 
@@ -561,6 +582,8 @@ def compile_context(
         # Without the raw fast path, discovery and method revalidation would prepare released sources on this
         # request. It reports the state that a released corpus over its preparation allowance already reports,
         # and held methods reset as they do on every unavailable branch.
+        if reach is not None:
+            reach.stop("task_context_unavailable")
         return empty("unavailable", reset=bool(held))
     sources: dict[str, SourceProjection | None] = {}
     with find_types.timing_span(timings, "working_set.methods"):
@@ -598,6 +621,8 @@ def compile_context(
             block["state"] = "partial"
             return block
         block["missing"] = missing
+        if reach is not None and any(gap.get("reason") == _LANE_FAILED for gap in missing):
+            reach.stop(_LANE_FAILED)
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
@@ -671,6 +696,9 @@ def compile_context(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,
         ):
             _add_missing(block, reason)
+            if reach is not None and reason == _LANE_FAILED:
+                # The leads' link targets are pages the turn reaches; without them the served pages are short.
+                reach.stop(_LANE_FAILED)
         # A lead is admitted together with its first connection when both fit; the rest fill the
         # room every lead and method leaves, in lead order. A lead's own method outranks its first
         # link, but a first link may take the room that a later lead would have used.
@@ -740,13 +768,15 @@ def compile_context(
                     block["candidates"].remove(item)
                     _add_missing(block, "budget")
         if reach is not None:
-            _record_reach(reach, candidates, block["candidates"], covered, target_paths)
+            _record_reach(reach.paths, candidates, block["candidates"], covered, target_paths)
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)
         return block
     except Exception:  # noqa: BLE001 - optional discovery cannot discard a usable map
         log.warning("task context unavailable", exc_info=True)
+        if reach is not None:
+            reach.stop(_LANE_FAILED)
         return empty("unavailable", reset=bool(held))
 
 

@@ -12,7 +12,7 @@ The system SHALL treat a semantic unit as a position unit only when its resolved
 - **THEN** recall does not treat that unit as a position unit
 
 ### Requirement: Recall Serves The Positions That Bear On A Turn
-When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages that their served connections name, in either direction, that the caller may see. It SHALL serve only current units, under the same admission as the stance and the domain profiles: a unit on a superseded or historical page, an expired unit and a superseded unit are not served. It SHALL rank every current unit in reach by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references within the same bound, never a cut unit, except that a caller served only an excerpt of a page has its left-out units counted instead, as the whole-unit requirement below says, and a bound of 0 SHALL turn the block off. The block SHALL NOT read a page that supplies the stance or a domain profile, a page marked `stance: true` or a page of a profile note type, whether or not the `stance` or `domain_profiles` block serves that page on the turn. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items. When the request deadline skips or stops a stage of task discovery, or task discovery is unavailable, the block SHALL name that cause as its `reason`, and SHALL report `unavailable` when it had no page to read and `partial` otherwise, never `empty`.
+When task discovery serves leads for a turn, a maps response SHALL carry a `positions` block. The block SHALL hold position units found on the served leads and on the pages that their served connections name, in either direction, that the caller may see. It SHALL serve only current units, under the same admission as the stance and the domain profiles: a unit on a superseded or historical page, an expired unit and a superseded unit are not served. It SHALL rank every current unit in reach by relevance to the turn and then by recency, and give each unit its text, its authored date where present, its page title and its unit reference. The block SHALL have its own bound, the vault budget `positions_max_chars`, and SHALL NOT draw on the turn allowance `max_chars`. Overflow SHALL become references within the same bound, never a cut unit, except that a caller served only an excerpt of a page has its left-out units counted instead, as the whole-unit requirement below says, and a bound of 0 SHALL turn the block off. The block SHALL NOT read a page that supplies the stance or a domain profile, a page marked `stance: true` or a page of a profile note type, whether or not the `stance` or `domain_profiles` block serves that page on the turn. A turn with no served leads, or with no position unit in reach, SHALL report the block's state and carry no items. When the request deadline skips or stops a stage of task discovery, a discovery lane that decides the served pages fails, or task discovery does not run, the block SHALL name that cause as its `reason`, and SHALL report `unavailable` when it had no page to read and `partial` otherwise, never `empty`.
 
 #### Scenario: A position late on a linked long page reaches the agent
 - **WHEN** a turn's served lead is a short page that links to a long page, and the long page holds a position unit in its last fifth
@@ -25,6 +25,10 @@ When task discovery serves leads for a turn, a maps response SHALL carry a `posi
 #### Scenario: A turn whose task discovery stopped early reports what it read as partial
 - **WHEN** leads are served but the request deadline stops a later stage of task discovery, such as the leads' connections
 - **THEN** the `positions` block reports `partial` with reason `budget`, whatever units it found on the pages it read
+
+#### Scenario: A turn whose connection lookup failed reports what it read as partial
+- **WHEN** leads are served but the lookup of their connections fails
+- **THEN** the `positions` block reports `partial` with reason `lane_failed`
 
 #### Scenario: A hidden page contributes nothing
 - **WHEN** a served lead links to a page the caller may not see
@@ -99,13 +103,17 @@ For a caller whose release ceiling serves a page only as an excerpt, the units s
 - **THEN** the block is reported unavailable and carries no unit of that page
 
 ### Requirement: The Positions Block Leads The Maps Response And Opens With Its Framing
-A maps response SHALL carry the `positions` block as its first field, before the map and every other field, including the fields that terminal egress adds. The block's framing passage `about` SHALL be its first field, followed by `state`, `items`, `overflow_refs`, `omitted` and, where present, `reason`. A client that renders the block SHALL render it before the map and the task leads, and the framing passage before the items. The response's `budget.serialized_chars` SHALL stay the length of the response as sent.
+A maps response SHALL carry the `positions` block as its first field, before the map and every other field, including the fields that terminal egress adds. The block's framing passage `about` SHALL be its first field, followed by `state`, `items`, `overflow_refs`, `omitted` and, where present, `reason`. A client that renders the block SHALL render it before the map and the task leads, and the framing passage before the items. A client that renders a `partial` or `unavailable` block SHALL say that the block is not the whole, with its reason, even when the block carries no item. The response's `budget.serialized_chars` SHALL stay the length of the response as sent.
 
 The block leads because a block placed last, or mid-packet, did not reliably open the first answer on a leading yes/no question, where one placed first did.
 
 #### Scenario: The block is read first, framing first
 - **WHEN** a maps response serves a `positions` block with items
 - **THEN** `positions` is the response's first field, `about` is the block's first field, and `budget.serialized_chars` equals the length of the response without the `serialized_chars` field
+
+#### Scenario: A rendered block says when it is not the whole
+- **WHEN** a client renders a `positions` block reported `unavailable` or `partial`
+- **THEN** the rendered text names the state and the reason and says that a recorded position may exist that is not shown
 
 #### Scenario: A client renders the block before the map and the leads
 - **WHEN** a client renders a response that carries a map, task leads and a `positions` block

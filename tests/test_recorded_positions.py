@@ -321,6 +321,26 @@ def test_a_turn_whose_task_discovery_stopped_early_reports_the_positions_it_read
     assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "budget"}
 
 
+def test_a_turn_whose_link_lookup_failed_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection graph was unavailable, so the linked page that holds the position was never read; the task
+    context said `lane_failed` and the block still read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(working_set, "read_connections", unavailable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A page its author retired for a newer one was served as a ready position, presenting a withdrawn view as current."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
@@ -414,7 +434,7 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_counted_not_named(va
     assert [item["text"] for item in guest["items"]] == [short_view]
     assert guest["overflow_refs"] == []
     assert guest["omitted"] == 1
-    assert hook._format_positions_block(guest).splitlines()[-1] == positions.overflow_line([], 1)
+    assert positions.overflow_line([], 1) in hook._format_positions_block(guest).splitlines()
 
 
 def test_several_short_positions_on_an_excerpted_page_share_its_excerpt_bound(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -462,9 +482,11 @@ def test_a_page_the_caller_may_read_no_text_of_lists_no_unit_line_or_ref(vault: 
     guest = _activate(vault, _external(), turn=TURN, max_chars=8000)
 
     assert reads
-    # The guest's task discovery is unavailable in this fixture, so the one page read is only part of the reach.
+    # The guest's task discovery does not run in this fixture, so the one page read is only part of the reach.
     assert guest["task_context"]["state"] == "unavailable"
-    assert guest["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+    assert guest["positions"] == {
+        "state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "task_context_unavailable",
+    }
 
 
 def test_a_policy_that_tightens_before_terminal_egress_does_not_serve_more_than_the_new_excerpt_bound(
@@ -696,3 +718,24 @@ def test_the_hook_renders_the_positions_before_the_map_and_the_task_leads() -> N
     leading = next(index for index, line in enumerate(lines) if line.startswith("- positions:"))
     assert leading < next(index for index, line in enumerate(lines) if line.startswith("- map:"))
     assert leading < next(index for index, line in enumerate(lines) if line.startswith("- task lead:"))
+
+
+def test_the_hook_says_when_the_positions_block_is_not_the_whole() -> None:
+    """The hook dropped an unavailable block and a partial one without items, so a hook-fed agent read a position the
+    service never read as none: the same text as a turn with no recorded position."""
+    unread = {"state": "unavailable", "reason": "budget", "items": [], "overflow_refs": [], "omitted": 0}
+    part = {
+        "state": "partial", "reason": "lane_failed", "about": positions.ABOUT, "overflow_refs": [], "omitted": 0,
+        "items": [{"ref": "exomem://vault/log.md#first", "text": "I prefer a slow cool below 600 degrees", "title": "Kiln log", "date": "2026-03-02"}],
+    }
+    none = {"state": "empty", "items": [], "overflow_refs": [], "omitted": 0}
+
+    assert hook._format_positions_block(unread) == (
+        "- positions unavailable (budget): a recorded position may exist that is not shown; search before you treat one as absent"
+    )
+    assert hook._format_positions_block(part).splitlines() == [
+        f"- positions: {positions.ABOUT}",
+        positions.item_line(part["items"][0]),
+        "- positions partial (lane_failed): a recorded position may exist that is not shown; search before you treat one as absent",
+    ]
+    assert hook._format_positions_block(none) == ""
