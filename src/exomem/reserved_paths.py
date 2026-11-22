@@ -5138,8 +5138,7 @@ def _remove_owner_file(
                         before_unlink()
                         if expected_version is not None and file.version() != expected_version:
                             raise OSError("private remove target changed")
-                        if not _owner_directory_is_current(filesystem, parent):
-                            raise OSError("private remove parent changed")
+                        _require_owner_parent(filesystem, route, parent)
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")

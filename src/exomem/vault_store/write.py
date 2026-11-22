@@ -14,7 +14,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -372,15 +372,99 @@ def _lexical_allocation_bytes(rows: lexstore.PageRows | None) -> int:
     return records + content + 4 * postings
 
 
+def _marked_moves(tx: Connection, change: StoreChange) -> dict[str, PageMove]:
+    """Find moves that carry a stored original's custody forward."""
+    by_source = {move.src: move for move in change.moves}
+    sources = tuple(by_source)
+    retained = {}
+    for start in range(0, len(sources), read.KEYS_PER_QUERY):
+        batch = sources[start : start + read.KEYS_PER_QUERY]
+        within = ", ".join("?" * len(batch))
+        for path, sha256 in tx.execute(
+            "SELECT p.path, p.sha256 FROM store_pages p "
+            f"WHERE p.path IN ({within}) AND EXISTS ("
+            "SELECT 1 FROM store_audit a WHERE a.path = p.path AND a.revision = p.revision "
+            "AND a.sha256 = p.sha256 AND a.reason = ?)",
+            (*batch, MEDIA_PAYLOAD_WRITE_REASON),
+        ):
+            move = by_source[path]
+            # A guarded public move can add lineage bytes. Its source expectation
+            # still binds the exact stored original that the audit trail marks.
+            expectation = change.expect.get(path)
+            if (move.body is None or (expectation is not None and expectation.sha256 == sha256)
+                    or hashlib.sha256(move.body).hexdigest() == sha256):
+                retained[path] = move
+    return retained
+
+
+def _original_inputs(
+    tx: Connection, puts: tuple[PagePut, ...], moves: dict[str, PageMove], *, scrub: bool,
+) -> Iterator[tuple[str, bytes, str | None, int, int]]:
+    """Stream the exact inputs to the destination page and its lexical rows."""
+    for put in puts:
+        mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
+        yield put.rel, put.body, frontmatter_json(put.body), mtime_ns, 0
+    sources = tuple(moves)
+    for start in range(0, len(sources), read.KEYS_PER_QUERY):
+        batch = sources[start : start + read.KEYS_PER_QUERY]
+        within = ", ".join("?" * len(batch))
+        for path, body, fields, mtime_ns in tx.execute(
+            "SELECT path, body, frontmatter_json, mtime_ns FROM store_pages "
+            f"WHERE path IN ({within})", batch,
+        ):
+            move = moves[path]
+            scrub_bytes = len(body) + 2 * len((fields or "").encode()) if scrub else 0
+            if move.body is not None:
+                body = move.body
+                fields, mtime_ns = frontmatter_json(body), time.time_ns()
+            yield move.dst, body, fields, mtime_ns, scrub_bytes
+
+
+def _source_fts_delete_bytes(
+    tx: Connection, moves: dict[str, PageMove], *, scrub: bool,
+) -> tuple[int, int]:
+    """Bound new delete entries from the source's actual stored index inputs."""
+    if not moves or not lexstore.fts5_available():
+        return 0, 0
+    sources = tuple(moves)
+    postings = 0
+    scrub_bytes = 0
+    for start in range(0, len(sources), read.KEYS_PER_QUERY):
+        batch = sources[start : start + read.KEYS_PER_QUERY]
+        within = ", ".join("?" * len(batch))
+        columns = tx.execute(
+            "SELECT f.c0, t.c0, t.c1 FROM pages p "
+            "LEFT JOIN fts_content f ON f.id = p.rowid "
+            "LEFT JOIN tri_content t ON t.id = p.rowid "
+            f"WHERE p.path IN ({within})", batch,
+        )
+        for words, title, body in columns:
+            postings += _fts_posting_bytes(words or "", trigram=False)
+            postings += _fts_posting_bytes(title or "", trigram=True)
+            postings += _fts_posting_bytes(body or "", trigram=True)
+            if scrub:
+                scrub_bytes += sum(len(text.encode()) for text in (words, title, body) if text)
+        for (words,) in tx.execute(
+            "SELECT f.c0 FROM semantic_units u JOIN unit_fts_content f ON f.id = u.rowid "
+            f"WHERE u.parent_path IN ({within})", batch,
+        ):
+            postings += _fts_posting_bytes(words, trigram=False)
+            if scrub:
+                scrub_bytes += len(words.encode())
+    # Delete keys omit positions. Use the same posting bound as inserts, with overhead
+    # for blocks and indexes, even when the destination is outside the search corpus.
+    return 4 * postings, scrub_bytes
+
+
 @contextmanager
 def _reserve_payload_pages(
-    writer: CollectionWriter, puts: tuple[PagePut, ...],
+    writer: CollectionWriter, puts: tuple[PagePut, ...], moves: dict[str, PageMove],
 ) -> Iterator[dict[str, _PreparedOriginal]]:
     """Protect original payload allocation and its direct write metadata on the vault device."""
     from .. import media_capacity
 
     originals = tuple(put for put in puts if put.media_allocation)
-    if not originals:
+    if not originals and not moves:
         yield {}
         return
     database = writer.handle.path
@@ -394,35 +478,43 @@ def _reserve_payload_pages(
         # SQLite file format: an overflow page reserves four bytes for the next page and up
         # to 255 reserved bytes. WAL stores a 32-byte header and 24 bytes per frame.
         usable = page_size - 4 - 255
-        # The tables that write one direct record per PagePut. Their real indexes carry the
-        # path too. SQLite's balance_nonroot uses one parent and up to five result pages.
+        # The tables that write a direct record per path. Their indexes carry the path
+        # too. SQLite's balance_nonroot uses one parent and up to five result pages.
         tables = ("store_pages", "store_audit", "store_projection_queue")
         trees = len(tables) + sum(conn.execute("SELECT count(*) FROM pragma_index_list(?)", (table,)).fetchone()[0]
                                   for table in tables)
-        levels = max(1, (before + len(originals)).bit_length())
+        touched = len(originals) + 2 * len(moves)
+        levels = max(1, (before + touched).bit_length())
         basis = epistemic_graph.producer_type_basis(writer.root)
         prepared = {}
         overflow_pages = 0
-        for put in originals:
-            fields = frontmatter_json(put.body)
-            mtime_ns = time.time_ns() if put.on_disk_mtime_ns is None else put.on_disk_mtime_ns
-            lexical = derive.prepare_lexical_page(writer.root, put.rel, put.body, mtime_ns, basis)
-            prepared[put.rel] = _PreparedOriginal(fields, mtime_ns, lexical)
+        upload_size = 0
+        scrub = bool(moves) and conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        scrub_bytes = 0
+        for rel, body, fields, mtime_ns, old_bytes in _original_inputs(conn, originals, moves, scrub=scrub):
+            lexical = derive.prepare_lexical_page(writer.root, rel, body, mtime_ns, basis)
+            prepared[rel] = _PreparedOriginal(fields, mtime_ns, lexical)
+            upload_size += len(body)
+            scrub_bytes += old_bytes
             # Both the page table and the store_pages_meta covering index store
             # frontmatter. Lexical allocation follows the exact admitted index inputs.
             record_size = (
-                len(put.body) + 2 * len((fields or "").encode()) + trees * len(put.rel.encode())
+                len(body) + 2 * len((fields or "").encode()) + trees * len(rel.encode())
                 + _lexical_allocation_bytes(lexical[1])
             )
             overflow_pages += (record_size + usable - 1) // usable
-        btree_paths = len(originals) * levels * trees
+        removed_postings, removed_content = _source_fts_delete_bytes(conn, moves, scrub=scrub)
+        overflow_pages += (removed_postings + usable - 1) // usable
+        btree_paths = touched * levels * trees
         # A split can add two siblings. The WAL also rewrites the existing siblings and parent.
         database_pages = overflow_pages + 2 * btree_paths
-        wal_pages = overflow_pages + 6 * btree_paths + 1  # Includes the store revision row.
+        # Secure deletion can write the old overflow pages to WAL while freeing them in the DB.
+        scrub_pages = (scrub_bytes + removed_content + usable - 1) // usable
+        wal_pages = overflow_pages + scrub_pages + 6 * btree_paths + 1  # Includes the revision row.
         room.reserve_store_pages(
             database, target_bytes=(before + database_pages) * page_size,
             wal_bytes=32 + wal_pages * (page_size + 24),
-            upload_size=sum(len(put.body) for put in originals),
+            upload_size=upload_size,
         )
         try:
             yield prepared
@@ -446,7 +538,9 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
     changed or went meanwhile rolls the whole commit back.
     """
     _require_owned(change)
-    with _reserve_payload_pages(writer, change.puts) as prepared, writer.handle.transaction() as tx:
+    # Close the transaction before releasing capacity, including on rollback. The
+    # source lookup and admission run before the first canonical mutation.
+    with ExitStack() as allocations, writer.handle.transaction() as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
         if row is None or row[0] != mode.STORE_MODE:
             raise connection.CollectionStoreError(NOT_ACTIVE, "this vault is not in store mode")
@@ -458,6 +552,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
                 "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
             ).fetchone():
                 raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
+        retained_moves = _marked_moves(tx, change)
+        prepared = allocations.enter_context(_reserve_payload_pages(writer, change.puts, retained_moves))
         _degrade_moves(tx, change.paths)
         existing = _held_pages(tx, change)
         now = timestamp()
@@ -467,7 +563,8 @@ def commit(writer: CollectionWriter, change: StoreChange) -> CommitResult:
         for page in change.deletes:
             _delete_page(tx, page, audit)
         for move in change.moves:
-            _move_page(tx, move, revision, audit)
+            _move_page(tx, move, revision, audit, media_allocation=move.src in retained_moves,
+                       prepared=prepared.get(move.dst))
         for record in change.binaries:
             _record_binary(tx, record, revision, audit)
         for binary in change.binary_deletes:
@@ -800,7 +897,10 @@ def _delete_page(tx: Connection, page: PageDelete, audit: _Trail) -> None:
     audit.removed(rel, None if row is None else row[0], queue=not page.on_disk)
 
 
-def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> None:
+def _move_page(
+    tx: Connection, move: PageMove, revision: int, audit: _Trail, *,
+    media_allocation: bool, prepared: _PreparedOriginal | None,
+) -> None:
     page = tx.execute(
         "SELECT body, sha256, size, frontmatter_json, mtime_ns, revision FROM store_pages "
         "WHERE path = ?",
@@ -816,8 +916,8 @@ def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> 
             move.body,
             hashlib.sha256(move.body).hexdigest(),
             len(move.body),
-            frontmatter_json(move.body),
-            time.time_ns(),
+            frontmatter_json(move.body) if prepared is None else prepared.fields,
+            time.time_ns() if prepared is None else prepared.mtime_ns,
         ]
     if move.on_disk:
         # The file kept its bytes and mtime through the rename, so it must have been the stored page.
@@ -839,12 +939,8 @@ def _move_page(tx: Connection, move: PageMove, revision: int, audit: _Trail) -> 
         # Nothing is left to project at either path; a queued intent at the destination named a file
         # that this rename replaced.
         _clear_queued(tx, move.src, move.dst)
-    # The destination's move and its later write share this revision. Carry the
-    # marker only from the exact prior stored version with the same original bytes.
-    media_allocation = content[1] == page[1] and tx.execute(
-        "SELECT 1 FROM store_audit WHERE path = ? AND revision = ? AND sha256 = ? AND reason = ?",
-        (move.src, stored_revision, page[1], MEDIA_PAYLOAD_WRITE_REASON),
-    ).fetchone() is not None
+    # The destination's move and its later write share this revision. Retain the
+    # admission proved for the exact source, including a guarded lineage change.
     audit.moved(move, page[1], content[1], media_allocation=media_allocation)
 
 

@@ -9,7 +9,7 @@ from test_media_store import _configure, _stored, _volume, selected_store as sel
 from test_personal_original_eviction import local_store as local_store
 
 from exomem import (
-    artifact_lifecycle, import_windows, media_bindings, media_jobs, media_replicas, media_store,
+    artifact_lifecycle, held_fs, import_windows, media_bindings, media_jobs, media_replicas, media_store,
     original_pool, originals, personal_eviction, preserve, reserved_paths,
 )
 from exomem.governance.principal import library_scope
@@ -64,6 +64,31 @@ def test_personal_eviction_continues_to_the_lower_threshold_after_yielding(vault
     assert second.exists()
     assert media_store.evict_to_target(vault) == 1
     assert not second.exists()
+
+
+def test_personal_eviction_uses_available_space_excluding_reserved_blocks(vault, local_store, monkeypatch):
+    first = _stored(vault, "a", 8_192)
+    second = _stored(vault, "b", 8_192)
+    third = _stored(vault, "c", 4_096)
+    volume = _volume(100_000, 35_904, first, second, third)
+
+    def usage(path):
+        space = volume(path)
+        space.free -= 20_000  # These free blocks are reserved for privileged writers.
+        return space
+
+    monkeypatch.setattr(shutil, "disk_usage", usage)
+    monkeypatch.setattr(media_store, "_EVICTION_BATCH", 1)
+
+    assert usage(vault).used < 70_000 and usage(vault).free < 30_000
+    assert media_store.evict_to_target(vault) == 1
+    assert not first.exists() and second.exists() and third.exists()
+    assert 30_000 < usage(vault).free < 40_000
+    assert media_store.evict_to_target(vault) == 1
+    assert not second.exists() and third.exists()
+    assert usage(vault).free == 40_000
+    assert media_store.evict_to_target(vault) == 0
+    assert third.exists()
 
 
 def test_personal_import_series_does_not_start_eviction_below_pressure(vault, selected_store, monkeypatch):
@@ -243,3 +268,27 @@ def test_late_store_exchange_after_holding_the_local_pool_file_keeps_plaintext(
     assert not media_store.evict(vault, original)
     assert previous.exists() and physical.read_bytes() == expected
     assert not media_replicas.has_quarantined(vault, (ref,))
+
+
+def test_late_local_pool_ancestor_exchange_keeps_both_plaintexts(vault, local_store, monkeypatch):
+    original, physical = _cached_for_unlink(vault, monkeypatch, pooled=True)
+    expected = physical.read_bytes()
+    ancestor = physical.parent.parent
+    previous = ancestor.with_name("previous-objects")
+    detached = previous / physical.relative_to(ancestor)
+    check_store = media_store._eviction_store_wait
+
+    def exchange_after_store_check(*args):
+        waiting = check_store(*args)
+        if waiting is None:
+            ancestor.rename(previous)
+            physical.parent.mkdir(parents=True)
+            physical.write_bytes(b"replacement")
+        return waiting
+
+    monkeypatch.setattr(media_store, "_eviction_store_wait", exchange_after_store_check)
+
+    with pytest.raises(held_fs.HeldFsError, match="IDENTITY_CHANGED"):
+        media_store.evict(vault, original)
+    assert detached.read_bytes() == expected
+    assert physical.read_bytes() == b"replacement"

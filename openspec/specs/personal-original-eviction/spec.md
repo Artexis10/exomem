@@ -60,6 +60,8 @@ Before a filesystem version authorizes eviction, the service SHALL flush its con
 
 The service SHALL apply the configured `upload_floor_bytes` to payload allocations on the vault volume. This includes multipart spools, resumable parts, final storage copies, signed-container extraction, archive members, direct preserve and hydration. Upload refusals SHALL report `MEDIA_SPACE_BUSY` with free space, the floor, the upload size and a retry hint. A vault without the key SHALL apply no floor.
 
+Moving a stored Markdown original SHALL reserve room for its database and search index writes before the move commits. A move that updates lineage SHALL keep the original's floor protection for later projection.
+
 #### Scenario: An upload that would cross the floor
 
 - **WHEN** the next upload allocation would consume the available room above the floor
@@ -75,6 +77,8 @@ The service SHALL apply the configured `upload_floor_bytes` to payload allocatio
 ### Requirement: The owner status shows what eviction keeps and why
 
 The owner status SHALL report the count and plaintext bytes of local and evicted bound physical originals as of its last complete inventory. Filings of one shared object SHALL contribute one physical original. The status SHALL report the result and time of the latest attempt separately. The last eviction pass can report `key_not_exported`, `store_unavailable`, `settling`, `nothing_idle` or `below_target`. An unreadable value SHALL show as unknown.
+
+Personal eviction SHALL use the space available to the service for both the starting threshold and the low-water target.
 
 #### Scenario: Eviction waits for the key export
 

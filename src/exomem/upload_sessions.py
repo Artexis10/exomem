@@ -193,6 +193,7 @@ class _Running:
     parked: str | None = None  # the code of the park last recorded for a caller
     # The one pending re-attempt, and the wait that the next one gets.
     reattempt: threading.Timer | None = None
+    reattempt_at: float = 0
     reattempt_wait: float = field(default_factory=lambda: REATTEMPT_INITIAL_SECONDS)
 
 
@@ -661,29 +662,39 @@ def _schedule_reattempt(store: Path, session_id: str, committer: Committer, vaul
         return
     with _RUNNING_LOCK:
         running = _RUNNING.get(session_id)
-        if running is None or running.reattempt is not None:
+        if running is None:
             return
         wait = running.reattempt_wait
-        running.reattempt_wait = min(wait * 2, REATTEMPT_MAX_SECONDS)
         try:
             remaining = float(record["expires"]) - _now()
         except (KeyError, TypeError, ValueError):
             remaining = 0
         if remaining > 0:
             wait = min(wait, remaining) if record.get("code") in _REATTEMPT_CODES else remaining
-        timer = threading.Timer(wait, _reattempt, args=(store, session_id, committer, vault_root))
+        wake_at = time.monotonic() + wait
+        if running.reattempt is not None:
+            if running.reattempt_at <= wake_at:
+                return
+            running.reattempt.cancel()
+        if record.get("code") in _REATTEMPT_CODES:
+            running.reattempt_wait = min(running.reattempt_wait * 2, REATTEMPT_MAX_SECONDS)
+        timer = threading.Timer(wait, lambda: _reattempt(store, session_id, committer, vault_root, timer))
         timer.name = f"upload-session-reattempt-{session_id[:8]}"
         timer.daemon = True
         running.reattempt = timer
+        running.reattempt_at = wake_at
         timer.start()
 
 
-def _reattempt(store: Path, session_id: str, committer: Committer, vault_root: Path | None) -> None:
+def _reattempt(
+    store: Path, session_id: str, committer: Committer, vault_root: Path | None, timer: threading.Timer,
+) -> None:
     with _RUNNING_LOCK:
         running = _RUNNING.get(session_id)
-        if running is None:
+        if running is None or running.reattempt is not timer:
             return
         running.reattempt = None
+        running.reattempt_at = 0
     record = _read_record(store, session_id)
     try:
         expired = record is None or float(record["expires"]) <= _now()

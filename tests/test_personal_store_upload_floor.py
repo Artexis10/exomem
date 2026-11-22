@@ -12,7 +12,7 @@ from test_vault_store_migration import vault  # noqa: F401
 from test_vault_store_projector import projecting  # noqa: F401
 from test_vault_store_write_path import served, stored, writer  # noqa: F401
 
-from exomem import lexstore, media_capacity, preserve, writer_lease
+from exomem import lexstore, media_capacity, move_file, preserve, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance.principal import library_scope
@@ -71,10 +71,30 @@ def test_store_original_and_later_projection_each_obey_the_vault_floor(
         assert read.owned_bytes(served, target) == data.encode()
 
         renamed = "Knowledge Base/Evidence/Tests/Minutes/archived.md"
-        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "rename evidence",
-                                               moves=(write.PageMove(target, renamed),)))
+        writer.connection.execute("PRAGMA secure_delete = ON")
+        note = "Knowledge Base/Notes/Rename record.md"
+        change = write.StoreChange(
+            write.Origin.GOVERNED, "rename evidence", moves=(write.PageMove(target, renamed),),
+            puts=(write.PagePut(note, b"# Rename record\n"),),
+        )
+        revision = read.current_revision(served)
+        wal = database.with_name(database.name + "-wal")
+        wal_size = wal.stat().st_size
+        with pytest.raises(OpError) as moving:
+            write.commit(writer, change)
+        assert moving.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and wal.stat().st_size == wal_size
+        assert read.owned_bytes(served, target) == data.encode()
+        assert not read.page_exists(served, renamed) and not read.page_exists(served, note)
+
+        free[0] = floor + 32 * floor
+        write.commit(writer, change)
+        assert wal.stat().st_size > wal_size
         assert not read.page_exists(served, target) and not (served / target).exists()
         assert read.owned_bytes(served, renamed) == data.encode()
+        assert read.owned_bytes(served, note) == b"# Rename record\n"
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size + len(data.encode())
         assert projecting.run_pass().deferred[renamed] == media_capacity.UPLOAD_SPACE_BUSY
         assert not (served / renamed).exists()
 
@@ -140,3 +160,54 @@ def test_indexable_original_needs_room_for_its_search_rows(
     with closing(connection.open_reader(connection.store_path(served))) as reader:
         assert reader.execute("SELECT pages.path FROM tri JOIN pages ON pages.rowid = tri.rowid "
                               "WHERE tri MATCH ? AND pages.path = ?", ("a123", target)).fetchone() == (target,)
+
+
+def test_public_move_of_a_pending_original_meters_its_lineage_rewrite(
+    served, writer, projecting, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 32 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=100 * floor, free=free[0]))
+    database = connection.store_path(served)
+    original = "---\ntitle: Survey notes\n---\n\n" + "One survey observation.\n" * 800
+    source = "Knowledge Base/Evidence/Tests/Minutes/survey.md"
+    destination = "Knowledge Base/Evidence/Tests/Minutes/archived-survey.md"
+
+    def rename():
+        with library_scope():
+            return move_file.move_file(served, old_path=source, new_path=destination, update_wikilinks=False)
+
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT revision FROM store_mode").fetchone() is not None
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            saved = preserve.preserve(served, scope="Tests", category="Minutes", filename="survey.md", content=original)
+        assert saved.path == source and not (served / source).exists()
+        revision = read.current_revision(served)
+        page_size = writer.connection.execute("PRAGMA page_size").fetchone()[0]
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size
+        with pytest.raises(OpError) as busy:
+            rename()
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and not read.page_exists(served, destination)
+        assert read.owned_bytes(served, source) == original.encode()
+
+        free[0] = floor + 32 * floor
+        assert rename().new_path == destination
+        moved = read.owned_bytes(served, destination)
+        assert moved != original.encode() and source.encode() in moved
+        assert b"One survey observation." in moved and not read.page_exists(served, source)
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size
+        assert projecting.run_pass().deferred[destination] == media_capacity.UPLOAD_SPACE_BUSY
+        assert not (served / source).exists() and not (served / destination).exists()
+        assert read.owned_bytes(served, destination) == moved
+
+    free[0] = floor + 32 * floor
+    assert destination not in projecting.run_pass().deferred
+    assert (served / destination).read_bytes() == moved

@@ -460,23 +460,31 @@ class FilesystemStore:
             yield _StoredVersionWitness(self, root.identity, filesystem.capabilities, name, version, before)
 
     def confirm_versions(self, witnesses: Sequence[_StoredVersionWitness]) -> None:
-        """Reopen the named route once and compare metadata, with no ciphertext reads."""
+        """Confirm the named route and version metadata without reading ciphertext."""
         if not witnesses:
             return
         # A retained root can still reach a lazily unmounted or renamed filesystem.
         # Check the configured name as well, through a separate native root and its own files.
         # The initial check proved the capabilities. A read-only reopen must not probe writes on a replacement root.
         try:
-            opened = held_fs._backend().acquire(self.root, capability=witnesses[0].capabilities)
+            backend = held_fs._backend()
+            capabilities = witnesses[0].capabilities
+            opened = backend.acquire(self.root, capability=capabilities)
             with opened.require() as filesystem, filesystem.parent(".").require() as root:
                 if any(witness.store is not self or not held_fs._same_file_identity(witness.root, root.identity)
                        for witness in witnesses):
                     raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the checked store moved")
-                self._require_marker(_marker_in(filesystem))
+                marker = _marker_in(filesystem)
+                self._require_marker(marker)
                 for witness in witnesses:
                     with self._open_version(filesystem, witness.name, witness.version) as file:
                         if file.version() != witness.file:
                             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the checked version moved")
+                # A volume can leave its configured name during the file metadata reads.
+                with backend.acquire(self.root, capability=capabilities).require() as named:
+                    if (not held_fs._same_file_identity(root.identity, named.root_identity)
+                            or _marker_in(named) != marker):
+                        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the checked store moved")
         except (ReplicaAbsent, held_fs.HeldFsError, OSError) as error:
             raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the checked version is no longer reachable") from error
 
@@ -3609,11 +3617,14 @@ def _eviction_store_wait(
 @dataclass(frozen=True, slots=True)
 class _DailyEviction:
     config: dict[str, object]
+    high_water: float
     low_water: float
 
-    def below_target(self, vault: Path) -> bool:
+    def has_room(self, vault: Path, *, pressure: bool = True) -> bool:
         usage = shutil.disk_usage(vault)
-        return usage.used <= usage.total * self.low_water
+        used_limit = self.low_water if pressure else self.high_water
+        # Like upload admission, count only free blocks available to this caller.
+        return usage.free >= usage.total - usage.total * used_limit
 
 
 class _EvictionRefused(Exception):
@@ -3630,7 +3641,7 @@ def _personal_unlink_fence(
         raise _EvictionRefused(waiting)
     if originals.configuration(vault) != config:
         raise _EvictionRefused(POLICY_CHANGED)
-    if daily is not None and daily.below_target(vault):
+    if daily is not None and daily.has_room(vault):
         raise _EvictionRefused(BELOW_TARGET)
 
 
@@ -3640,7 +3651,7 @@ def _evict_one(vault: Path, path: Path, *, daily: _DailyEviction | None = None) 
     if daily is not None:
         if originals.configuration(vault) != daily.config:
             return POLICY_CHANGED
-        if daily.below_target(vault):
+        if daily.has_room(vault):
             return BELOW_TARGET
     config = daily.config if daily is not None else _settings(vault)
     if not _may_evict(config):
@@ -4221,9 +4232,8 @@ def _personal_eviction_pass(
     except TypeError:
         progress = _PersonalEvictionProgress()
     starting = vars(progress).copy()
-    usage = shutil.disk_usage(vault)
-    progress.pressure = usage.used > usage.total * (low_water if progress.pressure else high_water)
-    daily = _DailyEviction(config, low_water)
+    daily = _DailyEviction(config, high_water, low_water)
+    progress.pressure = not daily.has_room(vault, pressure=progress.pressure)
     deadline = time.monotonic() + _PERSONAL_EVICTION_SECONDS
     count = 0
     waiting = None
@@ -4255,7 +4265,7 @@ def _personal_eviction_pass(
                     progress.saw_wait = True
                 count += outcome == EVICTED
             progress.after = row["physical_rel"]
-        if daily.below_target(vault):
+        if daily.has_room(vault):
             waiting = BELOW_TARGET
             return count, waiting
         if len(page) <= _EVICTION_BATCH:
@@ -4270,7 +4280,7 @@ def _personal_eviction_pass(
               closing(ledger._connect()) as conn, conn):
             conn.execute("BEGIN IMMEDIATE")
             if originals.configuration(vault) == config:
-                progress.pressure = progress.pressure and not daily.below_target(vault)
+                progress.pressure = progress.pressure and not daily.has_room(vault)
                 if starting != vars(progress):
                     _save_eviction_status(conn, _PERSONAL_CURSOR, config, **vars(progress))
                 _save_eviction_status(conn, _PERSONAL_WAIT, config, reason=waiting,

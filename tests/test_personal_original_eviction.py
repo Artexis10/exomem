@@ -4,7 +4,7 @@ import json
 import os
 import shutil
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -145,6 +145,33 @@ def test_declaration_flushes_an_existing_marker_before_adopting_it(vault, select
     assert media_store.declare_store(vault, name) == folder
     assert media_replicas.declared_store_id(vault, name) == marker_id
     assert marker.read_bytes() == media_store._store_marker(name, marker_id)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="uses a POSIX directory exchange")
+def test_eviction_keeps_the_original_if_the_store_moves_during_the_final_probe(vault, selected_store, monkeypatch):
+    original = _stored(vault, "file retained after a late store move")
+    assert _offload(vault, original) is not None
+    media_replicas.confirm_key_export(vault)
+    folder = Path(selected_store[0]["root"])
+    moved = folder.with_name("moved-store")
+    open_version = media_store.FilesystemStore._open_version
+
+    @contextmanager
+    def move_during_metadata(store, filesystem, name, version, *, durable=False):
+        with open_version(store, filesystem, name, version, durable=durable) as file:
+            if not durable:
+                folder.rename(moved)
+            yield file
+
+    try:
+        with monkeypatch.context() as detached:
+            detached.setattr(media_store.FilesystemStore, "_open_version", move_during_metadata)
+            assert not media_store.evict(vault, original) and original.is_file()
+            assert moved.exists()
+    finally:
+        if moved.exists():
+            moved.rename(folder)
+    assert media_store.evict(vault, original)
 
 
 def test_eviction_keeps_the_original_until_its_key_and_publication_are_ready(vault, selected_store):
@@ -414,6 +441,39 @@ def test_an_expired_parked_commit_releases_space_without_another_upload(vault, s
     assert not session.part.exists()
     with media_capacity.upload_room(vault) as room:
         assert room.reserved == 0
+
+
+def test_a_commit_that_becomes_retryable_does_not_wait_for_its_expiry(vault, monkeypatch):
+    monkeypatch.setattr(upload_sessions, "TTL_SECONDS", 5)
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 0.03)
+    data = b"A complete original survives a change in the reason its commit waits."
+    digest = hashlib.sha256(data).hexdigest()
+    target = {"lane": "evidence", "scope": "field", "category": "samples", "filename": "recording.bin"}
+    session, secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=digest, target=target, max_bytes=1024,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    assert part.close() == (len(data), True)
+    failures = iter(("SOURCE_DESTINATION_CHANGED", "MEDIA_SPACE_BUSY"))
+
+    def commit(held, _record):
+        if code := next(failures, None):
+            raise upload_sessions.CommitFailed(code, "the original remains held", retryable=True)
+        return {"hash": hashlib.sha256(held.read_bytes()).hexdigest()}
+
+    upload_sessions.start_commit(session, commit)
+    deadline = time.monotonic() + 3
+    while upload_sessions._running(session.id).reattempt is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    parked = upload_sessions.open_session(vault, session.id, secret)
+    assert parked.record["code"] == "SOURCE_DESTINATION_CHANGED"
+    upload_sessions.start_commit(parked, commit)
+    while (observed := upload_sessions.open_session(vault, session.id, secret).view())["state"] != upload_sessions.COMMITTED:
+        assert time.monotonic() < deadline, observed
+        time.sleep(0.01)
+    assert observed["receipt"] == {"hash": digest}
 
 
 def test_a_new_owner_floor_applies_to_the_next_chunk_of_an_open_stage(vault, local_store, monkeypatch):

@@ -29,11 +29,12 @@ The default margin frees an extra tenth of the requested space. The upload floor
 Use `--margin-bytes` and `--upload-floor-bytes` to set those values. An upload at the floor returns `MEDIA_SPACE_BUSY` with a retry hint.
 The final part of a resumable upload reserves space for its commit stages. The service keeps accepted parts if commit must wait.
 Hydration, signed-container extraction and each final storage copy use the same vault-volume budget.
+Moving a stored Markdown original also uses that budget for database and search index writes. Its projected file keeps the floor protection.
 
 After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
 The service flushes the version directory and store root before relying on that copy for eviction.
 Eviction confirms the configured path still reaches that same copy immediately before removal.
-On personal installs, eviction follows the vault's free-space target. A bounded walk continues across passes.
+On personal installs, eviction starts and stops using the disk space available to the service. A bounded walk continues across passes.
 Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
 Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
 
