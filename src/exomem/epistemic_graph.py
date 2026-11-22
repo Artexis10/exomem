@@ -2504,11 +2504,12 @@ def write_page_graph_rows(
     rows: PageGraphRows,
     registry_stamps: Iterable[tuple[str, str]],
     *,
-    before_write: Callable[[tuple[PageGraphRecords, ...]], None] | None = None,
+    before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
-    ``registry_stamps`` is `graph_registry_stamps` of the pass. The caller owns the transaction.
+    ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
+    and the records that replace its rows, before any row changes. The caller owns the transaction.
     """
     rel = rows.rel
     parent = PageGraphRecords(
@@ -2533,7 +2534,7 @@ def write_page_graph_rows(
             "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges),
             replace=True,
         )
-        before_write((nodes, parent, edges, dependencies, coverage))
+        before_write(rel, (nodes, parent, edges, dependencies, coverage))
 
     conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
     conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))

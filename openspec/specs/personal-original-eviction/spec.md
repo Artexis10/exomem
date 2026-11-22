@@ -71,7 +71,7 @@ The floor SHALL cover the database, search and graph writes derived directly fro
 #### Scenario: A small original in a large store
 
 - **WHEN** a stored Markdown original is small and the store database is large
-- **THEN** the floor reserves room in proportion to the original's own records and the trees they touch
+- **THEN** the floor reserves room in proportion to the records the write inserts and deletes, including the graph rows of pages that link to the original
 - **AND** the size of the store database does not refuse the original
 
 #### Scenario: Another write needs space reserved for a completed upload

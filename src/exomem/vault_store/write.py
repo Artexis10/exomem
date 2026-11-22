@@ -485,8 +485,18 @@ class _CellPages:
 
     overflow: int = 0  # overflow pages of the cells' records
     local_bytes: int = 0  # inline bytes, with cell pointers, varints and child pointers
-    positions: int = 0  # existing leaves the cells land in or leave, before any balance
-    trees: int = 0
+    # Per tree, the runs of adjacent cells: each lands in or leaves one existing leaf.
+    runs: dict[tuple[str, int], int] = field(default_factory=dict)
+
+    @property
+    def trees(self) -> int:
+        return len(self.runs)
+
+    def merge(self, other: _CellPages) -> None:
+        self.overflow += other.overflow
+        self.local_bytes += other.local_bytes
+        for tree, runs in other.runs.items():
+            self.runs[tree] = self.runs.get(tree, 0) + runs
 
     def add(self, size: int, limit: int, usable: int) -> None:
         self.local_bytes += min(size, limit) + 32
@@ -497,14 +507,31 @@ class _CellPages:
         """Leaf pages that hold the inline bytes when balancing leaves them half full."""
         return (2 * self.local_bytes + usable - 1) // usable
 
-    def rewritten(self, usable: int) -> int:
-        """Existing pages these cells can dirty.
+    def added(self, usable: int, depth: int) -> int:
+        """New pages that inserting these cells allocates: overflow, leaves and their parents.
 
-        Each position dirties its leaf. SQLite's balance_nonroot then rewrites at most three
-        siblings and their parent, once per leaf that the cells fill or empty. The bound follows
-        the cells, never the size of the database.
+        An interior page holds at least four cells, so each level above the leaves needs at most
+        a quarter of the level below, plus one partial page per level of each tree.
         """
-        return self.positions + 4 * (self.leaves(usable) + 2 * self.trees)
+        leaves = self.leaves(usable)
+        return self.overflow + leaves + (leaves + 2) // 3 + self.trees * depth
+
+    def run_rewrites(self, depth: int, pages: int) -> int:
+        """Existing pages that the runs of these cells and their balances can dirty.
+
+        Each run of adjacent cells dirties the leaf it lands in or leaves, and its balances rewrite at
+        most two existing siblings (SQLite's balance_nonroot) and the run's path to the root. The
+        runs of one tree share their ancestors: since an interior page holds at least four cells,
+        the level `j` steps above the leaves holds at most `pages / 4**j` pages. The bound follows
+        the runs, never the size of the database.
+        """
+        return sum(3 * runs + sum(min(runs, pages // 4**level + 1) for level in range(1, depth))
+                   for runs in self.runs.values())
+
+    def deleted_rewrites(self, usable: int, depth: int, pages: int) -> int:
+        """Existing pages that deleting these cells dirties: the leaves that hold them, plus the
+        balances of each run as `run_rewrites` bounds them."""
+        return self.leaves(usable) + self.run_rewrites(depth, pages)
 
 
 def _rowid_runs(rowids: list[int]) -> int:
@@ -513,23 +540,70 @@ def _rowid_runs(rowids: list[int]) -> int:
     return sum(1 for index, rowid in enumerate(rowids) if index == 0 or rowid != rowids[index - 1] + 1)
 
 
-def _source_derived_pages(tx: Connection, sources: tuple[str, ...], usable: int) -> _CellPages:
+# The schema tables that the lexical and graph writers delete by source path, with that column.
+# The file's graph node stores its own copy of the structural summary.
+_LEXICAL_SOURCE_TABLES = (("pages", "path"), ("semantic_units", "parent_path"), ("unit_revisions", "parent_path"))
+_GRAPH_SOURCE_TABLES = (
+    ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
+    ("graph_dependencies", "source_path"), ("graph_dependency_coverage", "source_path"),
+)
+
+
+def _key_runs(
+    tx: Connection, table: str, names: tuple[str, ...], keys: set[tuple[Any, ...]],
+    *, others: tuple[str, tuple[str, ...]] | None = None, replacing: tuple[str, str] | None = None,
+) -> int:
+    """Count the runs that cells with these index keys form among the other rows of the index.
+
+    Sorted, two neighbouring keys share a run unless another stored row sorts between them. For
+    inserted cells that is a row after the first key and at or before the second: stored rows with
+    an equal key keep their smaller rowids ahead of new cells. For deleted cells, `others` names
+    the source column and sources whose rows are going, and any row of another source counts.
+    `replacing` names the source column and the page whose own rows the write deletes first,
+    so they never separate its new cells. A key that holds NULL or mixes value types forms a run
+    of its own.
+    """
+    ordered = [key for key in keys if all(isinstance(value, (str, int)) and not isinstance(value, bool)
+                                          for value in key)]
+    runs = len(keys) - len(ordered)
+    kinds = {tuple(type(value) for value in key) for key in ordered}
+    if len(kinds) > 1:
+        return len(keys)
+    ordered.sort()
+    columns = ", ".join('"' + name.replace('"', '""') + '"' for name in names)
+    marks = ", ".join("?" * len(names))
+    if others is None:
+        probe = f"SELECT 1 FROM {table} WHERE ({columns}) > ({marks}) AND ({columns}) <= ({marks})"
+        extra: tuple[str, ...] = ()
+        if replacing is not None:
+            probe += f" AND {replacing[0]} != ?"
+            extra = (replacing[1],)
+        probe += " LIMIT 1"
+    else:
+        source, going = others
+        probe = (f"SELECT 1 FROM {table} WHERE ({columns}) >= ({marks}) AND ({columns}) <= ({marks}) "
+                 f"AND {source} NOT IN ({', '.join('?' * len(going))}) LIMIT 1")
+        extra = going
+    runs += 1 if ordered else 0
+    for low, high in zip(ordered, ordered[1:], strict=False):
+        runs += tx.execute(probe, (*low, *high, *extra)).fetchone() is not None
+    return runs
+
+
+def _source_derived_pages(
+    tx: Connection, sources: tuple[str, ...], usable: int,
+    tables: tuple[tuple[str, str], ...] = _LEXICAL_SOURCE_TABLES + _GRAPH_SOURCE_TABLES,
+) -> _CellPages:
     """Size the stored records that the writers delete for these source paths."""
     cells = _CellPages()
     table_limit, index_limit = _tree_limits(usable)
-    # These are the tables the lexical and graph writers delete by source path.
-    # The file's graph node stores its own copy of the structural summary.
-    for table, key in (
-        ("pages", "path"), ("semantic_units", "parent_path"), ("unit_revisions", "parent_path"),
-        ("graph_nodes", "path"), ("graph_parent_refs", "path"), ("graph_edges", "source_path"),
-        ("graph_dependencies", "source_path"), ("graph_dependency_coverage", "source_path"),
-    ):
+    for table, key in tables:
         columns = tuple(name for (name,) in tx.execute(
             "SELECT name FROM pragma_table_xinfo(?) WHERE hidden IN (0, 3)", (table,),
         ))
         sizes = [_catalogue_record_size(columns)]
         limits = [table_limit]
-        keys: list[str] = []
+        keys: list[tuple[str, ...]] = []
         for (index,) in tx.execute("SELECT name FROM pragma_index_list(?)", (table,)):
             indexed = []
             for cid, name in tx.execute("SELECT cid, name FROM pragma_index_xinfo(?)", (index,)):
@@ -538,14 +612,18 @@ def _source_derived_pages(tx: Connection, sources: tuple[str, ...], usable: int)
                 indexed.append("rowid" if cid == -1 else name)
             sizes.append(_catalogue_record_size(tuple(indexed)))
             limits.append(index_limit)
-            # A key without its trailing rowid places the cell among other rows.
-            keys.append("json_array(" + ", ".join('"' + name.replace('"', '""') + '"'
-                                                   for name in indexed if name != "rowid") + ")")
+            # A key without its trailing rowid places the cell among other rows. Rows of one source
+            # sit together once the key reaches the source column, so the key stops there.
+            placed = [name for name in indexed if name != "rowid"]
+            if key in placed:
+                placed = placed[: placed.index(key) + 1]
+            keys.append(tuple(placed))
         # Count each existing row's record separately. A partial index can only omit
         # some of these rows, so including its key gives a safe upper bound.
-        fields = ", ".join(["rowid", *sizes, *keys])
+        quoted = ['"' + name.replace('"', '""') + '"' for placed in keys for name in placed]
+        fields = ", ".join(["rowid", *sizes, *quoted])
         rowids: list[int] = []
-        prefixes: list[set[str]] = [set() for _ in keys]
+        prefixes: list[set[tuple[Any, ...]]] = [set() for _ in keys]
         for start in range(0, len(sources), read.KEYS_PER_QUERY):
             batch = sources[start : start + read.KEYS_PER_QUERY]
             within = ", ".join("?" * len(batch))
@@ -553,27 +631,33 @@ def _source_derived_pages(tx: Connection, sources: tuple[str, ...], usable: int)
                 rowids.append(row[0])
                 for size, limit in zip(row[1 : 1 + len(sizes)], limits, strict=True):
                     cells.add(size, limit, usable)
-                for seen, prefix in zip(prefixes, row[1 + len(sizes) :], strict=True):
-                    seen.add(prefix)
+                at = 1 + len(sizes)
+                for seen, placed in zip(prefixes, keys, strict=True):
+                    seen.add(tuple(row[at : at + len(placed)]))
+                    at += len(placed)
         if not rowids:
             continue
         runs = _rowid_runs(rowids)
-        cells.trees += len(limits)
-        # Rows of one key prefix and one rowid run are adjacent in an index.
-        cells.positions += runs + sum(min(len(rowids), len(seen) * runs) for seen in prefixes)
+        cells.runs[(table, 0)] = runs
+        # Rows of one rowid run and one run of keys are adjacent in an index.
+        for tree, (placed, seen) in enumerate(zip(keys, prefixes, strict=True), start=1):
+            gaps = _key_runs(tx, table, placed, seen, others=(key, sources))
+            cells.runs[(table, tree)] = min(len(rowids), gaps * runs)
     return cells
 
 
 def _incoming_graph_pages(
-    tx: Connection, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
+    tx: Connection, rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...], usable: int,
     *, encoding: str, layouts: dict[str, list[tuple[tuple[int, ...], int]]],
 ) -> _CellPages:
     """Size the graph rows that a page's derivation inserts."""
     cells = _CellPages()
     table_limit, index_limit = _tree_limits(usable)
+    source_columns = dict(_GRAPH_SOURCE_TABLES)
     for table in records:
         if not table.values:
             continue
+        source_column = source_columns[table.table]
         shapes = layouts.get(table.table)
         if shapes is None:
             positions = {column: ordinal for ordinal, column in enumerate(table.columns)}
@@ -586,11 +670,18 @@ def _incoming_graph_pages(
                     indexed.append(len(positions) if cid == -1 else positions[name])
                 shapes.append((tuple(indexed), index_limit))
             layouts[table.table] = shapes
-        cells.trees += len(shapes)
         # New rows take the largest rowids: they append to the table tree, and within an
         # index they gather at one position per distinct key ahead of the rowid.
-        cells.positions += 1
-        prefixes: list[set[tuple[Any, ...]]] = [set() for _ in shapes[1:]]
+        cells.runs[(table.table, 0)] = 1
+        # Within an index, the page's cells gather at one position per distinct key ahead of the
+        # first column that holds one value for all of them, such as the page's own path.
+        placed = []
+        for columns, _limit in shapes[1:]:
+            keyed = [column for column in columns if column < len(table.columns)]
+            fixed = next((at for at, column in enumerate(keyed)
+                          if len({record[column] for record in table.values}) == 1), None)
+            placed.append(tuple(keyed if fixed is None else keyed[: fixed + 1]))
+        prefixes: list[set[tuple[Any, ...]]] = [set() for _ in placed]
         for record in table.values:
             sizes = tuple(
                 len(value) if isinstance(value, str) and encoding == "UTF-8" and value.isascii()
@@ -601,9 +692,12 @@ def _incoming_graph_pages(
             ) + (8,)  # SQLite appends the integer rowid to ordinary secondary indexes.
             for columns, limit in shapes:
                 cells.add(9 * (len(columns) + 1) + sum(sizes[column] for column in columns), limit, usable)
-            for seen, (columns, _limit) in zip(prefixes, shapes[1:], strict=True):
-                seen.add(tuple(record[column] for column in columns if column < len(record)))
-        cells.positions += sum(len(seen) for seen in prefixes)
+            for seen, columns in zip(prefixes, placed, strict=True):
+                seen.add(tuple(record[column] for column in columns))
+        for tree, (columns, seen) in enumerate(zip(placed, prefixes, strict=True), start=1):
+            names = tuple(table.columns[column] for column in columns)
+            cells.runs[(table.table, tree)] = _key_runs(tx, table.table, names, seen,
+                                                        replacing=(source_column, rel))
     return cells
 
 
@@ -667,29 +761,31 @@ def _reserve_payload_pages(
         source = _source_derived_pages(conn, tuple(moves), usable) if moves else _CellPages()
         if scrub:
             scrub_pages += source.overflow
-        wal_pages = (overflow_pages + scrub_pages + min(before, source.rewritten(usable))
+        wal_pages = (overflow_pages + scrub_pages + min(before, source.deleted_rewrites(usable, depth, before))
                      + 6 * btree_paths + 1)  # Includes the revision row.
         graph = _CellPages()
+        replaced = _CellPages()  # the graph rows of re-derived pages, deleted before their records land
         graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
         encoding, = conn.execute("PRAGMA encoding").fetchone()
 
         def reserve() -> None:
             # WAL writes each dirty page once per transaction, so the starting page count also
             # bounds the existing pages it rewrites. New graph pages also grow the database.
-            graph_pages = graph.overflow + graph.leaves(usable) + 2 * graph.trees
-            redistributed = min(before, graph.rewritten(usable))
+            graph_pages = graph.added(usable, depth)
+            redistributed = min(before, graph.run_rewrites(depth, before)
+                                + replaced.deleted_rewrites(usable, depth, before))
             room.reserve_store_pages(
                 database, target_bytes=(before + database_pages + graph_pages) * page_size,
                 wal_bytes=32 + (wal_pages + graph_pages + redistributed) * (page_size + 24),
                 upload_size=upload_size,
             )
 
-        def reserve_graph(records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
-            cells = _incoming_graph_pages(conn, records, usable, encoding=encoding, layouts=graph_layouts)
-            graph.overflow += cells.overflow
-            graph.local_bytes += cells.local_bytes
-            graph.positions += cells.positions
-            graph.trees += cells.trees
+        def reserve_graph(rel: str, records: tuple[epistemic_graph.PageGraphRecords, ...]) -> None:
+            cells = _incoming_graph_pages(conn, rel, records, usable, encoding=encoding, layouts=graph_layouts)
+            graph.merge(cells)
+            # A page that links to an original replaces its existing graph rows; a new page has none.
+            old = _source_derived_pages(conn, (rel,), usable, _GRAPH_SOURCE_TABLES)
+            replaced.merge(old)
             reserve()
 
         reserve()

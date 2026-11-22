@@ -53,7 +53,7 @@ class _LexicalPage(NamedTuple):
     rows: lexstore.PageRows | None
 
 
-ReserveGraph = Callable[[tuple[epistemic_graph.PageGraphRecords, ...]], None]
+ReserveGraph = Callable[[str, tuple[epistemic_graph.PageGraphRecords, ...]], None]
 
 
 def prepare_lexical_page(
@@ -390,7 +390,9 @@ class _Derivation:
         else:
             epistemic_graph.write_page_graph_rows(
                 self.tx, rows, graph.stamps,
-                before_write=self.reserve_graph if prepared is not None else None,
+                # Pages that link to an original re-derive in the same transaction, so their
+                # graph rows draw on the same reservation as the original's own.
+                before_write=self.reserve_graph,
             )
 
     # ------------------------------------------------------------------ dependents

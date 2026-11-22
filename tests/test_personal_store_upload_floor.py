@@ -387,3 +387,46 @@ def test_a_move_needs_room_for_the_leaves_its_source_records_leave(
                                                    moves=(write.PageMove(second, "Knowledge Base/_archive/second.md"),)))
         assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
         assert read.current_revision(served) == revision and read.page_exists(served, second)
+
+
+def test_an_original_needs_room_for_the_pages_that_link_to_it(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a filing that reserves its own graph rows but not the linking pages it re-derives."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    for target in ("north-survey", "south-survey"):
+        body = "".join(f"- [rule] Check gauge {index} against [[{target}]].\n" for index in range(30))
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "linking notes", puts=tuple(
+            write.PagePut(f"Knowledge Base/Notes/Surveys/{target}-{note:03}.md", f"# Note {note}\n\n{body}".encode())
+            for note in range(200))))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+
+    def file_survey(name: str) -> None:
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file survey", puts=(write.PagePut(
+            f"Knowledge Base/Evidence/Tests/Surveys/{name}.md", f"# {name}\n\nRaw readings.\n".encode(),
+            media_allocation=True),)))
+
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both filings in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        pages, = reader.execute("PRAGMA page_count").fetchone()
+        wal_size = wal.stat().st_size
+        file_survey("north-survey")
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+        assert written > 8 * floor  # the 200 linking pages re-derive their graph rows
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        revision = read.current_revision(served)
+        with pytest.raises(OpError) as busy:
+            file_survey("south-survey")
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision
