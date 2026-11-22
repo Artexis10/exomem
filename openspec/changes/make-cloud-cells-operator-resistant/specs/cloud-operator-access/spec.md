@@ -78,6 +78,8 @@ The provider account owner can still regain control of a server through the prov
 
 The break-glass credential SHALL be issued on demand, through an audited certificate request, only inside a presence-checked node session. It SHALL expire within about one hour, and SHALL NOT be the default in any operator procedure.
 
+Break-glass SHALL reach one named cell or scratch namespace per opening. No standing binding SHALL grant the break-glass group any role. Each opening SHALL bind only that opening's certificate user, in the target namespace, to a role that grants pod connect operations and Secret reads there. That role SHALL grant no RBAC, admission, certificate, impersonation or namespace rights. The cluster SHALL delete the opening's binding within one hour, whatever the certificate's own expiry. Admission SHALL refuse a binding of that role outside a cell or scratch namespace, to a group or to more than one subject, or with a lifetime over one hour. Admission SHALL also refuse any binding whose subjects name the break-glass group. The CSR API SHALL sign no client certificate for longer than 30 days.
+
 The issuing request, the approval, every API request made with the credential, and every node session SHALL be submitted to the access record. Each entry carries user or key identity, verb or command class, resource, namespace and time. No entry SHALL record Secret values or vault content. Request URIs SHALL lose their query parameters before they leave the node. Request and response bodies are recorded only for namespaces, PersistentVolumeClaims and StatefulSets, and the shipped fields SHALL be checked to carry no Secret values or content.
 
 Where the cluster can enforce it at admission, exec, attach, port-forward and ephemeral containers in cell namespaces SHALL be denied to every identity outside the break-glass group.
@@ -86,6 +88,31 @@ Where the cluster can enforce it at admission, exec, attach, port-forward and ep
 
 - **WHEN** an hour has passed since a break-glass credential was issued
 - **THEN** the API server rejects it
+
+#### Scenario: Break-glass access ends within the hour
+
+- **WHEN** an hour has passed since a break-glass opening for one cell
+- **THEN** the opening's binding is gone, and its credential can open no session in any cell, whatever its certificate's expiry
+
+#### Scenario: A credential from an earlier opening
+
+- **WHEN** a break-glass credential from an earlier opening is used while a later opening is active
+- **THEN** the API server denies it every connect operation, because no binding names its user or its group
+
+#### Scenario: Break-glass beyond its cell
+
+- **WHEN** an opening's credential requests exec in another cell, a Secret in another namespace, or a change to RBAC or admission
+- **THEN** authorization denies the request
+
+#### Scenario: A forged break-glass binding
+
+- **WHEN** anyone creates a binding of the break-glass role to a group, outside a cell or scratch namespace, or with a lifetime over one hour, or any binding that names the break-glass group
+- **THEN** admission denies it
+
+#### Scenario: A long certificate request
+
+- **WHEN** a certificate request through the CSR API asks for a client certificate valid for a year
+- **THEN** the signed certificate expires within 30 days
 
 #### Scenario: Break-glass exec into a cell
 
