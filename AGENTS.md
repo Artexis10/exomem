@@ -12,7 +12,7 @@ Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer
 
 ## CI load: the PR tier is the merge evidence
 
-`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs ~800 runner-minutes across 147 jobs. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
+`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs an estimated 490 runner-minutes across about 92 jobs (815 across 148 before the latency suites moved, measured 2026-11-15 to 2026-11-22). Latency measurements run nightly in `latency-measurements.yml` and do not gate releases. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
 
 ## Delegated worker tasks
 

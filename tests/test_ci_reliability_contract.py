@@ -19,12 +19,6 @@ FULL_CI_JOBS = {
     "frozen-verifier",
     "cloud-cellctl",
     "retrieval-quality",
-    "retrieval-latency",
-    "recall-latency-series",
-    "recall-latency-paired",
-    "recall-latency-aggregate",
-    "governance-projection-wire",
-    "governance-projection-wire-vector-cpu",
     "semantic-write-latency",
     "graph-convergence",
     "docker",
@@ -70,6 +64,13 @@ def _workflow_text() -> str:
 
 def _workflow() -> dict:
     return yaml.safe_load(_workflow_text())
+
+
+def _latency_workflow() -> dict:
+    # Latency measurements run nightly and on dispatch; the Full gate does not wait for them.
+    return yaml.safe_load(
+        (ROOT / ".github/workflows/latency-measurements.yml").read_text(encoding="utf-8")
+    )
 
 
 def _cross_platform_workflow() -> dict:
@@ -365,7 +366,7 @@ def test_pr_tiers_partition_the_lean_suite_exactly() -> None:
     serial = _collect_items("serial core checks", "core", serial_selections)
     harness_items = _collect_items("harness tier", "harness", [])
     latency_items = _collect_items("nightly latency file", None, [NIGHTLY_OWNED_MODULE])
-    latency_job = workflow["jobs"]["retrieval-latency"]
+    latency_job = _latency_workflow()["jobs"]["retrieval-latency"]
     latency_step = next(
         step for step in latency_job["steps"] if step.get("name", "").startswith("Per-lane")
     )
@@ -514,26 +515,42 @@ def test_the_bounded_install_helper_bounds_each_attempt_not_just_the_loop() -> N
 
 def test_retrieval_gates_run_as_three_independent_jobs() -> None:
     jobs = _workflow()["jobs"]
+    latency_jobs = _latency_workflow()["jobs"]
 
     assert "retrieval-eval" not in jobs
     assert "pytest -m embeddings -v" in jobs["retrieval-quality"]["steps"][-1]["run"]
     assert any(
         "tests/test_latency_gate.py -q" in step.get("run", "")
-        for step in jobs["retrieval-latency"]["steps"]
+        for step in latency_jobs["retrieval-latency"]["steps"]
     )
     semantic_command = jobs["semantic-write-latency"]["steps"][-1]["run"]
     assert "scripts/semantic_write_latency.py --check" in semantic_command
 
 
+def test_latency_measurements_run_nightly_and_do_not_gate_the_release() -> None:
+    workflow = _workflow()
+    latency = _latency_workflow()
+    triggers = _triggers(latency)
+    assert set(triggers) == {"schedule", "workflow_dispatch"}
+    moved = set(latency["jobs"])
+    assert moved == {
+        "retrieval-latency", "recall-latency-series", "recall-latency-paired",
+        "recall-latency-aggregate", "governance-projection-wire",
+        "governance-projection-wire-vector-cpu",
+    }
+    assert not moved & set(workflow["jobs"]), "a moved job is still defined in ci.yml"
+    assert not moved & set(workflow["jobs"]["gate"]["needs"]), "the Full gate waits for latency jobs"
+
+
 def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> None:
-    jobs = _workflow()["jobs"]
+    jobs = _latency_workflow()["jobs"]
     discovery, sampler, aggregate = (jobs[name] for name in (
         "recall-latency-series", "recall-latency-paired", "recall-latency-aggregate",
     ))
     assert all(job["runs-on"] == "ubuntu-24.04" for job in (discovery, sampler, aggregate))
-    assert discovery["needs"] == "scope"
-    assert set(sampler["needs"]) == {"scope", "recall-latency-series"}
-    assert set(aggregate["needs"]) == {"scope", "recall-latency-series", "recall-latency-paired"}
+    assert "needs" not in discovery
+    assert set(sampler["needs"]) == {"recall-latency-series"}
+    assert set(aggregate["needs"]) == {"recall-latency-series", "recall-latency-paired"}
     assert "!cancelled()" in aggregate["if"]
     assert sampler["strategy"]["matrix"]["shard"] == "${{ fromJSON(needs.recall-latency-series.outputs.shards) }}"
     assert sampler["strategy"]["fail-fast"] is False
@@ -552,8 +569,6 @@ def test_paired_recall_shards_raw_cases_and_compares_only_complete_series() -> N
     assert compare["env"]["PRODUCER_OUTCOME"] == "${{ needs.recall-latency-paired.result }}"
     assert '--producer-outcome "$PRODUCER_OUTCOME"' in compare["run"]
     assert aggregate["steps"][-1]["with"]["name"] == "recall-latency-paired-${{ matrix.series }}"
-    for name in ("recall-latency-series", "recall-latency-paired", "recall-latency-aggregate"):
-        assert name in jobs["gate"]["needs"]
     instrument_jobs = [name for name, job in jobs.items() if any(
         "tests/test_recall_latency_gate.py" in step.get("run", "") for step in job.get("steps", [])
     )]
@@ -580,8 +595,7 @@ def test_structural_recall_runs_on_the_pr_runtime_and_reference_sqlite() -> None
 
 
 def test_governance_wire_characterization_runs_every_registered_route() -> None:
-    workflow = _workflow()
-    job = workflow["jobs"]["governance-projection-wire"]
+    job = _latency_workflow()["jobs"]["governance-projection-wire"]
 
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == 8
@@ -609,12 +623,10 @@ def test_governance_wire_characterization_runs_every_registered_route() -> None:
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_CLIP"] == "1"
     assert job["steps"][-1]["env"]["EXOMEM_DISABLE_RANKING"] == "1"
-    assert "governance-projection-wire" in workflow["jobs"]["gate"]["needs"]
 
 
-def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> None:
-    workflow = _workflow()
-    job = workflow["jobs"]["governance-projection-wire-vector-cpu"]
+def test_governance_vector_cpu_wire_characterization_is_exact() -> None:
+    job = _latency_workflow()["jobs"]["governance-projection-wire-vector-cpu"]
 
     assert job["runs-on"] == "ubuntu-latest"
     assert job["timeout-minutes"] == 12
@@ -652,9 +664,6 @@ def test_governance_vector_cpu_wire_characterization_is_exact_and_required() -> 
         "MKL_NUM_THREADS": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
-    assert "governance-projection-wire-vector-cpu" in workflow["jobs"]["gate"][
-        "needs"
-    ]
 
 
 def test_full_jobs_share_one_scope_output_and_start_alongside_ordinary_checks() -> None:
@@ -907,12 +916,17 @@ def test_release_evidence_is_enforced_on_the_release_pr() -> None:
     """Release checks use the same tested-tree selector as evidence automation."""
     workflow = _workflow()
     job = workflow["jobs"]["release-evidence"]
-    report, checkout, install, scope, step = job["steps"]
+    report, checkout, install, scope, step, reconcile_checkout, *_, reconcile = job["steps"]
     assert checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
     assert "scripts/release_evidence.py" in checkout["with"]["sparse-checkout"]
     assert scope["shell"] == "bash"
     assert "scripts/check_release_pr_files.py" in scope["run"]
-    assert step["if"] == "needs.scope.outputs.release == 'true'"
+    assert step["if"] == (
+        "needs.scope.outputs.release == 'true' && needs.scope.outputs.reconcile != 'true'"
+    )
+    # A reconciliation PR is checked by code from its base, never from its own head.
+    assert reconcile_checkout["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
+    assert "release_cuts.py check-reconciliation" in reconcile["run"]
     assert step["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
     assert step["env"]["GH_REPO"] == "${{ github.repository }}"
     assert step["run"] == 'python3 scripts/release_evidence.py select --source "$BASE_SHA"'

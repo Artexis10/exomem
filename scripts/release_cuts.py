@@ -299,6 +299,7 @@ def push_generated(cut: dict, candidate: Path) -> None:
         "chore: regenerate packages for the selected version",
         cwd=candidate,
     )
+    pushed = git("rev-parse", "HEAD", cwd=candidate)
     git(
         "-c",
         "credential.helper=",
@@ -310,6 +311,13 @@ def push_generated(cut: dict, candidate: Path) -> None:
         f"HEAD:refs/heads/{branch}",
         cwd=candidate,
     )
+    # GitHub moves the PR head seconds after the push; the next step must read the new head.
+    for _ in range(24):
+        pr = release_pull(cut["branch"])
+        if pr and pr["head"]["sha"] == pushed:
+            return
+        time.sleep(5)
+    raise ValueError("release proposal head is pending after the generated push; retry this cut")
 
 
 def child_environment(root: Path) -> dict:
@@ -546,7 +554,7 @@ def reconcile_files(root: Path, record: dict, notes: str) -> None:
 @contextmanager
 def reconciliation_tree(base: str, record: dict, notes: str):
     """Project current metadata and maintained generators from one exact main tree."""
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     with tempfile.TemporaryDirectory(prefix="release-reconcile-") as temporary:
         root = Path(temporary)
         evidence.command("git", "clone", "--quiet", "--shared", ".", str(root))
@@ -610,7 +618,7 @@ def reconciliation_tree(base: str, record: dict, notes: str):
 
 
 def push_reconciliation(root: Path, record: dict) -> str:
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     git(
         "-c",
         "core.hooksPath=/dev/null",
@@ -658,7 +666,7 @@ def reconcile(record: dict) -> None:
     """Refresh only mismatched projections and repair a raced squash before publication."""
     tag, source = record["tag"], record["source"]
     notes = evidence.api(f"releases/tags/{tag}")["body"]
-    branch = f"release-reconcile/{source}"
+    branch = evidence.reconcile_branch(source)
     verified = False
     projections = {}
 
@@ -746,6 +754,33 @@ def reconcile(record: dict) -> None:
     raise ValueError("reconciliation refresh is pending after bounded retries; resume the same cut")
 
 
+def check_reconciliation(head: str, main: str, source: str) -> str:
+    """A reconciliation PR runs no CI test job, sound only while merging it gives the projection.
+
+    This is reconcile()'s own acceptance test: the head merged onto main must equal what the
+    controller projects onto that main for the accepted origin of `source`. Repairs that add
+    no origin and branches updated from main pass; any other content lands through a normal PR.
+    """
+    evidence.cut_branch(source)
+    merged = prospective_tree(main, head)
+    if merged is None:
+        raise ValueError("reconciliation does not merge cleanly onto main")
+    version = json.loads(git("show", f"{merged}:.release-please-manifest.json"))["."]
+    tag = "v" + version
+    record = json.loads(git("show", f"{merged}:{origin_path(tag)}"))
+    if record.get("source") != source or record.get("tag") != tag:
+        raise ValueError("reconciliation origin differs from its branch's release source")
+    # The record comes from the PR; its Git object names reach git commands below.
+    for name in (record["head"], record["release"], record["predecessor"]["reconciliation_commit"]):
+        evidence.cut_branch(name)
+    verify_origin(record, main, require_evidence=False)
+    notes = evidence.api(f"releases/tags/{tag}")["body"]
+    with reconciliation_tree(main, record, notes) as (_, tree):
+        if tree != merged:
+            raise ValueError("reconciliation differs from the projection onto main")
+    return tag
+
+
 def verify_origin(record: dict, main: str, *, require_evidence: bool) -> None:
     """Check immutable graph and source binding; accepted records survive artifact expiry."""
     source, head, release = record["source"], record["head"], record["release"]
@@ -819,6 +854,7 @@ def main() -> None:
             "publish",
             "reconcile",
             "verify-tag",
+            "check-reconciliation",
         ),
     )
     parser.add_argument("--source")
@@ -826,6 +862,7 @@ def main() -> None:
     parser.add_argument("--tag")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--trusted-main")
+    parser.add_argument("--head")
     args = parser.parse_args()
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     if args.operation == "prepare":
@@ -885,6 +922,11 @@ def main() -> None:
                 return
             time.sleep(5)
         raise ValueError("accepted origin is pending on main; retry this cut before publication")
+    elif args.operation == "check-reconciliation":
+        if not args.head or not args.trusted_main or not args.source:
+            parser.error("check-reconciliation requires --head, --trusted-main and --source")
+        tag = check_reconciliation(args.head, args.trusted_main, args.source)
+        print(f"the reconciliation PR is the controller's projection for {tag}")
     else:
         if not args.tag or not args.trusted_main:
             parser.error("verify-tag requires --tag and --trusted-main")
