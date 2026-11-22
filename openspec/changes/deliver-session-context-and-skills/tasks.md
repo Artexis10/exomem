@@ -33,3 +33,13 @@
 - [ ] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
 - [ ] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+
+## 5. Method activation from ordinary turns
+
+- [ ] 5.1 Select skills and Records collections with the bounded method-fit judgment over their authored descriptions, served first and bounded by `method_fit_max_items`; verify selection, none, a failed call, an unsupplied label and no placement.
+- [ ] 5.2 Carry each selected skill's contract under `method_contract_max_chars` in the MCP packet and the start-of-turn hook; verify whole, cut and over-allowance cases.
+- [ ] 5.3 Report method use evidence in the owner served-context readout from the served rows and the local read and write logs; verify followed, not observed and disabled-log cases.
+- [ ] 5.4 Add the no-magic-word fixtures (technology discussed, experiment approved, outcome reported, Exomem failure, each with a negative twin) as session-close scenarios with scorer-only keys; record the packet-level run against base and candidate.
+- [ ] 5.5 Run the fixtures through the session-close bench on real models; record whether the agent followed the contract and wrote to the keyed destination.
+- [ ] 5.6 Compare method selection with no judgment, a local placement and an API placement on the same cases; record per-case exact match with intervals, and recommend a placement.
+- [ ] 5.7 Verify on the installed service: an ordinary turn serves the matching vault skill with its contract, and the owner readout shows its use evidence.

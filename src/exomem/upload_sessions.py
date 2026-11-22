@@ -38,17 +38,19 @@ import logging
 import os
 import re
 import secrets
+import sqlite3
 import shutil
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from filelock import FileLock, Timeout
 
-from . import private_state
+from . import media_capacity, private_state
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +106,7 @@ REATTEMPT_MAX_SECONDS = 60.0
 # lock, store and warm-up fix, so this set is closed by them. Other retryable codes (a full
 # disk, an unknown outcome) need the client or an operator, so the server leaves them alone.
 # nosemgrep: ep-word-set -- these are the vault's documented transient error codes.
-_REATTEMPT_CODES = frozenset({"MUTATION_BUSY", "COLLECTION_STORE_BUSY", "MUTATION_WARMING"})
+_REATTEMPT_CODES = frozenset({"MUTATION_BUSY", "COLLECTION_STORE_BUSY", "MUTATION_WARMING", media_capacity.UPLOAD_SPACE_BUSY})
 _now = time.time
 
 
@@ -191,6 +193,7 @@ class _Running:
     parked: str | None = None  # the code of the park last recorded for a caller
     # The one pending re-attempt, and the wait that the next one gets.
     reattempt: threading.Timer | None = None
+    reattempt_at: float = 0
     reattempt_wait: float = field(default_factory=lambda: REATTEMPT_INITIAL_SECONDS)
 
 
@@ -247,9 +250,11 @@ def _part_size(part: Path) -> int:
         return 0
 
 
-def _drop(store: Path, session_id: str) -> None:
-    # A released lock removes its own file; this one is what a killed commit left.
-    _remove(store / f"{session_id}.part", store / f"{session_id}.json", store / f"{session_id}.lock")
+def _drop(store: Path, session_id: str, vault_root: Path | None) -> None:
+    _remove(store / f"{session_id}.part")
+    if vault_root is not None:
+        media_capacity.release_commit_credit(vault_root, session_id)
+    _remove(store / f"{session_id}.json")
     _forget(session_id)
 
 
@@ -264,7 +269,7 @@ def sweep(vault_root: Path) -> None:
         except (KeyError, TypeError, ValueError):
             expires = 0.0
         if expires <= now:
-            _drop(store, meta.stem)
+            _expire(store, meta.stem, vault_root, now)
     for leftover in (*store.glob("*.part"), *store.glob("*.tmp")):
         session_id = leftover.name.split(".", 1)[0]
         if leftover.suffix == ".part" and (store / f"{session_id}.json").exists():
@@ -277,12 +282,33 @@ def sweep(vault_root: Path) -> None:
             _remove(leftover)
 
 
+def _expire(store: Path, session_id: str, vault_root: Path | None, now: float) -> bool:
+    running = _running(session_id)
+    if not running.lock.acquire(blocking=False):
+        return False
+    try:
+        with _commit_lock(store, session_id):
+            record = _read_record(store, session_id)
+            try:
+                expired = record is None or float(record["expires"]) <= now
+            except (KeyError, TypeError, ValueError):
+                expired = True
+            if expired:
+                _drop(store, session_id, vault_root)
+            return True
+    except Timeout:
+        return False
+    finally:
+        running.lock.release()
+
+
 @dataclass
 class Session:
     """One authenticated session: its record as read, and its store."""
 
     store: Path
     record: dict
+    vault_root: Path | None = None
 
     @property
     def id(self) -> str:
@@ -332,7 +358,7 @@ def startup_sweep(vault_root: Path) -> list[Session]:
     for meta in store.glob("*.json"):
         record = _read_record(store, meta.stem)
         if record and record.get("state") in _COMMITTABLE:
-            pending.append(Session(store, record))
+            pending.append(Session(store, record, vault_root))
     return pending
 
 
@@ -386,6 +412,10 @@ def _create_locked(
             f"at most {MAX_LIVE_PER_BINDING} upload sessions may be open at once; finish or cancel one",
             429,
         )
+    with _vault_upload_room(vault_root) as room:
+        if room is not None:
+            same_volume = store.stat().st_dev == vault_root.stat().st_dev
+            room.require(length + (reserved if same_volume else 0), upload_size=length)
     if reserved + length > shutil.disk_usage(store).free:
         raise SessionError("UPLOAD_SESSION_NO_SPACE", "not enough free disk space for this upload", 507)
     secret = secrets.token_urlsafe(32)
@@ -416,7 +446,7 @@ def _create_locked(
         raise
     running = _running(session_id)
     running.size, running.digest = 0, hashlib.sha256()
-    return Session(store, record), secret
+    return Session(store, record, vault_root), secret
 
 
 def open_session(vault_root: Path, session_id: str, secret: str | None) -> Session:
@@ -429,13 +459,13 @@ def open_session(vault_root: Path, session_id: str, secret: str | None) -> Sessi
         str(record.get("secret_sha256")).encode(), _secret_hash(str(secret)).encode()
     ):
         raise _not_found()
-    session = Session(store, record)
+    session = Session(store, record, vault_root)
     try:
         expired = session.expires <= _now()
     except (KeyError, TypeError, ValueError):
         expired = True
     if expired:
-        _drop(store, session_id)
+        _expire(store, session_id, vault_root, _now())
         raise SessionError("UPLOAD_SESSION_EXPIRED", "this upload session has expired", 410)
     return session
 
@@ -464,11 +494,39 @@ def delete(session: Session) -> None:
             current = _read_record(session.store, session.id)
             if current is not None and current.get("state") in (VERIFYING, COMMITTING):
                 raise committing
-            _drop(session.store, session.id)
+            _drop(session.store, session.id, session.vault_root)
     except Timeout as exc:
         raise committing from exc
     finally:
         running.lock.release()
+
+
+@contextmanager
+def _vault_upload_room(vault_root: Path, *, reserve: bool = False):
+    from .cli_ops import OpError
+
+    try:
+        with media_capacity.upload_room(vault_root, reserve=reserve) as room:
+            yield room
+    except OpError as error:
+        raise SessionError(error.code, error.message, 503) from error
+
+
+def commit_copy_count(vault_root: Path, target: dict) -> int:
+    """Count the stages that coexist on the vault volume before a normal session installs."""
+    from . import add, preserve, vault
+
+    if target.get("archive") is not None:
+        # A member upload meters the actual compressed output and can reuse existing blobs.
+        return 0
+    if target.get("lane") == "source":
+        pooled = add.pools_named_original(vault_root, f"artifact{add.source_artifact_suffix(target['filename'])}")
+    else:
+        pooled = preserve.pools_evidence_original(vault_root, target["filename"])
+    if pooled:
+        return 2
+    # Without a trustworthy generation, the workspace and final publication both copy.
+    return 1 if vault.STAT_GENERATION_TRUSTED else 3
 
 
 class Patch:
@@ -485,7 +543,12 @@ class Patch:
         self._running = _running(session.id)
         if not self._running.lock.acquire(timeout=_LOCK_WAIT_SECONDS):
             raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409)
+        self._patch_lock = _commit_lock(session.store, session.id)
         try:
+            try:
+                self._patch_lock.acquire()
+            except Timeout as exc:
+                raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409) from exc
             # Re-read under the lock: an earlier part may have ended or failed it.
             current = _read_record(session.store, session.id)
             if current is None or current.get("state") != RECEIVING:
@@ -503,6 +566,7 @@ class Patch:
                 self._running.size, self._running.digest = size, digest
             self._sink = session.part.open("ab")
         except BaseException:
+            self._patch_lock.release()
             self._running.lock.release()
             raise
         self.offset = offset
@@ -513,7 +577,26 @@ class Patch:
             raise SessionError("TOO_LARGE", f"one request carries at most {MAX_PATCH_BYTES:,} bytes", 413)
         if self.offset + self.written + len(chunk) > self.session.length:
             raise SessionError("INVALID_UPLOAD", "the part runs past `Upload-Length`", 400)
-        self._sink.write(chunk)
+        vault = self.session.vault_root
+        offset = self.offset + self.written
+        same_volume = vault is not None and self.session.store.stat().st_dev == vault.stat().st_dev
+        reserve = (vault is not None and offset + len(chunk) == self.session.length
+                   and media_capacity.managed_allocations(vault))
+        copies = commit_copy_count(vault, self.session.record["target"]) if reserve and vault is not None else 0
+        if vault is not None and (same_volume or copies):
+            with media_capacity.commit_credit(self.session.id), _vault_upload_room(vault, reserve=bool(copies)) as room:
+                if room is not None:
+                    incoming = len(chunk) if same_volume else 0
+                    if copies:
+                        room.reserve_commit(self.session.length, copies, incoming=incoming, offset=offset)
+                    else:
+                        room.require(incoming, offset=offset, upload_size=self.session.length)
+                self._sink.write(chunk)
+                if same_volume:
+                    # The next allocator must see these bytes in the volume's free-space accounting.
+                    self._sink.flush()
+        else:
+            self._sink.write(chunk)
         self._running.digest.update(chunk)
         self.written += len(chunk)
         self._running.size = self.offset + self.written
@@ -536,68 +619,108 @@ class Patch:
             self.session.record = record
             return offset, complete
         finally:
+            self._patch_lock.release()
             self._running.lock.release()
 
 
 Committer = Callable[[Path, dict], dict]
 
 
-def _fail(store: Path, record: dict, code: str, reason: str) -> None:
+def _fail(store: Path, record: dict, code: str, reason: str, vault_root: Path | None) -> None:
     _remove(store / f"{record['id']}.part")
     _write_record(store, {**record, "state": FAILED, "code": code, "reason": reason})
+    _release_credit(vault_root, record["id"])
     _forget(record["id"])
 
 
-def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock) -> None:
+def _release_credit(vault_root: Path | None, session_id: str) -> None:
+    if vault_root is None:
+        return
     try:
-        _commit_locked(store, session_id, committer, _running(session_id))
+        media_capacity.release_commit_credit(vault_root, session_id)
+    except Exception:  # The terminal receipt survives and expiry can retire its credit again.
+        log.warning("upload session credit cleanup will retry at expiry", exc_info=True)
+
+
+def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock, vault_root: Path | None) -> None:
+    try:
+        _commit_locked(store, session_id, committer, _running(session_id), vault_root)
     finally:
         lock.release()
-    _schedule_reattempt(store, session_id, committer)
+    _schedule_reattempt(store, session_id, committer, vault_root)
 
 
-def _schedule_reattempt(store: Path, session_id: str, committer: Committer) -> None:
-    """After a commit that a busy vault left retryable, start it again later, with no client.
+def _schedule_reattempt(store: Path, session_id: str, committer: Committer, vault_root: Path | None) -> None:
+    """Retry an eligible park and retire any parked session at its expiry.
 
     A client that sent every byte has nothing more to send, and the vault's contention is the
-    server's to wait out. One timer waits per session, so a client that also reads the session
-    and starts a commit does not add a second one; the session's expiry ends the attempts.
+    server's to wait out. One timer owns the next retry or expiry. A park that needs a new
+    client decision still releases its bytes and reserved room when its session expires.
     """
     record = _read_record(store, session_id)
-    if record is None or record.get("state") != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if record is None or record.get("state") != RETRYABLE:
         return
-    with _RUNNING_LOCK:
-        running = _RUNNING.get(session_id)
-        if running is None or running.reattempt is not None:
-            return
-        wait = running.reattempt_wait
-        running.reattempt_wait = min(wait * 2, REATTEMPT_MAX_SECONDS)
-        timer = threading.Timer(wait, _reattempt, args=(store, session_id, committer))
-        timer.name = f"upload-session-reattempt-{session_id[:8]}"
-        timer.daemon = True
-        running.reattempt = timer
-        timer.start()
-
-
-def _reattempt(store: Path, session_id: str, committer: Committer) -> None:
     with _RUNNING_LOCK:
         running = _RUNNING.get(session_id)
         if running is None:
             return
+        wait = running.reattempt_wait
+        try:
+            remaining = float(record["expires"]) - _now()
+        except (KeyError, TypeError, ValueError):
+            remaining = 0
+        if remaining > 0:
+            wait = min(wait, remaining) if record.get("code") in _REATTEMPT_CODES else remaining
+        wake_at = time.monotonic() + wait
+        if running.reattempt is not None:
+            if running.reattempt_at <= wake_at:
+                return
+            running.reattempt.cancel()
+        if record.get("code") in _REATTEMPT_CODES:
+            running.reattempt_wait = min(running.reattempt_wait * 2, REATTEMPT_MAX_SECONDS)
+        timer = threading.Timer(wait, lambda: _reattempt(store, session_id, committer, vault_root, timer))
+        timer.name = f"upload-session-reattempt-{session_id[:8]}"
+        timer.daemon = True
+        running.reattempt = timer
+        running.reattempt_at = wake_at
+        timer.start()
+
+
+def _reattempt(
+    store: Path, session_id: str, committer: Committer, vault_root: Path | None, timer: threading.Timer,
+) -> None:
+    with _RUNNING_LOCK:
+        running = _RUNNING.get(session_id)
+        if running is None or running.reattempt is not timer:
+            return
         running.reattempt = None
+        running.reattempt_at = 0
     record = _read_record(store, session_id)
     try:
         expired = record is None or float(record["expires"]) <= _now()
     except (KeyError, TypeError, ValueError):
         expired = True
-    if expired or record["state"] != RETRYABLE or record.get("code") not in _REATTEMPT_CODES:
+    if expired:
+        from .cli_ops import OpError
+
+        try:
+            if _expire(store, session_id, vault_root, _now()):
+                return
+        except (OpError, OSError, sqlite3.Error):
+            log.warning("expired upload session cleanup will retry", exc_info=True)
+        _schedule_reattempt(store, session_id, committer, vault_root)
+        return
+    if record["state"] != RETRYABLE:
+        return
+    if record.get("code") not in _REATTEMPT_CODES:
+        _schedule_reattempt(store, session_id, committer, vault_root)
         return
     # An empty context: nothing of the request that began the session, its principal included,
     # reaches the commit, which binds the transfer principal itself.
-    contextvars.Context().run(start_commit, Session(store, record), committer)
+    contextvars.Context().run(start_commit, Session(store, record, vault_root), committer)
 
 
-def _commit_locked(store: Path, session_id: str, committer: Committer, running: _Running) -> None:
+def _commit_locked(store: Path, session_id: str, committer: Committer, running: _Running, vault_root: Path | None) -> None:
     record = _read_record(store, session_id)
     if record is None or record.get("state") not in _COMMITTABLE:
         return
@@ -612,7 +735,7 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
                 hasher.update(chunk)
         digest = hasher.hexdigest()
     if size != int(record["length"]) or not hmac.compare_digest(digest, record["sha256"]):
-        _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256")
+        _fail(store, record, "UPLOAD_SHA256_MISMATCH", "the bytes received do not match the declared SHA-256", vault_root)
         return
     from .mutation_journal import retrying_park
     from .writer_lease import caller_holds_no_request_worker
@@ -624,7 +747,7 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
             receipt = committer(part, record)
     except CommitFailed as exc:
         if not exc.retryable:
-            _fail(store, record, exc.code, exc.reason)
+            _fail(store, record, exc.code, exc.reason, vault_root)
             return
         code, reason, refusal = exc.code, exc.reason, exc
     except Exception as exc:  # noqa: BLE001 - the bytes are sound, so a retry may succeed
@@ -634,6 +757,7 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
     else:
         _write_record(store, {**record, "state": COMMITTED, "receipt": receipt})
         _remove(part)
+        _release_credit(vault_root, session_id)
         _forget(session_id)
         return
     # The committer ran outside any request's dispatcher, so the park records itself. A poll retries a parked
@@ -684,7 +808,7 @@ def start_commit(session: Session, committer: Committer) -> None:
         context = contextvars.copy_context()
         threading.Thread(
             target=context.run,
-            args=(_commit, session.store, session.id, committer, lock),
+            args=(_commit, session.store, session.id, committer, lock, session.vault_root),
             name=f"upload-session-commit-{session.id[:8]}",
             daemon=True,
         ).start()

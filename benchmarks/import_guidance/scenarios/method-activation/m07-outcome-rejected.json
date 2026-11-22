@@ -1,0 +1,11 @@
+{
+  "id": "m07-outcome-rejected",
+  "title": "A trial that halved build time but broke on Windows is dropped",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I've got an update on the sccache experiment for Pebble Ledger.",
+    "We ran it in the release job for two weeks. The Linux and macOS builds got about 55 percent faster, which is great, but the Windows job started failing with cache lock errors on about one run in three. I can't live with a flaky release, so we're dropping it."
+  ]
+}

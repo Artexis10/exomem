@@ -1,0 +1,16 @@
+{
+  "reference": "The first turn is a lookup answered from the existing notes: the Fernwatch CI run takes about nine minutes. In the second turn the person raises a concrete build tool feature, a persistent on-disk cache in the Rspack bundler, for a named project and a stated use: cutting the nine-minute CI run. They say plainly they have not tried it. A correct assistant serves the technology-signal method and creates one item for this feature and project in state observed or assessed, noting the nine-minute baseline, and does not claim any test has happened. It makes no Planning item and marks nothing ready to test or testing. The existing decision to run CI on one Linux runner stays as written. The method also fits the earlier turns of the conversation, because the same technology idea is under discussion; the keyed turn is the one that defines the stage this case tests. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Entities/Decisions/Run Fernwatch CI on one Linux runner.md",
+    "Entities/Concepts/Fernwatch.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

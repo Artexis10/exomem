@@ -33,16 +33,19 @@ def _stems(text: str | None) -> str:
 
 
 def term_budget():
-    """How much of a long query reaches the MATCH.
+    """How much of a query reaches the MATCH.
 
-    The rarest 16 units carry most of a query's BM25 weight, and a unit on more than a
-    tenth of the chunks is dropped while rarer ones remain. On 40,500 chunks of 40-word
-    prose, queries of 3 to 250 words then cost under 25 ms at p95.
+    The MATCH reads every row of each kept stem, so the rows of common units set its cost.
+    From 500 chunks, a unit on more than 3% of them is dropped, and the rarest 6 of the
+    rest are kept. Below 500 chunks the MATCH is cheap whatever it reads, so no unit is
+    common. On 49 real questions over 33,454 chunks, fused top-15 coverage was 21 of 49
+    (20 for the previous budget), and on 40,500 chunks the lexical stage measured p95
+    about 4 ms in process (15 ms).
     """
     from . import lexstore
 
     return lexstore.QueryTermBudget(
-        max_units=16, max_stems=40, common_fraction=0.1, common_min_pages=100,
+        max_units=6, max_stems=40, common_fraction=0.03, common_min_pages=500,
         common_after_units=0,
     )
 
@@ -210,13 +213,52 @@ def _changed_since(
     return sidecar_store.changed_paths_since(conn, log, since, limit=BACKFILL_ROWS)
 
 
+class Rows:
+    """The chunk rows as the lexical stage reads them at one sidecar token.
+
+    It holds each row's path and chunk number by rowid, so naming a match reads no chunk row,
+    and each stem's count of rows. Every lexical search reads them. They change only with the
+    chunk rows, so each set is kept for one `token` (the epoch, chunk generation and instance
+    of a covered sidecar) and read again at the next. A complete set, read whole after a
+    backfill, holds every stem's count. Otherwise a stem's count is read once, by the first
+    search that names it; a stem on no row is not kept, so the set never outgrows the
+    vocabulary.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, token: tuple[int, int, int], *, complete: bool) -> None:
+        self.token = token
+        # The primary key index covers this read, so it scans no chunk row. One object per
+        # path keeps the map small, since each path repeats once per chunk.
+        paths: dict[str, str] = {}
+        self.names: dict[int, tuple[str, int]] = {
+            rowid: (paths.setdefault(path, path), int(chunk))
+            for rowid, path, chunk in conn.execute("SELECT rowid, file_path, chunk_idx FROM chunks")
+        }
+        self._complete = complete
+        self._documents: dict[str, int] = (
+            dict(conn.execute(f"SELECT term, doc FROM {_VOCABULARY}").fetchall()) if complete else {}
+        )
+
+    def documents(self, conn: sqlite3.Connection, stems: list[str]) -> dict[str, int]:
+        """The rows holding each of `stems` that any row holds, read in a snapshot at `token`."""
+        missing = [] if self._complete else [stem for stem in stems if stem not in self._documents]
+        if missing:
+            # One equality lookup per stem; a subquery here would scan the whole vocabulary.
+            # Searches at one token read the same counts, so a concurrent update is harmless.
+            self._documents.update(conn.execute(
+                f"SELECT term, doc FROM {_VOCABULARY} WHERE term IN ({', '.join('?' * len(missing))})",
+                missing,
+            ).fetchall())
+        return {stem: self._documents[stem] for stem in stems if stem in self._documents}
+
+
 def select(
-    conn: sqlite3.Connection, query: str, k: int, eligible: AbstractSet[str],
+    conn: sqlite3.Connection, query: str, k: int, eligible: AbstractSet[str], rows: Rows,
 ) -> list[tuple[str, int, float]]:
     """Eligible `(file_path, chunk_idx, bm25)` rows best first, in the caller's snapshot.
 
-    The corpus statistics span the sidecar. Rows of ineligible paths never become
-    candidates, and ties keep the physical row order.
+    `rows` must be the set for the snapshot's token. The corpus statistics span the sidecar.
+    Rows of ineligible paths never become candidates, and ties keep the physical row order.
     """
     from . import bm25, lexstore
 
@@ -230,25 +272,31 @@ def select(
     })
     if not stems:
         return []
-    # One equality lookup per stem; a subquery here would scan the whole vocabulary.
-    frequencies = dict(conn.execute(
-        f"SELECT term, doc FROM {_VOCABULARY} WHERE term IN ({', '.join('?' * len(stems))})",
-        stems,
-    ).fetchall())
-    rows = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
-    kept, _counted, _dropped = lexstore.select_query_units(units, frequencies, rows, term_budget())
+    # A query of only common units would read most rows to add little to the dense
+    # ranking, so it gets no lexical candidates rather than its rarest common units.
+    kept, _counted, _dropped = lexstore.select_query_units(
+        units, rows.documents(conn, stems), len(rows.names), term_budget(), min_units=0
+    )
     tokens = list(dict.fromkeys(stem for unit in kept for stem in unit.stems))
     if not tokens:
         return []
     # Stems are runs of letters, numbers and marks, so no FTS5 syntax can hide in them.
     match = " OR ".join(f'"{token}"' for token in tokens)
-    return [
-        (path, int(chunk), float(score))
-        for path, chunk, score in conn.execute(
-            f"SELECT c.file_path, c.chunk_idx, -bm25({TABLE}) AS score FROM {TABLE} "
-            f"JOIN chunks AS c ON c.rowid = {TABLE}.rowid WHERE {TABLE} MATCH ? "
-            "AND c.file_path IN (SELECT value FROM json_each(?)) "
-            "ORDER BY score DESC, c.rowid LIMIT ?",
-            (match, json.dumps(list(eligible), ensure_ascii=False), k),
-        )
-    ]
+    # The terms table alone orders the matches, and `rows` names them: a join or lookup of
+    # each match's chunk row read one random page of that large table per candidate.
+    ranked = conn.execute(
+        f"SELECT rowid, -bm25({TABLE}) AS score FROM {TABLE} WHERE {TABLE} MATCH ? "
+        "ORDER BY score DESC, rowid",
+        (match,),
+    )
+    found: list[tuple[str, int, float]] = []
+    try:
+        for rowid, score in ranked:
+            named = rows.names.get(rowid)
+            if named is not None and named[0] in eligible:
+                found.append((*named, float(score)))
+                if len(found) == k:
+                    break
+    finally:
+        ranked.close()
+    return found

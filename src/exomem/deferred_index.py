@@ -11,10 +11,11 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Iterable
+from contextlib import closing
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NamedTuple
 
 from . import reserved_paths, sidecar_store
 from .kbdir import managed_split_parts
@@ -29,6 +30,7 @@ _GRAPH_FULL_REBUILD_SEQUENCE_KEY = "graph_full_rebuild_sequence"
 #: marker's value unchanged, so a retirement can tell "no new debt" from "new
 #: debt at the same value".
 _GRAPH_FULL_REBUILD_MARKS_KEY = "graph_full_rebuild_marks"
+_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY = "graph_full_rebuild_fatal_family:v1"
 _PENDING_VISIBILITY_GENERATION_KEY = "pending_visibility_generation:v1"
 #: Set, in the transaction that rebuilds it, to the component names the table's
 #: CHECK accepts, so a release that adds a component widens the CHECK once.
@@ -556,18 +558,19 @@ def store_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / ".deferred-index.sqlite"
 
 
-def _connect_readonly(vault_root: Path) -> sqlite3.Connection:
+def _connect_readonly(vault_root: Path, *, deadline: float | None = None) -> sqlite3.Connection:
     """Open an existing sidecar without schema repair or journal writes."""
     with reserved_paths._subsystem_authority_scope("deferred_index"):
         with reserved_paths._identity_coordination_scope(
             vault_root,
             descriptor_ids=("deferred-index-store",),
             identity_may_change=False,
+            deadline=deadline,
         ):
-            return _connect_readonly_owned(vault_root)
+            return _connect_readonly_owned(vault_root, timeout=0.0 if deadline else 5.0)
 
 
-def _connect_readonly_owned(vault_root: Path) -> sqlite3.Connection:
+def _connect_readonly_owned(vault_root: Path, *, timeout: float = 5.0) -> sqlite3.Connection:
     path = store_path(vault_root)
     with reserved_paths._sqlite_owner_target_scope(
         vault_root,
@@ -578,7 +581,7 @@ def _connect_readonly_owned(vault_root: Path) -> sqlite3.Connection:
         conn = _sqlite_connect_owned(
             f"{retained_path.as_uri()}?mode=ro",
             uri=True,
-            timeout=5.0,
+            timeout=timeout,
         )
         try:
             reserved_paths._publish_sqlite_owner_family(
@@ -711,7 +714,10 @@ def _connect_created_owned(
             first_failed_at REAL NOT NULL,
             last_failed_at REAL NOT NULL,
             quarantined INTEGER NOT NULL DEFAULT 0,
-            signature TEXT
+            signature TEXT,
+            held_proof TEXT,
+            failure_revision INTEGER,
+            failure_cause TEXT
         )
         """
     )
@@ -748,6 +754,15 @@ def _connect_created_owned(
         # would let a pre-upgrade receipt bless a lineage gap it knows nothing
         # about. NULL reads back as "unknown", which never counts as coverage.
         conn.execute("ALTER TABLE graph_upserts ADD COLUMN graph_generation INTEGER")
+    failure_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(graph_failures)")}
+    for column, declaration in (
+        ("held_proof", "TEXT"), ("failure_revision", "INTEGER"), ("failure_cause", "TEXT"),
+    ):
+        if column not in failure_columns:
+            conn.execute(f"ALTER TABLE graph_failures ADD COLUMN {column} {declaration}")
+    if "read_grace_since" not in graph_columns:
+        _install_graph_read_grace(conn)
+    _install_graph_receipt_revisions(conn)
     _ensure_derived_batch_schema(conn)
     _ensure_vocabulary_provenance_schema(conn)
     if publish:
@@ -762,6 +777,74 @@ def _connect_created_owned(
             conn.close()
             raise
     return conn
+
+
+def _graph_receipt_revisions_current(conn: sqlite3.Connection) -> bool:
+    return bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master "
+        "WHERE type = 'index' AND name = 'graph_upserts_queue_order') "
+        "AND EXISTS(SELECT 1 FROM maintenance_state WHERE key = ?)",
+        (_GRAPH_UPSERTS_GENERATION_KEY,),
+    ).fetchone()[0])
+
+
+def _install_graph_receipt_revisions(conn: sqlite3.Connection) -> None:
+    """Reserve legacy identities once and index the order used by the drain."""
+    if _graph_receipt_revisions_current(conn):
+        return
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if _graph_receipt_revisions_current(conn):
+            return
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS graph_upserts_queue_order ON graph_upserts(updated_at, rel_path)"
+        )
+        conn.execute(
+            "INSERT INTO maintenance_state(key, value) VALUES (?, MAX("
+            "coalesce((SELECT max(revision) FROM graph_upserts), 0), "
+            "coalesce((SELECT max(failure_revision) FROM graph_failures), 0))) "
+            "ON CONFLICT(key) DO UPDATE SET value = MAX(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER))",
+            (_GRAPH_UPSERTS_GENERATION_KEY,),
+        )
+
+
+def _install_graph_read_grace(conn: sqlite3.Connection) -> None:
+    """Index receipt-local permission failures without a queue scan on every retry."""
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if any(row[1] == "read_grace_since" for row in conn.execute("PRAGMA table_info(graph_upserts)")):
+            return
+        # Older rows acquire an exact classification on their next isolated failure.
+        conn.execute("ALTER TABLE graph_upserts ADD COLUMN read_grace_since REAL")
+        conn.execute("CREATE INDEX graph_upserts_read_grace ON graph_upserts(read_grace_since)")
+        conn.execute("CREATE INDEX graph_upserts_oldest ON graph_upserts(created_at)")
+        conn.execute(
+            "CREATE TRIGGER graph_upserts_clear_read_grace "
+            "AFTER UPDATE OF revision, graph_generation, rel_path ON graph_upserts "
+            "WHEN NEW.read_grace_since IS NOT NULL AND "
+            "(OLD.revision IS NOT NEW.revision OR OLD.graph_generation IS NOT NEW.graph_generation "
+            "OR OLD.rel_path IS NOT NEW.rel_path) "
+            "BEGIN UPDATE graph_upserts SET read_grace_since = NULL WHERE rel_path = NEW.rel_path; END"
+        )
+        # The unreadable cause is the closed permission-grace outcome of graph repair.
+        # Releasing a quarantine leaves a fresh receipt to classify.
+        for name, event, condition in (
+            ("insert", "INSERT", ""),
+            ("update", "UPDATE OF first_failed_at, failure_revision, failure_cause, quarantined",
+             "AND OLD.quarantined = 0 "),
+        ):
+            conn.execute(
+                f"CREATE TRIGGER graph_failures_read_grace_{name} AFTER {event} ON graph_failures "
+                "BEGIN UPDATE graph_upserts SET read_grace_since = CASE WHEN "
+                "NEW.failure_revision = revision AND NEW.failure_cause = 'unreadable' "
+                f"AND NEW.quarantined = 0 {condition}THEN NEW.first_failed_at END "
+                "WHERE rel_path = NEW.rel_path; END"
+            )
+        conn.execute(
+            "CREATE TRIGGER graph_failures_read_grace_delete AFTER DELETE ON graph_failures "
+            "BEGIN UPDATE graph_upserts SET read_grace_since = NULL "
+            "WHERE rel_path = OLD.rel_path AND read_grace_since IS NOT NULL; END"
+        )
 
 
 def semantic_isolation_cursors(vault_root: Path) -> dict[str, dict[str, str]]:
@@ -1143,17 +1226,27 @@ def _add_plain_receipts(
     added = 0
     conn = _connect(vault_root, create=True)
     try:
-        columns = {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
-        tracks_generation = "graph_generation" in columns
+        tracks_generation = table == "graph_upserts"
         conn.execute("BEGIN IMMEDIATE")
         try:
-            for rel in rels:
+            graph_revision_floor = None
+            if tracks_generation:
+                # Each enqueue fires a generation trigger in this transaction.
+                # The queue clock stays ahead even after a receipt leaves the queue.
+                graph_revision_floor = int(conn.execute(
+                    "SELECT value FROM maintenance_state WHERE key = ?",
+                    (_GRAPH_UPSERTS_GENERATION_KEY,),
+                ).fetchone()[0])
+            for ordinal, rel in enumerate(rels, start=1):
                 stored = "graph_generation" if tracks_generation else "NULL"
                 row = conn.execute(
                     f"SELECT revision, {stored} FROM {table} WHERE rel_path = ?", (rel,)
                 ).fetchone()
+                if graph_revision_floor is None:
+                    revision = 1 if row is None else int(row[0]) + 1
+                else:
+                    revision = graph_revision_floor + ordinal
                 if row is None:
-                    revision = 1
                     added += 1
                     recorded = generation if tracks_generation else None
                     if tracks_generation:
@@ -1170,7 +1263,6 @@ def _add_plain_receipts(
                             (rel, now, now, revision),
                         )
                 else:
-                    revision = int(row[0]) + 1
                     previous = None if row[1] is None else int(row[1])
                     # The newest KNOWN generation wins, and an unknown enqueue
                     # never erases one: the row still owes the repair it was
@@ -1307,8 +1399,15 @@ def record_graph_debt_generation(vault_root: Path, *, generation: int) -> None:
         conn.close()
 
 
-def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
+def mark_graph_full_rebuild(
+    vault_root: Path, *, generation: int, fatal_family: str | None = None,
+) -> None:
     """Record that a whole-vault rebuild is owed, at or after this generation."""
+    if fatal_family is not None:
+        from .graph_sync import _is_digest
+
+        if not _is_digest(fatal_family):
+            raise ValueError("fatal graph family must be a SHA-256 digest")
     conn = _connect(vault_root, create=True)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1346,6 +1445,14 @@ def mark_graph_full_rebuild(vault_root: Path, *, generation: int) -> None:
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, recorded))),
             )
             _count_graph_full_rebuild_mark_locked(conn)
+            if fatal_family is not None:
+                conn.execute(
+                    "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY, fatal_family),
+                )
+            elif current is None:
+                _discard_orphaned_fatal_family_locked(conn)
         except Exception:
             conn.rollback()
             raise
@@ -1379,6 +1486,8 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
             current = int(rows.get(_GRAPH_FULL_REBUILD_KEY, 0))
             sequence = int(rows.get(_GRAPH_FULL_REBUILD_SEQUENCE_KEY, 0))
             generation = max(current, sequence, int(after_generation)) + 1
+            if _GRAPH_FULL_REBUILD_KEY not in rows:
+                _discard_orphaned_fatal_family_locked(conn)
             conn.execute(
                 "INSERT INTO maintenance_state(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -1400,12 +1509,36 @@ def advance_graph_full_rebuild(vault_root: Path, *, after_generation: int = 0) -
     return generation
 
 
+def _discard_orphaned_fatal_family_locked(conn: sqlite3.Connection) -> None:
+    """Drop a fatal-family row that outlived its marker.
+
+    Retirement deletes the family with its marker, but an older release that
+    retires only the marker leaves the row behind after a downgrade. Raising
+    new debt with no marker standing must not inherit that stale fence: a
+    healthy sidecar that reuses the damaged file's identity would otherwise be
+    refused as needing replacement.
+    """
+    conn.execute(
+        "DELETE FROM maintenance_state WHERE key = ?",
+        (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY,),
+    )
+
+
 def _count_graph_full_rebuild_mark_locked(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT INTO maintenance_state(key, value) VALUES (?, '1') "
         "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
         (_GRAPH_FULL_REBUILD_MARKS_KEY,),
     )
+
+
+class GraphFullRebuildDetails(NamedTuple):
+    token: tuple[int, int]
+    fatal_family: str | None  # Stable main-file identity, independent of content and times.
+
+
+class GraphFullRebuildStateUnavailable(RuntimeError):
+    """The marker state could not be read or validated."""
 
 
 def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
@@ -1415,27 +1548,46 @@ def graph_full_rebuild_observation(vault_root: Path) -> tuple[int, int] | None:
     publication can retire exactly the debt that existed then and nothing
     raised after -- see `retire_observed_graph_full_rebuild`.
     """
-    if not store_path(vault_root).exists():
-        return None
     try:
-        conn = _connect_readonly(vault_root)
+        details = graph_full_rebuild_details(vault_root)
+    except GraphFullRebuildStateUnavailable:
+        return None
+    return details.token if details is not None else None
+
+
+def graph_full_rebuild_details(
+    vault_root: Path, *, deadline: float | None = None,
+) -> GraphFullRebuildDetails | None:
+    """Read one marker snapshot. None means the marker is absent."""
+    from .cli_ops import OpError
+    from .graph_sync import _is_digest
+
+    try:
         try:
-            rows = dict(
-                conn.execute(
-                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?)",
-                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY),
-                ).fetchall()
-            )
-        finally:
-            conn.close()
-    except (OSError, sqlite3.Error):
-        return None
-    if _GRAPH_FULL_REBUILD_KEY not in rows:
-        return None
-    try:
-        return int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0))
-    except (TypeError, ValueError):
-        return None
+            store_path(vault_root).lstat()
+        except FileNotFoundError:
+            return None
+        with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+            conn.execute("BEGIN")
+            try:
+                rows = dict(conn.execute(
+                    "SELECT key, value FROM maintenance_state WHERE key IN (?, ?, ?)",
+                    (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_MARKS_KEY, _GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY),
+                ))
+            except sqlite3.OperationalError:
+                # A store from before maintenance markers could not hold one.
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'maintenance_state'").fetchone() is None:
+                    return None
+                raise
+        if _GRAPH_FULL_REBUILD_KEY not in rows:
+            return None
+        token = (int(rows[_GRAPH_FULL_REBUILD_KEY]), int(rows.get(_GRAPH_FULL_REBUILD_MARKS_KEY, 0)))
+        fatal_family = rows.get(_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY)
+        if min(token) < 0 or (fatal_family is not None and not _is_digest(fatal_family)):
+            raise ValueError("malformed graph rebuild marker")
+        return GraphFullRebuildDetails(token, fatal_family)
+    except (OSError, OpError, RuntimeError, sqlite3.Error, TypeError, ValueError) as error:
+        raise GraphFullRebuildStateUnavailable("graph rebuild marker state is unavailable") from error
 
 
 def retire_observed_graph_full_rebuild(
@@ -1481,15 +1633,15 @@ def retire_observed_graph_full_rebuild(
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_GRAPH_FULL_REBUILD_SEQUENCE_KEY, str(max(sequence, marker))),
             )
-            changed = conn.execute(
-                "DELETE FROM maintenance_state WHERE key = ?",
-                (_GRAPH_FULL_REBUILD_KEY,),
-            ).rowcount
+            conn.execute(
+                "DELETE FROM maintenance_state WHERE key IN (?, ?)",
+                (_GRAPH_FULL_REBUILD_KEY, _GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY),
+            )
         except Exception:
             conn.rollback()
             raise
         conn.commit()
-        return bool(changed)
+        return True
     finally:
         conn.close()
 
@@ -1522,14 +1674,16 @@ def _graph_full_rebuild_generation_locked(conn: sqlite3.Connection) -> int | Non
         return None
 
 
-def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> bool:
+def graph_repair_owed_outside(
+    vault_root: Path, rel_paths: Iterable[str], *, deadline: float | None = None,
+) -> bool:
     """Whether graph repair is owed beyond `rel_paths`.
 
     True for a queued receipt for any other path, a whole-vault rebuild marker,
     or a store that cannot be read: a caller that publishes the graph as current
     on False never publishes over work it could not see. An absent store owes
-    nothing. One connection, and receipts are counted rather than listed, so the
-    cost follows `rel_paths`, not the queue.
+    nothing. The lookup stops at the first outside receipt, so it examines at
+    most the number of paths in the proof plus one.
     """
     if not store_path(vault_root).exists():
         return False
@@ -1537,7 +1691,7 @@ def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> boo
         {rel for raw in rel_paths if (rel := _safe_markdown_rel_path(raw)) is not None}
     )
     try:
-        conn = _connect_readonly(vault_root)
+        conn = _connect_readonly(vault_root, deadline=deadline)
         try:
             tables = {
                 str(row[0])
@@ -1550,22 +1704,15 @@ def graph_repair_owed_outside(vault_root: Path, rel_paths: Iterable[str]) -> boo
                 return True
             if "graph_upserts" not in tables:
                 return False
-            queued = int(conn.execute("SELECT count(*) FROM graph_upserts").fetchone()[0])
-            inside = 0
-            for start in range(0, len(wanted), 900):
-                chunk = wanted[start : start + 900]
-                inside += int(
-                    conn.execute(
-                        "SELECT count(*) FROM graph_upserts WHERE rel_path IN "
-                        f"({','.join('?' for _ in chunk)})",
-                        chunk,
-                    ).fetchone()[0]
-                )
+            return conn.execute(
+                "SELECT 1 FROM graph_upserts "
+                "WHERE rel_path NOT IN (SELECT value FROM json_each(?)) LIMIT 1",
+                (json.dumps(wanted),),
+            ).fetchone() is not None
         finally:
             conn.close()
     except (OSError, sqlite3.Error):
         return True
-    return queued > inside
 
 
 def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None) -> bool:
@@ -1612,6 +1759,11 @@ def clear_graph_full_rebuild(vault_root: Path, *, generation: int | None = None)
                     "AND CAST(value AS INTEGER) <= ?",
                     (_GRAPH_FULL_REBUILD_KEY, int(generation)),
                 ).rowcount
+            if changed:
+                conn.execute(
+                    "DELETE FROM maintenance_state WHERE key = ?",
+                    (_GRAPH_FULL_REBUILD_FATAL_FAMILY_KEY,),
+                )
         except Exception:
             conn.rollback()
             raise
@@ -1785,9 +1937,15 @@ def snapshot_graph(
     *,
     limit: int | None = None,
     paths: set[str] | None = None,
+    deadline: float | None = None,
 ) -> list[DeferredReceipt]:
     """Queued graph work, oldest first, with corrupt legacy rows purged."""
-    return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
+    if deadline is None or not store_path(vault_root).exists():
+        return _snapshot_plain(vault_root, table="graph_upserts", limit=limit, paths=paths)
+    with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+        return _snapshot_plain(
+            vault_root, table="graph_upserts", limit=limit, paths=paths, connection=conn,
+        )
 
 
 #: Generations kept in the durable debt record. A gap wider than this is far
@@ -1984,44 +2142,195 @@ def list_graph_paths(vault_root: Path, *, limit: int | None = None) -> list[str]
     return [receipt.rel_path for receipt in snapshot_graph(vault_root, limit=limit)]
 
 
+def graph_receipts_cover(vault_root: Path, paths: Iterable[str]) -> bool:
+    """Check scoped ownership with one primary-key lookup per observed path."""
+    wanted = list(paths)
+    if (
+        any(_safe_markdown_rel_path(path) != path for path in wanted)
+        or not store_path(vault_root).exists()
+    ):
+        return False
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            return bool(conn.execute(
+                "SELECT NOT EXISTS(SELECT 1 FROM maintenance_state WHERE key = ?) "
+                "AND EXISTS(SELECT 1 FROM graph_upserts) "
+                "AND NOT EXISTS(SELECT 1 FROM json_each(?) AS observed "
+                "WHERE NOT EXISTS(SELECT 1 FROM graph_upserts WHERE rel_path = observed.value))",
+                (_GRAPH_FULL_REBUILD_KEY, json.dumps(wanted)),
+            ).fetchone()[0])
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def clear_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    """CAS-clear graph receipts; a path derived at last forgets its failures."""
-    cleared = _clear_plain_receipts(vault_root, receipts, table="graph_upserts")
-    if receipts:
-        forget_graph_failures(vault_root, {receipt.rel_path for receipt in receipts})
-    return cleared
+    """CAS-clear exact graph receipts and their completed failure state together."""
+    if not receipts or not store_path(vault_root).exists():
+        return 0
+    wanted = json.dumps([(r.rel_path, r.revision, r.graph_generation) for r in receipts])
+    with closing(_connect(vault_root, create=True)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        matched = conn.execute(
+            "SELECT q.rel_path FROM json_each(?) AS wanted CROSS JOIN graph_upserts AS q "
+            "ON q.rel_path = json_extract(wanted.value, '$[0]') "
+            "AND q.revision = json_extract(wanted.value, '$[1]') "
+            "AND q.graph_generation IS json_extract(wanted.value, '$[2]')",
+            (wanted,),
+        ).fetchall()
+        if not matched:
+            return 0
+        paths = json.dumps([row[0] for row in matched])
+        removed = conn.execute(
+            "DELETE FROM graph_upserts WHERE rel_path IN (SELECT value FROM json_each(?))",
+            (paths,),
+        ).rowcount
+        conn.execute(
+            "DELETE FROM graph_failures WHERE rel_path IN (SELECT value FROM json_each(?))",
+            (paths,),
+        )
+        return removed
 
 
-def note_graph_failure(vault_root: Path, rel_path: str) -> tuple[int, float]:
-    """Count one failed isolated attempt to derive `rel_path`.
+@dataclass(frozen=True, slots=True)
+class GraphHeldProof:
+    checkpoint_digest: str
+    receipt_revision: int
+    signature: str
+    retained_source: str
+    graph_instance: str
+    policy: tuple[str, str]
+    topology: str
+    cold_generation: tuple[int, int, int] | None
 
-    Returns the attempts so far and when the first of them failed. Counted per
-    path, not per receipt revision: a page that cannot be read fails the same
-    way whatever revision queued it.
+    def render(self) -> str:
+        return json.dumps([
+            self.checkpoint_digest, self.receipt_revision, self.signature,
+            self.retained_source, self.graph_instance, self.policy, self.topology, self.cold_generation,
+        ])
+
+    @classmethod
+    def parse(cls, raw: str) -> GraphHeldProof | None:
+        from .graph_sync import _is_digest
+
+        try:
+            digest, revision, signature, source, instance, policy, topology, cold = json.loads(raw)
+            if (
+                not all(_is_digest(value) for value in (digest, source, topology))
+                or type(revision) is not int or revision < 1
+                or not isinstance(signature, str) or not signature
+                or not isinstance(instance, str) or not instance
+                or not isinstance(policy, list) or len(policy) != 2
+                or not all(isinstance(value, str) for value in policy)
+                or (cold is not None and (
+                    not isinstance(cold, list) or len(cold) != 3
+                    or not all(type(value) is int for value in cold)
+                ))
+            ):
+                return None
+            return cls(
+                digest, revision, signature, source, instance, (policy[0], policy[1]), topology,
+                (cold[0], cold[1], cold[2]) if cold is not None else None,
+            )
+        except (TypeError, ValueError, RecursionError):
+            return None
+
+
+def held_graph_proofs(
+    vault_root: Path, *, digest: str, paths: Iterable[str], deadline: float | None = None,
+) -> dict[str, GraphHeldProof]:
+    """Read exact quarantines in one bounded query, excluding superseding receipts."""
+    wanted = list(paths)
+    if not wanted or not store_path(vault_root).exists():
+        return {}
+    with closing(_connect_readonly(vault_root, deadline=deadline)) as conn:
+        if "held_proof" not in {row[1] for row in conn.execute("PRAGMA table_info(graph_failures)")}:
+            return {}
+        rows = conn.execute(
+            "SELECT f.rel_path, f.held_proof, f.signature, f.failure_revision "
+            "FROM graph_failures f WHERE f.quarantined = 1 "
+            "AND length(f.held_proof) <= 1024 "
+            "AND f.rel_path IN (SELECT value FROM json_each(?)) "
+            "AND NOT EXISTS (SELECT 1 FROM graph_upserts q WHERE q.rel_path = f.rel_path)",
+            (json.dumps(wanted),),
+        ).fetchall()
+    result = {}
+    for rel, encoded, signature, revision in rows:
+        proof = GraphHeldProof.parse(encoded)
+        if (
+            proof is not None and proof.checkpoint_digest == digest
+            and proof.signature == signature and proof.receipt_revision == revision
+        ):
+            result[str(rel)] = proof
+    return result
+
+
+def graph_receipts_in_read_grace(vault_root: Path, *, seconds: float) -> bool:
+    """Only an entirely classified queue keeps its permission grace during a stall."""
+    if not store_path(vault_root).exists():
+        return False
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            return conn.execute(
+                # SQLite orders NULL first. A missing classification or the
+                # earliest failure outside the grace makes the queue ineligible.
+                "SELECT read_grace_since > ? FROM graph_upserts INDEXED BY graph_upserts_read_grace "
+                "ORDER BY read_grace_since LIMIT 1",
+                (time.time() - seconds,),
+            ).fetchone() == (1,)
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def graph_oldest_receipt_age(vault_root: Path) -> float | None:
+    """Read the scheduler's age without counting the diagnostic queue depth."""
+    if not store_path(vault_root).exists():
+        return None
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            row = conn.execute("SELECT min(created_at) FROM graph_upserts").fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    return max(0.0, time.time() - row[0]) if row and row[0] is not None else None
+
+
+def note_graph_failure(
+    vault_root: Path, receipt: DeferredReceipt, *, cause: str,
+) -> tuple[int, float] | None:
+    """Count one failed isolated attempt for a receipt still in the queue.
+
+    Attempts and the first failure time carry across requeues of that path.
+    A superseded receipt supplies no failure evidence for its replacement.
     """
     now = time.time()
     conn = _connect(vault_root, create=True)
     try:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute(
+                "SELECT 1 FROM graph_upserts WHERE rel_path = ? AND revision = ? AND graph_generation IS ?",
+                (receipt.rel_path, receipt.revision, receipt.graph_generation),
+            ).fetchone() is None:
+                return None
             conn.execute(
-                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at) "
-                "VALUES (?, 1, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
-                "attempts = attempts + 1, last_failed_at = excluded.last_failed_at",
-                (rel_path, now, now),
+                "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, last_failed_at, "
+                "failure_revision, failure_cause) VALUES (?, 1, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET attempts = attempts + 1, "
+                "last_failed_at = excluded.last_failed_at, failure_revision = excluded.failure_revision, "
+                "failure_cause = excluded.failure_cause",
+                (receipt.rel_path, now, now, receipt.revision, cause),
             )
             row = conn.execute(
                 "SELECT attempts, first_failed_at FROM graph_failures WHERE rel_path = ?",
-                (rel_path,),
+                (receipt.rel_path,),
             ).fetchone()
-        if row is None:
-            return 1, now
         return int(row[0]), float(row[1])
     finally:
         conn.close()
 
 
 def quarantine_graph_receipt(
-    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None
+    vault_root: Path, receipt: DeferredReceipt, *, signature: str | None,
+    held: GraphHeldProof | None = None,
 ) -> bool:
     """Set a receipt no drain can derive aside, by exact revision.
 
@@ -2035,17 +2344,19 @@ def quarantine_graph_receipt(
     try:
         with conn:
             removed = conn.execute(
-                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ?",
-                (receipt.rel_path, receipt.revision),
+                "DELETE FROM graph_upserts WHERE rel_path = ? AND revision = ? AND graph_generation IS ?",
+                (receipt.rel_path, receipt.revision, receipt.graph_generation),
             ).rowcount
             if removed:
                 now = time.time()
                 conn.execute(
                     "INSERT INTO graph_failures(rel_path, attempts, first_failed_at, "
-                    "last_failed_at, quarantined, signature) VALUES (?, 1, ?, ?, 1, ?) "
-                    "ON CONFLICT(rel_path) DO UPDATE SET quarantined = 1, "
-                    "last_failed_at = excluded.last_failed_at, signature = excluded.signature",
-                    (receipt.rel_path, now, now, signature),
+                    "last_failed_at, quarantined, signature, held_proof, failure_revision) "
+                    "VALUES (?, 1, ?, ?, 1, ?, ?, ?) ON CONFLICT(rel_path) DO UPDATE SET "
+                    "quarantined = 1, last_failed_at = excluded.last_failed_at, "
+                    "signature = excluded.signature, held_proof = excluded.held_proof, "
+                    "failure_revision = excluded.failure_revision",
+                    (receipt.rel_path, now, now, signature, held.render() if held else None, receipt.revision),
                 )
         return bool(removed)
     finally:
@@ -2107,7 +2418,7 @@ def release_graph_quarantine(vault_root: Path, rel_paths: list[str]) -> int:
     try:
         with conn:
             conn.executemany(
-                "UPDATE graph_failures SET quarantined = 0 WHERE rel_path = ?",
+                "UPDATE graph_failures SET quarantined = 0, held_proof = NULL WHERE rel_path = ?",
                 [(rel,) for rel in sorted(set(rel_paths))],
             )
     finally:
@@ -2175,6 +2486,27 @@ def clear_graph(vault_root: Path, rel_paths: list[str] | None = None) -> int:
 
 def rotate_graph_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
     return rotate_receipts(vault_root, receipts, queue="graph")
+
+
+def graph_queue_pending(vault_root: Path) -> bool:
+    """Whether graph repair has a queued receipt or a whole-vault marker."""
+    if not store_path(vault_root).exists():
+        return False
+    try:
+        with closing(_connect_readonly(vault_root)) as conn:
+            conn.execute("BEGIN")
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('maintenance_state', 'graph_upserts')"
+            )}
+            return (
+                "maintenance_state" in tables and _graph_full_rebuild_generation_locked(conn) is not None
+            ) or (
+                "graph_upserts" in tables
+                and bool(conn.execute("SELECT EXISTS(SELECT 1 FROM graph_upserts)").fetchone()[0])
+            )
+    except (OSError, sqlite3.Error):
+        return False
 
 
 def graph_queue_age(vault_root: Path) -> tuple[int, float | None]:
@@ -2323,12 +2655,6 @@ def clear_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
 
 
 def clear_full_receipts(vault_root: Path, receipts: list[DeferredReceipt]) -> int:
-    return _clear_plain_receipts(vault_root, receipts, table="full_upserts")
-
-
-def _clear_plain_receipts(
-    vault_root: Path, receipts: list[DeferredReceipt], *, table: str
-) -> int:
     if not receipts or not store_path(vault_root).exists():
         return 0
     conn = _connect(vault_root, create=True)
@@ -2336,7 +2662,7 @@ def _clear_plain_receipts(
         with conn:
             changed = sum(
                 conn.execute(
-                    f"DELETE FROM {table} WHERE rel_path = ? AND revision = ?",
+                    "DELETE FROM full_upserts WHERE rel_path = ? AND revision = ?",
                     (receipt.rel_path, receipt.revision),
                 ).rowcount
                 for receipt in receipts

@@ -1084,6 +1084,11 @@ class EmbeddingIndex:
         self._terms_lock = threading.Lock()
         self._terms_backfill: threading.Thread | None = None
         self._terms_failed_at: float | None = None
+        # The chunk rows' names and counts at the token a search last read; replaced, never
+        # edited. The lock makes one build per token, so concurrent searches after a write
+        # do not each read every row's name (a leaf lock).
+        self._terms_rows: passage_terms.Rows | None = None
+        self._terms_rows_lock = threading.Lock()
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -2959,7 +2964,9 @@ class EmbeddingIndex:
             return []
         eligible = set(allowed_paths) - withheld.paths
         for attempt in range(2):
-            conn = self._connect()
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. Each
+            # passage's text is read again, under the proof, by `matching_chunks`.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
                 token = self._build_token(conn)
@@ -2968,7 +2975,12 @@ class EmbeddingIndex:
                         self, token[:3], recall_space.read_identity(conn, tables=_VECTOR_TABLES)
                     )
                     with foreground_priority.foreground():
-                        rows = passage_terms.select(conn, query, k, eligible)
+                        with self._terms_rows_lock:
+                            terms_rows = self._terms_rows
+                            if terms_rows is None or terms_rows.token != proof.token:
+                                terms_rows = passage_terms.Rows(conn, proof.token, complete=False)
+                                self._terms_rows = terms_rows
+                        rows = passage_terms.select(conn, query, k, eligible, terms_rows)
                     return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
                 rows_held = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
             finally:
@@ -3010,7 +3022,15 @@ class EmbeddingIndex:
         try:
             conn = self._connect()
             try:
-                passage_terms.backfill(conn, CHUNK_PATH_LOG)
+                if passage_terms.backfill(conn, CHUNK_PATH_LOG):
+                    # Read every name and count now, so no search waits on their first read.
+                    conn.execute("BEGIN")
+                    try:
+                        token = self._build_token(conn)
+                        if passage_terms.covered(conn, token[1]):
+                            self._terms_rows = passage_terms.Rows(conn, token[:3], complete=True)
+                    finally:
+                        conn.rollback()
             finally:
                 conn.close()
         except (sqlite3.Error, OSError, OpError) as error:

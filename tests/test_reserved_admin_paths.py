@@ -3056,7 +3056,7 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
 ) -> None:
     from exomem import graph_sync, review_state, voice_profiles
 
-    observed: list[tuple[str, str, int]] = []
+    observed: list[tuple[str, str, int, float | None]] = []
 
     def observe(
         vault_root: Path,
@@ -3064,10 +3064,11 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
         descriptor_id: str,
         *,
         limit: int,
+        deadline: float | None = None,
     ) -> bytes:
         assert Path(vault_root) == tmp_path
         assert reserved_paths.owner_authorized(descriptor_id)
-        observed.append((descriptor_id, path.name, limit))
+        observed.append((descriptor_id, path.name, limit, deadline))
         if descriptor_id == "review-state":
             return b'{"records":{},"version":1}'
         if descriptor_id == "voice-profile-store":
@@ -3086,13 +3087,15 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
     assert voice_profiles.load_store(
         voice_profiles.voice_profiles_path(tmp_path), vault_root=tmp_path
     ) == {}
-    assert graph_sync.read_floor(tmp_path) is not None
+    deadline = 100.0
+    assert graph_sync.floor_state(tmp_path, deadline=deadline)[1] is not None
 
-    assert [(descriptor, name) for descriptor, name, _limit in observed] == [
+    assert [(descriptor, name) for descriptor, name, _limit, _deadline in observed] == [
         ("review-state", ".review-state.json"),
         ("voice-profile-store", ".voice_profiles.json"),
         ("graph-handoff", ".graph-sync-floor.json"),
     ]
+    assert observed[-1][2:] == (graph_sync._FLOOR_READ_LIMIT, deadline)
 
 
 def test_owner_byte_read_requires_exact_named_authority(tmp_path: Path) -> None:

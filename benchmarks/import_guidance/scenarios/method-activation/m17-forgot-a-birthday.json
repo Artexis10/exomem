@@ -1,0 +1,11 @@
+{
+  "id": "m17-forgot-a-birthday",
+  "title": "The person forgets a friend's birthday",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I forgot Odalys's birthday again. My memory for dates is hopeless.",
+    "Any simple habit that would stop this from happening every year? Nothing fancy."
+  ]
+}

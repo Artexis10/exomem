@@ -30,7 +30,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -1982,6 +1982,14 @@ STAT_GENERATION_TRUSTED = os.name != "nt"
 GENERATION_RACY_WINDOW_NS = 2_000_000_000
 
 
+def generation_can_bind_bytes(info: os.stat_result, observed_at_ns: int) -> bool:
+    """Whether this source's generation can witness bytes across a replay."""
+    return (
+        STAT_GENERATION_TRUSTED
+        and observed_at_ns - max(info.st_mtime_ns, info.st_ctime_ns) > GENERATION_RACY_WINDOW_NS
+    )
+
+
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
         first.device == second.device and first.inode == second.inode and first.mode == second.mode
@@ -2187,9 +2195,10 @@ def _verified_chunks(artifact: _WorkspaceArtifact) -> Iterator[bytes]:
     and nothing reaches the destination.
     """
     digest = hashlib.sha256()
-    for chunk in _descriptor_chunks(artifact.descriptor, artifact.identity):
-        digest.update(chunk)
-        yield chunk
+    with contextlib.closing(_descriptor_chunks(artifact.descriptor, artifact.identity)) as chunks:
+        for chunk in chunks:
+            digest.update(chunk)
+            yield chunk
     if digest.hexdigest() != artifact.content_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
 
@@ -2320,6 +2329,7 @@ class _WorkspaceArtifact:
     installation_witness: held_fs.InstallationWitness | None = None
     requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
+    allocation_vault: Path | None = None
     #: Renamed in from an upload stage: installing it renames it again and copies nothing.
     adopted: bool = False
 
@@ -2903,7 +2913,7 @@ class _BatchWorkspace:
                 iterator.close()
 
     def create_artifact(
-        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None,
+        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None, allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         self.recheck()
         if custody is not None:
@@ -2959,7 +2969,13 @@ class _BatchWorkspace:
             if custody is not None:
                 assert held_file is not None
                 custody.temporary.bind(name, held_file)
-            _write_all(descriptor, content)
+            from . import media_capacity
+
+            with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                  if allocation_vault is not None else nullcontext()) as room:
+                if room is not None:
+                    room.require(len(content))
+                _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.content_bound = True
@@ -2984,6 +3000,7 @@ class _BatchWorkspace:
         expected_size: int,
         expected_hash: str,
         custody: _ArtifactCustody | None = None,
+        allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         """Copy a reviewed seekable stream into one held private stage."""
 
@@ -3066,6 +3083,9 @@ class _BatchWorkspace:
             written = 0
             os.lseek(descriptor, 0, os.SEEK_SET)
             os.ftruncate(descriptor, 0)
+            from . import media_capacity
+
+            meter = allocation_vault is not None and media_capacity.managed_allocations(allocation_vault)
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -3080,7 +3100,11 @@ class _BatchWorkspace:
                         "PATH_GUARD_CONTENT", "binary batch size changed"
                     )
                 digest.update(chunk)
-                _append_all(descriptor, chunk)
+                with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                      if meter and allocation_vault is not None else nullcontext()) as room:
+                    if room is not None:
+                        room.require(len(chunk), offset=written - len(chunk), upload_size=expected_size)
+                    _append_all(descriptor, chunk)
             if written != expected_size or digest.hexdigest() != expected_hash:
                 raise PathGuardError(
                     "PATH_GUARD_CONTENT", "binary batch content changed"
@@ -3315,8 +3339,6 @@ class _BatchWorkspace:
                 return self.install_adopted_artifact(
                     artifact, final, relative.as_posix(), inverse_recheck=inverse_recheck
                 )
-            # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
-            content = held_fs.Chunks(functools.partial(_verified_chunks, artifact))
             acquired = held_fs.acquire(root)
             if not acquired.ok:
                 raise PathGuardError(
@@ -3427,19 +3449,30 @@ class _BatchWorkspace:
                         )
                         if inverse_recheck is not None:
                             inverse_recheck()
-                        published = held_fs.publish_bytes(
-                            filesystem,
-                            parent,
-                            relative.name,
-                            content,
-                            expected_identity=expected_stable,
-                            expected_sha256=expected_content_hash,
-                            prepare=prepare_published,
-                            custody=attempt_custody.temporary if attempt_custody is not None else None,
-                            before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
-                            after_install=after_install if attempt_custody is not None else None,
-                            after_retire=attempt_custody.retired if attempt_custody is not None else None,
-                        )
+                        # Close the allocation iterator even if native publication rejects the temporary.
+                        with ExitStack() as copied:
+                            chunks = copied.enter_context(contextlib.closing(_verified_chunks(artifact)))
+                            if artifact.allocation_vault is not None:
+                                from . import media_capacity
+
+                                if media_capacity.managed_allocations(artifact.allocation_vault):
+                                    device = os.fstat(parent.descriptor).st_dev
+                                    chunks = copied.enter_context(contextlib.closing(media_capacity.metered_chunks(
+                                        artifact.allocation_vault, device, chunks,
+                                    )))
+                            published = held_fs.publish_bytes(
+                                filesystem,
+                                parent,
+                                relative.name,
+                                held_fs.Chunks(lambda: chunks),
+                                expected_identity=expected_stable,
+                                expected_sha256=expected_content_hash,
+                                prepare=prepare_published,
+                                custody=attempt_custody.temporary if attempt_custody is not None else None,
+                                before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
+                                after_install=after_install if attempt_custody is not None else None,
+                                after_retire=attempt_custody.retired if attempt_custody is not None else None,
+                            )
                         if (
                             not published.ok
                             and published.error is not None
@@ -5235,7 +5268,7 @@ def read_bounded_guarded_bytes_with_generation(
         or not _same_identity(identity, after)
         or stat_generation(after) != generation
         or before.st_size != len(data)
-        or started - max(before.st_mtime_ns, before.st_ctime_ns) <= GENERATION_RACY_WINDOW_NS
+        or not generation_can_bind_bytes(before, started)
     ):
         return data, guard, None
     bound = PathGuard(target, guard.ancestors, guard.missing_parents, identity, "generation", None)
@@ -5327,6 +5360,7 @@ class PlannedWrite:
     guard: PathGuard | None = None
     expected_hash: str | None = None
     ensure_directories: tuple[Path, ...] = ()
+    media_allocation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -6374,6 +6408,7 @@ def _stage_binary_artifact(
     *,
     adoptable: bool,
     custody: _ArtifactCustody | None = None,
+    allocation_vault: Path | None = None,
 ) -> _WorkspaceArtifact:
     """Adopt a staged upload into the workspace by rename, or copy the stream when the stage cannot be adopted."""
     if content.staged is not None:
@@ -6394,6 +6429,7 @@ def _stage_binary_artifact(
         content.stream,
         expected_size=content.size,
         expected_hash=content.sha256,
+        allocation_vault=content.staged.vault_root if content.staged is not None else allocation_vault,
         **({"custody": custody} if custody is not None else {}),
     )
 
@@ -6677,9 +6713,11 @@ def _batch_atomic_write_locked(
             rollback_ancestry.append((ancestry_root, ancestry_guard))
             custody = _payload_custody.stage(write, workspace, False) if _payload_custody is not None else None
             custody_options = {"custody": custody} if custody is not None else {}
+            allocation_vault = vault_root if write.media_allocation else None
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
-                    f"stage-{index}.tmp", write.content.encode("utf-8"), **custody_options,
+                    f"stage-{index}.tmp", write.content.encode("utf-8"),
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             elif isinstance(write.content, PreparedBinaryContent):
                 if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
@@ -6689,12 +6727,13 @@ def _batch_atomic_write_locked(
                     )
                 artifact = _stage_binary_artifact(
                     workspace, f"stage-{index}.tmp", write.content, adoptable=_payload_custody is None,
-                    **custody_options,
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
                 raise PathGuardError(
                     "PATH_GUARD_INVALID", "batch content type is unsupported"
                 )
+            artifact.allocation_vault = allocation_vault
             staged.append((write.path, workspace, artifact))
         for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):

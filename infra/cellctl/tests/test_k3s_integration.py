@@ -3427,11 +3427,15 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
             if status.get("observedGeneration") != policy["metadata"]["generation"]:
                 return False
             assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)).returncode == 0
-
-    _wait_for(policies_ready, timeout=60, description="local storage admission")
+        # Type-check status can precede enforcement of this render's image repository, which an
+        # earlier test on the shared cluster may have applied differently, so a Job must pass too.
+        return (create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name,
+                                          clone_class=local.clone_class)).returncode == 0
+                and create(prepare).returncode == 0)
 
     prepare = render_prepare_job(spec, node="selected-agent", image=spec.image)
+    _wait_for(policies_ready, timeout=60, description="local storage admission")
+
     result = create(prepare)
     assert result.returncode == 0, result.stderr
     for secret_field in (

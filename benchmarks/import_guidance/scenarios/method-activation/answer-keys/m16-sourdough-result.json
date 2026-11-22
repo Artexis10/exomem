@@ -1,0 +1,13 @@
+{
+  "reference": "Negative twin of the outcome cases: the person reports the result of an experiment and a decision to keep one setting and drop another, but the subject is baking. The technology-signal method does not apply and no signal item belongs anywhere. The recipe-scaling method does not apply either, because nothing is being scaled to a different number of servings. No method in the vault covers the situation. A correct assistant selects no method and may record the result in the existing hydration trials page, which is its natural home: 78 percent gave a more open crumb but the loaves spread flat, so 72 stays for sandwich bread and 78 only for the weekend loaf. That edit is acceptable but is not keyed as required.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/recipe-scaling/SKILL.md",
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [],
+  "destination": null,
+  "trigger_turn": 1
+}

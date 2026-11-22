@@ -1,0 +1,16 @@
+{
+  "reference": "The person reports that the steps for cleaning a bike chain were saved at the bottom of the sourdough trials page instead of on their own page. This is a save to the wrong place, a failure of the assistant's memory. A correct assistant serves the memory-incident method and writes one item for this occurrence first, with where the person found it, what they expected (the chain steps on their own page) and what happened, and diagnoses afterwards. The seeded sourdough page and the chain-cleaning page contain no such mix-up, so the assistant should look before it edits and should not rewrite either page unasked; any repair waits for the person's yes. The item is written in the structured store, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/memory-incident-capture/SKILL.md",
+    "Notes/Experiments/baking/sourdough-hydration-trials.md",
+    "Notes/Procedures/chain-cleaning-and-lube.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "destination": "Records/Assistant/Memory Incidents/_collection.md",
+  "trigger_turn": 0
+}

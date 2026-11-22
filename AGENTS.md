@@ -69,7 +69,11 @@ its non-optional tasks are complete, synchronize its delta into the current
 canonical specs and archive it with `openspec archive` in the same delivery.
 Never archive by moving the directory. Preserve requirements and scenarios added
 by later work when refreshing a stale `MODIFIED` block, and run
-`openspec validate --all --strict` before and after the archive. A task-complete
+the strict gate (`source infra/tool-versions.env` then
+`node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --`,
+which fails only on warnings missing from `openspec/strict-baseline.json`;
+regenerate that baseline only to shrink it or to carry a renamed requirement)
+before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
 ## OpenSpec is the sole specification system

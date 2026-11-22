@@ -1,0 +1,14 @@
+{
+  "reference": "The person says they told the assistant about a dentist appointment on the fourteenth last week and the assistant now claims they never mentioned one. This is a failure of the assistant's memory: something the person says they gave it did not come back. A correct assistant serves the memory-incident method and writes one item for this occurrence first, with the date seen, the person's own words, what they expected (the appointment on the fourteenth) and what came back (no dentist on record). Only afterwards does it diagnose, checking whether the fact was ever saved, where it landed and what a read returned, and adds that to the same item. It does not argue about whether the person said it. It offers to restore the fact only after the item exists and never tells the person to simply say it again. The item is written in the structured store, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "destination": "Records/Assistant/Memory Incidents/_collection.md",
+  "trigger_turn": 1
+}

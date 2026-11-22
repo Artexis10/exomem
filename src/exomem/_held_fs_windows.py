@@ -58,6 +58,7 @@ from .held_fs import (
 FILE_OPEN = 1
 FILE_CREATE = 2
 FILE_OPEN_IF = 3
+OPEN_EXISTING = 3  # Win32 disposition for CreateFileW, separate from NtCreateFile.
 FILE_DIRECTORY_FILE = 0x00000001
 FILE_NON_DIRECTORY_FILE = 0x00000040
 FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
@@ -75,6 +76,7 @@ FILE_ADD_SUBDIRECTORY = 0x00000004
 FILE_READ_DATA = 0x00000001
 FILE_WRITE_DATA = 0x00000002
 FILE_READ_ATTRIBUTES = 0x00000080
+_DIRECTORY_ACCESS = FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES
 FILE_WRITE_ATTRIBUTES = 0x00000100
 GENERIC_WRITE = 0x40000000
 READ_CONTROL = 0x00020000
@@ -187,9 +189,10 @@ if os.name == "nt":  # pragma: no cover - executed by windows-latest
     SetFileInformationByHandle = ctypes.windll.kernel32.SetFileInformationByHandle
     GetFileInformationByHandleEx = ctypes.windll.kernel32.GetFileInformationByHandleEx
     GetFileInformationByHandle = ctypes.windll.kernel32.GetFileInformationByHandle
-    CreateFileW = ctypes.windll.kernel32.CreateFileW
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    CreateFileW = _kernel32.CreateFileW
     CloseHandle = ctypes.windll.kernel32.CloseHandle
-    FlushFileBuffers = ctypes.windll.kernel32.FlushFileBuffers
+    FlushFileBuffers = _kernel32.FlushFileBuffers
 
     NtCreateFile.argtypes = [
         POINTER(c_void_p),
@@ -493,27 +496,37 @@ def _delete_descriptor(descriptor: int) -> None:
         raise OSError(ctypes.get_last_error(), "relative disposition was refused")
 
 
-def _open_root(root: Path) -> int | None:
+def _open_root_directory(root: Path, *, flush_of: StableIdentity | None = None) -> int:
+    """Open the named root and verify its identity before using any new rights."""
     assert CreateFileW is not None
     handle = CreateFileW(
         str(root),
-        FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES,
+        _DIRECTORY_ACCESS | (GENERIC_WRITE if flush_of is not None else 0),
         FILE_SHARE_ALL,
         None,
-        3,
+        OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_OPEN_REPARSE_POINT,
         None,
     )
     if handle in {None, INVALID_HANDLE_VALUE}:
-        return None
+        raise OSError(ctypes.get_last_error(), "held root could not be opened")
     try:
         identity = _identity(int(handle))
         if identity.kind != "directory":
-            raise OSError("root is not a directory")
-        return _fd(int(handle))
-    except OSError:
+            raise OSError(errno.ENOTDIR, "root is not a directory")
+        if flush_of is not None and not _same_object(identity, flush_of):
+            raise OSError(errno.ESTALE, "held root identity changed")
+    except BaseException:
         assert CloseHandle is not None
         CloseHandle(c_void_p(handle))
+        raise
+    return _fd(int(handle))
+
+
+def _open_root(root: Path) -> int | None:
+    try:
+        return _open_root_directory(root)
+    except OSError:
         return None
 
 
@@ -647,7 +660,8 @@ class WindowsHeldFile(HeldFile):
 
 
 class WindowsHeldFilesystem(HeldFilesystem):
-    def __init__(self, descriptor: int, capabilities: Capabilities) -> None:
+    def __init__(self, root: Path, descriptor: int, capabilities: Capabilities) -> None:
+        self._root = root
         self.descriptor = descriptor
         self.capabilities = capabilities
         self.root_identity = _identity(_native(descriptor))
@@ -694,23 +708,22 @@ class WindowsHeldFilesystem(HeldFilesystem):
             return HeldResult(error=_invalid())
         if self.closed:
             return HeldResult(error=HeldFsError("IO_REFUSED", "held root is closed"))
-        if not parts and access != "read":
+        if not parts and access == "mutate":
             return HeldResult(
                 error=HeldFsError(
-                    "INVALID_INPUT", "elevated root directory access is unsupported"
+                    "INVALID_INPUT", "held root directory mutation is unsupported"
                 )
             )
         descriptor: int | None = None
         parent_descriptor: int | None = None
         try:
-            descriptor = os.dup(self.descriptor)
+            if not parts and access == "flush":
+                # Compare the new handle to the retained one before any mutation.
+                descriptor = _open_root_directory(self._root, flush_of=self.root_identity)
+            else:
+                descriptor = os.dup(self.descriptor)
             for index, part in enumerate(parts):
-                desired = (
-                    FILE_LIST_DIRECTORY
-                    | FILE_ADD_FILE
-                    | FILE_ADD_SUBDIRECTORY
-                    | FILE_READ_ATTRIBUTES
-                )
+                desired = _DIRECTORY_ACCESS
                 if index == len(parts) - 1 and access in {"flush", "mutate"}:
                     desired |= GENERIC_WRITE
                 if index == len(parts) - 1 and access == "mutate":
@@ -1257,12 +1270,13 @@ def _probe(root: Path) -> Capabilities:
         )
     ):
         return Capabilities.disabled("native Windows handle primitives are unavailable")
+    root = root.absolute()
     descriptor = _open_root(root)
     if descriptor is None:
         return Capabilities.disabled("root cannot be opened with stable identity")
 
-    provisional = Capabilities(True, True, True, True, True)
-    filesystem = WindowsHeldFilesystem(descriptor, provisional)
+    provisional = Capabilities(True, True, True, True, True, True)
+    filesystem = WindowsHeldFilesystem(root, descriptor, provisional)
     token = secrets.token_hex(16)
     source_name = f"{PROBE_ENTRY_PREFIX}{token}"
     renamed_name = f"{source_name}-renamed"
@@ -1337,7 +1351,7 @@ def _probe(root: Path) -> Capabilities:
             with filesystem.file(parent, replacement_target_name).require() as installed:
                 if filesystem.read(installed).value != b"replacement":
                     return Capabilities.disabled("relative replacement identity is unavailable")
-        return Capabilities(True, True, True, True, hard_link)
+        return Capabilities(True, True, True, True, hard_link, True)
     except (HeldFsError, OSError):
         return Capabilities.disabled("actual-filesystem capability probe failed")
     finally:
@@ -1377,6 +1391,7 @@ def probe(root: Path) -> Capabilities:
 def acquire(
     root: Path, *, capability: Capabilities | None = None
 ) -> HeldResult[HeldFilesystem]:
+    root = root.absolute()
     capability = capability or probe(root)
     if not capability.relative_operations:
         return HeldResult(
@@ -1387,4 +1402,4 @@ def acquire(
     descriptor = _open_root(root)
     if descriptor is None:
         return HeldResult(error=HeldFsError("IO_REFUSED", "root anchor could not be acquired"))
-    return HeldResult(value=WindowsHeldFilesystem(descriptor, capability))
+    return HeldResult(value=WindowsHeldFilesystem(root, descriptor, capability))

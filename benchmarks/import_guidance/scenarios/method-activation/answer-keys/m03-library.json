@@ -1,0 +1,16 @@
+{
+  "reference": "The person describes a concrete library for a named project with a stated use: a SIMD CSV parser against the slow forty-second import of Pebble Ledger. They are unsure whether parsing is even the bottleneck, which is a reason, not a go decision. A correct assistant serves the technology-signal method and records one item for this library and project as observed or assessed, keeping their doubt about the bottleneck in the rationale and the marginal value as uncertain. No test is approved, no Planning item is created and no state beyond assessed is claimed. The import edge-case notes and the schema notes do not change. It does not treat this as a dependency upgrade, because the crate is not in use yet. The method also fits the earlier turns of the conversation, because the same technology idea is under discussion; the keyed turn is the one that defines the stage this case tests. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Notes/Research/pebble-ledger/csv-import-edge-cases.md",
+    "Entities/Libraries/serde.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 0
+}

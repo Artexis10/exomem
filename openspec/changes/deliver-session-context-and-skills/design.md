@@ -87,3 +87,38 @@ Working-set mode keeps its turn packet. Turn leads stay pull-based until a lane 
 - Push the full turn packet on every prompt (working-set mode everywhere): about 1.5 s median per prompt for a 3-in-23 delivery rate.
 - Keep "once": agents stop recalling after the first turn, so later subjects never reach memory.
 - Push `search_memory` hits for the raw turn: cheaper, but conversational turns rank recorded transcripts above notes.
+
+## Method activation from ordinary turns
+
+### What the installed service showed
+
+On 2026-11-22 the installed service answered an ordinary technology turn in 22.4 s. The method-unit lane took 10.9 s and found nothing, and the conversation carry took 5.9 s. On a first turn of the same day the budget ran out before the method lane started. Skill pages reach `task_context` only when the general text or dense lanes happen to rank them among a 1,500-page vault, so a real vault rarely projects a skill. Task 4.1 passed on a three-page fixture, where any lane finds the skill. The served method item carried a description and a pointer, and `served_context_evidence` is a constant `unknown`.
+
+### Decision: a bounded judgment selects methods from their authored descriptions
+
+The first design kept skill pages whose chunks cleared the dense chance band. It was measured before it shipped, on the no-magic-word fixtures (18 cases on a 73-page seeded vault with 10 skills, keys written by a lane that never saw the implementation). Topical similarity does not recognise a situation: for the 14 cases that need a method, the keyed skill was the closest skill by its body in 4, and the closest by its description in 4. A turn is about a database or a dentist; a skill describes what to do when the user approves a trial or reports a failure.
+
+A bounded model reading the authored descriptions does recognise it. At one draw on the same 18 cases, Claude Haiku given the product's template and schema outside the product chose exactly the keyed methods in 17 (one false selection on a negative). Through the product itself (`method_check`), a local `qwen3:14b` placement chose exactly in 11 (about 5 s a call) and a local `qwen2.5:7b` in 10 with 8 false selections. No placement served a method in none of the 14 cases that need one. These are development figures: there is no held-out set yet, and the context-interpretation contract asks for held-out evidence before a deployment enables a placement. Selection therefore runs on the context-interpretation boundary that `recognize-situations-and-project-methods` added for optional judgments: a schema-forced answer whose items are the supplied labels, a deadline inside the request budget, no authority, and nothing selected on any failure. It has its own deployment switch, `EXOMEM_METHOD_FIT_CONFIG`, so turning it on does not also turn on lead ordering, whose effect is unmeasured.
+
+The candidates are the visible skill pages and the Records collection manifests, each described by its author: a skill's `description`, a manifest's body. A real vault keeps methods in both. A collection's contract (what one item is, which states need evidence) is a method for writing into it, and the capture owner serves no collection contract per turn.
+
+Rejected:
+
+- The dense chance band on skill bodies or descriptions: measured above.
+- A threshold or word list on skill text: a constant belongs to one encoder and vault, and matching words to decide meaning is the pattern registry C6 rejects.
+- Leaving selection to the active agent from the catalogue: the existing behaviour, and the dogfood record shows agents act from generic guidance instead.
+
+### Decision: carry the contract
+
+A selected skill carries its released body, cut at a line boundary to the vault's `method_contract_max_chars`. Agent Skills load the body when the task matches; carrying it in the packet does that load for every client, including MCP-only clients with no skill support. A cut body keeps its `read_ref`, so the agent loads the rest in one read. The contract counts against the turn allowance and is cut further before its method is dropped.
+
+### Decision: use evidence at readout, from existing logs
+
+The service already logs reads and writes locally (`reads.jsonl`, `writes.jsonl`) and keeps one served-context row per activation. The readout indexes each log by path once and looks each serving up by time, so it costs one pass over the logs, not one per serving. The owner readout joins them: a later read of the method page is `opened`; a later successful write to a page the method links to, or to an item of a collection it links to, is `followed`. Records item writes were not logged before; they now log under their manifest path. Disabled or rotated logs read `unknown`. Activation does no extra work. The logs are per host and not tied to one conversation, so the readout says so. An agent-declared receipt on every write tool was rejected for this round: it widens seven tool schemas for a self-report the logs can observe.
+
+### Proof
+
+- Packet level, model-free: the no-magic-word fixtures run the real compiler with the real encoder on a seeded vault, and score which methods each turn served against keys written from the operator's intent.
+- Agent level, real models: the same cases run through the session-close bench, scoring whether the agent followed the contract and wrote to the keyed destination.
+- Installed: an ordinary turn on the installed service serves the matching vault skill with its contract, and the owner readout shows its use evidence.
+- Decision model: the method-fit judgment on the same cases with a local placement and an API placement; the per-case exact-match difference against no judgment, with its interval, decides which placement to recommend.

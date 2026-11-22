@@ -9026,7 +9026,11 @@ def recall_resolver_snapshot(
     with _RESOLVER_LOCK:
         generation = _RECALL_RESOLVER_GENERATIONS.setdefault(root, 0)
         cached = _RECALL_RESOLVER_CACHE.get(root)
-        if cached and cached[0] == identity:
+        if (
+            cached and cached[0] == identity and (
+                checkpoint is None or _RECALL_RESOLVER_CHECKPOINTS.get(root) == checkpoint
+            )
+        ):
             # Fixed route counters describe copy attempts; paths sum across copies.
             with call_spans.span(
                 "resolver.fork", {"cache_hits": 1, "paths": len(cached[1].full_paths)}
@@ -9072,7 +9076,11 @@ def recall_resolver_snapshot(
             break
         with _RESOLVER_LOCK:
             cached = _RECALL_RESOLVER_CACHE.get(root)
-            if cached and cached[0] == identity:
+            if (
+                cached and cached[0] == identity and (
+                    checkpoint is None or _RECALL_RESOLVER_CHECKPOINTS.get(root) == checkpoint
+                )
+            ):
                 with call_spans.span(
                     "resolver.fork", {"follower_returns": 1, "paths": len(cached[1].full_paths)}
                 ):
@@ -9130,6 +9138,24 @@ def recall_resolver_snapshot(
             if done is not None:
                 done.set()
     return forked
+
+
+def publish_proved_recall_resolver(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+    resolver: WikilinkResolver,
+) -> None:
+    """Install prepared path/title entries at the exact event checkpoint."""
+    root = Path(vault_root)
+    with _RESOLVER_LOCK:
+        if freshness.recall_generation(root, "vault") != checkpoint.generation:
+            return
+        _RECALL_RESOLVER_GENERATIONS[root] = _RECALL_RESOLVER_GENERATIONS.get(root, 0) + 1
+        resolver.publication = object()
+        _RECALL_RESOLVER_CACHE[root] = (
+            _recall_checkpoint_identity(checkpoint), resolver, resolver.publication,
+        )
+        _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
 
 
 def recall_resolver_snapshot_at_checkpoint(

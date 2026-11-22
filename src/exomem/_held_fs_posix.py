@@ -128,25 +128,34 @@ _LIBC.syscall.argtypes = None
 _LIBC.syscall.restype = c_long
 
 _RENAME_NOREPLACE = 1
+_NOREPLACE_UNAVAILABLE = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP})
 _RENAMEAT2 = getattr(_LIBC, "renameat2", None)
 if _RENAMEAT2 is not None:
     _RENAMEAT2.argtypes = [c_int, c_char_p, c_int, c_char_p, c_uint]
     _RENAMEAT2.restype = c_int
 
 
+class _NoReplaceUnavailable(OSError):
+    """The no-replace rename syscall itself refused an unsupported primitive."""
+
+
 def _rename_noreplace(
     source: str, destination: str, *, src_dir_fd: int, dst_dir_fd: int
 ) -> None:
     # An absence check cannot prevent a destination arriving before rename.
-    # Unsupported kernels/filesystems are refused by the existing probe.
     if _RENAMEAT2 is None:
-        raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable")
+        raise _NoReplaceUnavailable(errno.ENOSYS, "atomic no-replace rename is unavailable")
     result = _RENAMEAT2(
         src_dir_fd, os.fsencode(source), dst_dir_fd, os.fsencode(destination), _RENAME_NOREPLACE
     )
     if result < 0:
         error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error))
+        failure = _NoReplaceUnavailable if error in _NOREPLACE_UNAVAILABLE else OSError
+        raise failure(error, os.strerror(error))
+
+
+def _no_replace_refusal(cause: OSError | None = None) -> HeldFsError:
+    return HeldFsError("CAPABILITY_UNAVAILABLE", "atomic no-replace rename is unavailable", cause=cause)
 
 
 def _identity(info: os.stat_result) -> StableIdentity:
@@ -164,6 +173,8 @@ def _same_object(left: StableIdentity, right: StableIdentity) -> bool:
 
 
 def _error(error: OSError) -> HeldFsError:
+    if isinstance(error, _NoReplaceUnavailable):
+        return _no_replace_refusal(error)
     if isinstance(error, _NameVariantError):
         return HeldFsError(
             "PATH_VARIANT_EXISTS",
@@ -611,6 +622,8 @@ class PosixHeldFilesystem(HeldFilesystem):
         replace: bool = False,
         retiring: RetiringFile | None = None,
     ) -> HeldResult[NameRetirementReceipt | None]:
+        if not replace and not self.capabilities.no_replace_rename:
+            return HeldResult(error=_no_replace_refusal())
         try:
             checked = self._check_file(source)
             destination = self._destination(
@@ -641,6 +654,8 @@ class PosixHeldFilesystem(HeldFilesystem):
         destination_parent: HeldDirectory,
         destination_leaf: str,
     ) -> HeldResult[None]:
+        if not self.capabilities.no_replace_rename:
+            return HeldResult(error=_no_replace_refusal())
         try:
             checked = self._check_directory(source)
             if (
@@ -752,6 +767,8 @@ class PosixHeldFilesystem(HeldFilesystem):
             destination_parent.check()
             if destination_parent.filesystem.closed:
                 raise OSError(errno.ESTALE, "destination root is unavailable")
+            if not destination_parent.filesystem.capabilities.no_replace_rename:
+                return HeldResult(error=_no_replace_refusal())
             destination = destination_parent
             try:
                 _stat(
@@ -912,7 +929,7 @@ def _probe(root: Path) -> Capabilities:
     except OSError:
         return Capabilities.disabled("root cannot be opened as a no-follow directory")
 
-    provisional = Capabilities(True, True, True, True, True)
+    provisional = Capabilities(True, True, True, True, True, True)
     filesystem = PosixHeldFilesystem(descriptor, provisional)
     token = secrets.token_hex(16)
     source_name = f"{PROBE_ENTRY_PREFIX}{token}"
@@ -921,6 +938,7 @@ def _probe(root: Path) -> Capabilities:
     alias_name = f"{source_name}-alias"
     directory_name = f"{source_name}-directory"
     directory_alias_name = f"{directory_name}-alias"
+    cleanup_failed = False
     try:
         with filesystem.parent(".").require() as parent:
             with filesystem.file(
@@ -949,12 +967,13 @@ def _probe(root: Path) -> Capabilities:
             with filesystem.file(parent, source_name, access="mutate").require() as source:
                 hard_link = filesystem.link(source, parent, linked_name).ok
                 renamed = filesystem.rename(source, parent, renamed_name)
-                if not renamed.ok:
+                if renamed.error is not None and renamed.error.code != "CAPABILITY_UNAVAILABLE":
                     return Capabilities.disabled("same-device relative rename is unavailable")
-            with filesystem.file(parent, renamed_name, access="mutate").require() as renamed:
-                if not filesystem.unlink(renamed).ok:
+            unlink_name = renamed_name if renamed.ok else source_name
+            with filesystem.file(parent, unlink_name, access="mutate").require() as held:
+                if not filesystem.unlink(held).ok:
                     return Capabilities.disabled("relative unlink is unavailable")
-        return Capabilities(True, True, True, True, hard_link)
+        capability = Capabilities(True, True, True, renamed.ok, hard_link, renamed.ok)
     except (HeldFsError, OSError):
         return Capabilities.disabled("actual-filesystem capability probe failed")
     finally:
@@ -969,14 +988,25 @@ def _probe(root: Path) -> Capabilities:
             ):
                 try:
                     _unlink(name, dir_fd=root_descriptor)
-                except OSError:
+                except FileNotFoundError:
                     pass
+                except OSError:
+                    cleanup_failed = True
             try:
                 _rmdir(directory_name, dir_fd=root_descriptor)
-            except OSError:
+            except FileNotFoundError:
                 pass
+            except OSError:
+                cleanup_failed = True
+            try:
+                _fsync(root_descriptor)
+            except OSError:
+                cleanup_failed = True
         finally:
             filesystem.close()
+    if cleanup_failed:
+        return Capabilities.disabled("temporary entries could not be removed or their directory flushed")
+    return capability
 
 
 def probe(root: Path) -> Capabilities:
