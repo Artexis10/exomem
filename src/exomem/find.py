@@ -8737,7 +8737,7 @@ def _schedule_recall_resolver_rebuild(root: Path) -> None:
     )
 
 
-def _schedule_query_resolver_rebuild(root: Path) -> None:
+def _schedule_query_resolver_rebuild(root: Path, *, require_checkpoint: bool = False) -> None:
     """Start at most one background broad-resolver build per vault.
 
     The owner that restores the resolver a server's context pack borrowed and
@@ -8747,7 +8747,7 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     _schedule_resolver_warm(
         root,
         _QUERY_RESOLVER_REBUILDS,
-        _get_query_resolver,
+        lambda root: _get_query_resolver(root, require_checkpoint=require_checkpoint),
         "exomem-query-resolver-warm",
     )
 
@@ -8842,7 +8842,9 @@ def _evict_resolver(root: Path) -> None:
     _RESOLVER_CHECKPOINTS.pop(root, None)
 
 
-def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
+def _get_query_resolver(
+    vault_root: Path, freshness: tuple | None = None, *, require_checkpoint: bool = False,
+):
     """Per-process WikilinkResolver cache, invalidated when the vault changes.
 
     Freshness is the digest-strength `_walk_freshness_key` triple — the old
@@ -8873,12 +8875,17 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         if checkpoint.triple != freshness:
             checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
-        if cached and cached[0] == freshness:
+        if not require_checkpoint and cached and cached[0] == freshness:
             return cached[1]
         with _RESOLVER_LOCK:
             cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == freshness:
+            if require_checkpoint and checkpoint is None:
+                return None
+            if (cached and cached[0] == freshness
+                    and (not require_checkpoint or _RESOLVER_CHECKPOINTS.get(root) == checkpoint)):
                 return cached[1]
+            # A matching disk digest alone cannot certify when the resolver was built.
+            # Rebuild against the observed checkpoint instead of stamping old entries.
             resolver = WikilinkResolver(root)
             _RESOLVER_CACHE[root] = (freshness, resolver)
             if checkpoint is not None:
@@ -8953,7 +8960,7 @@ def borrow_preview_resolver(vault_root: Path):
             return cached[1]
     finally:
         _RESOLVER_LOCK.release()
-    _schedule_query_resolver_rebuild(root)
+    _schedule_query_resolver_rebuild(root, require_checkpoint=True)
     return None
 
 

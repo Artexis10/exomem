@@ -190,7 +190,7 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
 
 
 @pytest.mark.parametrize("fault", [
-    "release", "render", "cold-resolver", "removed-link", "changed-source", "catalogue-link",
+    "release", "render", "cold-resolver", "uncertified-resolver", "removed-link", "changed-source", "catalogue-link",
     "catalogue-candidates", "catalogue-unavailable", "catalogue-unsupported", "inbound-freshness-lock",
 ])
 def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, source_schema, monkeypatch, fault):
@@ -214,8 +214,9 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
     monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     source = _capture(vault, source_schema, title="Field measurements").path
+    resolver_fault = fault in ("cold-resolver", "uncertified-resolver")
     referrer = (
-        f"{KB}/Evidence/field-log.md" if fault in ("cold-resolver", "catalogue-link")
+        f"{KB}/Evidence/field-log.md" if resolver_fault or fault == "catalogue-link"
         else f"{KB}/Notes/field-log.md"
     )
     (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +309,9 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
         async with Client(mcp, timeout=5) as client:
             if fault == "cold-resolver":
                 find._RESOLVER_CACHE.pop(vault, None)
+            elif fault == "uncertified-resolver":
+                find.shared_resolver(vault)
+                find._RESOLVER_CHECKPOINTS.pop(vault, None)
             call = public_call("manage_memory_file", {
                 "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
             })
@@ -321,7 +325,7 @@ def test_served_preview_retries_when_its_planning_or_release_proof_fails(vault, 
             assert "references" not in retry and "preview_digest" not in retry
             if fault == "render":
                 assert retry["error"]["retry"]["tool"] == "inspect_memory"
-            if fault == "cold-resolver":
+            if resolver_fault:
                 assert await asyncio.to_thread(find.await_recall_resolver_warm)
                 preview = await _call(client, *call)
                 assert preview["referrers"]["pointer_repointed"] == [referrer]
