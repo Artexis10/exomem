@@ -13,6 +13,8 @@
 - [x] 2.3 A leaf refused by a busy vault reports a retryable, uncommitted `MUTATION_BUSY`, and the next resume commits the step once.
 - [x] 2.4 A link rewrite, which takes no guard of its own, commits under the boundary.
 - [x] 2.5 The existing crash-seam tests pass unchanged.
+- [x] 2.6 A move with a `fields` patch refuses with `SOURCE_CHANGED` when another writer changed the source after the seal, and that writer's change survives.
+- [x] 2.7 A save to a step's page after its leaf commit leaves the step committed, and the undo proposal reports it as stale.
 
 ## 3. Closure
 

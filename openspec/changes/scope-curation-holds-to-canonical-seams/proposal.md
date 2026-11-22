@@ -23,6 +23,6 @@ Most of a step does not need the boundary. Its leaf already takes the boundary f
 ## Impact
 
 - Code: `curation.py`, `writer_lease.py`.
-- Behaviour: other writers commit between a curation step's seams. A page changed during a step's unlocked preflight makes the leaf refuse with its own stale-binding code, recorded as a failed attempt, where the wide hold made the writer wait instead.
+- Behaviour: other writers commit between a curation step's seams. A page changed during a step's unlocked preflight makes the leaf refuse with its own stale-binding code, recorded as a failed attempt, where the wide hold made the writer wait instead. A page changed after a self-guarded step's leaf commit leaves the step committed, and its undo reports the step as stale.
 - Errors: a second call on a run in flight gets `CURATION_RUN_BUSY` with `status: retryable` and `committed: false`. A busy vault at a self-guarded leaf's commit reaches the caller as a retryable `MUTATION_BUSY`; the next resume runs the step again.
 - Undo: set `EXOMEM_WIDE_MUTATION_BOUNDARY=1`, or revert the change. No stored format changes.

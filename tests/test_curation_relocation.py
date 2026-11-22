@@ -7,6 +7,7 @@ in file mode. Each test names the failure it catches.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -511,3 +512,35 @@ def test_a_link_rewrite_commits_under_the_vault_boundary(vault: Path, monkeypatc
 
     assert _run(vault, proposed)["phase"] == "completed"
     assert held_in_batch == {"move": True, "repoint-links": True}
+
+
+def test_a_move_with_a_fields_patch_keeps_another_writers_change_to_that_field(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A move's fields patch sets its field whatever the page holds. When another writer changed only
+    that field after the seal, the moved bytes still matched the seal and the other write was lost."""
+    _with_identity(vault, NOTES[0])
+    page = vault / NOTES[0]
+    page.write_text(
+        page.read_text(encoding="utf-8").replace("---\n", "---\nproject: project-gamma\n", 1), encoding="utf-8"
+    )
+    proposed = _propose(vault, _move_step(NOTES[0], project="project-alpha"))
+    real_dispatch = curation._dispatch_step
+
+    def another_writer_sets_the_field_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        def write() -> None:
+            with writer_lease.active_manager().mutation_guard(vault, operation="project_write"):
+                text = page.read_text(encoding="utf-8")
+                page.write_text(text.replace("project: project-gamma", "project: project-beta"), encoding="utf-8")
+
+        writer = threading.Thread(target=write, name="project-writer")
+        writer.start()
+        writer.join(timeout=30.0)
+        return real_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_writer_sets_the_field_first)
+
+    with pytest.raises(curation.CurationError, match="SOURCE_CHANGED"):
+        _run(vault, proposed)
+    assert "project: project-beta" in page.read_text(encoding="utf-8")
+    assert not (vault / _moved(NOTES[0])).exists()

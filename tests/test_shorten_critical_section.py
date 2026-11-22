@@ -1191,3 +1191,41 @@ def test_a_leaf_refused_by_a_busy_vault_commits_on_the_next_resume(
 
     assert _resume(manager, vault, proposed, call="next")["phase"] == "completed"
     assert _second_step_record(vault, proposed["run_id"]) == (["failed", "committed"], 2)
+
+
+def test_a_save_to_the_page_after_a_curation_leaf_commits_leaves_the_step_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save to the same page between a step's leaf commit and its receipt made the step's live
+    check fail: every resume then blocked as uncertain, and the undo left the step out."""
+    rel = "Knowledge Base/Notes/Insights/settle-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c1")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+
+    def another_writer_saves_the_page_after_the_leaf(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        result = real_dispatch(*args, **kwargs)
+        current = content_hash((vault / rel).read_text(encoding="utf-8"))
+        saver, saved = _in_thread(
+            "same-page-save",
+            lambda: _invoke_edit_memory(
+                vault, manager, path=rel, why="A later save.", new_body="Saved later.", expected_hash=current
+            ),
+        )
+        saver.join(timeout=60.0)
+        assert "error" not in saved, saved.get("error")
+        return result
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_writer_saves_the_page_after_the_leaf)
+
+    applied = _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert applied["phase"] == "completed"
+    assert "Saved later." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    assert [receipt["outcome"] for receipt in receipts] == ["committed"]
+    # The undo accounts for the step: the later save makes its inverse stale, not absent.
+    with pytest.raises(curation.CurationError) as undo:
+        curation.propose_compensation(vault, run_id=proposed["run_id"])
+    assert undo.value.code == "CURATION_BINDING_STALE"

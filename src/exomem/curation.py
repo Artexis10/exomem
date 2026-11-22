@@ -158,10 +158,11 @@ RECOVERY_PUBLICATION_NOT_STARTED: Final[str] = "publication_not_started"
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
 #: The step kinds whose leaf holds the vault mutation boundary itself and, under it, rechecks the
-#: binding that the seal recorded, so `_execute_next` runs their leaf outside every hold of its own.
-#: A pointer `edit` and any episode-bound step still run whole under curation's hold.
-# nosemgrep: ep-word-set -- a closed protocol set over the step kinds this module implements; a kind
-# joins only when its leaf's code takes its own guard and rechecks the sealed binding under it.
+#: sealed pre-step state of what it writes (a hash, or a new page's absence), so `_execute_next` runs
+#: their leaf outside every hold of its own. A move and its inverse recheck the source's sealed hash
+#: in `_dispatch_step`'s before-rename stage. A pointer `edit` and any episode-bound step still run
+#: whole under curation's hold.
+# nosemgrep: ep-word-set -- closed protocol set over this module's kinds; each member's leaf does that recheck.
 SELF_GUARDED_STEP_KINDS: Final[frozenset[str]] = frozenset(
     {"create-note", "edit", OBSERVE_UNIT_STEP_KIND, *COLLECTION_STEP_KINDS, "move", UNMOVE_STEP_KIND}
 )
@@ -407,13 +408,17 @@ _RUN_BUSY_RETRY_AFTER_MS: Final[int] = 1000
 
 
 class CurationRunBusy(CurationError):
-    """Another call in this process is executing the same run. Nothing was written."""
+    """Another call is executing the same run, or settled this call's step first.
+
+    Before the leaf this call wrote nothing. At the settle its leaf may have committed: the
+    receipt that the other call recorded accounts for the step.
+    """
 
     def as_public_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "message": self.reason,
-            "remediation": "Retry after the other call finishes this run's step; this call wrote nothing.",
+            "remediation": "Retry after the other call finishes this run's step; the retry continues from the run's receipts.",
             "ok": False,
             "error_code": self.code,
             "status": "retryable",
@@ -3647,13 +3652,15 @@ def _verify_live_postcondition(
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
     accepted: Mapping[str, frozenset[str]] | None = None,
-    drift: str = "CURATION_OUTCOME_UNCERTAIN",
+    drift: str | None = "CURATION_OUTCOME_UNCERTAIN",
 ) -> None:
     """Refuse unless each page the witness names holds its sealed postcondition.
 
     `drift` is the code for a readable page that differs. A step's own recovery cannot tell
     whose bytes those are, so it reports uncertain. Compensation reads a witness that matched
     when its step committed, so a difference there is later work and it passes the stale code.
+    None accepts the difference as later work (`_witness_drift`); an unsafe or unreadable path
+    and a Records receipt that does not corroborate still refuse.
     """
     if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
         from dataclasses import replace
@@ -3701,7 +3708,7 @@ def _verify_live_postcondition(
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target path is unsafe"
                 ) from error
-            if not absent:
+            if not absent and drift is not None:
                 raise _error(drift, f"{relative!r} exists where the step left it absent")
             continue
         expected = item.get("content_hash")
@@ -3710,12 +3717,14 @@ def _verify_live_postcondition(
                 actual = _guarded_digest(vault_root, relative, stale=True)
             except CurationError as error:
                 if error.code == "CURATION_BINDING_STALE":
+                    if drift is None:
+                        continue
                     raise _error(drift, f"{relative!r} is gone from where the step left it") from error
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target is unreadable"
                 ) from error
             # A page that a later step of the same plan rewrote again holds one of its chained hashes.
-            if actual != expected and actual not in (accepted or {}).get(relative, ()):
+            if drift is not None and actual != expected and actual not in (accepted or {}).get(relative, ()):
                 raise _error(drift, f"{relative!r} changed after the step wrote it")
 
 
@@ -3931,6 +3940,12 @@ def _dispatch_step(
 
         def stage(name: str) -> None:
             if name == "before-rename":
+                # The sealed source, rechecked under the move's own guard: a `fields` patch sets its
+                # field whatever the page holds, so the moved bytes alone cannot show another write.
+                if _guarded_digest(vault_root, str(binding["path"]), stale=True) != binding["before_hash"]:
+                    raise move_module.MoveFileError(
+                        code="SOURCE_CHANGED", reason="the page changed since its move was sealed"
+                    )
                 _fault_barrier("move-before-intent")
                 if before_rename is not None:
                     before_rename()
@@ -4417,7 +4432,12 @@ def _validated_operation_witness(
     )
     if live:
         _verify_live_postcondition(
-            store.vault_root, witness, step=step, binding=binding, accepted=_chained_states(step, binding)
+            store.vault_root,
+            witness,
+            step=step,
+            binding=binding,
+            accepted=_chained_states(step, binding),
+            drift=_witness_drift(step, binding),
         )
     return witness
 
@@ -4719,6 +4739,16 @@ def _guards_itself(step: Mapping[str, Any], binding: Mapping[str, Any]) -> bool:
     )
 
 
+def _witness_drift(step: Mapping[str, Any], binding: Mapping[str, Any]) -> str | None:
+    """The live check's code for a page that no longer holds what this step's witness names.
+
+    A self-guarded leaf releases the boundary once its batch commits the witness, so another
+    writer may change the page before the receipt. The witness proves the commit, and the change
+    is later work that compensation reports as stale. Any other step runs whole under one hold.
+    """
+    return None if _guards_itself(step, binding) else "CURATION_OUTCOME_UNCERTAIN"
+
+
 def _execute_next(
     vault_root: Path,
     run_identity: str,
@@ -4924,9 +4954,10 @@ def _execute_step(
             return
         try:
             seam.enter_context(_step_boundary(root, "curation_step_settle"))
-            # The run claim is per process. A receipt that another process recorded while this
-            # leaf ran means it settled the step: its create-only witness kept this leaf's batch out.
-            if store.reconstruct(run_identity).get("receipts") != reconstructed.get("receipts"):
+            # The run claim is per process. A receipt that another process recorded while this leaf
+            # ran means it settled the step: its own witness kept this leaf's batch out, or it
+            # recovered this leaf's witness.
+            if store._receipt_records(run_identity) != reconstructed.get("receipts"):
                 raise CurationRunBusy("CURATION_RUN_BUSY", "another call settled this step first")
         except BaseException as refusal:
             settle_refusal = refusal
@@ -4996,6 +5027,7 @@ def _execute_step(
             step=step,
             binding=execution_binding,
             accepted=_chained_states(step, execution_binding),
+            drift=_witness_drift(step, execution_binding),
         )
     except DefiniteNoEffect as error:
         if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
