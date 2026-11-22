@@ -2092,25 +2092,35 @@ def unregister_state_resolver(operation: str) -> None:
     _STATE_RESOLVERS.pop(operation, None)
 
 
-def event_records(vault_root: Path) -> list[dict[str, Any]]:
+def event_records(
+    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+) -> list[dict[str, Any]]:
     """Return verified content-free records without mutating chain or sidecar."""
     root = _events_root(Path(vault_root))
     if not root.exists():
         return []
     records: list[dict[str, Any]] = []
-    for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+    candidates = []
+    for path in root.iterdir():
+        if checkpoint is not None:
+            checkpoint()
+        if path.is_dir():
+            candidates.append(path)
+    for candidate in sorted(candidates):
+        if checkpoint is not None:
+            checkpoint()
         instance_dir = _instance_dir(vault_root, candidate.name)
-        instance_records, issues = _chain_state(instance_dir)
+        instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
         if issues:
             raise ReceiptError("receipt chain requires reconciliation")
-        records.extend(
-            {
+        for record in instance_records:
+            if checkpoint is not None:
+                checkpoint()
+            records.append({
                 key: value
                 for key, value in record.items()
                 if key not in {"_path", "_offset"}
-            }
-            for record in instance_records
-        )
+            })
     return sorted(records, key=lambda item: (str(item.get("instance_id")), int(item.get("seq", 0))))
 
 

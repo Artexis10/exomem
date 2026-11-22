@@ -18,12 +18,11 @@ from . import (
     freshness,
     maintenance_jobs,
     query_data,
-    recall_policy,
     reclassify_source,
     request_budget,
 )
 from .cli_ops import OpError
-from .governance import connector_boundary, egress, lifecycle, policy
+from .governance import connector_boundary
 from .governance.principal import (
     RequestPrincipal,
     effective_principal,
@@ -64,10 +63,10 @@ def _stale_report() -> OpError:
 class RetainedReport(dict):
     """Refuse a whole receipt page if the terminal filter changes any reviewed value."""
 
-    def __init__(self, result: Mapping[str, Any]) -> None:
+    def __init__(self, result: Mapping[str, Any], source: str) -> None:
         super().__init__(result)
         self._proof = _digest(result)
-        self.exact_paths = frozenset(entry["path"] for entry in result.get("entries", ()))
+        self.exact_paths = frozenset({source, *(entry["path"] for entry in result.get("entries", ()))})
 
     def require_complete_projection(self, result: Any) -> None:
         if _digest(result) != self._proof:
@@ -78,23 +77,18 @@ class RetainedReport(dict):
 class _Authority:
     key: str
     depends_on_membership: bool
+    complete: bool
 
 
 def _authority_binding(root: Path, who: RequestPrincipal) -> _Authority:
     if reclassify_source.managed_preview_stop(root, who) is None:
         raise _not_found()
-    compiled = policy.load(root)
-    if compiled.blocked or compiled.conflicted:
-        raise _not_found()
-    tombstones = lifecycle.tombstoned_paths(root)
-    request_budget.checkpoint()
-    if lifecycle.FAIL_CLOSED_TOMBSTONE in tombstones:
-        raise _not_found()
+    admission = reclassify_source.preview_release_authority(root, who)
     key = _digest((
-        compiled.fingerprint, recall_policy.recall_policy_identity(root),
-        connector_boundary.cache_identity(root, who)[-1], asdict(who), sorted(tombstones),
+        admission.policy_fingerprint, admission.access_fingerprint, admission.session_stamp,
+        connector_boundary.cache_identity(root, who)[-1], asdict(who), admission.erasure.fingerprint,
     ))
-    return _Authority(key, bool(compiled.scopes) or not egress._access_config_absent(root))
+    return _Authority(key, admission.depends_on_membership, admission.complete)
 
 
 def _snapshot_key(root: Path) -> str | None:
@@ -213,6 +207,8 @@ def report(
         raise _not_found()
     who = effective_principal()
     authority = _authority_binding(root, who)
+    if not authority.complete:
+        raise _not_found()
     snapshot_key = _snapshot_key(root)
     args = {"path": path, "source_kind": source_kind, "domain": domain}
     request_key = _digest(args)
@@ -226,7 +222,6 @@ def report(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
             run_id=preview_run_id, cursor=cursor,
         )
-        reclassify_source.preview_release_policy(root, who)
         if (authority.depends_on_membership and result.get("state") == maintenance_jobs.COMPLETED
                 and result.get("snapshot_current") is not True):
             raise _stale_report()
@@ -238,7 +233,6 @@ def report(
     else:
         if snapshot_key is None:
             raise reclassify_source.preview_warming()
-        reclassify_source.preview_release_policy(root, who)
         surface = capabilities.current_active_surface()
         result = maintenance_jobs.start_source_preview(
             root, binding=authority.key, request_key=request_key, snapshot_key=snapshot_key,
@@ -253,4 +247,4 @@ def report(
         if result.get("next_cursor") is not None:
             follow["cursor"] = result["next_cursor"]
         result["next"] = capabilities.active_call_route("manage_memory_file", follow)
-    return RetainedReport(result) if result.get("state") == maintenance_jobs.COMPLETED else result
+    return RetainedReport(result, path) if result.get("state") == maintenance_jobs.COMPLETED else result

@@ -509,10 +509,15 @@ class InboundRewrite:
     refusal: tuple[str, str] | None = None
 
 
-ReferrerProof = Callable[[
-    Sequence[InboundLink], Sequence[str], Sequence[InboundRewrite],
-    Callable[[str], bool] | None, Callable[[str], bool], bool,
-], Callable[[], None]]
+@dataclass(frozen=True)
+class ReferrerProof:
+    """Select the approved reference scope before planning the guarded writes."""
+
+    visible: Callable[[str], bool]
+    verify: Callable[[
+        Sequence[InboundLink], Sequence[str], Sequence[InboundRewrite],
+        Callable[[str], bool] | None, Callable[[str], bool], bool,
+    ], Callable[[], None]]
 
 
 #: The outcome a move preview gives each referrer; the command-surface specification fixes the set.
@@ -698,7 +703,7 @@ def move_file(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
-    _verify_referrers: ReferrerProof | None = None,
+    _referrer_proof: ReferrerProof | None = None,
     lineage_entry: Mapping[str, Any] | None = None,
     undo_lineage: bool = False,
     preview: bool = False,
@@ -737,7 +742,7 @@ def move_file(
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
         try:
-            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, _verify_referrers=_verify_referrers, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
+            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, _referrer_proof=_referrer_proof, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
         except originals.RetirementUnconfirmed as error:
             raise MoveFileError(code=error.code, reason=error.reason) from error
 
@@ -922,7 +927,7 @@ def _move_file_local(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
-    _verify_referrers: ReferrerProof | None = None,
+    _referrer_proof: ReferrerProof | None = None,
     originals_context: ExitStack,
     mutation_context: ExitStack,
     lineage_entry: Mapping[str, Any] | None = None,
@@ -1267,6 +1272,7 @@ def _move_file_local(
 
     view = mover_view(vault_root)
     visible, restricted, limited_mover = view.visible, view.restricted, view.limited
+    referrer_visible = _referrer_proof.visible if _referrer_proof is not None else visible if limited_mover else None
     # Scan inbound links BEFORE the move, while the old path still exists.
     stored_check: store_targets.InboundCheck | None = None
     if store_writer is not None and update_wikilinks:
@@ -1281,8 +1287,8 @@ def _move_file_local(
             if update_wikilinks
             else []
         )
-    if limited_mover:
-        inbound = [hit for hit in inbound if visible(hit.path)]
+    if referrer_visible is not None:
+        inbound = [hit for hit in inbound if referrer_visible(hit.path)]
     # Pages that cite the moved paths in prose come from the catalogue, never from a walk.
     mention_lookup = (
         path_mentions.find_pages(
@@ -1294,7 +1300,7 @@ def _move_file_local(
     named_in = [
         rel
         for rel in (mention_lookup.pages if mention_lookup is not None else ())
-        if not limited_mover or visible(rel)
+        if referrer_visible is None or referrer_visible(rel)
     ]
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
@@ -1359,9 +1365,9 @@ def _move_file_local(
         plans = plan_inbound_rewrites(
             vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary, undo=undo_lineage,
         ) if inbound or named_in else []
-        if _verify_referrers is not None:
-            recheck_referrers = _verify_referrers(
-                inbound, named_in, plans, visible, writable_page,
+        if _referrer_proof is not None:
+            recheck_referrers = _referrer_proof.verify(
+                inbound, named_in, plans, _referrer_proof.visible, writable_page,
                 mention_lookup is not None and mention_lookup.complete,
             )
         for item in plans:
@@ -1426,7 +1432,7 @@ def _move_file_local(
     if not validate_only:
         try:
             pointer_write.require_preview(
-                moves, repoints, digest if _verify_referrers is not None else preview_digest,
+                moves, repoints, digest if _referrer_proof is not None else preview_digest,
                 preview_call=capabilities.active_call_text("manage_memory_file", _preview_call),
             )
         except pointer_write.PointerWriteError as error:

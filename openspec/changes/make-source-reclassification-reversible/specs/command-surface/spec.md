@@ -59,7 +59,7 @@ The paged report's approval digest SHALL bind all referrer outcomes and the poin
 
 Restricted callers, and callers before a live observer is ready or without a live observer, retain the synchronous file preview. Its latency and behavior under concurrent file changes are unverified by this change.
 
-A managed preview whose policy can withhold a contributor SHALL return `RECLASSIFICATION_PREVIEW_UNAVAILABLE` without counts, a job handle, or a digest. A change to the governed erasure set SHALL invalidate retained results.
+A managed preview SHALL return `RECLASSIFICATION_PREVIEW_UNAVAILABLE` without counts, a job handle, or a digest when an owner-level rule or Access exclusion restricts the report. Before calculating counts or effects, the planner SHALL omit referrers withheld by their release decision or a governed erasure. Paged apply SHALL use the same release decision for its candidate scope. A change to the governed erasure set SHALL invalidate retained results.
 
 When no values are supplied, evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
 

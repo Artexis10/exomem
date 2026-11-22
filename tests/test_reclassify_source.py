@@ -131,7 +131,12 @@ def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
             await asyncio.to_thread(_until, lambda: lexstore.search_current_published_substrings(
                 vault, [captured.path.removeprefix(f"{KB}/").lower()]
             ).readiness.complete)
-            warm = await call("manage_memory_file", **preview)
+            async with asyncio.timeout(5):
+                while True:
+                    warm = await call("manage_memory_file", **preview)
+                    if warm.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                        break
+                    await asyncio.sleep(0.05)
             assert warm.get("references") == 2, warm
             assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
             assert warm["preview_digest"]
@@ -196,6 +201,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
     from fastmcp import Client
     from record_fixtures import copy_dataset_fixture
     from test_agent_tool_surface import _call
+    from test_governance_bridges import _bridge_text
 
     from exomem import (
         file_watcher,
@@ -254,10 +260,10 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
 
             async def ready(run_id):
                 async with asyncio.timeout(12):
-                    while (status := await preview(preview_run_id=run_id))["state"] == "running":
+                    while (status := await preview(preview_run_id=run_id)).get("state") == "running":
                         assert "preview_digest" not in status and "result" not in status
                         await asyncio.sleep(0.1)
-                assert status["state"] == "completed", status
+                assert status.get("state") == "completed", status
                 return status
 
             queued = await preview()
@@ -335,13 +341,27 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert "references" not in restricted and "run_id" not in restricted
             erased = sorted(paths)[0]
             rule.write_text(rule.read_text().replace("audience: owner", "audience: principal:report-reader"))
+            bridge = vault / KB / "Notes" / "unapproved-summary.md"
+            title_link = f"[[{Path(source).stem}]]"
+            bridge.write_text(_bridge_text(sources=f"  - '{title_link}'\n",
+                                           relations=f"- derived_from {title_link}\n"), encoding="utf-8")
+            bridge_rel = bridge.relative_to(vault).as_posix()
+            assert egress.release_level_for(vault, bridge_rel) == 0
+            freshness.on_files_changed(vault, changed=[bridge])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[bridge_rel], deleted_rels=[])
+            lexstore.ensure_fresh(vault)
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            governed = await ready((await preview())["run_id"])
+            assert governed["result"]["references"] == terminal["result"]["references"], governed
+            bridge.unlink()
             deletion = await call("manage_memory_file", operation="delete", path=erased, confirm=True)
             assert (vault / erased).exists() is False, deletion
             assert lifecycle.is_tombstoned(vault, erased)
             rule.unlink()
             scope.unlink()
-            freshness.on_files_changed(vault, deleted=[vault / erased])
-            vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[erased])
+            freshness.on_files_changed(vault, deleted=[vault / erased, bridge])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[erased, bridge_rel])
             after_erasure = await preview(preview_run_id=run_id)
             assert after_erasure["error"]["code"] == "NOT_FOUND", after_erasure
             assert "result" not in after_erasure and "next_cursor" not in after_erasure
@@ -349,8 +369,11 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             changed = sorted(paths)[-1]
             changed_path = vault / changed
             changed_path.write_text(f"See [[{source}]] and [[{source}]].\n", encoding="utf-8")
-            freshness.on_files_changed(vault, changed=[changed_path])
-            vault_module.on_inbound_files_changed(vault, changed_rels=[changed], deleted_rels=[])
+            erased_path = vault / erased
+            restored_bytes = f"Sync copied the old link back: [[{source}]].\n"
+            erased_path.write_text(restored_bytes, encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[changed_path, erased_path])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[changed, erased], deleted_rels=[])
             lexstore.ensure_fresh(vault)
             refused = await call("manage_memory_file", operation="reclassify", **args,
                                  reason="Correct the Source kind", preview_digest=digest)
@@ -389,6 +412,8 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             destination = refreshed["result"]["destination"]
             assert corrected.get("path") == destination, corrected
             assert (vault / destination).is_file() and f"[[{destination.removesuffix('.md')}]]" in (vault / evidence).read_text()
+            assert lifecycle.is_tombstoned(vault, erased)
+            assert erased_path.read_text() == restored_bytes
 
     try:
         asyncio.run(exercise())

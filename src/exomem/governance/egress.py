@@ -8074,6 +8074,7 @@ def release_walk_filter(
     *,
     principal: RequestPrincipal | None = None,
     purpose: str | None = None,
+    tombstones: frozenset[str] | None = None,
 ) -> Any:
     """A per-file `keep(rel_path) -> bool` predicate for a leaf that WALKS.
 
@@ -8099,7 +8100,8 @@ def release_walk_filter(
     without parsing it.
     """
     policy = policy_module.load(Path(vault_root))
-    tombstones = lifecycle.tombstoned_paths(vault_root)
+    if tombstones is None:
+        tombstones = lifecycle.tombstoned_paths(vault_root)
     if _file_policy_empty(vault_root, policy) and not tombstones:
         who = principal if principal is not None else effective_principal()
         if unrestricted_content_access(vault_root, who):
