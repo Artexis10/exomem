@@ -857,13 +857,42 @@ def _attach_handoff(args, *, transport=None) -> int:
     return 0
 
 
-def _attach_refused(response, payload: object) -> int:
+def _attach_refused(response, payload: object, *, retained_source: bool = False) -> int:
+    if retained_source and response.status_code in (404, 410):
+        print("attach: the session is unavailable and the Source outcome is unknown. "
+              "Check Source custody before starting another upload", file=sys.stderr)
+        return 1
     code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+    next_step = ". Request a new handoff before trying again" if (
+        isinstance(payload, dict) and payload.get("handoff_spent") is True
+    ) else ""
     print(
-        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''}){next_step}",
         file=sys.stderr,
     )
     return 1
+
+
+def _matches_source_receipt(receipt: object, sha256: str, size: int) -> bool:
+    from pathlib import PurePosixPath
+
+    from .memory_refs import canonical_memory_ref
+
+    if (not isinstance(receipt, dict) or receipt.get("hash_algorithm") != "sha256"
+            or receipt.get("hash") != sha256 or type(receipt.get("size")) is not int or receipt["size"] != size):
+        return False
+    try:
+        canonical_memory_ref(receipt.get("ref"))
+        page, artifact = receipt.get("path"), receipt.get("artifact_path")
+        if not isinstance(page, str) or not isinstance(artifact, str) or page == artifact:
+            return False
+        paths = (PurePosixPath(page), PurePosixPath(artifact))
+        if any(path.is_absolute() or len(path.parts) < 2 or ".." in path.parts or "\\" in path.as_posix()
+               for path in paths):
+            return False
+        return paths[0].parent == paths[1].parent and paths[0].suffix == ".md"
+    except ValueError:
+        return False
 
 
 def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
@@ -927,10 +956,9 @@ def _send_upload_session(
     if session is not None:
         held = client.head(url, headers={**tus, "Exomem-Upload-Secret": secret})
         if held.status_code in (404, 410):
-            record_path.unlink(missing_ok=True)
             if delegated:
-                print("attach: the upload session is unavailable; request a new handoff", file=sys.stderr)
-                return 1
+                return _attach_refused(held, None, retained_source=True)
+            record_path.unlink(missing_ok=True)
             session = None
         elif held.status_code != 200:
             return _attach_refused(held, None)
@@ -968,7 +996,8 @@ def _send_upload_session(
         try:
             url = checked_location(created.headers.get("location", ""), secret)
         except ValueError:
-            print("attach: the service returned an invalid upload session", file=sys.stderr)
+            print("attach: the service returned an invalid upload session"
+                  + (". Request a new handoff before trying again" if delegated else ""), file=sys.stderr)
             return 1
         records.mkdir(mode=0o700, parents=True, exist_ok=True)
         private_state.write_record(records, key, {"url": url, "secret": secret}, temp_suffix=".tmp", durable=True)
@@ -1003,10 +1032,10 @@ def _send_upload_session(
             continue
         # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
         if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
-            return _attach_refused(sent, None)
+            return _attach_refused(sent, None, retained_source=delegated)
         held = client.head(url, headers=headers)
         if held.status_code != 200:
-            return _attach_refused(held, None)
+            return _attach_refused(held, None, retained_source=delegated)
         advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
         if advanced is None or not offset <= advanced <= offset + len(chunk):
             print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
@@ -1026,14 +1055,15 @@ def _send_upload_session(
         except ValueError:
             payload = None
         if state.status_code != 200 or not isinstance(payload, dict):
-            return _attach_refused(state, payload)
+            return _attach_refused(state, payload, retained_source=delegated)
         if payload.get("state") == upload_sessions.COMMITTED:
             receipt = payload.get("receipt")
-            if delegated and (not isinstance(receipt, dict) or receipt.get("hash") != sha256
-                              or receipt.get("size") != size or not receipt.get("path") or not receipt.get("artifact_path")):
+            if delegated and not _matches_source_receipt(receipt, sha256, size):
                 print("attach: the Source receipt does not match the file bytes", file=sys.stderr)
                 return 1
-            record_path.unlink(missing_ok=True)
+            if not delegated:
+                record_path.unlink(missing_ok=True)
+            # The same command can recover a delegated receipt if stdout closes after commit.
             print(json.dumps(receipt, ensure_ascii=False))
             return 0
         if payload.get("state") == upload_sessions.FAILED:
@@ -1041,6 +1071,10 @@ def _send_upload_session(
             print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
             return 1
         if payload.get("state") == upload_sessions.RETRYABLE:
+            if payload.get("code") == "SOURCE_OUTCOME_UNKNOWN":
+                print("attach: the Source outcome is unknown. Run the same command again to check its receipt",
+                      file=sys.stderr)
+                return 1
             # The service holds every byte; the session record stays so the next run retries the commit.
             print(f"attach: the upload is held but not preserved yet ({payload.get('code')}); "
                   "run the same command again to retry", file=sys.stderr)

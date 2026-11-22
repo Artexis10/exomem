@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -286,6 +287,79 @@ class ImportCapture:
             vault.batch_atomic_write(
                 [write], vault_root=root, required_guards=(page_guard,), post_commit_fanout=False,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ResumableCapture(ImportCapture):
+    """A delegated upload's receipt proves one publication, without repair or deduplication."""
+
+    file_witness: Path | None
+
+    def prepare(self, root: Path, receipt: Receipt) -> None:
+        # The upload cannot retry an ambiguous writer claim. Only this batch's commit can prove the receipt.
+        return None
+
+    def seal_file_commit(self, receipt: Receipt) -> None:
+        path = self.file_witness
+        assert path is not None
+        receipt_hash = vault.content_hash(receipt.model_dump_json() + "\n")
+        # The session owns this private directory and keeps its lock through publication.
+        with private_state.stage_record(path.parent, path.stem, {"receipt_sha256": receipt_hash},
+                                        temp_suffix=".tmp", durable=True) as temporary:
+            os.link(temporary, path)
+        private_state.sync_directory(path.parent)
+
+    def committed_upload_receipt(self, root: Path, *, size: int) -> dict | None:
+        """Read the exact sealed Source and original under the upload's current principal."""
+        from .collection_store.connection import CollectionStoreError
+        from .governance.egress import release_level_for
+        from .governance.policy import DISCLOSURE_MAX
+
+        try:
+            relative = self._path(root).relative_to(root).as_posix()
+            with reserved_paths._subsystem_authority_scope(OWNER):
+                raw, _ = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_RECEIPT_BYTES)
+            receipt = self._read_receipt(raw)
+            self._require_same_input(receipt)
+            if self.file_witness is not None:
+                with self.file_witness.open("rb") as source:
+                    witness = json.loads(source.read(_MAX_RECEIPT_BYTES + 1))
+                if witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
+                    return None
+            if (
+                release_level_for(root, receipt.page) != DISCLOSURE_MAX
+                or release_level_for(root, receipt.artifact) != DISCLOSURE_MAX
+            ):
+                return None
+            payload = duplicates.stored_payload(root, receipt.page)
+            if (
+                payload is None or payload.lane != duplicates.SOURCES or payload.ref != receipt.ref
+                or payload.protected != self.protected or payload.artifact_path != receipt.artifact
+                or payload.sha256 != self.original_sha256 or vault.content_hash(payload.text) != receipt.source_hash
+                or duplicates.original_size(root, receipt.page, payload, bound=True) != size
+            ):
+                return None
+        except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+            return None
+        return {
+            "path": receipt.page, "ref": receipt.ref, "artifact_path": receipt.artifact,
+            "hash": self.original_sha256, "hash_algorithm": "sha256", "size": size,
+        }
+
+
+def resumable_capture(root: Path, record: dict) -> ResumableCapture:
+    """Bind the exact session, issuing login binding, original and admitted capture fields."""
+    from .upload_sessions import file_commit_witness_path
+    from .vault_store.mode import store_mode_active
+
+    origin = record["source_handoff"]
+    target = record["target"]
+    file_witness = None if store_mode_active(root) else file_commit_witness_path(root, record["id"])
+    key = _digest(["source-upload-commit/v1", record["id"], origin["binding"],
+                   origin["deployment"], origin["ticket_sha256"]])
+    # A file receipt copied into SQLite during a mode transition cannot stand for a store commit.
+    fingerprint = _digest([1, key, file_witness is not None, target, record["length"], record["sha256"]])
+    return ResumableCapture(key, fingerprint, record["sha256"], target["raw_protection"], file_witness)
 
 
 def receipt_root(root: Path) -> Path:

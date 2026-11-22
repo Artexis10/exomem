@@ -12,6 +12,7 @@ import os
 import secrets
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -38,12 +39,22 @@ HANDOFF_LANES = (*upload_tokens.UPLOAD_LANES, held_uploads.IMPORT_LANE)
 _TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
+# A downgraded worker can only look up a nonce in the legacy store.
+_SOURCE_TICKET_STORE = "source-upload-handoffs"
 UNAVAILABLE_REASON = "no usable upload handoff"
 #: The upload route's content-free refusal for a ticket it cannot use: a new upload is always a valid way on.
 TICKET_UNUSABLE_REASON = f"{UNAVAILABLE_REASON}; request a new one with upload_files"
 #: A claimed ticket is spent whatever the send's outcome, so every refusal after the claim says so.
 SPENT_REMEDY = "This upload is used now; a retry needs a new one from upload_files."
 _now = time.time
+
+
+class SourceOriginBusy(ValueError):
+    """The issuing login could not be checked. Retry without replacing the ticket."""
+
+
+class SourceTicketSpent(ValueError):
+    """The service removed a ticket but could not confirm durable consumption."""
 
 
 def _unavailable() -> ValueError:
@@ -173,6 +184,19 @@ async def _active(root: Path, who: principal.RequestPrincipal) -> bool:
     return await auth_sessions.origin_session_active(who)
 
 
+def _require_source_login(state: auth_sessions.OriginLogin) -> None:
+    if state is auth_sessions.OriginLogin.UNREADABLE:
+        raise SourceOriginBusy("UPLOAD_ORIGIN_BUSY: the issuing login cannot be checked yet")
+    if state is not auth_sessions.OriginLogin.VALID:
+        raise _unavailable()
+
+
+async def _check_source_authority(root: Path, who: principal.RequestPrincipal) -> None:
+    if who.surface != "mcp" or not raw_protection.has_unrestricted_access(root, who):
+        raise _unavailable()
+    _require_source_login(await auth_sessions.origin_login_state(who, require_owner=True))
+
+
 def prepare_upload(
     vault_root: Path, *, lane: str, expected_sha256: str,
     base_url: str | None = None, max_bytes: int | None = None, import_identity: str | None = None,
@@ -203,8 +227,29 @@ def prepare_upload(
             if cloud:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
             raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this transport has no verified HTTP session; use a personal HTTP MCP connection")
-        if not await _active(vault_root, who):
+        configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
+        limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError("INVALID_UPLOAD_HANDOFF: max_bytes must be positive")
+            limit = min(limit, max_bytes)
+        if limit <= 0:
             raise _unavailable()
+        if size_bytes is not None and (lane != "source" or type(size_bytes) is not int or size_bytes < 0):
+            raise ValueError("INVALID_UPLOAD_HANDOFF: size_bytes must be a nonnegative Source size")
+        large_source = size_bytes is not None and size_bytes > limit
+        resumable = large_source and not (cloud or held_only or import_key is not None)
+        if resumable:
+            await _check_source_authority(vault_root, who)
+        elif not await _active(vault_root, who):
+            raise _unavailable()
+        if size_bytes is not None and large_source:
+            if not resumable:
+                raise ValueError(f"TOO_LARGE: this handoff holds at most {limit:,} bytes")
+            session_limit = upload_sessions.max_bytes_from_env()
+            if size_bytes > session_limit:
+                raise ValueError(f"TOO_LARGE: a Source session holds at most {session_limit:,} bytes")
+            limit = size_bytes
         route = None
         if cloud:
             # The gateway's capsule names its own fixed endpoint and bounds the ticket's life.
@@ -218,26 +263,6 @@ def prepare_upload(
             if not base:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this MCP session has no HTTP upload listener")
             endpoint = upload_endpoint(base + "/upload")
-        configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
-        limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)
-        if max_bytes is not None:
-            if type(max_bytes) is not int or max_bytes <= 0:
-                raise ValueError("INVALID_UPLOAD_HANDOFF: max_bytes must be positive")
-            limit = min(limit, max_bytes)
-        if limit <= 0:
-            raise _unavailable()
-        if size_bytes is not None and (lane != "source" or type(size_bytes) is not int or size_bytes < 0):
-            raise ValueError("INVALID_UPLOAD_HANDOFF: size_bytes must be a nonnegative Source size")
-        resumable = size_bytes is not None and size_bytes > limit
-        if resumable:
-            if cloud or held_only or import_key is not None:
-                raise ValueError(f"TOO_LARGE: this handoff holds at most {limit:,} bytes")
-            if not raw_protection.is_owner(who):
-                raise _unavailable()
-            session_limit = upload_sessions.max_bytes_from_env()
-            if size_bytes > session_limit:
-                raise ValueError(f"TOO_LARGE: a Source session holds at most {session_limit:,} bytes")
-            limit = size_bytes
         binding = held_uploads.principal_binding(who)
         if binding is None:
             raise _unavailable()
@@ -255,7 +280,7 @@ def prepare_upload(
             steps = _import_steps(token, endpoint)
         else:
             steps = _file_steps(endpoint, lane)
-        store = private_state.store(vault_root, STORE_DIRNAME)
+        store = private_state.store(vault_root, _SOURCE_TICKET_STORE if resumable else STORE_DIRNAME)
         with FileLock(store / ".lock"):
             now = _now()
             count = 0
@@ -305,12 +330,13 @@ def prepare_upload(
 
 async def claim_upload(
     vault_root: Path, token: str, *, resumable: bool = False, size_bytes: int | None = None, sha256: str | None = None,
+    admit: Callable[[principal.RequestPrincipal], Awaitable[None]] | None = None,
 ) -> dict:
-    """Consume a ticket before reading a request body, or give one content-free refusal."""
+    """Consume the ticket before byte receipt, after delegated admission if supplied."""
     secret = parse_ticket(token, resumable=resumable)
     if secret is None:
         raise _unavailable()
-    store = private_state.store(vault_root, STORE_DIRNAME)
+    store = private_state.store(vault_root, _SOURCE_TICKET_STORE if resumable else STORE_DIRNAME)
     key = hashlib.sha256(secret.encode("ascii")).hexdigest()
     path = store / f"{key}.json"
     with FileLock(store / ".lock"):
@@ -339,17 +365,26 @@ async def claim_upload(
                 raise _unavailable()
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise _unavailable() from None
-    if not await _active(vault_root, who):
+    if resumable:
+        await _check_source_authority(vault_root, who)
+        if admit is not None:
+            await admit(who)
+    elif not await _active(vault_root, who):
         raise _unavailable()
     with FileLock(store / ".lock"):
         try:
             if json.loads(path.read_text(encoding="utf-8")) != record or float(record["expires"]) <= _now():
                 raise _unavailable()
             path.unlink()
+        except (OSError, ValueError, KeyError, TypeError):
+            raise _unavailable() from None
+        try:
             # Refuse before accepting bytes if consumption cannot survive a crash;
             # otherwise replay can recreate a cancelled import's upload identity.
             private_state.sync_directory(store)
-        except (OSError, ValueError, KeyError, TypeError):
+        except OSError:
+            if resumable:
+                raise SourceTicketSpent(TICKET_UNUSABLE_REASON) from None
             raise _unavailable() from None
     return {**record, "principal": who, "nonce": secret,
             **({"source_handoff": {"principal": record["principal"], "binding": record["binding"],
@@ -368,9 +403,9 @@ def source_principal(vault_root: Path, record: dict) -> principal.RequestPrincip
                 or not authority["binding"] or authority["binding"] != record["binding"]
                 or authority["binding"] != held_uploads.principal_binding(who)
                 or who.surface != "mcp" or who.origin_session is None or who.client_binding is None
-                or cloud_cell.is_cloud_issuer_family(who.issuer_family)
-                or not raw_protection.is_owner(who) or not raw_protection._authority(vault_root, who)[0]):
+                or not raw_protection.has_unrestricted_access(vault_root, who)):
             raise _unavailable()
     except (KeyError, TypeError, ValueError, AttributeError):
         raise _unavailable() from None
+    _require_source_login(auth_sessions.origin_login_state_sync(who, require_owner=True))
     return who

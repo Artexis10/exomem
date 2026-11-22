@@ -9,7 +9,6 @@ import logging
 import mimetypes
 import os
 import secrets
-from contextlib import nullcontext
 from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
@@ -284,15 +283,28 @@ def _source_upload_receipt(vault_root: Path, result: dict) -> dict:
 
 def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     """Publish one Source through the maintained mutation replay protocol."""
-    from . import add, schema
+    from . import add, schema, source_imports
     from .cli_ops import OpError
     from .command_surface import Command
     from .vault import BatchWriteError
     from .writer_lease import _PostCommitOutcomeUncertain, invoke_command
 
+    delegated = upload_sessions.delegated_source(record["id"])
+    capture = source_imports.resumable_capture(vault_root, record) if delegated else None
+
+    def recovered_receipt() -> dict | None:
+        if capture is None:
+            return None
+        _require_source_origin(vault_root, record)
+        recovered = capture.committed_upload_receipt(vault_root, size=record["length"])
+        return None if recovered is None else _source_upload_receipt(vault_root, recovered)
+
     def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
-        if upload_sessions.delegated_source(session_id):
+        def confirm_origin() -> None:
             _require_source_origin(root, record)
+
+        if delegated:
+            confirm_origin()
         if _source_session_destination(root, target, size=length, sha256=sha256) != target["destination"]:
             raise upload_sessions.CommitFailed(
                 "SOURCE_DESTINATION_CHANGED", "the Source destination changed; uploaded bytes remain held", retryable=True,
@@ -303,6 +315,8 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
                 artifact=add.SourceArtifact(part, target["filename"], target.get("content_type"), staged=staged),
                 raw_protection=target["raw_protection"], expected_sha256=sha256,
+                _validate_inputs=confirm_origin if delegated else None,
+                import_capture=capture,
             ).as_dict()
         except BatchWriteError as error:
             if error.code == "BATCH_ROLLBACK_INCOMPLETE":
@@ -311,6 +325,8 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             raise
         return _source_upload_receipt(root, result)
 
+    if (recovered := recovered_receipt()) is not None:
+        return recovered
     # The session's bytes are copied into a private stage before `invoke_command` takes the boundary, so the
     # commit plans and installs without moving them. A replay that finds its result stored discards the stage.
     try:
@@ -328,11 +344,19 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 idempotency_key=record["id"], public_idempotency_key=None,
             )
     except OpError as error:
+        if error.code == "MUTATION_OUTCOME_UNKNOWN":
+            if (recovered := recovered_receipt()) is not None:
+                return recovered
+            raise upload_sessions.CommitFailed(
+                "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown. Uploaded bytes remain held", retryable=True,
+            ) from error
         raise upload_sessions.CommitFailed(
             error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
         ) from error
     if not isinstance(result, dict) or not result.get("path") or not result.get("artifact_path") or not result.get("hash"):
         # Signed receipt recovery can prove a commit without recovering its complete leaf result.
+        if (recovered := recovered_receipt()) is not None:
+            return recovered
         raise upload_sessions.CommitFailed(
             "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
         )
@@ -342,15 +366,13 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
 
 def _require_source_origin(vault_root: Path, record: dict) -> principal_module.RequestPrincipal:
     try:
-        who = upload_handoff.source_principal(vault_root, record)
+        return upload_handoff.source_principal(vault_root, record)
+    except upload_handoff.SourceOriginBusy as error:
+        raise upload_sessions.CommitFailed(
+            "UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", retryable=True,
+        ) from error
     except ValueError as error:
         raise upload_sessions.CommitFailed("UPLOAD_HANDOFF_UNAVAILABLE", upload_handoff.UNAVAILABLE_REASON) from error
-    login = auth_sessions.origin_login_state_sync(who)
-    if login is auth_sessions.OriginLogin.UNREADABLE:
-        raise upload_sessions.CommitFailed("UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", retryable=True)
-    if login is not auth_sessions.OriginLogin.VALID:
-        raise upload_sessions.CommitFailed("UPLOAD_HANDOFF_UNAVAILABLE", upload_handoff.UNAVAILABLE_REASON)
-    return who
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -1275,10 +1297,12 @@ def register_transfer_routes(
             headers["Upload-Expires"] = formatdate(session.expires, usegmt=True)
         return headers
 
-    def _tus_refusal(code: str, reason: str, status: int, **extra: str) -> JSONResponse:
-        return JSONResponse(
-            {"code": code, "reason": reason}, status_code=status, headers=_tus_headers(**extra)
-        )
+    def _tus_refusal(code: str, reason: str, status: int, *, handoff_spent: bool = False, **extra: str) -> JSONResponse:
+        body: dict[str, str | bool] = {"code": code, "reason": reason}
+        if handoff_spent:
+            body["reason"] = f"{reason}. Request a new handoff before trying again"
+            body["handoff_spent"] = True
+        return JSONResponse(body, status_code=status, headers=_tus_headers(**extra))
 
     def _tus_options() -> Response:
         return Response(
@@ -1346,16 +1370,8 @@ def register_transfer_routes(
             return _tus_refusal(
                 "INVALID_UPLOAD", f"`Upload-Metadata` lacks {', '.join(missing)}", 400
             )
-        ticket = None
-        if delegated:
-            if metadata.get("lane", "source") != "source":
-                return _tus_refusal("INVALID_UPLOAD", "a Source ticket cannot select another lane", 400)
-            try:
-                ticket = await upload_handoff.claim_upload(
-                    vault_root, token, resumable=True, size_bytes=declared, sha256=metadata["sha256"].strip(),
-                )
-            except ValueError:
-                return _tus_refusal("UPLOAD_HANDOFF_UNAVAILABLE", upload_handoff.TICKET_UNUSABLE_REASON, 401)
+        if delegated and metadata.get("lane", "source") != "source":
+            return _tus_refusal("INVALID_UPLOAD", "a Source ticket cannot select another lane", 400)
         preserve_module = _preserve_module()
         from . import add
         from .cli_ops import OpError, error_dict
@@ -1384,54 +1400,80 @@ def register_transfer_routes(
         ]
         if refusals:
             return _tus_refusal("INVALID_UPLOAD", "; ".join(refusals), 400)
-        try:
-            scope = principal_module.request_scope(ticket["principal"]) if ticket is not None else nullcontext()
-            with scope:
-                if lane == "source":
-                    target = {
-                        "lane": lane, "filename": target["filename"],
-                        "title": metadata.get("title", "").strip() or target["filename"],
-                        "source_type": add.capture_kind(vault_root, metadata.get("source_kind") or None, unattended=True),
-                        "domain": metadata.get("domain", "").strip() or None,
-                        "url": metadata.get("url", "").strip() or None,
-                        "content_type": metadata.get("content_type", "").strip() or None,
-                        "raw_protection": raw_protection,
-                    }
-                    target["destination"] = _source_session_destination(
-                        vault_root, target, size=declared, sha256=metadata.get("sha256", "").strip(),
-                    )
-                elif members:
-                    folder = preserve_module.evidence_folder(vault_root, target["scope"], target["category"])
-                    preserve_module.admit_destination(vault_root, folder, directory=True, members=True)
-                    preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
-                else:
-                    # Before any byte is sent: a name the commit cannot store fails after the whole upload.
-                    artifact, _ = preserve_module.evidence_artifact(
-                        vault_root, scope=target["scope"], category=target["category"],
-                        filename=target["filename"], raw_protection=raw_protection,
-                    )
-                    # The destination decision comes before existence, which it never reveals.
-                    preserve_module.admit_destination(vault_root, artifact)
-                    # A pooled filing has no file at its logical name, which stays taken.
-                    if artifact.exists() or originals.pooled(vault_root, artifact) is not None:
-                        return _tus_refusal(
-                            "ARTIFACT_EXISTS",
-                            f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "
-                            "Evidence is append-only, so pick a new filename",
-                            409,
-                        )
-                if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
-                    return _tus_refusal(refused["code"], refused["reason"], 413)
-                session, secret = await run_in_threadpool(
-                    upload_sessions.create,
-                    vault_root,
-                    binding=ticket["binding"] if ticket is not None else _credential_binding(request),
-                    length=declared,
-                    sha256=metadata.get("sha256", "").strip(),
-                    target=target,
-                    max_bytes=session_max_bytes,
-                    source_handoff=ticket["source_handoff"] if ticket is not None else None,
+        sha256 = metadata["sha256"].strip()
+        ticket = None
+
+        async def check_destination() -> None:
+            nonlocal target
+            if lane == "source":
+                target = {
+                    "lane": lane,
+                    "filename": target["filename"],
+                    "raw_protection": raw_protection,
+                    "title": metadata.get("title", "").strip() or target["filename"],
+                    "source_type": add.capture_kind(vault_root, metadata.get("source_kind") or None, unattended=True),
+                    "domain": metadata.get("domain", "").strip() or None,
+                    "url": metadata.get("url", "").strip() or None,
+                    "content_type": metadata.get("content_type", "").strip() or None,
+                }
+                target["destination"] = await run_in_threadpool(
+                    _source_session_destination, vault_root, target, size=declared, sha256=sha256,
                 )
+            elif members:
+                folder = preserve_module.evidence_folder(vault_root, target["scope"], target["category"])
+                preserve_module.admit_destination(vault_root, folder, directory=True, members=True)
+                preserve_module.validate_raw_capture(target["filename"], raw_protection=True)
+            else:
+                artifact, _ = preserve_module.evidence_artifact(
+                    vault_root, scope=target["scope"], category=target["category"],
+                    filename=target["filename"], raw_protection=raw_protection,
+                )
+                # The destination decision comes before existence, which it never reveals.
+                preserve_module.admit_destination(vault_root, artifact)
+                if artifact.exists() or originals.pooled(vault_root, artifact) is not None:
+                    raise upload_sessions.SessionError(
+                        "ARTIFACT_EXISTS",
+                        f"{artifact.relative_to(vault_root).as_posix()!r} already exists; "
+                        "Evidence is append-only, so pick a new filename",
+                        409,
+                    )
+            if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
+                raise upload_sessions.SessionError(refused["code"], refused["reason"], 413)
+
+        async def admit_source(who: principal_module.RequestPrincipal) -> None:
+            if declared > session_max_bytes:
+                raise upload_sessions.SessionError("TOO_LARGE", f"a session holds at most {session_max_bytes:,} bytes", 413)
+            with principal_module.request_scope(who):
+                try:
+                    await check_destination()
+                except (OpError, ValueError) as exc:
+                    error = error_dict(exc)
+                    raise upload_sessions.SessionError(error["code"], error["message"], 400) from exc
+
+        try:
+            if delegated:
+                try:
+                    ticket = await upload_handoff.claim_upload(
+                        vault_root, token, resumable=True, size_bytes=declared, sha256=sha256, admit=admit_source,
+                    )
+                except upload_handoff.SourceOriginBusy:
+                    return _tus_refusal("UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", 503)
+                except upload_handoff.SourceTicketSpent:
+                    return _tus_refusal("UPLOAD_HANDOFF_UNAVAILABLE", upload_handoff.TICKET_UNUSABLE_REASON, 503, handoff_spent=True)
+                except ValueError:
+                    return _tus_refusal("UPLOAD_HANDOFF_UNAVAILABLE", upload_handoff.TICKET_UNUSABLE_REASON, 401)
+            else:
+                await check_destination()
+            session, secret = await run_in_threadpool(
+                upload_sessions.create,
+                vault_root,
+                binding=ticket["binding"] if ticket is not None else _credential_binding(request),
+                length=declared,
+                sha256=sha256,
+                target=target,
+                max_bytes=session_max_bytes,
+                source_handoff=ticket["source_handoff"] if ticket is not None else None,
+            )
         except preserve_module.PreserveError as exc:
             return _tus_refusal(exc.code, exc.reason, 400)
         except (OpError, ValueError) as exc:
@@ -1440,7 +1482,12 @@ def register_transfer_routes(
         except add.AddError as exc:
             return _tus_refusal(exc.code, exc.reason, 400)
         except upload_sessions.SessionError as exc:
-            return _tus_refusal(exc.code, exc.reason, exc.status)
+            return _tus_refusal(exc.code, exc.reason, exc.status, handoff_spent=ticket is not None)
+        except OSError:
+            if ticket is None:
+                raise
+            log.exception("could not create a delegated upload session")
+            return _tus_refusal("UPLOAD_SESSION_BUSY", "the service did not confirm session creation", 503, handoff_spent=True)
         await run_in_threadpool(upload_sessions.start_commit, session, commit)
         return Response(
             status_code=201,
@@ -1473,13 +1520,10 @@ def register_transfer_routes(
             return _tus_refusal(exc.code, exc.reason, exc.status)
         if upload_sessions.delegated_source(session.id):
             try:
-                who = upload_handoff.source_principal(vault_root, session.record)
-            except ValueError:
-                return _tus_refusal("UPLOAD_SESSION_NOT_FOUND", "no upload session answers this request", 404)
-            login = await auth_sessions.origin_login_state(who)
-            if login is auth_sessions.OriginLogin.UNREADABLE:
+                await run_in_threadpool(upload_handoff.source_principal, vault_root, session.record)
+            except upload_handoff.SourceOriginBusy:
                 return _tus_refusal("UPLOAD_ORIGIN_BUSY", "the issuing login cannot be checked yet", 503)
-            if login is not auth_sessions.OriginLogin.VALID:
+            except ValueError:
                 return _tus_refusal("UPLOAD_SESSION_NOT_FOUND", "no upload session answers this request", 404)
         # A commit that a stop interrupted, or that can be retried, resumes when its session is read.
         await run_in_threadpool(upload_sessions.start_commit, session, commit)

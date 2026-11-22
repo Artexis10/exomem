@@ -6221,6 +6221,7 @@ def batch_atomic_write(
     _publish_originals: Callable[[], None] | None = None,
     _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _seal_file_commit: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -6245,6 +6246,8 @@ def batch_atomic_write(
 
         writer = availability.page_writer(Path(vault_root))
         if writer is not None:
+            if _seal_file_commit is not None:
+                raise ValueError("a file commit witness requires its native writer")
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
@@ -6323,6 +6326,7 @@ def batch_atomic_write(
                     _publish_originals, curation_witness.publication_hook(curation_witness_state)
                 ),
                 _payload_custody=_payload_custody,
+                _seal_file_commit=_seal_file_commit,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -6417,6 +6421,7 @@ def _batch_atomic_write_locked(
     _graph_epoch: bool = True,
     _before_commit_point: Callable[[], None] | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _seal_file_commit: Callable[[], None] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -7040,6 +7045,9 @@ def _batch_atomic_write_locked(
             _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
+        if _seal_file_commit is not None:
+            # A provisional file receipt can precede the final validation and the authority commit.
+            _seal_file_commit()
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
         # Opens the span the writer lease closes when the mutation row reaches
         # `canonically_committed`. On the 0.83.1 deploy that stretch was the

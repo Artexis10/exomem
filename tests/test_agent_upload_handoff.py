@@ -24,6 +24,8 @@ from exomem.governance import principal
 @pytest.fixture
 def upload_env(vault, tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:42")
     monkeypatch.delenv("EXOMEM_UPLOAD_TOKEN", raising=False)
     monkeypatch.delenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", raising=False)
     authority = auth_sessions.SessionAuthority.local(
@@ -149,6 +151,145 @@ def test_large_source_respects_the_session_limit_and_an_explicit_hold(upload_env
     assert _prepare(upload_env)["hold"] is True
 
 
+def test_resumable_ticket_cannot_be_read_as_a_legacy_multipart_ticket(upload_env, monkeypatch):
+    from exomem import private_state, upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault = upload_env[0]
+    data = b"recording"
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+    legacy = _prepare(upload_env, b"legacy")
+
+    # A downgraded worker locates a multipart ticket by nonce in the original store.
+    legacy_store = private_state.store(vault, upload_handoff.STORE_DIRNAME)
+    legacy_nonce = upload_handoff.parse_ticket(legacy["token"])
+    delegated_nonce = upload_handoff.parse_ticket(handoff["token"], resumable=True)
+    assert legacy_nonce is not None and delegated_nonce is not None
+    assert (legacy_store / (hashlib.sha256(legacy_nonce.encode()).hexdigest() + ".json")).is_file()
+    assert not (legacy_store / (hashlib.sha256(delegated_nonce.encode()).hexdigest() + ".json")).exists()
+    assert _post(upload_env, legacy, b"legacy").status_code == 201
+
+
+def test_resumable_ticket_survives_access_refresh(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, who, authority, _, _ = upload_env
+    clock = [time.time()]
+    monkeypatch.setattr(authority, "clock", lambda: clock[0])
+    access, record, refresh = asyncio.run(authority.issue_offline(
+        client_id=who.client_binding.client_id, scopes=["mcp", "offline_access"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+    ))
+    issuer = replace(who, origin_session=principal.OriginSessionBinding(
+        record.session_id, record.generation, record.audience,
+    ))
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    assert record.expires_at is not None
+    clock[0] = record.expires_at - 1
+    with principal.request_scope(issuer):
+        handoff = upload_handoff.prepare_upload(vault, lane="source", expected_sha256=digest, size_bytes=len(data))
+
+    clock[0] += 2
+    refreshed, _, _ = asyncio.run(authority.rotate_refresh(refresh, client_id=record.client_id, scopes=["mcp"]))
+    assert asyncio.run(authority.validate(access)) is None
+    assert asyncio.run(authority.validate(refreshed)) is not None
+    claimed = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert claimed["principal"] == issuer
+
+
+def test_resumable_ticket_rechecks_the_current_owner_before_spending(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, _, authority, bearer, _ = upload_env
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+    monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT")
+
+    assert asyncio.run(authority.validate(bearer)) is not None
+    with pytest.raises(ValueError, match="UPLOAD_HANDOFF_UNAVAILABLE"):
+        asyncio.run(upload_handoff.claim_upload(
+            vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+        ))
+
+
+def test_resumable_ticket_survives_an_unreadable_login_store(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, _, authority, _, _ = upload_env
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+
+    async def unavailable(**_):
+        raise auth_sessions.SessionStoreUnavailable("temporary read failure")
+
+    with monkeypatch.context() as offline:
+        offline.setattr(authority, "revalidate_login", unavailable)
+        with pytest.raises(upload_handoff.SourceOriginBusy, match="UPLOAD_ORIGIN_BUSY"):
+            asyncio.run(upload_handoff.claim_upload(
+                vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+            ))
+    recovered = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert recovered["size_bytes"] == len(data)
+
+
+def test_resumable_ticket_uses_shared_login_when_optional_cache_cannot_open(vault, tmp_path, monkeypatch):
+    from exomem import upload_handoff
+    from exomem.lease_coordinator import create_app
+
+    cache_parent = tmp_path / "cache-parent"
+    cache_parent.write_text("an existing file")
+    for key, value in {
+        "EXOMEM_BASE_URL": "https://capture.example",
+        "EXOMEM_GITHUB_USER_ID": "42",
+        "EXOMEM_OWNER_OAUTH_SUBJECT": "github:42",
+        "EXOMEM_JWT_SIGNING_KEY": "test-signing-key",
+        "EXOMEM_UPLOAD_MAX_BYTES": "8",
+        "EXOMEM_OAUTH_STORAGE_URL": "https://coordinator.example",
+        "EXOMEM_OAUTH_STORAGE_NAMESPACE": "fixture",
+        "EXOMEM_OAUTH_STORAGE_TOKEN": "test-coordinator-token",
+        "EXOMEM_SESSION_STALE_GRACE_SECONDS": "3600",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(cache_parent),
+    }.items():
+        monkeypatch.setenv(key, value)
+    transport = httpx.ASGITransport(app=create_app(
+        database=tmp_path / "coord.sqlite", bearer_token="test-coordinator-token",
+    ))
+    build_remote = auth_sessions.SessionAuthority.remote
+    monkeypatch.setattr(auth_sessions.SessionAuthority, "remote", staticmethod(
+        lambda **settings: build_remote(transport=transport, **settings),
+    ))
+    with pytest.raises(FileExistsError):
+        server_auth.build_session_authority(base_url="https://capture.example")
+    authority = server_auth.build_session_authority(base_url="https://capture.example", authoritative_only=True)
+    _, record = asyncio.run(authority.issue(
+        client_id="fixture", scopes=["mcp"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+    ))
+    who = principal.RequestPrincipal(
+        audience_id="owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=principal.ClientBinding(record.issuer, record.client_id),
+        origin_session=principal.OriginSessionBinding(record.session_id, record.generation, record.audience),
+    )
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    with principal.request_scope(who):
+        handoff = upload_handoff.prepare_upload(vault, lane="source", expected_sha256=digest, size_bytes=len(data))
+    claimed = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert claimed["principal"] == who
+
+
 def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
     upload_env, tmp_path, monkeypatch, capsys,
 ):
@@ -188,9 +329,15 @@ def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
     assert receipt["size"] == len(data)
     assert (upload_env[0] / receipt["artifact_path"]).read_bytes() == data
     assert len(list((upload_env[0] / receipt["artifact_path"]).parent.glob("*.bin"))) == 1
+    # The same invocation can recover the receipt if its first stdout consumer missed it.
+    assert _attach_main(
+        ["--handoff-file", str(handoff), "--root", str(tmp_path), str(original)],
+        transport=_ASGISyncTransport(upload_env[-1]),
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == receipt
 
 
-@pytest.mark.parametrize("revoke_at", [None, "restart", "staging"])
+@pytest.mark.parametrize("revoke_at", [None, "restart", "staging", "owner_binding", "publication"])
 def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, monkeypatch, revoke_at):
     from exomem import upload_handoff, upload_sessions, upload_stage
 
@@ -210,6 +357,9 @@ def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, mon
     }
     wrong_size = {**open_headers, "Upload-Length": str(len(data) + 1)}
     assert client.post(upload_sessions.SESSIONS_PATH, headers=wrong_size).status_code == 401
+    invalid_flags = {**open_headers, "Upload-Metadata": open_headers["Upload-Metadata"] + ",raw_protection bm90LWEtZmxhZw=="}
+    refused = client.post(upload_sessions.SESSIONS_PATH, headers=invalid_flags)
+    assert refused.status_code == 400 and "handoff_spent" not in refused.json()
     assert _post(upload_env, descriptor, data).status_code != 201
     created = client.post(upload_sessions.SESSIONS_PATH, headers=open_headers)
     assert created.status_code == 201, created.text
@@ -235,6 +385,9 @@ def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, mon
     monkeypatch.setattr(upload_sessions, "_RUNNING", {})
     if revoke_at == "restart":
         asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+    if revoke_at == "owner_binding":
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT")
+        assert asyncio.run(authority.validate(bearer)) is not None
     if revoke_at == "staging":
         stage = upload_stage.stage
 
@@ -245,6 +398,21 @@ def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, mon
                 yield staged
 
         monkeypatch.setattr(upload_stage, "stage", revoke_after_staging)
+    if revoke_at == "publication":
+        from exomem import vault as vault_module
+
+        after = vault_module._after_batch_destination_published
+        revoked = False
+
+        def revoke_after_original_is_installed(path):
+            nonlocal revoked
+            after(path)
+            if not revoked and path.suffix == ".bin":
+                assert path.read_bytes() == data
+                revoked = True
+                asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+
+        monkeypatch.setattr(vault_module, "_after_batch_destination_published", revoke_after_original_is_installed)
     server_transfer.resume_upload_sessions(vault)
     deadline = time.monotonic() + 20
     while True:
@@ -255,6 +423,8 @@ def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, mon
         time.sleep(0.03)
     response = client.get(location, headers=headers)
     if revoke_at is not None:
+        if revoke_at == "publication":
+            assert revoked
         assert response.status_code == 404
         assert state["state"] == upload_sessions.FAILED
         assert not list(vault.rglob("*.bin"))

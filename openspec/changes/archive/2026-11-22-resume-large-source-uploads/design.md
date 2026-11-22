@@ -26,15 +26,17 @@ The existing hold remains available for files that fit. The hosted ingress repor
 
 Bind the exact size, digest, deployment and issuing principal to one ticket. Its nonce creates one session. Check those facts and validate Source metadata under the issuing principal before accepting bytes.
 
-Keep delegated records in a private namespace that the legacy session parser cannot open. It prevents an old worker from treating a delegated Source as an ordinary transfer upload. Count both namespaces in the existing reservation and session admission. Flush the new session record and directory before returning its location.
+Keep delegated tickets and sessions in their own private stores. Old multipart and session readers cannot redeem them. Count both populations of live sessions in the existing reservation and admission. Store terminal delegated receipts outside that admission scan.
 
-Require the session secret and revalidate the bound login for status, resumption and cancellation. Confirmed revocation refuses access. An unreadable login store leaves the transfer retryable.
+Require the session secret and revalidate the bound login and current owner binding for status, resumption and cancellation. Use the authoritative login record directly. An unreadable authority leaves the transfer retryable. Check the destination before consuming the ticket.
 
 ### Run the existing Source commit as the issuing principal
 
 Reconstruct the issuing principal from the durable record for every attempt. Clear administrative ingress. Recheck the login before staging and at the guarded Source publication check. Reuse the session ID for the existing Source mutation replay.
 
-The existing part file supplies the durable offset. If a stop leaves a full file in receiving state, reconcile it under the session lock before verification. Publish only after the whole file matches the expected SHA-256. Return the existing Source custody receipt once publication settles.
+Publish the acknowledged offset after syncing the part. Reconcile a recovered tail under the session lock. Publish only after the whole file matches the expected SHA-256.
+
+Seal the delegated capture identity with the existing canonical Source import receipt. Recover a file-mode outcome only when the final validation and authority commit completed. SQLite records the receipt in the Source transaction. An ambiguous cut leaves the bytes held. The attach client keeps its receipt locator if its output is interrupted.
 
 ### Keep file transfer outside the tool and writer guard
 

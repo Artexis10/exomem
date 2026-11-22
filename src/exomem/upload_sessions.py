@@ -20,12 +20,13 @@ commit that fails for any other reason, such as a full disk or a lease handoff,
 keeps the bytes and leaves the session `retryable`; the next read retries it.
 When the vault was only busy or warming, the server also retries it after a wait
 that doubles from 2 to 60 seconds, until the session expires. A per-session
-file lock lets one process at a time commit a session, and a store-wide one
-serialises creation, so its limits hold across processes.
+file lock serialises appends, commit and cleanup across processes, and a
+store-wide lock serialises creation.
 
-A session expires `TTL_SECONDS` after its last accepted part, and a sweep at
-creation and at the serving runtime's start removes expired sessions with
-their bytes.
+A session expires `TTL_SECONDS` after its last accepted part. Delegated
+Source offsets are published only after syncing the bytes, and terminal
+Source receipts have their own retention window. The serving runtime sweeps
+expired sessions at start, and an expired lookup cleans up its own session.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,7 @@ STORE_DIRNAME = "upload-sessions"
 # Older session readers do not open this namespace or accept this ID prefix.
 SOURCE_STORE_DIRNAME = "source-upload-sessions"
 SOURCE_ID_PREFIX = "source-"
+_RECEIPTS_DIRNAME = "receipts"
 #: A session lives this long after its last accepted part.
 TTL_SECONDS = 24 * 3600
 #: Bytes one request may carry: under the proxy edge's 100 MB body cap.
@@ -185,9 +188,8 @@ def handoff(base_url: str, *, lane: str = LANE) -> dict[str, Any]:
 
 @dataclass
 class _Running:
-    """Per-session process state: the writer lock and the running digest."""
+    """Per-session process state: the running digest and a pending retry."""
 
-    lock: threading.Lock = field(default_factory=threading.Lock)
     size: int = -1
     digest: Any = None
     parked: str | None = None  # the code of the park last recorded for a caller
@@ -233,6 +235,19 @@ def valid_session_id(session_id: str) -> bool:
     return _SESSION_ID.fullmatch(session_id.removeprefix(SOURCE_ID_PREFIX)) is not None
 
 
+def _witness_path(store: Path, session_id: str) -> Path:
+    return store / f"{session_id}.commit"
+
+
+def file_commit_witness_path(vault_root: Path, session_id: str) -> Path:
+    """Locate a delegated Source commit witness without creating its store."""
+    from .state_paths import vault_state_dir
+
+    if not delegated_source(session_id) or not valid_session_id(session_id):
+        raise ValueError("invalid Source upload session ID")
+    return _witness_path(vault_state_dir(vault_root) / SOURCE_STORE_DIRNAME, session_id)
+
+
 def valid_session_secret(secret: str) -> bool:
     return _SECRET.fullmatch(secret) is not None
 
@@ -244,6 +259,12 @@ def _secret_hash(secret: str) -> str:
 _remove = private_state.remove
 
 
+def _remove_session_payloads(store: Path, session_id: str) -> None:
+    if delegated_source(session_id):
+        _remove(_witness_path(store, session_id))
+    _remove(store / f"{session_id}.part")
+
+
 def _write_record(store: Path, record: dict) -> None:
     # `sweep` owns the `.tmp` temp; `.part` here is a session's bytes.
     delegated = store.name == SOURCE_STORE_DIRNAME
@@ -252,21 +273,45 @@ def _write_record(store: Path, record: dict) -> None:
         private_state.sync_directory(store)
 
 
-def _commit_lock(store: Path, session_id: str) -> FileLock:
-    """The lock a process holds while it commits this session; any other process skips it."""
-    # Admission and the daemon share this instance across threads.
-    return FileLock(store / f"{session_id}.lock", timeout=0, thread_local=False)
+def _finish(store: Path, record: dict) -> None:
+    delegated = delegated_source(record["id"])
+    if delegated:
+        record = {**record, "expires": _now() + TTL_SECONDS}
+    _write_record(store, record)
+    if delegated:
+        # The live record already holds the outcome if a stop interrupts this move.
+        receipts = store / _RECEIPTS_DIRNAME
+        receipts.mkdir(mode=0o700, exist_ok=True)
+        leaf = f"{record['id']}.json"
+        os.replace(store / leaf, receipts / leaf)
+        private_state.sync_directory(receipts)
+        private_state.sync_directory(store)
+    _remove_session_payloads(store, record["id"])
+    _forget(record["id"])
 
 
-def _read_record(store: Path, session_id: str) -> dict | None:
+def _session_lock(store: Path, session_id: str, *, timeout: float = 0) -> FileLock:
+    """Use one lock for all writers, including cleanup, and let FileLock own its inode."""
+    # A handler and its worker may use the same instance from different threads.
+    return FileLock(store / f"{session_id}.lock", timeout=timeout, thread_local=False)
+
+
+def _read_record_at(store: Path, session_id: str) -> dict | None:
     try:
         record = json.loads((store / f"{session_id}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(record, dict) or record.get("id") != session_id:
         return None
-    if store.name == SOURCE_STORE_DIRNAME and not isinstance(record.get("source_handoff"), dict):
+    if delegated_source(session_id) and not isinstance(record.get("source_handoff"), dict):
         return None
+    return record
+
+
+def _read_record(store: Path, session_id: str) -> dict | None:
+    record = _read_record_at(store, session_id)
+    if record is None and delegated_source(session_id):
+        return _read_record_at(store / _RECEIPTS_DIRNAME, session_id)
     return record
 
 
@@ -278,9 +323,33 @@ def _part_size(part: Path) -> int:
 
 
 def _drop(store: Path, session_id: str) -> None:
-    # A released lock removes its own file; this one is what a killed commit left.
-    _remove(store / f"{session_id}.part", store / f"{session_id}.json", store / f"{session_id}.lock")
+    """Remove the session under its lock. Never unlink the lock from its holder."""
+    leaf = f"{session_id}.json"
+    _remove_session_payloads(store, session_id)
+    _remove(store / leaf)
+    if delegated_source(session_id):
+        _remove(store / _RECEIPTS_DIRNAME / leaf)
     _forget(session_id)
+
+
+def _expired(record: dict, now: float) -> bool:
+    try:
+        return not float(record["expires"]) > now
+    except (KeyError, TypeError, ValueError):
+        return True
+
+
+def _expire(store: Path, session_id: str, now: float) -> dict | None:
+    """Clean up only when the part and commit are idle, after re-reading expiry."""
+    try:
+        with _session_lock(store, session_id):
+            record = _read_record(store, session_id)
+            if record is not None and not _expired(record, now):
+                return record
+            _drop(store, session_id)
+    except Timeout:
+        pass
+    return None
 
 
 def sweep(vault_root: Path) -> None:
@@ -291,24 +360,25 @@ def sweep(vault_root: Path) -> None:
 
 
 def _sweep(store: Path, now: float) -> None:
-    for meta in store.glob("*.json"):
-        record = _read_record(store, meta.stem)
-        try:
-            expires = float(record["expires"]) if record else 0.0
-        except (KeyError, TypeError, ValueError):
-            expires = 0.0
-        if expires <= now:
-            _drop(store, meta.stem)
-    for leftover in (*store.glob("*.part"), *store.glob("*.tmp")):
-        session_id = leftover.name.split(".", 1)[0]
-        if leftover.suffix == ".part" and (store / f"{session_id}.json").exists():
+    receipts = store / _RECEIPTS_DIRNAME
+    for meta in chain(store.glob("*.json"), receipts.glob("*.json")):
+        if valid_session_id(meta.stem):
+            record = _read_record_at(meta.parent, meta.stem)
+            if record is None or _expired(record, now):
+                _expire(store, meta.stem, now)
+    for leftover in chain(store.glob("*.part"), store.glob("*.tmp"), store.glob("*.commit")):
+        session_id = leftover.name.partition(".")[0]
+        if not valid_session_id(session_id):
             continue
         try:
-            stale = leftover.stat().st_mtime + TTL_SECONDS <= now
-        except OSError:
+            if leftover.stat().st_mtime + TTL_SECONDS > now:
+                continue
+            with _session_lock(store, session_id):
+                record = _read_record(store, session_id)
+                if leftover.suffix == ".tmp" or record is None or record.get("state") not in _LIVE:
+                    _remove(leftover)
+        except (OSError, Timeout):
             continue
-        if stale:
-            _remove(leftover)
 
 
 @dataclass
@@ -336,6 +406,8 @@ class Session:
 
     def offset(self) -> int:
         if self.record["state"] == RECEIVING:
+            if delegated_source(self.id):
+                return self.record.get("durable_offset", 0)
             return _part_size(self.part)
         return self.length
 
@@ -360,7 +432,7 @@ def startup_sweep(vault_root: Path) -> list[Session]:
     pending = []
     for store in _existing_stores(vault_root):
         for meta in store.glob("*.json"):
-            record = _read_record(store, meta.stem)
+            record = _read_record_at(store, meta.stem)
             if record and _can_start(store, record):
                 pending.append(Session(store, record))
     return pending
@@ -404,19 +476,21 @@ def _create_locked(
     vault_root: Path, store: Path, binding: str, length: int, sha256: str, target: dict[str, Any],
     source_handoff: dict[str, Any] | None,
 ) -> tuple[Session, str]:
-    sweep(vault_root)
+    now = _now()
     live = 0
     reserved = 0
+    # The legacy flat directory stays readable by previous workers. Delegated
+    # receipts live outside this scan, and cleanup stays outside the create lock.
     for existing_store in _existing_stores(vault_root):
         for meta in existing_store.glob("*.json"):
-            record = _read_record(existing_store, meta.stem)
-            if not record or record.get("state") not in _LIVE:
+            record = _read_record_at(existing_store, meta.stem)
+            if not record or record.get("state") not in _LIVE or _expired(record, now):
                 continue
             if record.get("binding") == binding:
                 live += 1
             if record.get("state") == RECEIVING:
-                size = _part_size(existing_store / f"{meta.stem}.part")
-                reserved += max(int(record.get("length") or 0) - size, 0)
+                existing = Session(existing_store, record)
+                reserved += max(int(record.get("length") or 0) - existing.offset(), 0)
     if live >= MAX_LIVE_PER_BINDING:
         raise SessionError(
             "UPLOAD_SESSION_QUOTA",
@@ -428,7 +502,6 @@ def _create_locked(
     secret = secrets.token_urlsafe(32)
     prefix = SOURCE_ID_PREFIX if source_handoff is not None else ""
     session_id = prefix + secrets.token_hex(16)
-    now = _now()
     record = {
         "id": session_id,
         "binding": binding,
@@ -440,21 +513,20 @@ def _create_locked(
         "state": RECEIVING if length else VERIFYING,
         "created": now,
         "expires": now + TTL_SECONDS,
-        **({"source_handoff": source_handoff} if source_handoff is not None else {}),
+        **({"source_handoff": source_handoff, "durable_offset": 0} if source_handoff is not None else {}),
     }
-    descriptor = os.open(
-        store / f"{session_id}.part",
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
-        0o600,
-    )
-    os.close(descriptor)
-    try:
-        _write_record(store, record)
-    except BaseException:
-        _remove(store / f"{session_id}.part")
-        raise
-    running = _running(session_id)
-    running.size, running.digest = 0, hashlib.sha256()
+    part = store / f"{session_id}.part"
+    # A startup sweep uses the same lock when it finds a part before its record.
+    with _session_lock(store, session_id, timeout=_LOCK_WAIT_SECONDS):
+        descriptor = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+        os.close(descriptor)
+        try:
+            _write_record(store, record)
+        except BaseException:
+            _remove(part)
+            raise
+        running = _running(session_id)
+        running.size, running.digest = 0, hashlib.sha256()
     return Session(store, record), secret
 
 
@@ -469,46 +541,62 @@ def open_session(vault_root: Path, session_id: str, secret: str | None) -> Sessi
         str(record.get("secret_sha256")).encode(), _secret_hash(str(secret)).encode()
     ):
         raise _not_found()
-    session = Session(store, record)
+    now = _now()
+    if _expired(record, now):
+        record = _expire(store, session_id, now)
+        if record is None:
+            raise SessionError("UPLOAD_SESSION_EXPIRED", "this upload session has expired", 410)
+    return Session(store, record)
+
+
+def _reconcile_source_part(session: Session) -> None:
+    """Sync a recoverable tail before its offset becomes visible to other requests."""
     try:
-        expired = session.expires <= _now()
-    except (KeyError, TypeError, ValueError):
-        expired = True
-    if expired:
-        _drop(store, session_id)
-        raise SessionError("UPLOAD_SESSION_EXPIRED", "this upload session has expired", 410)
-    return session
+        size = _part_size(session.part)
+        offset = session.offset()
+        if size == offset:
+            return
+        if not offset <= size <= session.length:
+            raise SessionError("UPLOAD_SESSION_BUSY", "the held upload needs recovery", 503)
+        with session.part.open("r+b") as source:
+            os.fsync(source.fileno())
+        record = {**session.record, "durable_offset": size, "expires": _now() + TTL_SECONDS}
+        if size == session.length:
+            record["state"] = VERIFYING
+        _write_record(session.store, record)
+    except OSError as exc:
+        raise SessionError("UPLOAD_SESSION_BUSY", "the held upload could not be synced", 503) from exc
+    session.record = record
 
 
 def held_offset(session: Session) -> int:
     """The offset once any part still being written has landed, so a resume starts there."""
-    running = _running(session.id)
-    if not running.lock.acquire(timeout=_LOCK_WAIT_SECONDS):
-        raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409)
-    try:
+    if session.record["state"] != RECEIVING:
         return session.offset()
-    finally:
-        running.lock.release()
+    try:
+        with _session_lock(session.store, session.id, timeout=_LOCK_WAIT_SECONDS):
+            current = _read_record(session.store, session.id)
+            if current is None:
+                raise _not_found()
+            session.record = current
+            if current["state"] == RECEIVING and delegated_source(session.id):
+                _reconcile_source_part(session)
+            return session.offset()
+    except Timeout as exc:
+        raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409) from exc
 
 
 def delete(session: Session) -> None:
     """Cancel a session and delete its bytes; a commit in flight is not cancelled."""
     committing = SessionError("UPLOAD_SESSION_COMMITTING", "this upload is being committed", 409)
-    running = _running(session.id)
-    if not running.lock.acquire(timeout=_LOCK_WAIT_SECONDS):
-        raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409)
     try:
-        # The commit lock keeps a retry in any process from starting on bytes being removed.
-        with _commit_lock(session.store, session.id):
-            # Re-read under both locks: the final part may have moved it to `verifying`.
+        with _session_lock(session.store, session.id):
             current = _read_record(session.store, session.id)
             if current is not None and current.get("state") in (VERIFYING, COMMITTING):
                 raise committing
             _drop(session.store, session.id)
     except Timeout as exc:
         raise committing from exc
-    finally:
-        running.lock.release()
 
 
 class Patch:
@@ -522,16 +610,23 @@ class Patch:
         if declared is not None and offset + declared > session.length:
             raise SessionError("INVALID_UPLOAD", "the part runs past `Upload-Length`", 400)
         self.session = session
+        self._lock = _session_lock(session.store, session.id, timeout=_LOCK_WAIT_SECONDS)
+        try:
+            self._lock.acquire()
+        except Timeout as exc:
+            raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409) from exc
         self._running = _running(session.id)
-        if not self._running.lock.acquire(timeout=_LOCK_WAIT_SECONDS):
-            raise SessionError("UPLOAD_SESSION_BUSY", "a part of this upload is still being written", 409)
         try:
             # Re-read under the lock: an earlier part may have ended or failed it.
             current = _read_record(session.store, session.id)
-            if current is None or current.get("state") != RECEIVING:
+            if current is None or current.get("state") != RECEIVING or _expired(current, _now()):
                 raise SessionError("UPLOAD_SESSION_CLOSED", "this upload has all its bytes", 409)
             session.record = current
-            size = _part_size(session.part)
+            if delegated_source(session.id):
+                _reconcile_source_part(session)
+                if session.record["state"] == VERIFYING:
+                    raise SessionError("UPLOAD_SESSION_CLOSED", "this upload has all its bytes", 409)
+            size = session.offset()
             if offset != size:
                 raise SessionError("UPLOAD_OFFSET_MISMATCH", f"the server holds {size} bytes", 409)
             if self._running.size != size or self._running.digest is None:
@@ -543,7 +638,7 @@ class Patch:
                 self._running.size, self._running.digest = size, digest
             self._sink = session.part.open("ab")
         except BaseException:
-            self._running.lock.release()
+            self._lock.release()
             raise
         self.offset = offset
         self.written = 0
@@ -561,14 +656,16 @@ class Patch:
     def close(self) -> tuple[int, bool]:
         """Make the received bytes durable; return the new offset and whether it is complete."""
         try:
-            self._sink.flush()
-            os.fsync(self._sink.fileno())
-            self._sink.close()
+            with self._sink:
+                self._sink.flush()
+                os.fsync(self._sink.fileno())
             record = dict(self.session.record)
             offset = self.offset + self.written
             complete = offset == self.session.length
             if self.written:
                 record["expires"] = _now() + TTL_SECONDS
+                if delegated_source(self.session.id):
+                    record["durable_offset"] = offset
             if complete:
                 record["state"] = VERIFYING
             if self.written or complete:
@@ -576,16 +673,14 @@ class Patch:
             self.session.record = record
             return offset, complete
         finally:
-            self._running.lock.release()
+            self._lock.release()
 
 
 Committer = Callable[[Path, dict], dict]
 
 
 def _fail(store: Path, record: dict, code: str, reason: str) -> None:
-    _remove(store / f"{record['id']}.part")
-    _write_record(store, {**record, "state": FAILED, "code": code, "reason": reason})
-    _forget(record["id"])
+    _finish(store, {**record, "state": FAILED, "code": code, "reason": reason})
 
 
 def _commit(store: Path, session_id: str, committer: Committer, lock: FileLock) -> None:
@@ -672,9 +767,7 @@ def _commit_locked(store: Path, session_id: str, committer: Committer, running: 
         code, reason = "UPLOAD_COMMIT_FAILED", "the upload could not be preserved yet"
         refusal = exc
     else:
-        _write_record(store, {**record, "state": COMMITTED, "receipt": receipt})
-        _remove(part)
-        _forget(session_id)
+        _finish(store, {**record, "state": COMMITTED, "receipt": receipt})
         return
     # The committer ran outside any request's dispatcher, so the park records itself. A poll retries a parked
     # session and parks it again for the same reason: that is one refusal, not a new one. A new process
@@ -705,7 +798,7 @@ def start_commit(session: Session, committer: Committer) -> None:
     """
     if not _can_start(session.store, session.record):
         return
-    lock = _commit_lock(session.store, session.id)
+    lock = _session_lock(session.store, session.id)
     try:
         try:
             lock.acquire(timeout=0)
@@ -719,25 +812,23 @@ def start_commit(session: Session, committer: Committer) -> None:
         return
     try:
         record = _read_record(session.store, session.id)
-        if record is None or not _can_start(session.store, record):
+        if record is None or _expired(record, _now()) or not _can_start(session.store, record):
             lock.release()
             return
         if record["state"] == RECEIVING:
-            # The final part can reach the disk before the verifying record. Exclude a live part writer.
-            running = _running(session.id)
-            if not running.lock.acquire(blocking=False):
-                lock.release()
-                return
-            try:
-                record = _read_record(session.store, session.id)
-                if record is None or not _can_start(session.store, record):
+            # A stopped PATCH may leave the last bytes before it publishes the verifying record.
+            if delegated_source(session.id):
+                session.record = record
+                try:
+                    _reconcile_source_part(session)
+                except SessionError:
                     lock.release()
                     return
+                record = session.record
+            else:
                 record = {**record, "state": VERIFYING}
                 _write_record(session.store, record)
                 session.record = record
-            finally:
-                running.lock.release()
         # Report a failure found under the lock even when GET captured the preceding attempt.
         if record["state"] == RETRYABLE:
             session.record = record

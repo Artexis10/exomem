@@ -402,16 +402,16 @@ When a Source request to `upload_files` specifies `size_bytes` above the one-sho
 
 ### Requirement: A resumable Source preserves the upload's issuing authority
 
-A resumable Source handoff SHALL bind the expected digest, byte limit, owner, issuing MCP login and deployment. One ticket SHALL open at most one session. The session SHALL accept only the bound digest and permitted Source metadata. The service SHALL recheck the issuing login before session operations and canonical publication.
+A resumable Source handoff SHALL bind the expected digest, byte limit, owner, issuing MCP login and deployment. One ticket SHALL open at most one session. The session SHALL accept only the bound digest and permitted Source metadata. The service SHALL recheck the current owner binding and issuing login before session operations and at canonical publication. Refreshing an access token SHALL preserve authority while its login remains active. An unreadable authority SHALL leave an unspent ticket available for retry.
 
 #### Scenario: A transfer stops before the final byte
 
 - **WHEN** an upload stops partway or the listener restarts while the issuing login remains valid
 - **THEN** the next valid request receives the durable offset and can send the remaining bytes
 
-#### Scenario: The issuing login closes before publication
+#### Scenario: The issuing login closes or loses owner access before publication
 
-- **WHEN** the login that issued the Source handoff has closed by the final authorization check
+- **WHEN** the login has closed or the account has lost its owner binding by the final authorization check
 - **THEN** the listener refuses session access and does not publish any pending Source
 
 #### Scenario: A client replays the ticket or sends a different digest
@@ -423,7 +423,13 @@ A resumable Source handoff SHALL bind the expected digest, byte limit, owner, is
 
 The listener SHALL verify the complete SHA-256 and publish the original through the governed Source commit. Sending every byte SHALL not by itself report that a Source is stored. The terminal receipt SHALL identify the Source, artifact and verified digest.
 
-#### Scenario: Publication completes after an interrupted acknowledgement
+#### Scenario: Canonical publication completed before the acknowledgement was interrupted
 
-- **WHEN** the whole original matches the expected digest and a stop interrupts publication or acknowledgement
-- **THEN** the listener settles the same upload once and returns its receipt without duplicating the Source
+- **WHEN** the canonical Source commit completed before an interruption
+- **THEN** the listener reuses the exact receipt without duplicating the Source
+- **AND** the same command can retrieve its receipt for 24 hours after settlement
+
+#### Scenario: A partial publication cannot prove its outcome
+
+- **WHEN** a stop leaves canonical files without complete evidence of their commit
+- **THEN** the listener retains the uploaded bytes and reports an unknown Source outcome

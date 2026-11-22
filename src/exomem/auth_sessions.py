@@ -1512,7 +1512,9 @@ def _request_verifier(origin: Any) -> tuple[SessionAuthority, str] | None:
     return verifier, token.token
 
 
-def _configured_authority(client: Any, origin: Any) -> SessionAuthority | None:
+def _configured_authority(
+    client: Any, origin: Any, *, authoritative_only: bool = False,
+) -> SessionAuthority | None:
     """The authority this deployment configures for a delegated origin, or None when it has none for it."""
     from . import local_ingress, server_auth
 
@@ -1522,7 +1524,7 @@ def _configured_authority(client: Any, origin: Any) -> SessionAuthority | None:
         base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
         if not base_url or client.issuer != base_url:
             return None
-        authority = server_auth.build_session_authority(base_url=base_url)
+        authority = server_auth.build_session_authority(base_url=base_url, authoritative_only=authoritative_only)
     if client.issuer != authority.issuer or origin.audience != authority.audience:
         return None
     return authority
@@ -1590,7 +1592,7 @@ def origin_revalidates_in_background(who: Any) -> bool:
     return who.origin_session is not None and not cloud_cell.is_cloud_issuer_family(who.issuer_family)
 
 
-async def origin_login_state(who: Any) -> OriginLogin:
+async def origin_login_state(who: Any, *, require_owner: bool = False) -> OriginLogin:
     """Recheck the login behind a delegated origin for work that outlives its access token.
 
     The origin session's own access-token expiry does not end it; its refresh family
@@ -1600,22 +1602,46 @@ async def origin_login_state(who: Any) -> OriginLogin:
     A store or cipher read failure, or an unusable state directory, is ``UNREADABLE``.
     Any other failure, such as no authority configured for the issuer, is ``NOT_VALID``:
     the service then has nothing that could vouch for the login.
+
+    Personal owner delegation checks the current owner binding and reads the
+    configured session store without initializing the optional stale cache.
     """
     origin = who.origin_session
     if origin is None:
-        return OriginLogin.VALID
+        return OriginLogin.NOT_VALID if require_owner else OriginLogin.VALID
     client = who.client_binding
     if client is None:
         return OriginLogin.NOT_VALID
     from . import cloud_cell
 
     if cloud_cell.is_cloud_issuer_family(who.issuer_family):
+        if require_owner:
+            return OriginLogin.NOT_VALID
         from . import cloud_origin
 
         return OriginLogin.VALID if cloud_origin.matches(who) else OriginLogin.NOT_VALID
+
+    owner = None
+    if require_owner:
+        from . import local_ingress
+        from .governance import principal
+
+        if not who.resolved or who.audience_id != principal.OWNER_AUDIENCE:
+            return OriginLogin.NOT_VALID
+        if client.issuer == local_ingress.LOCAL_ISSUER:
+            if not who.local_owner or who.issuer_family != principal.LOCAL_INGRESS_ISSUER_FAMILY:
+                return OriginLogin.NOT_VALID
+        else:
+            owner = principal.remote_owner_binding()
+            if not who.remote_owner or owner is None or owner.issuer != client.issuer:
+                return OriginLogin.NOT_VALID
+
     try:
-        verified = _request_verifier(origin)
-        authority = verified[0] if verified is not None else _configured_authority(client, origin)
+        verified = None if require_owner else _request_verifier(origin)
+        authority = (
+            verified[0] if verified is not None
+            else _configured_authority(client, origin, authoritative_only=require_owner)
+        )
         if authority is None or client.issuer != authority.issuer or origin.audience != authority.audience:
             return OriginLogin.NOT_VALID
         record = await authority.revalidate_login(
@@ -1625,18 +1651,20 @@ async def origin_login_state(who: Any) -> OriginLogin:
         return OriginLogin.UNREADABLE
     except (RuntimeError, ValueError):
         return OriginLogin.NOT_VALID
-    return OriginLogin.VALID if record is not None else OriginLogin.NOT_VALID
+    if record is None or (owner is not None and record.github_user_id != owner.user_id):
+        return OriginLogin.NOT_VALID
+    return OriginLogin.VALID
 
 
-def origin_login_state_sync(who: Any) -> OriginLogin:
+def origin_login_state_sync(who: Any, *, require_owner: bool = False) -> OriginLogin:
     """``origin_login_state`` for a synchronous caller, retaining request evidence."""
     if who.origin_session is None:
-        return OriginLogin.VALID
+        return OriginLogin.NOT_VALID if require_owner else OriginLogin.VALID
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(origin_login_state(who))
+        return asyncio.run(origin_login_state(who, require_owner=require_owner))
     # Synchronous job ticks may run on an ASGI loop; retain its verified request context.
     context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(context.run, lambda: asyncio.run(origin_login_state(who))).result()
+        return pool.submit(context.run, lambda: asyncio.run(origin_login_state(who, require_owner=require_owner))).result()
