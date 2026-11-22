@@ -17,6 +17,7 @@
 - [x] 2.7 A save to a step's page between its leaf commit and its settle hold leaves the step committed, and the undo proposal reports it as stale.
 - [x] 2.8 A witness that a failed batch's rollback could not remove is not taken as a commit: the run blocks as uncertain and holds no receipt.
 - [x] 2.9 Another process refuses a step while its leaf is in flight, and the leaf then commits. The step gets its committed receipt after the refusal, and the run completes.
+- [x] 2.10 When that call stops before its settle hold, `status` reports the step as `receipt-required`, and the next resume records it as `recovered-committed`.
 
 ## 3. Closure
 
@@ -25,6 +26,6 @@
 
 ## Follow-ups for separate changes
 
-- The compensation seal compares receipts only. A forward step in another process, between its leaf commit and its settle hold, can then be left out of the undo. Under the seal hold, refuse with a retryable code while the forward evidence directory holds a witness with no receipt.
+- The compensation proposal derives the forward run's committed steps from receipts only. A forward step whose leaf committed without a receipt is then left out of the undo until a resume records it. Such a step can be in flight in another process, stopped before its settle hold, or behind another process's refusal. A crash under the wide hold leaves the same state. Under the seal hold, refuse with a retryable code while the forward run's next step holds a witness with no receipt.
 - A store-mode move commits through `mutate_in_store`, which never calls the before-rename stage, so it does not recheck the source's sealed hash. Review reports that such a run already ends `CURATION_OUTCOME_UNCERTAIN` before this change. Pass the sealed hash as an explicit source expectation, as `_adopt_rename` does with `source_hash=binding["before_hash"]`.
 - Planning and Preservation steps recover a found witness with `live=False`. A witness that a failed batch's rollback could not remove can then be recovered as committed without a live check. This predates this change. Give that recovery a proof that the batch committed, as the live check gives the other kinds.

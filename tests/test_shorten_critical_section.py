@@ -1297,3 +1297,51 @@ def test_a_leaf_that_commits_after_another_call_refused_its_step_leaves_the_step
     receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
     # The undo derives the steps to reverse from these receipts.
     assert [receipt["outcome"] for receipt in receipts] == ["failed", "committed"]
+
+
+def test_a_step_refused_elsewhere_whose_leaf_committed_is_recorded_by_the_next_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call whose leaf committed after another process refused the step can stop before its
+    settle hold. Every resume then stopped on that refusal, and the status read the run as failed."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+    rel = "Knowledge Base/Notes/Insights/refused-unsettled-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c7")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+    holding, release = threading.Event(), threading.Event()
+    holders: list[tuple[threading.Thread, dict]] = []
+
+    def other_writer() -> None:
+        with manager.mutation_guard(vault, operation="other_writer"):
+            holding.set()
+            assert release.wait(30.0)
+
+    def refuse_first_then_hold_the_settle(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        result = real_dispatch(*args, **kwargs)
+        holders.append(_in_thread("other-writer", other_writer))
+        assert holding.wait(10.0)
+        return result
+
+    monkeypatch.setattr(curation, "_dispatch_step", refuse_first_then_hold_the_settle)
+    try:
+        with pytest.raises(Exception) as stopped:
+            _curation(manager, vault, **_apply_arguments(proposed))
+    finally:
+        release.set()
+        for holder, held in holders:
+            holder.join(timeout=60.0)
+            assert "error" not in held, held.get("error")
+
+    assert error_dict(stopped.value).get("committed") is True
+    status = curation.status(vault, run_id=proposed["run_id"])
+    assert (status["phase"], status["recovery"], status["next_action"]) == ("executing", "receipt-required", "resume")
+    assert _resume(manager, vault, proposed, call="after")["phase"] == "completed"
+    assert "Reworded." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "recovered-committed"]

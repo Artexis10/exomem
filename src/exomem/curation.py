@@ -4305,13 +4305,18 @@ def _committed_step_ids(state: Mapping[str, Any]) -> set[str]:
 
 def _next_step(
     plan: Mapping[str, Any], state: Mapping[str, Any]
-) -> tuple[int, Mapping[str, Any], Mapping[str, Any]] | None:
+) -> tuple[int, Mapping[str, Any], Mapping[str, Any], bool] | None:
+    """The first uncommitted step, and whether a receipt refused it for good.
+
+    A refused step is still returned: its refusal stands only while the step has no committed
+    witness. Another process can record that refusal before the step's leaf commits, and the call
+    that ran the leaf can stop before it records the receipt. Each caller probes the witness first.
+    """
     committed = _committed_step_ids(state)
     for ordinal, step in enumerate(plan["steps"]):
         if step["step_id"] not in committed:
-            if state.get("failed_step") == step["step_id"] and not state.get("retryable", False):
-                return None
-            return ordinal, step, plan["binding_manifest"][ordinal]
+            refused = state.get("failed_step") == step["step_id"] and not state.get("retryable", False)
+            return ordinal, step, plan["binding_manifest"][ordinal], refused
     return None
 
 
@@ -4793,21 +4798,11 @@ def _execute_step(
         raise _error("CURATION_OUTCOME_UNCERTAIN", "run evidence is invalid")
     next_item = _next_step(plan, reconstructed)
     if next_item is None:
-        failed_step = reconstructed.get("failed_step")
-        if failed_step is not None:
-            # The run stopped on a refusal that committed nothing: a retry hears that refusal
-            # again, never a replay of a run that did not complete.
-            codes = [
-                receipt["error_code"]
-                for receipt in reconstructed["receipts"]
-                if receipt.get("step_id") == failed_step and receipt.get("outcome") == "failed"
-            ]
-            raise _error(codes[-1], f"curation step {failed_step!r} was refused and did not commit")
         return _compensation_phase(
             {**reconstructed, "outcome": "replayed", "mutated": False},
             compensation=compensation,
         )
-    ordinal, step, binding = next_item
+    ordinal, step, binding, refused = next_item
     if scoped and not _guards_itself(step, binding):
         return under_boundary()
     operation_identity = operation_id(plan_identity, ordinal, step["step_id"])
@@ -4857,6 +4852,15 @@ def _execute_step(
             effect=recovered_effect,
             compensation=compensation,
         )
+    if refused:
+        # The run stopped on a refusal that committed nothing: a retry hears that refusal
+        # again, never a replay of a run that did not complete.
+        codes = [
+            receipt["error_code"]
+            for receipt in reconstructed["receipts"]
+            if receipt.get("step_id") == step["step_id"] and receipt.get("outcome") == "failed"
+        ]
+        raise _error(codes[-1], f"curation step {step['step_id']!r} was refused and did not commit")
 
     if step["kind"] in _RENAME_STEP_KINDS and writer is None:
         try:
@@ -5305,17 +5309,21 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "error_code": str(projection.get("error_code") or "CURATION_OUTCOME_UNCERTAIN"),
             "recovery": "blocked",
         }
-    if reconstructed["phase"] in {"completed", "partial", "failed", "blocked"}:
-        result = {
+    settled = _compensation_phase(
+        {
             **reconstructed,
             "action": "status",
             "mutated": False,
             "recovery": "blocked" if reconstructed["phase"] == "blocked" else None,
-        }
-        return _compensation_phase(result, compensation=compensation)
+        },
+        compensation=compensation,
+    )
     next_item = _next_step(plan, reconstructed)
+    refused = next_item is not None and next_item[3]
+    if reconstructed["phase"] in {"completed", "partial", "failed", "blocked"} and not refused:
+        return settled
     if next_item is not None:
-        ordinal, step, binding = next_item
+        ordinal, step, binding, _refused = next_item
         operation_identity = operation_id(identity, ordinal, step["step_id"])
         try:
             committed_witness = _validated_operation_witness(
@@ -5346,8 +5354,11 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 "phase": "executing",
                 "recovery": "receipt-required",
                 "active_step": step["step_id"],
+                "next_action": "resume",
             }
             return _compensation_phase(result, compensation=compensation)
+    if refused:
+        return settled
     prepared = projection.get("prepared")
     if isinstance(prepared, Mapping):
         ordinal = prepared.get("ordinal")
