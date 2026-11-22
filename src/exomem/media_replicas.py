@@ -124,15 +124,16 @@ _STATUS_TABLES = ("media_replica_counts", "media_replica_buckets")
 _STATUS_TRIGGER_EVENTS = ("INSERT", "UPDATE", "DELETE")
 _REPLICA_COUNT_TRIGGER = "media_replicas_counts"
 _EXPORT_COUNT_TRIGGER = "media_key_exports_count"
+_QUARANTINED_VERSION_INDEX = "media_replicas_reproof_version"
 _REPLICA_STATUS_TRIGGERS = {
     f"{prefix}_{event.lower()}"
     for prefix in (_REPLICA_COUNT_TRIGGER, "media_replicas_buckets")
     for event in _STATUS_TRIGGER_EVENTS
 }
 _QUEUE_STATUS_TRIGGERS = {f"media_replica_queue_buckets_{event.lower()}" for event in _STATUS_TRIGGER_EVENTS}
+_EXPORT_STATUS_TRIGGERS = {f"{_EXPORT_COUNT_TRIGGER}_{event.lower()}" for event in _STATUS_TRIGGER_EVENTS}
 _STATUS_REQUIRED_SCHEMA = {
-    *_STATUS_SOURCES, *_STATUS_TABLES, *_REPLICA_STATUS_TRIGGERS, *_QUEUE_STATUS_TRIGGERS,
-    *(f"{_EXPORT_COUNT_TRIGGER}_{event.lower()}" for event in _STATUS_TRIGGER_EVENTS),
+    *_STATUS_SOURCES, *_STATUS_TABLES, *_REPLICA_STATUS_TRIGGERS, *_QUEUE_STATUS_TRIGGERS, *_EXPORT_STATUS_TRIGGERS,
 }
 
 
@@ -324,7 +325,7 @@ def initialize(conn: sqlite3.Connection) -> None:
     # (`_record_damage`) and a release reads for the filings that a wrong plaintext holds (`_released`). Each statement
     # states the cause it wants: a version has few filings, so it reads only them, however many other replicas are
     # quarantined.
-    conn.execute("CREATE INDEX IF NOT EXISTS media_replicas_reproof_version ON media_replicas(object, version, store) "
+    conn.execute(f"CREATE INDEX IF NOT EXISTS {_QUARANTINED_VERSION_INDEX} ON media_replicas(object, version, store) "
                  f"WHERE state = '{QUARANTINED}'")
     # A stored version that a check, a sample or eviction found damaged, whichever filings list it: what eviction asks
     # before it drops an original's local bytes. Damage is a fact of the version, so it outlives any filing's row: a row
@@ -1323,6 +1324,15 @@ def _matches_replica(row: sqlite3.Row | None, replica: originals.StoredObject) -
     ) == (replica.object, replica.version, replica.key_version, replica.ciphertext_size, replica.ciphertext_sha256)
 
 
+# One first-row probe of the quarantined-version index per requested binding entry, even for shared versions.
+_SAME_VERSION_QUARANTINES = (
+    "SELECT r.store, r.level, r.failure FROM json_each(?) AS wanted CROSS JOIN media_replicas AS r "
+    "ON (r.binary_rel, r.store) = (SELECT held.binary_rel, held.store FROM media_replicas AS held "
+    f"INDEXED BY {_QUARANTINED_VERSION_INDEX} WHERE (held.object, held.version, held.store) = (json_extract(wanted.value, '$[1]'), "
+    f"json_extract(wanted.value, '$[2]'), json_extract(wanted.value, '$[0]')) AND held.state = '{QUARANTINED}' LIMIT 1)"
+)
+
+
 def original_view(vault: Path, path: str) -> dict[str, object]:
     """One binding and its evidence from one readonly ledger snapshot."""
     vault = Path(vault).resolve()
@@ -1336,43 +1346,58 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
     recorded: dict[str, sqlite3.Row] = {}
     versions: dict[str, sqlite3.Row] = {}
     digests: set[str] = set()
-    exports: dict[str, float] | None = None
-    damage_complete = projection_complete = False
+    exports: dict[str, float] = {}
+    damage_complete = projection_complete = exports_complete = False
     if replicas and ledger.path.exists():
         wanted = _quadruples(replicas)
         try:
             with closing(ledger._connect(readonly=True)) as conn:
                 conn.execute("BEGIN")
-                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")}
+                schema = _status_schema(conn)
+                sources = {row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table' OR (type = 'index' AND name = ?)",
+                    (_QUARANTINED_VERSION_INDEX,))}
                 # Each damage source may survive independently. A surviving positive finding is still authoritative.
-                if "media_damaged_versions" in tables:
+                if "media_damaged_versions" in sources:
                     versions = {row["store"]: row for row in conn.execute(
                         "SELECT d.store, d.level, d.failure FROM json_each(?) AS wanted JOIN media_damaged_versions AS d "
                         "ON (d.store, d.object, d.version) = (json_extract(wanted.value, '$[0]'), "
                         "json_extract(wanted.value, '$[1]'), json_extract(wanted.value, '$[2]'))", (wanted,))}
-                if "media_damaged_digests" in tables:
+                if "media_damaged_digests" in sources:
                     digests = {row[0] for row in conn.execute(
                         "SELECT ciphertext_sha256 FROM media_damaged_digests WHERE ciphertext_sha256 IN "
                         "(SELECT json_extract(value, '$[3]') FROM json_each(?))", (wanted,))}
-                damage_complete = {"media_damaged_versions", "media_damaged_digests"} <= tables
-                if "media_key_exports" in tables:
+                damage_complete = {"media_damaged_versions", "media_damaged_digests"} <= sources
+                if "media_key_exports" in sources:
                     exports = dict(conn.execute(
                         "SELECT key_version, confirmed_at FROM media_key_exports WHERE key_version IN "
                         "(SELECT value FROM json_each(?))", (json.dumps(sorted({r.key_version for r in replicas})),)))
-                if "media_replicas" in tables:
+                    exports_complete = _EXPORT_STATUS_TRIGGERS.issubset(schema)
+                if "media_replicas" in sources:
+                    missing_versions = tuple(replica for replica in replicas if replica.store not in versions)
+                    if missing_versions and _QUARANTINED_VERSION_INDEX not in sources:
+                        damage_complete = False
+                    elif missing_versions:
+                        surviving = {row["store"]: row for row in conn.execute(
+                            _SAME_VERSION_QUARANTINES, (_quadruples(missing_versions),))}
+                        if surviving:
+                            versions.update(surviving)
+                            damage_complete = False
                     recorded = {row["store"]: row for row in conn.execute(
                         f"SELECT store, object, version, key_version, size, ciphertext_sha256, verified_at, "
                         f"state, {_CHECK_COLUMNS} FROM media_replicas WHERE binary_rel = ?",
                         (snapshot.path.relative_to(vault).as_posix(),))}
-                    projection_complete = _REPLICA_STATUS_TRIGGERS.issubset(_status_schema(conn))
+                    projection_complete = _REPLICA_STATUS_TRIGGERS.issubset(schema)
         except (sqlite3.Error, OSError):
             # Retain any positive evidence already read in the snapshot; the missing part remains unknown.
             pass
     found = []
+    filings_complete = True
     for replica in replicas:
         entry = entries.get(replica.store)
         row = recorded.get(replica.store)
         checked = row if _matches_replica(row, replica) else None
+        filings_complete &= checked is not None
         view = _check_view(checked) if checked is not None else {
             "last_check": None, "decrypted_at": None, "finding": None, "failed_attempt": None,
         }
@@ -1385,13 +1410,14 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
             view["last_check"] = view["failed_attempt"] = None
         if view["finding"] is not None:
             state, recoverable, reason = QUARANTINED, False, QUARANTINED
-        elif not damage_complete or not projection_complete:
+        elif not damage_complete or not projection_complete or checked is None:
             state, recoverable, reason = "unknown", None, "damage evidence unavailable"
-        elif exports is None and config.get(originals.KEY_CUSTODY) != originals.PLATFORM_CUSTODY:
+        elif (not exports_complete and replica.key_version not in exports
+              and config.get(originals.KEY_CUSTODY) != originals.PLATFORM_CUSTODY):
             state, recoverable, reason = UPLOAD_VERIFIED, None, "key export evidence unavailable"
         else:
             state = UPLOAD_VERIFIED
-            recoverable, reason = recoverability(config, replica.key_version, exports or {})
+            recoverable, reason = recoverability(config, replica.key_version, exports)
         found.append({
             "store": replica.store, "state": state,
             "verified_at": _iso(checked["verified_at"]) if checked is not None else None,
@@ -1400,7 +1426,7 @@ def original_view(vault: Path, path: str) -> dict[str, object]:
             "recoverable": recoverable, "reason": reason, "key_version": replica.key_version,
             **view,
         })
-    partial = bool(replicas) and (not projection_complete or not damage_complete or exports is None)
+    partial = bool(replicas) and not (projection_complete and filings_complete and damage_complete and exports_complete)
     return {"state": "partial" if partial else "measured",
             "reason": "some replica evidence is unavailable" if partial else None,
             "original_state": snapshot.state, "replicas": found}
@@ -1904,7 +1930,7 @@ def _check_store(vault: Path, ledger: MediaJobStore, name: str, level: str, cycl
             spent += size
             try:
                 with cap.reading(size):
-                    failure = media_store.check_replica(vault, replica)
+                    failure = media_store.check_replica(vault, replica, deadline=limit)
             except media_store.ReplicaAbsent as missing:
                 spent -= size
                 failure = missing.failure
@@ -1989,7 +2015,8 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
     generation: every finding of a wrong plaintext of these bytes, on any version of them and from any filing, gives it
     a new one (`_record_damage`). Only a generation that is still the one the sample read is released, in one
     transaction. The ciphertext decrypted, so every filing of it under any name that a wrong plaintext quarantined is
-    released too, with the copies again they queued, and no record of a wrong plaintext of it is left; a newer finding
+    released too. Their copies settle unless a sealed hold needs guarded cleanup. No record of the wrong plaintext
+    remains; a newer finding
     on any of them leaves all of it, this replica included, quarantined with its request. A filing that holds another
     cause stays: its version is lost or differs, which this download does not answer. Only the downloaded version
     gains a decrypt proof. Other versions become unchecked.
@@ -2011,17 +2038,26 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
         conn.execute("UPDATE media_damaged_versions SET ciphertext_sha256 = ? "
                      "WHERE (store, object, version) = (?, ?, ?) AND ciphertext_sha256 IS NULL",
                      (replica.ciphertext_sha256, store, name, version))
-        _complete_copies(conn, f"kind = '{RECOPY}' AND store = :store AND binary_rel = :path",
-                         {"store": store, "path": row["binary_rel"]})
         # Clear the shared plaintext finding. Each version still needs its own proof of a successful read.
         # Keep other causes and records that a remaining quarantine depends on.
         digest = replica.ciphertext_sha256
         same = (f"WHERE state = '{QUARANTINED}' AND failure = '{PLAINTEXT_MISMATCH}' AND (object, version, store) IN "
                 "(SELECT object, version, store FROM media_damaged_versions "
                 f"WHERE ciphertext_sha256 = :digest AND failure = '{PLAINTEXT_MISMATCH}')")
+        # The first update already released the sampled row. Include it alongside the remaining filings of the digest.
+        released = ("SELECT store, binary_rel, object FROM media_replicas WHERE store = :store AND binary_rel = :path "
+                    f"UNION ALL SELECT store, binary_rel, object FROM media_replicas {same}")
+        # Protections use an empty scope for the eviction pointer and the store name for an additional replica.
+        # The guarded settlement identifies the actual scope before deleting the sealed hold.
+        jobs = (f"kind = '{RECOPY}' AND (store, binary_rel) IN (SELECT r.store, r.binary_rel FROM ({released}) AS r "
+                "WHERE EXISTS (SELECT 1 FROM media_protections AS hold WHERE hold.binary_rel = r.binary_rel "
+                "AND hold.object = r.object AND hold.store IN ('', r.store) AND hold.uploadable = 0) = :sealed)")
+        identity = {"store": store, "path": row["binary_rel"], "digest": digest}
+        cleanup = conn.execute(
+            "UPDATE media_replica_queue SET state = :pending, code = NULL, attempts = 0, retry_at = 0, token = random() "
+            f"WHERE {jobs}", {**identity, "pending": PENDING, "sealed": True}).rowcount
+        _complete_copies(conn, jobs, {**identity, "sealed": False})
         proved_at = "CASE WHEN (store, object, version) = (:store, :object, :version) THEN :now ELSE 0 END"
-        _complete_copies(conn, f"kind = '{RECOPY}' AND (store, binary_rel) IN "
-                         f"(SELECT store, binary_rel FROM media_replicas {same})", {"digest": digest})
         conn.execute("UPDATE media_replicas SET state = :healthy, level = NULL, failure = NULL, checked_at = 0, "
                      f"check_from = 0, decrypted_at = {proved_at}, sample_from = {proved_at} {same}",
                      {"healthy": UPLOAD_VERIFIED, "store": store, "object": name, "version": version,
@@ -2032,6 +2068,8 @@ def _released(vault: Path, row: sqlite3.Row, replica: originals.StoredObject) ->
                      f"AND held.state = '{QUARANTINED}')", (digest, PLAINTEXT_MISMATCH))
         conn.execute("UPDATE media_damaged_versions SET ciphertext_sha256 = NULL WHERE ciphertext_sha256 = ?", (digest,))
         conn.execute("DELETE FROM media_damaged_digests WHERE ciphertext_sha256 = ?", (digest,))
+    if cleanup:
+        wake()
 
 
 def _charge(conn: sqlite3.Connection, store: str, month: int, size: int, budget: int | None = None) -> bool:

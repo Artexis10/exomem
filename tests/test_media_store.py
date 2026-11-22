@@ -77,6 +77,21 @@ def _offload(vault: Path, path: Path):
     return reference
 
 
+def test_a_store_check_rejects_an_oversized_replica_before_hashing(vault: Path, selected_store, monkeypatch):
+    from exomem import media_store
+
+    reference = _offload(vault, _preserved(vault))
+    stored = Path(selected_store[0]["root"]) / reference.object / reference.version
+    with stored.open("r+b") as stream:
+        stream.truncate(reference.ciphertext_size + 1024 * 1024)
+
+    def read_unexpected_bytes(*args, **kwargs):
+        pytest.fail("a replica with the wrong byte length should need no ciphertext read")
+
+    monkeypatch.setattr(media_store, "_digest", read_unexpected_bytes)
+    assert media_store.check_replica(vault, reference) == "size_mismatch"
+
+
 def test_real_age_offload_and_verified_hydration_preserve_the_sidecar(vault: Path, selected_store):
     from exomem import media_jobs, media_processing, media_store
     from exomem.governance import companions
@@ -893,7 +908,7 @@ def test_unknown_store_result_preserves_the_reference_and_local_bytes(vault: Pat
     path = _preserved(vault)
     reference = _offload(vault, path)
 
-    def unavailable(self, name, version):
+    def unavailable(self, name, version, **_options):
         raise TimeoutError("store request timed out")
 
     monkeypatch.setattr(media_store.FilesystemStore, "head", unavailable)
@@ -2606,7 +2621,7 @@ def test_eviction_takes_unread_originals_first_and_among_them_those_with_no_pend
     paths = {originals.original_state(vault, path).reference.object: path for path in (played, queued, idle)}
     head = media_store.FilesystemStore.head
     monkeypatch.setattr(media_store.FilesystemStore, "head",
-                        lambda store, name, version: order.append(paths[name]) or head(store, name, version))
+                        lambda store, name, version, **options: order.append(paths[name]) or head(store, name, version, **options))
 
     media_store.evict_to_target(vault)
 
@@ -2786,7 +2801,7 @@ def test_a_store_outage_ends_the_eviction_pass_at_its_first_head(vault: Path, se
     stored = [_stored(vault, f"recording-{index}", 100 + index) for index in range(3)]
     heads = []
 
-    def unreachable(self, name, version):
+    def unreachable(self, name, version, **_options):
         heads.append(name)
         raise OSError("the store is unreachable")
 
@@ -4101,10 +4116,10 @@ def test_an_eviction_that_read_a_served_policy_still_honours_a_latch_set_before_
     path = _stored(vault, "cached", 300)
     head = media_store.FilesystemStore.head
 
-    def turn_off_and_count(store, name, version):
+    def turn_off_and_count(store, name, version, **options):
         _retained(selected_store, vault)  # The owner turns the store off while the eviction waits on the store.
         assert media_store.drain_census(vault) == (0, 0)
-        return head(store, name, version)
+        return head(store, name, version, **options)
 
     monkeypatch.setattr(media_store.FilesystemStore, "head", turn_off_and_count)
 

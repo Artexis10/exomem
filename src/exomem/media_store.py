@@ -142,13 +142,14 @@ class Store(Protocol):
     def open(self, name: str, version: str): ...
 
 
-def _digest(stream: BinaryIO, *, deadline: float | None = None) -> ObjectHead:
-    """The size and SHA-256 of a stream; a request's `deadline` stops the pass as the ordinary hold's hash does."""
+def _digest(stream: BinaryIO, *, deadline: float | None = None, limit: int | None = None) -> ObjectHead:
+    """Hash a stream, up to the held length when the caller has a size proof."""
     digest = hashlib.sha256()
     size = 0
     while True:
         reserved_paths._copy_deadline(deadline)
-        chunk = stream.read(1024 * 1024)
+        remaining = min(1024 * 1024, limit - size) if limit is not None else 1024 * 1024
+        chunk = stream.read(remaining)
         if not chunk:
             return ObjectHead(size, digest.hexdigest())
         size += len(chunk)
@@ -323,7 +324,8 @@ class FilesystemStore:
                     with os.fdopen(os.dup(file.descriptor), "rb") as stream:
                         yield stream
 
-    def head(self, name: str, version: str) -> ObjectHead | None:
+    def head(self, name: str, version: str, *, expected_size: int | None = None,
+             deadline: float | None = None) -> ObjectHead | None:
         self._validate_locator(name, version)
         with self._held() as filesystem:
             parent_result = filesystem.parent(name)
@@ -334,8 +336,17 @@ class FilesystemStore:
                 if found.error is not None and found.error.code == "MISSING":
                     return None
                 with found.require() as file:
-                    with os.fdopen(os.dup(file.descriptor), "rb") as stream:
-                        return _digest(stream)
+                    before = file.version()
+                    if expected_size is not None and before.size != expected_size:
+                        raise ReplicaMismatch("size_mismatch")
+                    with os.fdopen(os.dup(file.descriptor), "rb", buffering=0) as stream:
+                        try:
+                            proof = _digest(stream, deadline=deadline, limit=before.size)
+                        except reserved_paths.ReservedPathLeafError as error:
+                            raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the replica check exceeded its deadline") from error
+                    if file.version() != before:
+                        raise MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the held replica changed during the read")
+                    return proof
 
 
 def _settings(vault: Path) -> dict[str, object]:
@@ -1127,8 +1138,9 @@ class OffloadBatch:
 
     def charge(self, ledger: MediaJobStore, snapshot: OriginalSnapshot, reference: StoredObject) -> None:
         self._charged = True
-        self._usage = self.usage(ledger).charged(_binding_of(self._vault, snapshot), reference)
-        _record_census(ledger, self._usage)
+        usage = self.usage(ledger)
+        usage.charge(_binding_of(self._vault, snapshot), reference)
+        _record_census(ledger, usage)
 
     def failed(self) -> None:
         """A member raised: drop the census when that member may have half-published, which the census cannot know."""
@@ -1226,27 +1238,27 @@ def recorded_census(vault: Path) -> RecordedCensus | None:
         tuple(media_allowance.Blocker(path, reason) for path, reason in named))
 
 
+# Bound how many live bindings and store HEADs one offload spends on equal versions.
+_REUSE_CANDIDATE_LIMIT = 8
+
+
 def _reuse_candidates(
     vault: Path, binary: originals.BinaryBinding, usage: media_allowance.ReferenceUsage, key_version: str,
 ) -> tuple[list[tuple[Path, StoredObject]], list[StoredObject]]:
-    """The first live filing of each version of equal bytes under the current key, and the damaged versions among them.
-
-    One statement tells which versions a finding recorded as damaged (`media_replicas.damaged_among`, however many
-    candidates): they are never reused, and are returned so that the caller can name its own filing as the one that heals them.
-    The rest keep the census's order.
-    """
+    """One indexed slice of matching versions and their recorded damage."""
     from . import media_replicas
 
-    found: dict[tuple[str, str, str], tuple[Path, StoredObject]] = {}
-    for key, path in (usage.live_paths if usage.versions is not None else {}).items():
-        candidate_binary, candidate_reference = usage.versions[key]
-        if (candidate_binary.sha256 == binary.sha256 and candidate_binary.size == binary.size
-                and candidate_reference.key_version == key_version):
-            found.setdefault((candidate_reference.store, candidate_reference.object, candidate_reference.version),
-                             (path, candidate_reference))
-    damaged = media_replicas.damaged_among(vault, [candidate for _path, candidate in found.values()])
-    return ([found[identity] for identity in found if identity not in damaged],
-            [found[identity][1] for identity in found if identity in damaged])
+    found = usage.reuse_candidates(binary, key_version, limit=_REUSE_CANDIDATE_LIMIT)
+    damaged = media_replicas.damaged_among(vault, [candidate for _path, candidate in found])
+    ready: list[tuple[Path, StoredObject]] = []
+    failed: list[StoredObject] = []
+    for path, reference in found:
+        if (reference.store, reference.object, reference.version) in damaged:
+            usage.skip_reuse(binary, reference)
+            failed.append(reference)
+        else:
+            ready.append((path, reference))
+    return ready, failed
 
 
 def _live_filing(vault: Path, binary: originals.BinaryBinding, path: Path, reference: StoredObject) -> OriginalSnapshot:
@@ -1460,10 +1472,13 @@ def _publish_reference(vault: Path, snapshot: OriginalSnapshot, reference: Store
     _commit_reference(vault, prepare_reference(vault, snapshot, reference))
 
 
-def _verified_head(store: Store, reference: StoredObject) -> ObjectHead | None:
+def _verified_head(store: Store, reference: StoredObject, *, deadline: float | None = None) -> ObjectHead | None:
     """The version's HEAD, None when it is definitively absent. A different ciphertext raises."""
     with _transport("head"):
-        head = store.head(reference.object, reference.version)
+        if isinstance(store, FilesystemStore):
+            head = store.head(reference.object, reference.version, expected_size=reference.ciphertext_size, deadline=deadline)
+        else:
+            head = store.head(reference.object, reference.version)
     if head is not None and head.size != reference.ciphertext_size:
         raise ReplicaMismatch("size_mismatch")
     if head is not None and head.sha256 != reference.ciphertext_sha256:
@@ -1477,14 +1492,14 @@ _BYTES_HERE = ("local", "cached")
 _ABSENT, _CONDEMNED = ReplicaAbsent.failure, "condemned"
 
 
-def _head_failure(backend: Store, replica: StoredObject) -> str | None:
+def _head_failure(backend: Store, replica: StoredObject, *, deadline: float | None = None) -> str | None:
     """Ask `backend` about the replica's version: None when it matches the entry, else why it does not.
 
     The answers are `absent`, `condemned`, `size_mismatch` and `digest_mismatch`. A store that cannot answer raises
     `MEDIA_STORE_UNAVAILABLE`: that is no finding, and the caller keeps what it had.
     """
     try:
-        head = _verified_head(backend, replica)  # a filesystem store proves its identity inside the view it reads
+        head = _verified_head(backend, replica, deadline=deadline)
     except ReplicaMismatch as mismatch:
         return mismatch.failure
     if head is None:
@@ -1493,9 +1508,9 @@ def _head_failure(backend: Store, replica: StoredObject) -> str | None:
     return _CONDEMNED if head.condemned else None
 
 
-def check_replica(vault: Path, replica: StoredObject) -> str | None:
+def check_replica(vault: Path, replica: StoredObject, *, deadline: float | None = None) -> str | None:
     """Check the stored version. A confirmed absence raises before any ciphertext is charged."""
-    failure = _head_failure(store_for(vault, replica.store), replica)
+    failure = _head_failure(store_for(vault, replica.store), replica, deadline=deadline)
     if failure == _ABSENT:
         raise ReplicaAbsent()
     return failure
@@ -1888,8 +1903,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
             _refuse(ledger, snapshot, MediaStoreError(RESIDENT_CODE, "the original stays on the volume"),
                     media_capacity.age_ciphertext_size(snapshot.binary_size))
             return None
-        # One census and one list of the versions of equal bytes, walked once: a candidate that the store does not confirm is
-        # passed over, so the cost of the walk is bounded by the candidates, not by the censuses a retry would repeat.
+        # One bounded slice from the current census. A fresh copy still needs room under the allowance.
         usage, candidates, damaged = _reuse_walk_inputs(vault, snapshot, census(), str(config["key_version"]))
         reuse = None
         binary = _binding_of(vault, snapshot)
@@ -1903,6 +1917,7 @@ def _offload_member(vault: Path, path: Path, batch: OffloadBatch | None, *,
             if failure is None:
                 reuse = live
                 break
+            usage.skip_reuse(binary, candidate)
             # A version whose bytes differ from its record is a finding. One that the store lost or condemned is passed over
             # while its filing still has bytes here: eviction releases that pointer itself. A lost version of a filing that
             # has none is a finding too, and the new version that this offload publishes heals it (`note_repair`).

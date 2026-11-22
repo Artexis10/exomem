@@ -29,6 +29,8 @@ Each box carries the proof that closes it. Tests live in `tests/test_media_repli
   A final probe used the owner replicate command on the same disposable 1,000,000-replica fixture. Two ordinary concurrent opens finished in 4.638 and 4.805 seconds. With four seconds deliberately added inside the migration, a competing call returned retryable `MEDIA_STORE_BUSY` in 5.090 seconds and copy progress reported unknown. The initializer finished in 10.032 seconds. A later owner call reopened the completed ledger and verified all 500 recovered records in 64 ms.
   The paired warm fixture measured median owner status at 386.17 to 1.09 ms and copy progress at 36.11 to 0.58 ms. It used SQLite 3.53.1, 1,000,000 replicas, 200,000 queue rows and ten warm reads per arm.
 
+  A sample that clears an interrupted repair's finding keeps the sealed hold queued for guarded cleanup. The exact-path read finds a surviving sibling quarantine after loss of the authority row. It keeps a missing export receipt unknown after table recreation and credits a receipt that survived. On SQLite 3.53.1, one indexed sibling lookup took 42 VM steps with 20 filings of the same version and with 20,000.
+
 ## 4. Fixity
 
 - [x] 4.1 Drop quarantined replicas from repair candidates, quarantine a replica that fails its hash during repair, and keep a verified copy that could not be put in place. Prove in `tests/test_original_fixity.py` that the retry after a failed Trash move reads the kept copy and makes no replica read.

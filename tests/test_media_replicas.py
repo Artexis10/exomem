@@ -1342,8 +1342,8 @@ def test_eviction_of_a_shared_original_whose_pointer_is_absent_or_condemned_quar
     else:
         head = media_store.FilesystemStore.head
 
-        def condemned(self, name: str, version: str):
-            found = head(self, name, version)
+        def condemned(self, name: str, version: str, **options):
+            found = head(self, name, version, **options)
             return found if found is None else dataclasses.replace(found, condemned=True)
 
         monkeypatch.setattr(media_store.FilesystemStore, "head", condemned)
@@ -1388,9 +1388,9 @@ def _quarantined_while_the_store_answers(vault: Path, relative: str, reference: 
     """A check finds the pointer damaged at the moment eviction asks the store about it: the finding lands during the HEAD."""
     head = media_store.FilesystemStore.head
 
-    def answering_after_a_finding(store, name, version):
+    def answering_after_a_finding(store, name, version, **options):
         media_replicas.quarantine(vault, relative, reference, level=media_replicas.CONTENT, failure="digest_mismatch")
-        return head(store, name, version)
+        return head(store, name, version, **options)
 
     monkeypatch.setattr(media_store.FilesystemStore, "head", answering_after_a_finding)
 
@@ -1589,6 +1589,43 @@ def test_a_repair_reconciles_an_already_published_replacement_before_it_settles(
     assert not _queued(vault)
 
 
+def test_sample_release_leaves_a_sealed_repair_pending_for_guarded_cleanup(
+        vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    relative, damaged = _replicated(vault)
+    media_replicas.quarantine(vault, relative, damaged, level=media_replicas.CONTENT, failure="digest_mismatch")
+    note = media_store._note_replica
+
+    def stop_after_the_replacement_is_recorded(*args):
+        note(*args)
+        raise RuntimeError("stopped before clearing the sealed hold")
+
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(media_store, "_note_replica", stop_after_the_replacement_is_recorded)
+        with pytest.raises(RuntimeError, match="stopped before clearing the sealed hold"):
+            media_replicas.drain(vault)
+
+    replacement = _entry(vault, relative, MIRROR)
+    assert replacement != damaged
+    versions = _objects(mirrored)
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        assert conn.execute("SELECT uploadable FROM media_protections WHERE binary_rel = ? AND store = ? AND object = ?",
+                            (relative, MIRROR, replacement.object)).fetchone() == (0,)
+    media_replicas.quarantine(vault, relative, replacement, level=media_replicas.DECRYPTED,
+                              failure=media_replicas.PLAINTEXT_MISMATCH)
+    _unproven(vault)
+
+    media_replicas.sample(vault)
+
+    assert not media_replicas.has_quarantined(vault, (replacement,))
+    assert _queued(vault) == [(MIRROR, media_replicas.RECOPY, media_replicas.PENDING, None)]
+    assert media_replicas.drain(vault) == 1
+    assert _objects(mirrored) == versions
+    assert _queued(vault) == []
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT 1 FROM media_protections WHERE object = ?", (replacement.object,)).fetchone() is None
+
+
 def test_a_first_copy_keeps_its_job_when_the_published_replica_cannot_record_its_quarantine(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original = _preserved(vault)
@@ -1683,6 +1720,55 @@ def test_exact_and_paged_status_use_surviving_authority_without_certifying_a_rec
         conn.execute("DROP TABLE media_damaged_versions")
     [mirror] = [item for item in media_replicas.original_view(vault, relative)["replicas"] if item["store"] == MIRROR]
     assert (mirror["state"], mirror["recoverable"]) == ("unknown", None)
+
+
+def test_exact_status_reads_the_quarantine_of_a_sibling_filing_after_authority_loss(
+        vault: Path, selected_store) -> None:
+    first, second, pointer = _two_filings_of_one_version(vault, selected_store)
+    media_replicas.confirm_key_export(vault)
+    failure = _replica_row_of(vault, first, pointer.store)["failure"]
+    relative = second.relative_to(vault).as_posix()
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("DELETE FROM media_replicas WHERE binary_rel = ?", (relative,))
+        [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_damaged_versions'").fetchone()
+        conn.execute("DROP TABLE media_damaged_versions")
+        conn.execute(schema)
+
+    status = media_replicas.original_view(vault, relative)
+
+    [shown] = status["replicas"]
+    assert status["state"] == "partial"
+    assert (shown["state"], shown["recoverable"], shown["finding"]["failure"]) == (
+        media_replicas.QUARANTINED, False, failure,
+    )
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM media_damaged_versions").fetchone() == (0,)
+
+
+def test_exact_status_keeps_unknown_export_coverage_and_credits_a_surviving_receipt(
+        vault: Path, selected_store, mirrored: Path) -> None:
+    relative, replica = _replicated(vault)
+    media_replicas.confirm_key_export(vault, replica.key_version)
+    path = media_jobs.MediaJobStore(vault).path
+    with closing(sqlite3.connect(path)) as conn, conn:
+        [schema] = conn.execute("SELECT sql FROM sqlite_schema WHERE name = 'media_key_exports'").fetchone()
+        conn.execute("DROP TABLE media_key_exports")
+        conn.execute(schema)
+
+    status = media_replicas.original_view(vault, relative)
+
+    assert status["state"] == "partial"
+    assert all(item["recoverable"] is None for item in status["replicas"])
+
+    # An older runtime can confirm one key in the recreated table before the new runtime repairs its coverage.
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("INSERT INTO media_key_exports VALUES (?, ?)", (replica.key_version, time.time()))
+    status = media_replicas.original_view(vault, relative)
+
+    assert status["state"] == "partial"
+    [mirror] = [item for item in status["replicas"] if item["store"] == MIRROR]
+    assert mirror["recoverable"] is True
 
 
 def test_a_replica_that_a_check_found_damaged_is_copied_again_from_the_local_original(
@@ -2348,8 +2434,8 @@ def test_a_copy_again_does_not_reuse_a_replacement_that_no_live_filing_confirms(
     else:
         head = media_store.FilesystemStore.head
 
-        def condemned_replacement(self, name: str, version: str):
-            found = head(self, name, version)
+        def condemned_replacement(self, name: str, version: str, **options):
+            found = head(self, name, version, **options)
             return found if found is None or name != replacement.object else dataclasses.replace(found, condemned=True)
 
         monkeypatch.setattr(media_store.FilesystemStore, "head", condemned_replacement)
@@ -2599,10 +2685,9 @@ def test_a_filing_published_on_a_version_that_a_finding_condemned_meanwhile_is_w
     assert (second.relative_to(vault).as_posix(), media_replicas.RECOPY) in _requests(vault)
 
 
-def test_offload_reads_the_census_and_the_damage_once_however_many_candidates_the_store_lost(
+def test_offload_checks_one_bounded_slice_of_candidates_before_charging_a_fresh_copy(
         vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each retry that re-read the census and re-scanned the candidates would make eight lost versions cost eight censuses."""
-    lost = 8
+    lost = 10
     root = Path(selected_store[0]["root"])
     gone = []
     for number in range(lost):
@@ -2627,7 +2712,7 @@ def test_offload_reads_the_census_and_the_damage_once_however_many_candidates_th
     assert _offload(vault, _preserved(vault, category="last")).object not in {reference.object for reference in gone}
 
     assert (len(censuses) - baseline, len(recorded)) == (baseline, 1)
-    assert sorted(visited, key=lambda reference: reference.object) == sorted(gone, key=lambda reference: reference.object)
+    assert len(visited) == 8 and set(visited) < set(gone)
 
 
 # --- verify-stored-replicas: what the owner sees ----------------------------------------------------------
@@ -3731,7 +3816,7 @@ def test_a_round_checks_its_whole_share_when_each_read_takes_the_time_a_real_sto
     monkeypatch.setattr(media_replicas.foreground_priority, "wait_for_retry",
                         lambda seconds: clock.__setitem__(0, clock[0] + seconds))
 
-    def read_by_the_store(_vault, replica):
+    def read_by_the_store(_vault, replica, *, deadline):
         clock[0] += replica.ciphertext_size / (50 * 10**6)  # a NAS that serves 50 MB a second: about 1 s a replica
         return None
 
@@ -3768,7 +3853,7 @@ def test_a_read_too_large_for_one_round_is_paid_for_before_the_next_round_reads_
                         lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
         1, row["store"], "1", row["object"], row["version"], 100 * gib, "0" * 64)))
-    monkeypatch.setattr(media_store, "check_replica", lambda _vault, replica: reads.append(
+    monkeypatch.setattr(media_store, "check_replica", lambda _vault, replica, *, deadline: reads.append(
         (clock[0], replica.ciphertext_size)))
 
     for _round in range(8):  # the worker's check interval is ten minutes
@@ -3802,7 +3887,7 @@ def test_reads_that_fail_after_moving_their_bytes_still_use_up_the_read_cap(
     monkeypatch.setattr(media_replicas, "_bound", lambda _vault, row: (None, originals.StoredObject(
         1, row["store"], "1", row["object"], row["version"], 10 * gib, "0" * 64)))
 
-    def drops_the_connection(_vault, _replica):
+    def drops_the_connection(_vault, _replica, *, deadline):
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the connection dropped")
 
     monkeypatch.setattr(media_store, "check_replica", drops_the_connection)
@@ -3935,12 +4020,12 @@ def test_a_store_that_goes_away_during_a_round_ends_its_round_and_leaves_the_row
     _due_again(vault)
     check_replica, reads = media_store.check_replica, []
 
-    def unmounted_after_the_first_read(vault_root, replica):
+    def unmounted_after_the_first_read(vault_root, replica, *, deadline):
         if replica.store == MIRROR:
             reads.append(replica.object)
             if len(reads) == 2:
                 (mirrored / media_store.STORE_MARKER).unlink()
-        return check_replica(vault_root, replica)
+        return check_replica(vault_root, replica, deadline=deadline)
 
     monkeypatch.setattr(media_store, "check_replica", unmounted_after_the_first_read)
 
@@ -3959,7 +4044,7 @@ def test_a_failed_attempt_does_not_land_on_a_version_that_a_copy_again_published
     _due_again(vault)
     newer = dataclasses.replace(replica, version="a-newer-version")
 
-    def republished_then_unavailable(vault_root, checked):
+    def republished_then_unavailable(vault_root, checked, *, deadline):
         if checked.store == MIRROR:
             media_replicas.record(vault, relative, newer, verified_at=None)
         raise media_store.MediaStoreError("MEDIA_STORE_UNAVAILABLE", "the store did not answer")
