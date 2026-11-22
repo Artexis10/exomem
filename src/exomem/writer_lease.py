@@ -4824,6 +4824,12 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
     if not math.isfinite(wait):
         wait = _CAPTURE_WAIT_SECONDS
     wait = min(max(0.0, wait), _CAPTURE_WAIT_CEILING_SECONDS)
+    from . import write_intake
+
+    intake_deadline = write_intake.busy_wait_cap()
+    if intake_deadline is not None:
+        # An intake-eligible save is queued durably when this wait runs out, so it waits briefly.
+        wait = min(wait, max(0.0, intake_deadline - time.monotonic()))
     budget = request_budget.current()
     if budget is not None:
         wait = min(
@@ -8704,6 +8710,27 @@ def _invocation_provenance(
     return wrapped
 
 
+def _busy_write_intake(
+    function: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Queue an eligible save durably instead of refusing it while the boundary is busy.
+
+    Directly inside `_invocation_provenance`, so the contention refusal it accepts has passed
+    the terminal filter and the store-thread routing below. `write_intake.admission` decides
+    eligibility; a call it does not admit runs exactly as before.
+    """
+    @wraps(function)
+    def wrapped(command: Any, *injected: Any, **kwargs: Any) -> Any:
+        from . import write_intake
+
+        admission = write_intake.admission(command, injected, kwargs)
+        if admission is None:
+            return function(command, *injected, **kwargs)
+        return admission.run(lambda: function(command, *injected, **kwargs))
+
+    return wrapped
+
+
 def _foreground_command_activity(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -9028,6 +9055,7 @@ def _foreground_priority_request(func):
 
 
 @_invocation_provenance
+@_busy_write_intake
 @_foreground_command_activity
 @_fixed_projected_command_completion
 @_restricted_refusal_floor

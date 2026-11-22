@@ -181,6 +181,15 @@ failed file. Retry the failed files in a new call that names only them, under a
 new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
 committed and the same identity and payload are retried.
 
+A save can instead return `state: "queued"` with `committed: false` and a
+`queued_write.ref`. The memory was busy, so the service holds the save durably
+and applies it in arrival order. It is not saved yet: tell the user it is
+queued, never that it is saved. Do not resend it; a resend with the same
+identity returns the same receipt. Read its outcome later with the `route`
+the reply gives (`review_memory` mode `queued-write` with that `ref`): it ends
+`applied`, or `failed` with its refusal and the original arguments to correct
+and send again.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
