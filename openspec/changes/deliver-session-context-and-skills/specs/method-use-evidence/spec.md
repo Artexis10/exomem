@@ -37,7 +37,7 @@ For one serving, `opened` SHALL be observed when the read log holds a read of th
 ### Requirement: Use evidence never claims an absence it cannot see
 
 Evidence SHALL be `unknown` when the log is disabled, absent or rotated past the window start, or when the window has not closed and holds no matching event. A method that links to no page or collection SHALL report `followed` as unknown.
-`opened` and `followed` SHALL be reported separately. The report SHALL say the logs belong to one host and service, not one conversation, so concurrent work by the same principal can produce the evidence.
+`opened` and `followed` SHALL be reported separately, each as observed, not observed or unknown. The report SHALL say the logs belong to one host and service, not one conversation, so concurrent work by the same principal can produce the evidence.
 
 #### Scenario: A served skill followed by a write to its destination
 

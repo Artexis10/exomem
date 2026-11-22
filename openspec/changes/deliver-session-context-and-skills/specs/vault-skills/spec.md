@@ -115,12 +115,17 @@ The judgment, reading its carriers and calling the model, SHALL take at most hal
 
 The placement SHALL be deployment configuration outside the vault (`EXOMEM_METHOD_FIT_CONFIG`), separate from the lead-ordering placement.
 A local placement SHALL be a loopback Ollama endpoint. An API placement SHALL require explicit disclosure authorization and a provider audience.
-An API placement SHALL read each description from the caller/provider intersection, with references either audience may not see redacted. A page hidden from that audience SHALL change no label.
+An API placement SHALL offer only pages its provider audience may see. It SHALL read each description from the caller/provider intersection, with withheld references redacted. A hidden page SHALL change no label.
 
 #### Scenario: A provider sees only what its audience may see
 
 - **WHEN** an API placement's provider audience may not see a page that a skill description or a collection manifest links to
 - **THEN** the provider input carries neither that page's path nor its text, and labels are unchanged by withheld pages
+
+#### Scenario: A provider never sees a withheld method's label
+
+- **WHEN** an API placement's provider audience may not see a skill page or a collection manifest
+- **THEN** the provider input carries neither that method's label nor its description
 
 ### Requirement: Selected methods are served first and grant no authority
 
