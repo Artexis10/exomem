@@ -38,8 +38,9 @@ This section was moved from task 3.3 of `deliver-session-context-and-skills`.
   - The instructed skill carrier beat the note per case, with an interval excluding zero, and forced no row on other turns. Design D8 records the result.
 - [x] 4.2 Specify the carrier that the evaluation supports, as a delta, before code.
   - `specs/vault-skills`: routing tables travel as ordinary vault skills, and the scaffold teaches the convention.
-- [ ] 4.3 Teach the routing-skill convention in the generic scaffold. After install, verify a row-shaped turn on the installed service against a routing skill.
-  - The scaffold's "Vault skills" section teaches the convention, and the generated skill copies are refreshed. The installed-service check stays open until after install.
+- [x] 4.3 Teach the routing-skill convention in the generic scaffold. After install, verify a row-shaped turn on the installed service against a routing skill.
+  - The scaffold's "Vault skills" section teaches the convention, and the generated skill copies are refreshed.
+  - 2026-11-22, installed 0.196.0: a row-shaped turn received the vault's routing skill in its `skills` catalogue, and the skill's body named the matching row and its sources.
 
 ## 5. Verify and deliver
 
