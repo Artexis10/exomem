@@ -215,6 +215,42 @@ def test_a_fresh_media_upload_is_stored_pending_so_reconciliation_commits_nothin
     assert frontmatter["processing_state"] == "pending"
 
 
+@pytest.mark.parametrize(("choice", "expected"), [("false", False), ("true", True)])
+def test_audio_upload_pins_its_speaker_label_choice(vault, monkeypatch, choice, expected) -> None:
+    from exomem.vault import parse_frontmatter
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    response = client.post(
+        "/upload",
+        files={"file": ("recording.m4a", b"original audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "diarize": choice},
+        headers={"Authorization": "Bearer test-upload-token"},
+    )
+
+    assert response.status_code == 201, response.text
+    receipt = response.json()
+    fields = parse_frontmatter((vault / receipt["sidecar_path"]).read_text())[0]
+    assert fields["diarize_requested"] is expected
+    assert (vault / receipt["path"]).read_bytes() == b"original audio bytes"
+
+
+@pytest.mark.parametrize("lane", ["evidence", "source"])
+def test_audio_upload_refuses_labeling_a_supplied_transcript(vault, monkeypatch, lane) -> None:
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    token = upload_tokens.mint_for_endpoint("test-upload-token", "https://example.invalid", lane=lane)["token"]
+    response = client.post(
+        "/upload", files={"file": ("recording.m4a", b"audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "source_kind": "session", "diarize": "true", "text": "Caller transcript"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "DIARIZE_NOT_APPLICABLE"
+    assert not list(vault.rglob("recording.m4a*"))
+
+
 def test_upload_reconciles_when_media_worker_is_unavailable(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,9 +353,14 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     events: list[str] = []
+    real_manager = writer_lease.get_manager()
 
     class RecordingManager:
         depth = 0
+
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
 
         def ensure_writer(self) -> None:
             events.append("legacy-ensure")
@@ -372,6 +413,10 @@ def test_upload_media_reconciliation_holds_the_boundary_only_for_its_commit(
     seen: list[tuple[int, int]] = []
 
     class Manager:
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
+
         @contextmanager
         def reserved_identity_guard(self, _vault, **_kwargs):
             yield
@@ -398,6 +443,7 @@ def test_upload_media_reconciliation_holds_the_boundary_only_for_its_commit(
             seen.append((before, depth))
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    real_manager = writer_lease.get_manager()
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
     monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
     response = client.post(

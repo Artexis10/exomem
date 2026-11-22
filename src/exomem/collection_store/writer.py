@@ -1501,18 +1501,15 @@ class CollectionWriter:
             projection = (None if item is None else self._publication.previous(item["view_path"]))
             if outside and (projection is None or projection["path"] != facts["old_path"]):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "moved source basis changed")
-            stamp, identity = facts["stamp"], self._publication.identity
-            lineage = {entry["instance_id"] for entry in json.loads(self.connection.execute(
-                "SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+            stamp, owned = facts["stamp"], edit_back.owned_stamp(self.connection)
             code = edit_back.MOVED if outside else edit_back.UNBOUND if item is None else edit_back.CONFLICT
-            current = bool(item is not None and projection is not None and stamp is not None
-                           and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
+            current = bool(item is not None and projection is not None and stamp is not None and owned(stamp)
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
             legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
                 self.connection, projection)
             legacy_exact = legacy is not None and legacy[0] == facts["digest"]
             current = current or legacy_exact
-            if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+            if stamp is not None and not owned(stamp):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
                 code = edit_back.CONFLICT if stamp and stamp["v"] < item["row_version"] else edit_back.INVALID

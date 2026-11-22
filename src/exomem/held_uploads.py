@@ -34,6 +34,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -41,7 +42,7 @@ from typing import BinaryIO
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 
-from . import private_state
+from . import media_capacity, private_state
 from .governance import principal
 
 #: The `download_url` scheme of a held handle. Never fetched.
@@ -216,6 +217,17 @@ def _write_record(store: Path, key: str, record: dict) -> None:
     private_state.write_record(store, key, record, temp_suffix=".part")
 
 
+@contextmanager
+def _hold_upload_room(vault_root: Path, *, device: int):
+    from .cli_ops import OpError
+
+    try:
+        with media_capacity.upload_room(vault_root, device=device) as room:
+            yield room
+    except OpError as error:
+        raise HeldUploadError(error.code, error.message) from error
+
+
 def hold(
     vault_root: Path,
     stream: BinaryIO,
@@ -243,7 +255,7 @@ def hold(
     kind = (content_type or "").split(";", 1)[0].strip()[:255] or None
 
     store = _store(vault_root)
-    with FileLock(store / ".lock"):
+    with FileLock(store / ".lock"), _hold_upload_room(vault_root, device=store.stat().st_dev) as room:
         now = _now()
         _sweep(store, now)
         held_count, held_bytes = _usage(store, binding)
@@ -253,6 +265,8 @@ def hold(
         start = stream.tell()
         length = stream.seek(0, os.SEEK_END) - start
         stream.seek(start)
+        if room is not None:
+            room.require(length)
         if length > shutil.disk_usage(store).free:
             raise HeldUploadError("HELD_UPLOAD_NO_SPACE", "not enough free disk space to hold this upload")
         secret = secret if secret is not None else secrets.token_urlsafe(32)

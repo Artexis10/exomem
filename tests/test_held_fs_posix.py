@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
+import hashlib
 import importlib
 import importlib.util
+import io
 import os
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -57,6 +62,122 @@ def test_posix_capability_failure_disables_operations_without_fallback(
     assert refused.ok is False
     assert refused.error is not None
     assert refused.error.code == "CAPABILITY_UNAVAILABLE"
+
+
+def _refuse_noreplace(monkeypatch: pytest.MonkeyPatch, error: int) -> None:
+    posix = importlib.import_module("exomem._held_fs_posix")
+
+    def renameat2(*_args):
+        ctypes.set_errno(error)
+        return -1
+
+    monkeypatch.setattr(posix, "_RENAMEAT2", renameat2)
+
+
+@pytest.mark.parametrize("error", [errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP])
+def test_filesystem_store_uploads_and_reads_when_only_no_replace_rename_is_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: int
+) -> None:
+    from exomem import media_store
+
+    _refuse_noreplace(monkeypatch, error)
+    store_id = media_store.write_store_marker(tmp_path, "test-store")
+    store = media_store.FilesystemStore(tmp_path, name="test-store", store_id=store_id)
+    data = b"stored ciphertext"
+    digest = hashlib.sha256(data).hexdigest()
+
+    version = store.upload(digest, io.BytesIO(data), size=len(data), sha256=digest)
+
+    assert store.head(digest, version) == media_store.ObjectHead(len(data), digest)
+    with store.open(digest, version) as stream:
+        assert stream.read() == data
+    assert sorted(path.name for path in tmp_path.iterdir()) == [media_store.STORE_MARKER, digest]
+    assert [path.name for path in (tmp_path / digest).iterdir()] == [version]
+
+
+def test_no_replace_rename_refuses_from_a_relaxed_root_and_keeps_strict_roots_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import state_paths
+
+    held_fs = _held_fs()
+    _refuse_noreplace(monkeypatch, errno.EINVAL)
+    vault = tmp_path / "vault"
+    state = tmp_path / "state"
+    vault.mkdir()
+    (state / "vault-state" / "example").mkdir(parents=True)
+    monkeypatch.setenv(state_paths.ENV_HOSTED_STATE_ROOT, str(state))
+
+    capability = held_fs.probe(vault)
+    assert capability.relative_operations and capability.hard_link
+    assert not capability.no_replace_rename
+    assert held_fs.acquire(vault).error.code == "CAPABILITY_UNAVAILABLE"
+    with pytest.raises(OSError, match="state anchor cannot be safely acquired"):
+        state_paths.validate_hosted_state_directory(state / "vault-state" / "example")
+
+    (vault / "source").write_bytes(b"source")
+    (vault / "destination").write_bytes(b"existing")
+    (vault / "directory").mkdir()
+    with held_fs.acquire(vault, required={"relative_operations"}).require() as fs:
+        with fs.parent(".", access="mutate").require() as parent:
+            with fs.file(parent, "source", access="mutate").require() as source:
+                assert fs.rename(source, parent, "destination").error.code == "CAPABILITY_UNAVAILABLE"
+                assert fs.rename(source, parent, "absent").error.code == "CAPABILITY_UNAVAILABLE"
+            with fs.parent("directory", access="mutate").require() as directory:
+                assert fs.rename_directory(directory, parent, "moved").error.code == "CAPABILITY_UNAVAILABLE"
+    assert sorted(path.name for path in vault.iterdir()) == ["destination", "directory", "source"]
+    assert (vault / "source").read_bytes() == b"source"
+    assert (vault / "destination").read_bytes() == b"existing"
+
+
+@pytest.mark.parametrize("fault", ["rename-io", "directory-flush"])
+def test_a_rename_limited_store_does_not_bypass_other_filesystem_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    from exomem import media_store
+
+    store_id = media_store.write_store_marker(tmp_path, "test-store")
+    _refuse_noreplace(monkeypatch, errno.EIO if fault == "rename-io" else errno.EINVAL)
+    if fault == "directory-flush":
+        posix = importlib.import_module("exomem._held_fs_posix")
+        fsync = posix._fsync
+
+        def refuse_directory(descriptor):
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                raise OSError(errno.EINVAL, "directory flush unavailable")
+            fsync(descriptor)
+
+        monkeypatch.setattr(posix, "_fsync", refuse_directory)
+    store = media_store.FilesystemStore(tmp_path, name="test-store", store_id=store_id)
+
+    with pytest.raises(media_store.MediaStoreError) as unavailable:
+        store.head("a" * 64, "version")
+
+    assert unavailable.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert [path.name for path in tmp_path.iterdir()] == [media_store.STORE_MARKER]
+
+
+def test_a_store_requires_hard_links_even_when_default_held_acquisition_can_proceed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_store
+
+    held_fs = _held_fs()
+    posix = importlib.import_module("exomem._held_fs_posix")
+
+    def refuse_link(*_args, **_kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links unavailable")
+
+    monkeypatch.setattr(posix, "_link", refuse_link)
+    store_id = media_store.write_store_marker(tmp_path, "test-store")
+    with held_fs.acquire(tmp_path).require() as fs:
+        assert not fs.capabilities.hard_link
+    store = media_store.FilesystemStore(tmp_path, name="test-store", store_id=store_id)
+
+    with pytest.raises(media_store.MediaStoreError) as unavailable:
+        store.head("a" * 64, "version")
+
+    assert unavailable.value.code == "MEDIA_STORE_UNAVAILABLE"
 
 
 def test_posix_source_and_destination_must_be_on_the_same_filesystem(tmp_path: Path) -> None:

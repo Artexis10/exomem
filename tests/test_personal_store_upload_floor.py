@@ -1,0 +1,432 @@
+"""A stored Evidence original must leave capacity for its canonical and projected copies."""
+
+import json
+import string
+from contextlib import closing
+from itertools import islice, product
+from types import SimpleNamespace
+
+import pytest
+from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_vault_store_migration import vault  # noqa: F401
+from test_vault_store_projector import projecting  # noqa: F401
+from test_vault_store_write_path import served, stored, writer  # noqa: F401
+
+from exomem import lexstore, media_capacity, move_file, preserve, writer_lease
+from exomem.cli_ops import OpError
+from exomem.collection_store import connection
+from exomem.governance.principal import library_scope
+from exomem.vault_store import read, write
+
+
+def test_store_original_and_later_projection_each_obey_the_vault_floor(
+    served, writer, projecting, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    database = connection.store_path(served)
+    assert database.stat().st_dev == served.stat().st_dev
+    unit = media_capacity._allocation_unit(served)
+    free = [floor + unit - 1]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=100 * floor, free=free[0]))
+    data = "# Original meeting notes\n\n" + "One recorded item.\n" * 7000
+    target = "Knowledge Base/Evidence/Tests/Minutes/minutes.md"
+
+    def file_original():
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            return preserve.preserve(served, scope="Tests", category="Minutes", filename="minutes.md", content=data)
+
+    previous_revision = read.current_revision(served)
+    with pytest.raises(OpError) as busy:
+        file_original()
+    assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == previous_revision
+    assert not read.page_exists(served, target) and not (served / target).exists()
+
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT revision FROM store_mode").fetchone() == (previous_revision,)
+        free[0] = floor + 16 * floor
+        saved = file_original()
+        assert saved.path == target and read.owned_bytes(served, target) == data.encode()
+
+        page_size = writer.connection.execute("PRAGMA page_size").fetchone()[0]
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        checkpoint_growth = page_count * page_size - database.stat().st_size
+        assert checkpoint_growth > 0  # The earlier real reader pins all of this commit's new pages in WAL.
+        free[0] = floor + checkpoint_growth + unit - 1
+        with media_capacity.upload_room(served, device=served.stat().st_dev) as room:
+            assert room is not None
+            with pytest.raises(OpError) as held:
+                room.require(1)
+            assert held.value.code == media_capacity.UPLOAD_SPACE_BUSY
+
+        free[0] = floor + checkpoint_growth + len(data.encode())
+        report = projecting.run_pass()
+        assert report.deferred[target] == media_capacity.UPLOAD_SPACE_BUSY
+        assert not (served / target).exists()
+        assert read.owned_bytes(served, target) == data.encode()
+
+        renamed = "Knowledge Base/Evidence/Tests/Minutes/archived.md"
+        writer.connection.execute("PRAGMA secure_delete = ON")
+        note = "Knowledge Base/Notes/Rename record.md"
+        change = write.StoreChange(
+            write.Origin.GOVERNED, "rename evidence", moves=(write.PageMove(target, renamed),),
+            puts=(write.PagePut(note, b"# Rename record\n"),),
+        )
+        revision = read.current_revision(served)
+        wal = database.with_name(database.name + "-wal")
+        wal_size = wal.stat().st_size
+        with pytest.raises(OpError) as moving:
+            write.commit(writer, change)
+        assert moving.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and wal.stat().st_size == wal_size
+        assert read.owned_bytes(served, target) == data.encode()
+        assert not read.page_exists(served, renamed) and not read.page_exists(served, note)
+
+        free[0] = floor + 32 * floor
+        write.commit(writer, change)
+        assert wal.stat().st_size > wal_size
+        assert not read.page_exists(served, target) and not (served / target).exists()
+        assert read.owned_bytes(served, renamed) == data.encode()
+        assert read.owned_bytes(served, note) == b"# Rename record\n"
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size + len(data.encode())
+        assert projecting.run_pass().deferred[renamed] == media_capacity.UPLOAD_SPACE_BUSY
+        assert not (served / renamed).exists()
+
+    free[0] = floor + 16 * floor
+    with media_capacity.commit_credit("other-original"):
+        with media_capacity.upload_room(served, device=served.stat().st_dev, reserve=True) as room:
+            assert room is not None
+            room.reserve_commit(floor, 2, incoming=0, offset=0)
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": 0}}}))
+    free[0] = 2 * floor + len(data.encode())
+    assert projecting.run_pass().deferred[renamed] == media_capacity.UPLOAD_SPACE_BUSY
+    assert not (served / renamed).exists()
+    media_capacity.release_commit_credit(served, "other-original")
+    free[0] = 16 * floor
+    assert renamed not in projecting.run_pass().deferred
+    assert (served / renamed).read_bytes() == data.encode()
+
+
+def test_indexable_original_needs_room_for_its_search_rows(
+    served, tmp_path, monkeypatch,  # noqa: F811
+):
+    if not lexstore.fts5_available():
+        pytest.skip("this SQLite build omits the full-text catalogue")
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 6 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=128 * floor, free=free[0]))
+
+    # The header is stored in both the page and its covering index. The body has
+    # a large set of distinct trigrams and words for the two real FTS indexes.
+    alphabet = string.ascii_lowercase + string.digits
+    words = " ".join("".join(chars) for chars in islice(product(alphabet, repeat=4), 90_000))
+    data = f"---\ntitle: Catalogue sample\nx-note: {words}\n---\n\n{words}\n"
+    target = "Knowledge Base/Evidence/Tests/Minutes/catalogue.md"
+
+    def file_original():
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            return preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md", content=data)
+
+    revision = read.current_revision(served)
+    with pytest.raises(OpError) as busy:
+        file_original()
+    assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+
+    free[0] = 96 * floor
+    with media_capacity.commit_credit("other-catalogue-original"):
+        with media_capacity.upload_room(served, device=served.stat().st_dev, reserve=True) as room:
+            assert room is not None
+            room.reserve_commit(90 * floor, 1, incoming=0, offset=0)
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": 0}}}))
+    with pytest.raises(OpError) as reserved:
+        file_original()
+    assert reserved.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+
+    media_capacity.release_commit_credit(served, "other-catalogue-original")
+    assert file_original().path == target
+    assert read.owned_bytes(served, target) == data.encode()
+    with closing(connection.open_reader(connection.store_path(served))) as reader:
+        assert reader.execute("SELECT pages.path FROM tri JOIN pages ON pages.rowid = tri.rowid "
+                              "WHERE tri MATCH ? AND pages.path = ?", ("a123", target)).fetchone() == (target,)
+
+
+def test_public_move_of_a_pending_original_meters_its_lineage_rewrite(
+    served, writer, projecting, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 32 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=100 * floor, free=free[0]))
+    database = connection.store_path(served)
+    original = "---\ntitle: Survey notes\n---\n\n" + "One survey observation.\n" * 800
+    source = "Knowledge Base/Evidence/Tests/Minutes/survey.md"
+    destination = "Knowledge Base/Evidence/Tests/Minutes/archived-survey.md"
+
+    def rename():
+        with library_scope():
+            return move_file.move_file(served, old_path=source, new_path=destination, update_wikilinks=False)
+
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        assert reader.execute("SELECT revision FROM store_mode").fetchone() is not None
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            saved = preserve.preserve(served, scope="Tests", category="Minutes", filename="survey.md", content=original)
+        assert saved.path == source and not (served / source).exists()
+        revision = read.current_revision(served)
+        page_size = writer.connection.execute("PRAGMA page_size").fetchone()[0]
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size
+        with pytest.raises(OpError) as busy:
+            rename()
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and not read.page_exists(served, destination)
+        assert read.owned_bytes(served, source) == original.encode()
+
+        free[0] = floor + 32 * floor
+        assert rename().new_path == destination
+        moved = read.owned_bytes(served, destination)
+        assert moved != original.encode() and source.encode() in moved
+        assert b"One survey observation." in moved and not read.page_exists(served, source)
+        page_count = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        free[0] = floor + page_count * page_size - database.stat().st_size
+        assert projecting.run_pass().deferred[destination] == media_capacity.UPLOAD_SPACE_BUSY
+        assert not (served / source).exists() and not (served / destination).exists()
+        assert read.owned_bytes(served, destination) == moved
+
+    free[0] = floor + 32 * floor
+    assert destination not in projecting.run_pass().deferred
+    assert (served / destination).read_bytes() == moved
+
+
+def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 40 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=256 * floor, free=free[0]))
+    original = b"# Field notes\n\n" + b"- [rule] Confirm the valve.\n" * 610
+    source = "Knowledge Base/Evidence/Tests/Minutes/field.md"
+    destination = "Knowledge Base/_archive/field.md"
+    assert not any(lexstore.page_membership(destination))
+    filing = write.StoreChange(write.Origin.GOVERNED, "file original",
+                               puts=(write.PagePut(source, original, media_allocation=True),))
+    before = read.current_revision(served)
+    with pytest.raises(OpError) as filing_busy:
+        write.commit(writer, filing)
+    assert filing_busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+    assert read.current_revision(served) == before and not read.page_exists(served, source)
+
+    free[0] = floor + 128 * floor
+    write.commit(writer, filing)
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    writer.connection.execute("PRAGMA secure_delete = ON")
+    assert writer.handle.checkpoint()
+    change = write.StoreChange(write.Origin.GOVERNED, "archive original",
+                               moves=(write.PageMove(source, destination),))
+    headroom = 24 * floor
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        (structure_size,) = reader.execute(
+            "SELECT length(CAST(structure_json AS BLOB)) FROM pages WHERE path = ?", (source,),
+        ).fetchone()
+        (graph_size,) = reader.execute(
+            "SELECT MAX(length(CAST(metadata AS BLOB))) FROM graph_nodes WHERE path = ?", (source,),
+        ).fetchone()
+        assert structure_size + graph_size > headroom
+        assert reader.execute("SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?", (source,)).fetchone() == (610,)
+        wal_size = wal.stat().st_size
+        free[0] = floor + headroom
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, change)
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and wal.stat().st_size == wal_size
+        assert read.owned_bytes(served, source) == original and not read.page_exists(served, destination)
+
+        free[0] = floor + 128 * floor
+        write.commit(writer, change)
+        assert wal.stat().st_size - wal_size > headroom
+        assert read.owned_bytes(served, destination) == original and not read.page_exists(served, source)
+        with closing(connection.open_reader(database)) as current:
+            assert current.execute("SELECT path FROM pages WHERE path IN (?, ?)", (source, destination)).fetchall() == []
+
+
+def test_original_reserves_resolved_graph_records_before_writing_them(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 4 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(free=free[0]))
+    folder = "Knowledge Base/Notes/" + "/".join(
+        f"catalogue-section-{index:02}-" + "region-" * 9 for index in range(31)
+    )
+    targets = tuple(f"Station-{index:03}" for index in range(420))
+    write.commit(writer, write.StoreChange(
+        write.Origin.GOVERNED, "prepare catalogue targets",
+        puts=tuple(write.PagePut(f"{folder}/{name}.md", f"# {name}\n".encode()) for name in targets),
+    ))
+    original = ("# Field directory\n\n" + "\n".join(f"- [[{name}]]" for name in targets)).encode()
+    source = "Knowledge Base/Evidence/Tests/Minutes/directory.md"
+    change = write.StoreChange(write.Origin.GOVERNED, "file directory",
+                               puts=(write.PagePut(source, original, media_allocation=True),))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")
+        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        original_pages, = reader.execute("PRAGMA page_count").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        wal_size = wal.stat().st_size
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, change)
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and not read.page_exists(served, source)
+        assert wal.stat().st_size == wal_size
+        assert writer.connection.execute(
+            "SELECT COUNT(*) FROM graph_edges WHERE source_path = ?", (source,),
+        ).fetchone() == (0,)
+
+        free[0] = floor + 256 * floor
+        write.commit(writer, change)
+        count, longest = writer.connection.execute(
+            "SELECT COUNT(*), MAX(length(dst_key)) FROM graph_edges WHERE source_path = ?", (source,),
+        ).fetchone()
+        assert count == len(targets) and longest > 2000
+        growth = (writer.connection.execute("PRAGMA page_count").fetchone()[0] - original_pages) * page_size
+        assert growth + wal.stat().st_size - wal_size > 4 * floor
+        assert read.owned_bytes(served, source) == original
+
+
+def test_a_small_note_needs_room_for_itself_not_for_the_whole_store(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a graph reservation that grows with the store database instead of with the note."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # A large store database: only its page count matters to the reservation.
+    writer.connection.execute("CREATE TABLE padding(x BLOB)")
+    for _ in range(4):
+        writer.connection.execute("INSERT INTO padding VALUES (zeroblob(16 * 1024 * 1024))")
+    writer.connection.commit()
+    assert writer.handle.checkpoint()
+    free = [floor + 32 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    note = "# Field notes\n\n" + "".join(f"- [rule] Confirm valve {index} before the shift.\n" for index in range(100))
+    target = "Knowledge Base/Evidence/Tests/Minutes/valves.md"
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note",
+                                           puts=(write.PagePut(target, note.encode(), media_allocation=True),)))
+
+    assert read.owned_bytes(served, target) == note.encode()
+
+
+def test_a_move_needs_room_for_the_leaves_its_source_records_leave(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a move that reserves the source's overflow pages but not the leaves its deleted rows rewrite."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: False)
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    note = ("# Field notes\n\n" + "".join(f"- [rule] Confirm valve {index} before the shift.\n"
+                                           for index in range(3000))).encode()
+    first, second = "Knowledge Base/Evidence/Tests/Minutes/first.md", "Knowledge Base/Evidence/Tests/Minutes/second.md"
+    for path in (first, second):
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note",
+                                               puts=(write.PagePut(path, note, media_allocation=True),)))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both moves in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        pages, = reader.execute("PRAGMA page_count").fetchone()
+        wal_size = wal.stat().st_size
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive first",
+                                               moves=(write.PageMove(first, "Knowledge Base/_archive/first.md"),)))
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        revision = read.current_revision(served)
+        with pytest.raises(OpError) as busy:
+            write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive second",
+                                                   moves=(write.PageMove(second, "Knowledge Base/_archive/second.md"),)))
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision and read.page_exists(served, second)
+
+
+def test_an_original_needs_room_for_the_pages_that_link_to_it(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a filing that reserves its own graph rows but not the linking pages it re-derives."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    for target in ("north-survey", "south-survey"):
+        body = "".join(f"- [rule] Check gauge {index} against [[{target}]].\n" for index in range(30))
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "linking notes", puts=tuple(
+            write.PagePut(f"Knowledge Base/Notes/Surveys/{target}-{note:03}.md", f"# Note {note}\n\n{body}".encode())
+            for note in range(200))))
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+
+    def file_survey(name: str) -> None:
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file survey", puts=(write.PagePut(
+            f"Knowledge Base/Evidence/Tests/Surveys/{name}.md", f"# {name}\n\nRaw readings.\n".encode(),
+            media_allocation=True),)))
+
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both filings in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        pages, = reader.execute("PRAGMA page_count").fetchone()
+        wal_size = wal.stat().st_size
+        file_survey("north-survey")
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+        assert written > 8 * floor  # the 200 linking pages re-derive their graph rows
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        revision = read.current_revision(served)
+        with pytest.raises(OpError) as busy:
+            file_survey("south-survey")
+        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
+        assert read.current_revision(served) == revision

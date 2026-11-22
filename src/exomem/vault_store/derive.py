@@ -19,11 +19,12 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from .. import (
     epistemic_graph,
@@ -44,6 +45,47 @@ if TYPE_CHECKING:
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
+
+
+class _LexicalPage(NamedTuple):
+    page: ParsedPage | None
+    state: SemanticParentIndexState | None
+    rows: lexstore.PageRows | None
+
+
+ReserveGraph = Callable[[str, tuple[epistemic_graph.PageGraphRecords, ...]], None]
+
+
+def prepare_lexical_page(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _LexicalPage:
+    """Prepare exactly the lexical rows the commit writes for an original."""
+    in_kb, in_vault = lexstore.page_membership(rel)
+    if not (in_kb or in_vault):
+        return _LexicalPage(None, None, None)
+    page, state = _parse(root, rel, raw, mtime_ns, type_basis)
+    rows = lexstore.page_rows(
+        root, rel, raw, page=page, state=state, mtime_ns=mtime_ns, in_kb=in_kb, in_vault=in_vault,
+    )
+    return _LexicalPage(page, state, rows)
+
+
+def _parse(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _Parsed:
+    page = find_corpus.parse_page(
+        root / rel, mtime_ns / 1e9, root, content=raw, resolved_relative=rel,
+    )
+    if page is None:
+        return None, None
+    try:
+        state = semantic_index.current_parent_index_state(
+            root, rel, source=raw.decode("utf-8"), owner_type_basis=type_basis,
+        )
+    except (OSError, UnicodeError, ValueError):
+        # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
+        state = None
+    return page, state
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +119,8 @@ def apply(
     existing: frozenset[str],
     *,
     before: tuple | None = None,
+    prepared_lexical: Mapping[str, _LexicalPage] | None = None,
+    reserve_graph: ReserveGraph | None = None,
 ) -> ResolverDelta:
     """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
 
@@ -96,6 +140,8 @@ def apply(
         refreshed=list(change.refresh),
         existing=existing,
         before=before,
+        prepared_lexical=prepared_lexical,
+        reserve_graph=reserve_graph,
     ).run()
 
 
@@ -122,9 +168,13 @@ class _Derivation:
         refreshed: list[str],
         existing: frozenset[str],
         before: tuple | None = None,
+        prepared_lexical: Mapping[str, _LexicalPage] | None = None,
+        reserve_graph: ReserveGraph | None = None,
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.before_triple = before
+        self.prepared_lexical = prepared_lexical or {}
+        self.reserve_graph = reserve_graph
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
@@ -265,14 +315,12 @@ class _Derivation:
                 continue
             raw, mtime_ns = found
             in_kb, in_vault = lexstore.page_membership(rel)
-            rows = None
-            page = None
-            if in_kb or in_vault:
-                page, state = self.parse(rel, raw, mtime_ns)
-                rows = lexstore.page_rows(
-                    self.root, rel, raw, page=page, state=state, mtime_ns=mtime_ns,
-                    in_kb=in_kb, in_vault=in_vault,
+            prepared = self.prepared_lexical.get(rel)
+            if prepared is None:
+                prepared = prepare_lexical_page(
+                    self.root, rel, raw, mtime_ns, self.type_basis,
                 )
+            page, rows = prepared.page, prepared.rows
             if rows is not None:
                 lexstore.write_page_rows(self.tx, rows)
             if self.admission:
@@ -304,31 +352,26 @@ class _Derivation:
 
     def parse(self, rel: str, raw: bytes, mtime_ns: int) -> _Parsed:
         """The parsed page and its parent state, as file mode derives them from the same bytes."""
-        page = find_corpus.parse_page(
-            self.root / rel, mtime_ns / 1e9, self.root, content=raw, resolved_relative=rel
-        )
-        if page is None:
-            return None, None
-        try:
-            state = semantic_index.current_parent_index_state(
-                self.root, rel, source=raw.decode("utf-8"), owner_type_basis=self.type_basis
-            )
-        except (OSError, UnicodeError, ValueError):
-            # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
-            state = None
-        return page, state
+        return _parse(self.root, rel, raw, mtime_ns, self.type_basis)
 
     # ------------------------------------------------------------------ graph rows
 
     def _write_graph(self, rel: str, graph: _GraphInputs) -> None:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
+        prepared = self.prepared_lexical.get(rel)
         found = self.source(rel)
         # File mode builds the graph from the Knowledge Base walk alone: a refreshed page outside it
         # has lexical rows and no graph rows, or it would get a node under a path that has no file.
         if found is not None and lexstore.page_membership(rel)[0]:
             raw, mtime_ns = found
-            page, state = self.parse(rel, raw, mtime_ns)
+            if prepared is None:
+                page, state = self.parse(rel, raw, mtime_ns)
+                structure = None
+            else:
+                page, state = prepared.page, prepared.state
+                summary = prepared.rows.structure_json if prepared.rows is not None else None
+                structure = json.loads(summary) if summary is not None else None
             if page is not None and state is not None:
                 rows = epistemic_graph.page_graph_rows(
                     self.root,
@@ -340,11 +383,19 @@ class _Derivation:
                     type_basis=graph.type_basis,
                     target_exists=self.target_exists,
                     landing=graph.landing,
+                    prepared_structure=structure,
                 )
         if rows is None:
+            if self.reserve_graph is not None:
+                self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
-            epistemic_graph.write_page_graph_rows(self.tx, rows, graph.stamps)
+            epistemic_graph.write_page_graph_rows(
+                self.tx, rows, graph.stamps,
+                # Pages that link to an original re-derive in the same transaction, so their
+                # graph rows draw on the same reservation as the original's own.
+                before_write=self.reserve_graph,
+            )
 
     # ------------------------------------------------------------------ dependents
 

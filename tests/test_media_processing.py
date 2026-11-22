@@ -860,9 +860,9 @@ def test_background_batch_rechecks_access_policy_changed_during_staging(
     original_create = vault_module._BatchWorkspace.create_artifact
     changed = False
 
-    def create_then_protect(self, name, content):  # noqa: ANN001
+    def create_then_protect(self, name, content, **options):  # noqa: ANN001, ANN003
         nonlocal changed
-        artifact = original_create(self, name, content)
+        artifact = original_create(self, name, content, **options)
         if not changed and name.startswith("stage-"):
             changed = True
             (vault / "Knowledge Base" / "_access.yaml").write_text(

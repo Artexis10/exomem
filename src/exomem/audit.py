@@ -613,7 +613,11 @@ def audit(
         request_budget.checkpoint()
         if "corpus_contradictions" in selected:
             sense_scope, release = _capture_audit_scope(vault_root)
-        if selected == {"source_pointer_drift"}:
+        if selected == {CUSTODY_SOURCE}:
+            # Only a custody-marked Source can produce this finding, so its
+            # frontmatter mark selects the corpus before admission runs.
+            pages = _parse_all(kb, vault_root, select=_custody_marked_selector(vault_root))
+        elif selected == {"source_pointer_drift"}:
             pages = _parse_all(kb, vault_root, append_only=True)
         elif not from_store and not selected <= projection_checks:
             pages = _parse_all(kb, vault_root, keep=release)
@@ -695,6 +699,9 @@ def audit(
         # One snapshot, built on first use, for both backlog checks.
         return find_module.writer_resolver_snapshot(vault_root)
 
+    # A custody-only parse admitted no derivative or predecessor: the pages a
+    # Source names are admitted and parsed on demand, through the same rule.
+    named_page = _named_page_lookup(kb, vault_root, pages) if selected == {CUSTODY_SOURCE} else None
     backlog_families = selected & {"unprocessed_source", CUSTODY_SOURCE}
     with stage(backlog_families) as run:
         if run:
@@ -702,6 +709,7 @@ def audit(
                 _check_unprocessed_sources(
                     vault_root, pages, today=today, source_context=source_context,
                     resolver=backlog_resolver, families=backlog_families,
+                    lookup=named_page,
                 )
             )
     with stage(review_state_module.EPISODE_BACKLOG) as run:
@@ -2497,9 +2505,19 @@ _AUDIT_RELEASE_DEFAULT = object()
 
 @call_spans.timed("audit.parse_corpus")
 def _parse_all(
-    kb: Path, vault_root: Path, *, keep: Any = _AUDIT_RELEASE_DEFAULT, append_only: bool = False,
+    kb: Path,
+    vault_root: Path,
+    *,
+    keep: Any = _AUDIT_RELEASE_DEFAULT,
+    append_only: bool = False,
+    select: Callable[[str, bytes | None], bool] | None = None,
 ) -> list[find_module.ParsedPage]:
-    """Parse the admitted Markdown pages in the knowledge base."""
+    """Parse the admitted Markdown pages in the knowledge base.
+
+    `select` runs before authorization: an unselected page is never admitted
+    or parsed, so a check whose findings can come only from marked pages pays
+    a frontmatter read where it used to pay the whole admission.
+    """
     from .governance import egress
     from .governance.principal import effective_principal
 
@@ -2513,7 +2531,8 @@ def _parse_all(
     for page in find_corpus.corpus_pages(
         vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
         lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
-        keep=lambda rel, content: (not append_only or in_append_only_tree(rel) is not None)
+        keep=lambda rel, content: (select is None or select(rel, content))
+        and (not append_only or in_append_only_tree(rel) is not None)
         and egress.content_permits(vault_root, rel, who, snapshot=content)
         and (admitted is None or admitted(rel)),
     ):
@@ -2521,6 +2540,154 @@ def _parse_all(
         if page.part_of is None:
             pages.append(page)
     return pages
+
+
+def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], bool]:
+    """Keep pages whose frontmatter records `custody_only: true`.
+
+    Only a decided negative drops a page: on any uncertainty — an unreadable,
+    unterminated or oversized frontmatter block, a fence spelling the bounded
+    reader does not recognise, or frontmatter that does not parse — the page
+    stays in and the ordinary admission and full parse decide it, exactly as
+    without a selector.
+    """
+
+    def select(rel: str, content: bytes | None) -> bool:
+        if content is None:
+            # A file-mode page: read only its fenced block through a plain
+            # no-follow open — the wikilink resolver build reads walked pages
+            # the same way. The boolean only narrows the admission set; every
+            # page kept here is read again through the held reader in
+            # admission and the full parse. Any doubt keeps the page.
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            if nofollow is None:
+                return True
+            path = vault_root.joinpath(*rel.split("/"))
+            fd = -1
+            try:
+                fd = os.open(
+                    path,
+                    os.O_RDONLY | nofollow | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
+                )
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return True
+                with os.fdopen(fd, "rb", closefd=True) as stream:
+                    fd = -1
+                    probe = stream.read(8)
+                    stream.seek(0)
+                    content = vault_module.read_frontmatter_header(
+                        stream, 64 * 1024
+                    )
+            except (OSError, vault_module.FrontmatterError):
+                return True
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if not content and probe.removeprefix(b"\xef\xbb\xbf").startswith(b"---"):
+                # The opener is there but the bounded reader could not fence
+                # the block (a CR-only page's `\r` opener): undecided.
+                return True
+        return _custody_marked(content)
+
+    return select
+
+
+def _custody_marked(content: bytes) -> bool:
+    """Whether page bytes, or the page's fenced block alone, record `custody_only: true`.
+
+    Parsed the way `_parse_page_after_checkpoint` parses it (LF normalization,
+    frontmatter pattern, safe loader). A page whose bytes do not decode or
+    carry no frontmatter is a decided negative; one whose frontmatter does not
+    parse is undecided, and the caller keeps it.
+    """
+    try:
+        text = vault_module.markdown_lf(content.decode("utf-8"))
+    except UnicodeDecodeError:
+        return False
+    fm_match = find_module.FRONTMATTER_PATTERN.match(text)
+    if fm_match is None:
+        return False
+    try:
+        frontmatter = vault_module.yaml_safe_load(fm_match.group(1)) or {}
+    except vault_module.MALFORMED_FRONTMATTER_ERRORS + (yaml.YAMLError,):
+        return True
+    return isinstance(frontmatter, dict) and frontmatter.get("custody_only") is True
+
+
+def _named_page_lookup(
+    kb: Path, vault_root: Path, pages: list[find_module.ParsedPage]
+) -> Callable[[str], find_module.ParsedPage | None]:
+    """A `lookup` that admits and parses one named page when a check asks for it.
+
+    The answer for a vault-relative path is the one a full `_parse_all` would
+    have given: a page already parsed, else `None` when the corpus walk does
+    not reach it, authorization refuses it or it parses to a hidden part page.
+    Each answer is cached for the call, `None` included, and the read is
+    budgeted so an exhausted lookup truncates the stage as the corpus read's
+    exhaustion does.
+    """
+    from . import find_corpus
+    from .governance import egress
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    admitted = egress.restricted_release_filter(vault_root)
+    parsed = {page.rel_path: page for page in pages}
+    resolved: dict[str, find_module.ParsedPage | None] = {}
+    listings: dict[Path, frozenset[str] | None] = {}
+
+    def lookup(rel: str) -> find_module.ParsedPage | None:
+        if rel in parsed:
+            return parsed[rel]
+        if rel not in resolved:
+            request_budget.checkpoint()
+            resolved[rel] = _admit_named_page(rel)
+        return resolved[rel]
+
+    def _admit_named_page(rel: str) -> find_module.ParsedPage | None:
+        path = vault_root.joinpath(*rel.split("/"))
+        source = _named_corpus_source(rel, path)
+        if source is None:
+            return None
+        content = source.stored.body if source.stored is not None else None
+        if not egress.content_permits(vault_root, rel, who, snapshot=content):
+            return None
+        if admitted is not None and not admitted(rel):
+            return None
+        try:
+            page = source.parse(
+                lambda file: find_module._parse_page(file, file.stat().st_mtime, vault_root)
+            )
+        except OSError:
+            return None
+        # A hidden part page is its Source's own text: `_parse_all` drops it.
+        if page is None or page.part_of is not None:
+            return None
+        return page
+
+    def _named_corpus_source(rel: str, path: Path) -> find_corpus.CorpusSource | None:
+        stored_rel = find_corpus.stored_relative(path, vault_root)
+        if stored_rel is not None:
+            # A stored page may have no file at all; the store's row is its membership.
+            from .vault_store import read
+
+            if not read.corpus_member(stored_rel, "kb"):
+                return None
+            with read.snapshot(vault_root) as view:
+                stored = view.page(stored_rel)
+            if stored is None:
+                return None
+            return find_corpus.CorpusSource(path, vault_root, stored)
+        if not find_corpus.kb_walk_member(rel):
+            return None
+        # The walk's own entry rule on this one path's ancestry, so a link or a
+        # hard-linked file is no more read than the walk would read it.
+        if not find_corpus.walk_md_admits(kb, path, listings):
+            return None
+        return find_corpus.CorpusSource(path, vault_root)
+
+    return lookup
 
 
 def _page_signal_version(page: find_module.ParsedPage) -> str:

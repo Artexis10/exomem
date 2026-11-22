@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .catalogue_build import BuildJob
@@ -229,6 +229,19 @@ class PodPlacement:
 
 
 @dataclass(frozen=True)
+class ResticVerificationJob:
+    name: str
+    uid: str | None
+    statefulset_uid: str | None
+    invocation: str | None
+    active: bool
+    deleting: bool
+    outcome: Literal["success", "failed", "unknown"] | None = None
+    pod_uid: str | None = None
+    finished_at: datetime | None = None
+
+
+@dataclass(frozen=True)
 class ClusterObservation:
     """What cellctl can see for one cell's namespace this pass.
 
@@ -276,6 +289,7 @@ class ClusterObservation:
     pv_node_lost: bool = False
 
     statefulset_exists: bool = False
+    statefulset_uid: str | None = None
     statefulset_image: str | None = None
     statefulset_replicas: int | None = None
     statefulset_hold_kind: str | None = None
@@ -293,6 +307,7 @@ class ClusterObservation:
     # D3: an hourly backup's recorded outcome (its snapshot id, or "failed").
     # While set, the hold only removes its clone and snapshot.
     statefulset_backup_outcome: str | None = None
+    statefulset_restic_verification: str | None = None
     statefulset_backup_family_request: str | None = None
     backup_family_secret_referenced: bool | None = False
     # D4: a restore hold that relocates the cell off the volume with this id.

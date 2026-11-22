@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import os
 import secrets
+import tempfile
 from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
@@ -18,7 +19,7 @@ from urllib.parse import quote
 import anyio
 from fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import FormData, MutableHeaders
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException
 from starlette.requests import ClientDisconnect, Request
@@ -36,7 +37,9 @@ from . import (
     cf_access,
     download_links,
     local_ingress,
+    media_capacity,
     media_store,
+    multipart_upload,
     originals,
     reserved_paths,
     upload_handoff,
@@ -110,6 +113,22 @@ def _upload_flags(raw_flag: str, archive: str) -> tuple[bool, bool, str | None]:
     return raw_protection, bool(archive), None
 
 
+def _diarize_upload_option(value: object, *, filename: str, members: bool) -> tuple[bool | None, str | None]:
+    if value is None:
+        return None, None
+    # Multipart and Upload-Metadata use the literal spellings of a JSON boolean.
+    if value not in ("true", "false"):
+        return None, "`diarize` must be true or false"
+    if members:
+        return None, "archive=members takes no speaker-label choice"
+    from . import media_engines, media_types
+
+    artifact = _preserve_module()._sanitize_filename(filename)
+    if media_engines.engine_for(media_types.media_type_for(artifact)) != media_engines.SPEECH:
+        return None, "speaker labels apply to audio and video only"
+    return value == "true", None
+
+
 def _preserve_module():
     from . import preserve as preserve_module
 
@@ -129,13 +148,16 @@ def _preserve_under_guard(
     *,
     stream: Any,
     **kwargs: Any,
-) -> Any:
-    """Copy an upload into a private stage, then plan and install it under vault authority.
+) -> dict:
+    """Copy an upload into a private stage, then plan and install it under vault authority; return its receipt.
 
     The bytes are copied, hashed and fsynced once, before the boundary, so a large upload never holds
     it while it moves. The commit then renames the stage into place. Only the acquire waits out
-    contention, and the commit body runs once.
+    contention, and the commit body runs once. The derived fan-out runs after the release, before the
+    receipt returns, and the receipt says whether it completed.
     """
+    from . import writer_lease
+
     preserve_module = _preserve_module()
     artifact, _protected = preserve_module.evidence_artifact(
         vault_root, scope=kwargs["scope"], category=kwargs["category"], filename=kwargs["filename"],
@@ -149,9 +171,11 @@ def _preserve_under_guard(
             pooled=preserve_module.pools_evidence_original(vault_root, artifact.name),
         ) as staged:
             with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
-                return preserve_stream(vault_root, staged=staged, **kwargs)
+                return preserve_stream(vault_root, staged=staged, defer_fanout_to_terminal=True, **kwargs)
 
-    return _restaged_once(attempt, stream)
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        result = _restaged_once(attempt, stream)
+    return {**result.as_dict(), "derived_sync": fanout.derived_sync}
 
 
 def _restaged_once(attempt: Any, stream: Any) -> Any:
@@ -169,15 +193,18 @@ def _restaged_once(attempt: Any, stream: Any) -> Any:
         return attempt()
 
 
-def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
-    """Expand an archive's members outside the guard; commit its manifest under it."""
-    from . import archive_members
+def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> tuple[dict, bool]:
+    """Expand an archive's members outside the guard; commit its manifest under it, and fan it out after."""
+    from . import archive_members, writer_lease
 
-    return archive_members.preserve_members(
-        vault_root,
-        guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
-        **kwargs,
-    )
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        receipt, stored = archive_members.preserve_members(
+            vault_root,
+            guard=lambda: manager.absorbing_mutation_guard(vault_root, operation="upload_manifest"),
+            defer_fanout_to_terminal=True,
+            **kwargs,
+        )
+    return {**receipt, "derived_sync": fanout.derived_sync}, stored
 
 
 def _capture_source_under_guard(
@@ -194,16 +221,20 @@ def _capture_source_under_guard(
     add_module: Any,
     max_bytes: int,
     raw_protection: bool = False,
-) -> Any:
-    """Capture an out-of-band upload as a Source, under vault authority.
+    diarize: bool | None = None,
+) -> dict:
+    """Capture an out-of-band upload as a Source, under vault authority; return its upload receipt.
 
     The bytes are copied into a private stage first, before the boundary: `add` writes the artifact
     and its page in one operation, and a half-consumed request stream cannot be replayed if that
-    operation refuses. The capture takes the boundary only to plan and install the stage.
+    operation refuses. The capture takes the boundary only to plan and install the stage. Its derived
+    fan-out runs after the release, before the receipt returns.
 
     A person may post from the upload form with no agent to ask, so a missing
     kind is recorded as `unclassified` rather than refused.
     """
+    from . import writer_lease
+
     source_type = add_module.capture_kind(vault_root, source_type, unattended=True)
 
     def attempt() -> Any:
@@ -225,11 +256,15 @@ def _capture_source_under_guard(
                         filename=filename,
                         content_type=content_type,
                         staged=staged,
+                        diarize=diarize,
                     ),
                     raw_protection=raw_protection,
+                    defer_fanout_to_terminal=True, custody_before_commit=True, corpus_advisories=False,
                 )
 
-    return _restaged_once(attempt, stream)
+    with writer_lease.fanout_after_release(vault_root) as fanout:
+        result = _restaged_once(attempt, stream)
+    return {**_source_upload_receipt(vault_root, result.as_dict()), "derived_sync": fanout.derived_sync}
 
 
 def _source_pools_original(add_module: Any, vault_root: Path, filename: str) -> bool:
@@ -287,7 +322,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     from .cli_ops import OpError
     from .command_surface import Command
     from .vault import BatchWriteError
-    from .writer_lease import _PostCommitOutcomeUncertain, invoke_command
+    from .writer_lease import _PostCommitOutcomeUncertain, fanout_after_release, invoke_command
 
     def publish(root: Path, *, target: dict, length: int, sha256: str, session_id: str) -> dict:
         if _source_session_destination(root, target, size=length, sha256=sha256) != target["destination"]:
@@ -295,10 +330,15 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
                 "SOURCE_DESTINATION_CHANGED", "the Source destination changed; uploaded bytes remain held", retryable=True,
             )
         try:
+            # The command drains this deferred fan-out after its own boundary release, before it returns.
             result = add.add(
-                root, schema.load_source_schema(root), content="", title=target["title"],
+                root, schema.load_source_schema(root), defer_fanout_to_terminal=True, custody_before_commit=True,
+                corpus_advisories=False, content="", title=target["title"],
                 source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
-                artifact=add.SourceArtifact(part, target["filename"], target.get("content_type"), staged=staged),
+                artifact=add.SourceArtifact(
+                    part, target["filename"], target.get("content_type"),
+                    staged=staged, diarize=target.get("diarize"),
+                ),
                 raw_protection=target["raw_protection"], expected_sha256=sha256,
             ).as_dict()
         except BatchWriteError as error:
@@ -311,7 +351,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
     # The session's bytes are copied into a private stage before `invoke_command` takes the boundary, so the
     # commit plans and installs without moving them. A replay that finds its result stored discards the stage.
     try:
-        with part.open("rb") as stream, upload_stage.stage(
+        with fanout_after_release(vault_root) as fanout, part.open("rb") as stream, upload_stage.stage(
             vault_root, stream, limit=int(record["length"]),
             too_large=lambda: upload_sessions.CommitFailed("SOURCE_BYTES_CHANGED", "the held Source bytes grew; upload again"),
             pooled=_source_pools_original(add, vault_root, record["target"]["filename"]),
@@ -334,7 +374,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             "SOURCE_OUTCOME_UNKNOWN", "the Source outcome is unknown; uploaded bytes remain held", retryable=True,
         )
     # Also project older cached results before they leave the transfer principal's scope.
-    return _source_upload_receipt(vault_root, result)
+    return {**_source_upload_receipt(vault_root, result), "derived_sync": fanout.derived_sync}
 
 
 def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
@@ -347,7 +387,26 @@ def commit_session(vault_root: Path, part: Path, record: dict) -> dict:
     """
     # A lane token carries no caller identity. Every commit runs under the same transfer floor:
     # the first attempt, a re-attempt by the server's own timer and startup recovery alike.
-    with principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")):
+    from . import document_containers
+    from .cli_ops import OpError
+
+    with (principal_module.request_scope(principal_module.most_restrictive_principal(surface="transfer")),
+          media_capacity.commit_credit(record["id"])):
+        try:
+            if media_capacity.upload_floor(vault_root) is not None:
+                copies = upload_sessions.commit_copy_count(vault_root, record["target"])
+                if copies:
+                    extra_sizes = ()
+                    if document_containers.is_container(record["target"]["filename"]):
+                        with part.open("rb") as stream:
+                            sizes = document_containers.commit_payload_sizes(stream)
+                        spool_here = Path(tempfile.gettempdir()).stat().st_dev == vault_root.stat().st_dev
+                        extra_sizes = sizes * (3 if spool_here else 2)
+                    with media_capacity.upload_room(vault_root, reserve=True) as room:
+                        if room is not None:
+                            room.reserve_commit(record["length"], copies, incoming=0, offset=0, extra_sizes=extra_sizes)
+        except OpError as error:
+            raise upload_sessions.CommitFailed(error.code, error.message, retryable=True) from error
         return _commit_session(vault_root, part, record)
 
 
@@ -369,10 +428,10 @@ def _commit_session(vault_root: Path, part: Path, record: dict) -> dict:
             receipt = _commit_evidence_session(vault_root, part, record, manager, preserve_module)
     except archive_members.ArchiveError as exc:
         raise upload_sessions.CommitFailed(
-            exc.code, exc.reason, retryable=exc.code == archive_members.NO_SPACE
+            exc.code, exc.reason, retryable=exc.code in (archive_members.NO_SPACE, media_capacity.UPLOAD_SPACE_BUSY),
         ) from exc
     except preserve_module.PreserveError as exc:
-        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+        raise upload_sessions.CommitFailed(exc.code, exc.reason, retryable=exc.code == media_capacity.UPLOAD_SPACE_BUSY) from exc
     except OpError as exc:
         error = error_dict(exc)
         raise upload_sessions.CommitFailed(error["code"], error["message"], retryable=True) from exc
@@ -415,29 +474,34 @@ def _commit_evidence_session(vault_root: Path, part: Path, record: dict, manager
                     max_bytes=int(record["length"]),
                     raw_protection=bool(target.get("raw_protection")),
                     media_pending=True,
+                    diarize=target.get("diarize"),
                 )
             except preserve_module.PreserveError as exc:
                 stored = _stored_already(vault_root, record) if exc.code == "ARTIFACT_EXISTS" else None
                 if stored is None:
                     raise
-                receipt = stored
+                # This door did not run the stored page's fan-out, so it cannot say that it completed.
+                receipt = {**stored, "derived_sync": "pending"}
             else:
-                receipt = result.as_dict()
+                receipt = result
     except preserve_module.PreserveError as exc:
-        raise upload_sessions.CommitFailed(exc.code, exc.reason) from exc
+        raise upload_sessions.CommitFailed(exc.code, exc.reason, retryable=exc.code == media_capacity.UPLOAD_SPACE_BUSY) from exc
     return receipt
 
 
 def _stored_already(vault_root: Path, record: dict) -> dict | None:
     """The `already_stored` receipt when the session's target holds exactly its bytes."""
     target = record["target"]
-    stored = _preserve_module().stored_artifact(
+    preserve_module = _preserve_module()
+    stored = preserve_module.stored_artifact(
         vault_root, scope=target["scope"], category=target["category"], filename=target["filename"],
         sha256=record["sha256"], raw_protection=bool(target.get("raw_protection")),
     )
     if stored is None:
         return None
-    return stored.receipt(size=int(record["length"]), content_type=mimetypes.guess_type(stored.path)[0])
+    receipt = stored.receipt(size=int(record["length"]), content_type=mimetypes.guess_type(stored.path)[0])
+    preserve_module.disclose_retained_speaker_choice(receipt, target.get("diarize"))
+    return receipt
 
 
 def resume_upload_sessions(vault_root: Path) -> None:
@@ -748,6 +812,7 @@ async def _receive_ticket_upload(vault_root: Path, request: Request, ticket: dic
 async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) -> tuple[int, dict]:
     """The status and body of one claimed ticket's send: 201 with the held upload, or a refusal."""
     from . import held_uploads
+    from .cli_ops import OpError, http_status_for
 
     maximum = ticket["max_bytes"]
     received = 0
@@ -775,7 +840,9 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         if refused is not None:
             return 413, refused
     try:
-        async with bounded.form(max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES) as form:
+        async with multipart_upload.form(
+            bounded, vault_root, max_files=1, max_fields=3, max_part_size=_FORM_OVERHEAD_BYTES,
+        ) as form:
             # The ticket-upload protocol fixes these fields; none can select a commit target.
             if (str(form.get("lane") or "") != ticket["lane"]
                     or _flag(str(form.get("hold") or "")) is not True
@@ -807,8 +874,14 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         return 201, held
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
+    except OpError as exc:
+        if exc.code != media_capacity.UPLOAD_SPACE_BUSY:
+            raise
+        return http_status_for(exc.code), {"code": exc.code, "reason": exc.message}
     except held_uploads.HeldUploadError as exc:
-        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400), {"code": exc.code, "reason": exc.reason}
+        return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)), {
+            "code": exc.code, "reason": exc.reason,
+        }
 
 
 def _handoff_unavailable() -> JSONResponse:
@@ -1038,8 +1111,7 @@ def register_transfer_routes(
                 {"code": "UNAUTHORIZED", "reason": "missing or invalid upload credential"},
                 status_code=401,
             )
-        from .cli_ops import OpError, error_dict, http_status_for
-        from .writer_lease import get_manager, record_caller_refusal
+        from .cli_ops import OpError, http_status_for
 
         max_bytes = (
             config.local_upload_max_bytes
@@ -1055,7 +1127,8 @@ def register_transfer_routes(
             )
         try:
             # `max_part_size` bounds form fields only; the copy loops bound the file.
-            form = await request.form(max_part_size=config.upload_max_bytes)
+            async with multipart_upload.form(request, vault_root, max_part_size=config.upload_max_bytes) as form:
+                return await _accept_upload(request, form, max_bytes)
         except MultiPartException as exc:
             return JSONResponse(
                 {
@@ -1065,6 +1138,15 @@ def register_transfer_routes(
                 },
                 status_code=413,
             )
+        except OpError as exc:
+            if exc.code != media_capacity.UPLOAD_SPACE_BUSY:
+                raise
+            return JSONResponse({"code": exc.code, "reason": exc.message}, status_code=http_status_for(exc.code))
+
+    async def _accept_upload(request: Request, form: FormData, max_bytes: int) -> JSONResponse:
+        from .cli_ops import OpError, error_dict, http_status_for
+        from .writer_lease import get_manager, record_caller_refusal
+
         upload = form.get("file")
         if not hasattr(upload, "read"):
             return JSONResponse(
@@ -1108,6 +1190,11 @@ def register_transfer_routes(
                     },
                     status_code=400,
                 )
+            if form.get("diarize") is not None:
+                return JSONResponse(
+                    {"code": "INVALID_UPLOAD", "reason": "set `diarize` on the file handle when redeeming it"},
+                    status_code=400,
+                )
             from .client_artifacts import fetch_budget
 
             try:
@@ -1124,13 +1211,19 @@ def register_transfer_routes(
             except held_uploads.HeldUploadError as exc:
                 return JSONResponse(
                     {"code": exc.code, "reason": exc.reason},
-                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, 400),
+                    status_code={"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)),
                 )
             return JSONResponse(held, status_code=201)
         from . import archive_members
 
         preserve_module = _preserve_module()
+        diarize, diarize_refusal = _diarize_upload_option(
+            form.get("diarize"), filename=filename, members=archive,
+        )
+        if diarize_refusal is not None:
+            return JSONResponse({"code": "INVALID_UPLOAD", "reason": diarize_refusal}, status_code=400)
         try:
+            preserve_module.validate_diarize_text(diarize, text)
             manager = get_manager()
             if archive:
                 receipt, stored = await run_in_threadpool(
@@ -1168,6 +1261,7 @@ def register_transfer_routes(
                     add_module=add_module,
                     max_bytes=max_bytes,
                     raw_protection=raw_protection,
+                    diarize=diarize,
                 )
             else:
                 result = await run_in_threadpool(
@@ -1185,6 +1279,7 @@ def register_transfer_routes(
                     max_bytes=max_bytes,
                     raw_protection=raw_protection,
                     media_pending=True,
+                    diarize=diarize,
                 )
         except preserve_module.PreserveError as exc:
             status = {
@@ -1214,18 +1309,15 @@ def register_transfer_routes(
                 _reconcile_under_guard,
                 manager,
                 vault_root,
-                vault_root / (getattr(result, "artifact_path", None) or result.path),
+                vault_root / (result.get("artifact_path") or result["path"]),
             )
         except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
             log.warning(
                 "media reconciliation failed for %s; evidence remains recoverable",
-                result.path,
+                result["path"],
                 exc_info=True,
             )
-        receipt = result.as_dict()
-        if lane == "source":
-            receipt = _source_upload_receipt(vault_root, receipt)
-        return JSONResponse(receipt, status_code=201)
+        return JSONResponse(result, status_code=201)
 
     def _credential_binding(request: Request) -> str:
         """Which credential opened a session, for its per-binding quota; never the credential."""
@@ -1340,12 +1432,16 @@ def register_transfer_routes(
             "raw_protection": raw_protection,
             "archive": ARCHIVE_MEMBERS if members else None,
         }
+        diarize, diarize_refusal = _diarize_upload_option(
+            metadata.get("diarize"), filename=target["filename"], members=members,
+        )
         refusals = [
             refusal
             for refusal in (
                 preserve_module.destination_segment_refusal(target["scope"], field="scope") if lane == "evidence" else None,
                 preserve_module.destination_segment_refusal(target["category"], field="category") if lane == "evidence" else None,
                 flag_refusal,
+                diarize_refusal,
                 "archive=members preserves Evidence directly" if members and lane == "source" else None,
             )
             if refusal
@@ -1386,6 +1482,8 @@ def register_transfer_routes(
                         "Evidence is append-only, so pick a new filename",
                         409,
                     )
+            if diarize is not None:
+                target["diarize"] = diarize
             if (refused := await _allowance_refused(vault_root, declared, target["filename"], lane)) is not None:
                 return _tus_refusal(refused["code"], refused["reason"], 413)
             session, secret = await run_in_threadpool(

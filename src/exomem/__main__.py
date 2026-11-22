@@ -602,6 +602,11 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         help="with --scope/--category: keep the original owner-only until a whole-artifact release",
     )
     parser.add_argument(
+        "--diarize",
+        action=argparse.BooleanOptionalAction,
+        help="with --scope/--category: request or skip speaker labels for this recording",
+    )
+    parser.add_argument(
         "--archive",
         choices=("members",),
         default="",
@@ -633,7 +638,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     )
     args = parser.parse_args(argv)
     if args.handoff_file:
-        if (args.scope or args.category or args.description or args.raw_protection
+        if (args.scope or args.category or args.description or args.raw_protection or args.diarize is not None
                 or args.archive or args.resumable or args.token_file or args.port):
             parser.error("--handoff-file accepts only a held file, --root, --filename and its bound --lane")
         return _attach_handoff(args, transport=transport)
@@ -660,6 +665,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     if hold and args.raw_protection:
         parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
+    if hold and args.diarize is not None:
+        parser.error("--diarize and --no-diarize need --scope/--category; a held file takes the choice when redeemed")
     if hold and (args.archive or args.resumable):
         parser.error("--archive and --resumable need --scope/--category")
     fields = {
@@ -676,6 +683,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         }.items()
         if value
     }
+    if args.diarize is not None:
+        fields["diarize"] = "true" if args.diarize else "false"
 
     import httpx
 
@@ -858,7 +867,7 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
     size = source.stat().st_size
     # nosemgrep: ep-word-set -- the session metadata keys that `/upload/sessions` defines.
     destination = {key: fields[key] for key in ("scope", "category", "description",
-                                                "raw_protection", "archive") if key in fields}
+                                                "raw_protection", "archive", "diarize") if key in fields}
     key = hashlib.sha256(json.dumps(
         {"sha256": sha256, "target": base, "filename": name, **destination}, sort_keys=True
     ).encode()).hexdigest()
@@ -1146,9 +1155,8 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--rediarize",
         action="store_true",
-        help="re-extract audio/video transcribed before diarization (extracted_by without "
-        "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
-        "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
+        help="add speaker labels to existing unlabeled recordings. An explicit recording choice "
+        "takes precedence over EXOMEM_DIARIZE in this shell.",
     )
     parser.add_argument(
         "--retime",
@@ -1157,8 +1165,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
         "does not read .env). One re-extraction serves --retime and --rediarize together. "
-        "Already-diarized recordings are SKIPPED unless EXOMEM_DIARIZE is also set, so "
-        "re-timing never drops their speaker labels.",
+        "Re-timing a labeled recording requires an enabled speaker-label choice so it keeps its labels.",
     )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -5186,7 +5193,7 @@ def _cell_export_main(argv: list[str]) -> int:
 
 
 def _media_replicas_main(argv: list[str]) -> int:
-    """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
+    """The owner's commands for replica stores and personal eviction."""
     parser = argparse.ArgumentParser(
         prog="exomem media-replicas",
         description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
@@ -5202,6 +5209,16 @@ def _media_replicas_main(argv: list[str]) -> int:
     confirm = actions.add_parser("confirm-key-export", parents=[common],
                                  help="record that you exported the key outside this machine")
     confirm.add_argument("--key-version", help="the key version; default is the vault's current one")
+    enable = actions.add_parser("enable-eviction", parents=[common], help="evict idle originals to a declared store")
+    enable.add_argument("store", help="the name of a declared filesystem store")
+    enable.add_argument("--free-bytes", required=True, type=int, help="vault bytes to keep free before eviction starts")
+    enable.add_argument("--margin-bytes", type=int, help="extra vault bytes to free in each pass")
+    enable.add_argument("--upload-floor-bytes", type=int, help="minimum free bytes to keep after an upload")
+    enable.add_argument("--minimum-idle-seconds", type=int, default=600)
+    enable.add_argument("--eviction-settle-seconds", type=int, default=600)
+    enable.add_argument("--max-temporary-bytes", type=int)
+    enable.add_argument("--max-hydrations", type=int)
+    actions.add_parser("disable-eviction", parents=[common], help="stop evicting and restore originals as space allows")
     listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
     listing.add_argument("--after", help="the path that the previous page ended on")
     listing.add_argument("--limit", type=int, default=100)
@@ -5213,7 +5230,7 @@ def _media_replicas_main(argv: list[str]) -> int:
     if not args.vault:
         print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
-    from . import media_replicas, media_store, state_migration
+    from . import held_fs, media_replicas, media_store, personal_eviction, state_migration
     from .vault_store import cli_fence
 
     vault = Path(args.vault).expanduser()
@@ -5224,12 +5241,24 @@ def _media_replicas_main(argv: list[str]) -> int:
             print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
         elif args.action == "confirm-key-export":
             print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "enable-eviction":
+            personal_eviction.enable(
+                vault, args.store, free_bytes=args.free_bytes, margin_bytes=args.margin_bytes,
+                upload_floor_bytes=args.upload_floor_bytes, minimum_idle_seconds=args.minimum_idle_seconds,
+                eviction_settle_seconds=args.eviction_settle_seconds, max_temporary_bytes=args.max_temporary_bytes,
+                max_hydrations=args.max_hydrations,
+            )
+            print(f"Eviction is enabled for {args.store}.")
+            print("Eviction removes plaintext from the vault and its current mirrors. "
+                  "Recover an evicted original from the store with its exported decryption key.")
+        elif args.action == "disable-eviction":
+            print(f"Eviction is disabled for {personal_eviction.disable(vault)}. Originals return as space allows.")
         elif args.action == "findings":
             cursor = None if args.after_path is None else (args.after_path, args.after_store)
             print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
         else:
             print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
-    except (media_store.MediaStoreError, ValueError) as error:
+    except (held_fs.HeldFsError, media_store.MediaStoreError, ValueError) as error:
         print(f"Error [{getattr(error, 'code', 'INVALID')}]: {error}", file=sys.stderr)
         return 1
     return 0

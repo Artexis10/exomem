@@ -571,11 +571,28 @@ A promoted worker runs its own warm-up, and subtracts from it whatever its
 standby already finished in the same process and promotion either re-verified or
 cannot invalidate. `carried_from_standby` on the `cutover` block and on the
 promotion record names what was subtracted, and the worker's `warm complete` log
-line repeats it. The graph handoff is carried only when the promotion verdict is
-`current`: the snapshot the standby proved is still on disk, or promotion
-re-proved the one the old worker published after that proof. An `advanced`,
-`unproven` or `rebuild-after-promotion` verdict leaves it out, and the adoption
-runs again in full while the writers' gate refuses writes. What remains after a
+line repeats it. A `current` graph promotion carries both `graph_handoff` and
+`startup_validation`. The worker arms its normal file watcher after taking ownership.
+Promotion then replays the source proof and binds it to that observer.
+The watcher seeds from disk and replays its buffered events without repeating the graph proof.
+If that observer stops or changes before startup finishes, the worker proves the sources again.
+
+If the proof finds a bounded set of changed pages, `residue_applied` records
+the number queued for repair. Graph reads wait for the drain to publish those rows.
+If observation or proof cannot complete, `startup_validation` is `pending`.
+Startup proves the graph origin through the normal recovery path.
+Any canonical writes that reach graph dispatch in the meantime queue their graph work.
+When the canonical floor and checkpoint agree, a full graph rebuild can replace a damaged metadata table.
+If startup encounters fatal SQLite corruption while reading the graph, graph reads stay fenced and rebuild debt remains.
+The startup log reports `graph_sidecar_requires_replacement`.
+Touching or rewriting the same file, or changing its companions, does not release this fence.
+Offline replacement requires closed readers and writers, a distinct main file, and compatible WAL or journal state.
+Restore or replace the damaged graph family offline before downgrading from a worker that recorded this fault.
+Older releases ignore the recorded data-family attestation.
+A quarantine can settle an exact checkpoint after the drain proves the held page's
+admission and topology. The graph retains that page's last-readable rows. The
+write reports pending graph repair, and the doctor reports the quarantine.
+What remains after a
 carried promotion is the retrieval catalog check and any model the standby's
 preload policy did not load. When promotion adopted a catalog the standby built
 detached, `carried_from_standby` names `catalogue_handoff` and not `lexical`: the
@@ -645,7 +662,8 @@ match and the manifest is complete, the step is recorded as skipped:
 {"handoff": {"standby": "ready",
              "migration": {"state": "skipped", "reason": "declared_none"},
              "promotion": {"snapshot": "current",
-                           "revalidated": true, "reproved": false}}}
+                           "startup_validation": "carried",
+                           "revalidated": true, "reproved": true}}}
 ```
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
@@ -677,33 +695,25 @@ precisely the one worth reading closely, so neither value overwrites the other.
 manifest state that was not complete) when it runs. `promotion.snapshot` is
 `current` when the checkpoint this process adopted is the one on disk,
 `advanced` when it moved and promotion could not re-prove it, and
-`rebuild-after-promotion` when the migrated re-proof failed — in that last case
-promotion still proceeds and the coalesced rebuild path owns the repair. It is
-`unproven` when the standby's proof declined the snapshot outright, for example
-because the graph sidecar has an older schema than the build; promotion then
-records the decline reason in `promotion.proof_declined`, and the promoted
-worker runs the whole graph handoff.
+`rebuild-after-promotion` when promotion cannot seal the inherited proof.
+Promotion still proceeds and startup takes over graph recovery.
+It is `unproven` when the standby could not prove the snapshot, for example
+because the graph sidecar uses an older schema.
+`promotion.proof_declined` records the standby's reason.
 
-`promotion.revalidated` says promotion re-checked the snapshot at all;
-`promotion.reproved` says it re-ran the source proof. With a migration it re-runs
-the whole proof, because the migrator may have rewritten what the standby proved.
-Without one, promotion compares the checkpoint pair — a real re-validation
-against the one writer the sequence has not already excluded. A whole source
-proof would add seconds to the one window this sequence exists to shorten.
-
-When the pair moved, the old worker published after the standby's proof, which
-is the usual case under live writes. Promotion then re-proves the snapshot on
-disk from the page reads of the standby's proof. Each of its one or two rounds
-walks the vault once and checks the stat of every page. It reads again only the
-pages that moved since, where the stat generation binds a page's bytes. On
-Windows, and for a page written less than 2 s before its read, the check reads
-the page's bytes again. An adoption records `current` with `reproved: true`.
+`promotion.revalidated` says promotion checked the graph checkpoint.
+`promotion.reproved` says it ran the source proof after arming observation.
+A migration runs the whole proof because it may have rewritten state.
+Otherwise the proof starts with the standby's guarded reads, even when the
+checkpoint pair matches. Each round rechecks membership and every page guard.
+It re-reads pages whose guards moved or cannot bind the bytes.
+On Windows, a guard checks the page's bytes again.
 
 The supervisor sends the budget of its promotion request as `request_seconds`
 in the request body, at most 30 s. The re-proof may spend 40% of that budget,
 so at most 12 s, and it stops at the first page it reaches after that. A decline
-records `advanced` with the reason in `promotion.reproof_declined`, for example
-`proof_deadline_passed`, and the promoted worker runs the handoff in full. On a
+records its reason in `promotion.reproof_declined`, such as `proof_deadline_passed`.
+The promoted worker then proves its own graph origin during startup. On a
 synthetic 13,000-page vault, on a host at load 8, the re-proof of one moved
 page took 2.2 to 2.6 s.
 

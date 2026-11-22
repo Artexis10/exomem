@@ -87,10 +87,8 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
 
     from . import embeddings
 
-    scorer = embeddings.resident_page_scorer(root)
-    if scorer is None:
-        return None
     try:
+        # These two are cheap and start no load, so they run before the scorer reads the store or loads a matrix.
         index = embeddings.peek_embedding_index(root)
         fingerprint = embeddings.activation_fingerprint()
         # The turn vector is the activation encoder's: a sidecar that another encoder wrote holds another space.
@@ -100,7 +98,8 @@ def _semantic_scores(root: Path, pages: set[str], turn_vector: Any) -> dict[str,
         query = np.asarray(turn_vector, dtype=np.float32).reshape(-1)
         if not np.all(np.isfinite(query)) or float(np.linalg.norm(query)) == 0.0:
             return None
-        return scorer.best_scores(query, pages)
+        scorer = embeddings.resident_page_scorer(root)
+        return None if scorer is None else scorer.best_scores(query, pages)
     except Exception:  # noqa: BLE001 - a failed vector reading leaves the lexical one standing, and the evidence says so
         log.debug("profile vector reading unavailable", exc_info=True)
         return None

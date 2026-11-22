@@ -154,8 +154,8 @@ def test_ci_validates_all_openspec_records_before_the_archive_debt_gate() -> Non
     tool_versions = (ROOT / "infra" / "tool-versions.env").read_text(encoding="utf-8")
     validation = (
         "source infra/tool-versions.env\n"
-        "          npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} -- "
-        "validate --all --strict"
+        "          node scripts/openspec_strict_gate.mjs -- "
+        "npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} --"
     )
     audit = "python scripts/check_openspec_archive_discipline.py"
 

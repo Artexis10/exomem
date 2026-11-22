@@ -280,15 +280,16 @@ def test_scoring_a_few_paths_matches_the_masked_whole_matrix_search_and_skips_a_
             best[path] = max(score, best.get(path, score))
         return best
 
-    scored = idx.best_scores_for_paths(query, asked)
+    scored = idx.page_scorer().best_scores(query, asked)
 
     assert scored == pytest.approx(masked_search())
     assert set(scored) == {"a.md", "b.md", "c.md"}
 
     monkeypatch.setattr(idx, "_withheld", lambda: Withheld(paths=frozenset({"b.md"})))
 
-    assert "b.md" not in idx.best_scores_for_paths(query, asked)
-    assert idx.best_scores_for_paths(query, asked) == pytest.approx(masked_search())
+    withheld = idx.page_scorer().best_scores(query, asked)
+    assert "b.md" not in withheld
+    assert withheld == pytest.approx(masked_search())
 
 
 def test_delete_to_empty_keeps_zero_row_shape(tmp_path):
