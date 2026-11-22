@@ -753,6 +753,8 @@ def test_change_scope_covers_the_complete_merge_and_both_rename_paths(
         path = repository / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("initial\n")
+    (repository / "tests").mkdir(exist_ok=True)
+    (repository / "tests/pr_guard_modules.txt").write_text("# no guard modules\n")
     _scope_fixture_git(repository, "add", ".")
     _scope_fixture_git(repository, "commit", "-m", "initial")
     _scope_fixture_git(repository, "checkout", "-b", "topic")
@@ -806,6 +808,7 @@ def test_change_scope_runs_the_pull_requests_own_test_modules_in_measured_groups
     }
     (repository / ".test_durations.json").write_text(json.dumps(durations))
     (repository / "tests/harness_modules.txt").write_text("# no harness modules\n")
+    (repository / "tests/pr_guard_modules.txt").write_text("# no guard modules\n")
     _scope_fixture_git(repository, "add", ".")
     _scope_fixture_git(repository, "commit", "-m", "initial")
     _scope_fixture_git(repository, "checkout", "-b", "topic")
@@ -848,12 +851,77 @@ _CORE_MODULE = "tests/test_ci_reliability_contract.py"
 _HARNESS_MODULE = "tests/test_cjk_readiness.py"
 
 
+def _guard_scope_decision(tmp_path: Path, changed: str) -> dict[str, str]:
+    """The pull-request scope output for a repository whose pull request changes only `changed`."""
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _scope_fixture_git(repository, "init", "-b", "main")
+    for relative in (
+        "tests/test_guard_b.py",
+        "tests/test_guard_a.py",
+        "tests/test_other.py",
+        "src/runtime.py",
+        "docs/guide.md",
+    ):
+        (repository / relative).parent.mkdir(parents=True, exist_ok=True)
+        (repository / relative).write_text("initial\n")
+    (repository / "tests/pr_guard_modules.txt").write_text(
+        "# guards\ntests/test_guard_b.py\n\ntests/test_guard_a.py\ntests/test_removed_guard.py\n"
+    )
+    (repository / "tests/harness_modules.txt").write_text("# no harness modules\n")
+    (repository / ".test_durations.json").write_text(json.dumps({"tests/test_guard_a.py::test_slow": 30.0}))
+    _scope_fixture_git(repository, "add", ".")
+    _scope_fixture_git(repository, "commit", "-m", "initial")
+    _scope_fixture_git(repository, "checkout", "-b", "topic")
+    (repository / changed).write_text("changed\n")
+    _scope_fixture_git(repository, "commit", "-am", "change")
+    _scope_fixture_git(repository, "checkout", "main")
+    _scope_fixture_git(repository, "merge", "--no-ff", "--no-edit", "topic")
+    decision, _ = _change_scope(
+        repository,
+        "pull_request",
+        {"FULL": "false", "FULL_PYTHON_VERSIONS": '["3.11", "3.13"]', "CORE_SHARDS": "24", "HARNESS_SHARDS": "6"},
+    )
+    return decision
+
+
+def test_a_pull_request_that_changes_no_test_still_runs_the_guard_modules(tmp_path: Path) -> None:
+    """Catches a change to source breaking a repository-wide invariant that no changed test covers."""
+    decision = _guard_scope_decision(tmp_path, "src/runtime.py")
+
+    # Sorted, without the guard that no longer exists, and on every runtime that Full covers.
+    assert decision["changed_tests"] == "tests/test_guard_a.py tests/test_guard_b.py"
+    assert {entry["python-version"] for entry in json.loads(decision["core_matrix"])} == {"3.11", "3.13"}
+    assert json.loads(decision["harness_matrix"]) == []
+
+
+def test_a_docs_only_pull_request_runs_no_guard_module(tmp_path: Path) -> None:
+    """Catches the guards joining a docs-only pull request, which runs only the tests that read docs."""
+    decision = _guard_scope_decision(tmp_path, "docs/guide.md")
+
+    assert decision["changed_tests"] == ""
+    assert json.loads(decision["core_matrix"]) == [{"python-version": "3.11", "shard": 1, "splits": 1}]
+
+
+def test_every_declared_guard_module_is_a_test_module_that_exists() -> None:
+    """Catches a renamed or deleted guard module, which the scope step drops silently by design."""
+    scope = _load_change_scope()
+    listed = [
+        line.strip()
+        for line in (ROOT / "tests" / "pr_guard_modules.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+    assert listed
+    assert scope.changed_test_modules(listed, ROOT) == sorted(listed)
+
+
 @pytest.mark.parametrize(
     "paths,full,core,harness",
     [
-        # A pull request that changes no test module runs no core or harness job.
-        (["src/exomem/__init__.py"], False, set(), set()),
-        # Its own modules run: core on every runtime, harness on the floor only.
+        # A pull request that changes no test module still runs the guard modules, all core ones.
+        (["src/exomem/__init__.py"], False, {("3.11", "changed"), ("3.13", "changed")}, set()),
+        # Its own modules run too: core on every runtime, harness on the floor only.
         (
             ["src/exomem/__init__.py", _CORE_MODULE, _HARNESS_MODULE],
             False,
@@ -1043,11 +1111,13 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     # release-evidence-landed runs after the gate and depends on it.
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it. The push-run
-    # cancel is a best-effort saving that must not decide evidence.
+    # cancel is a best-effort saving that must not decide evidence, and the tracking
+    # issue only reports the gate's result.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
+        "main-failing-issue",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
@@ -1057,6 +1127,15 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     assert full_ci == "${{ needs.scope.outputs.full == 'true' }}"
     assert "release-please" not in full_ci
 
+
+
+def test_main_failing_issue_runs_only_for_pushes_to_main_and_writes_only_issues() -> None:
+    """Catches the tracking job writing issues for a pull request or schedule, or holding wider rights."""
+    job = _workflow()["jobs"]["main-failing-issue"]
+
+    assert job["needs"] == "gate"
+    assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" in job["if"]
+    assert job["permissions"] == {"contents": "read", "issues": "write"}
 
 
 @pytest.mark.parametrize(

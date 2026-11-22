@@ -2,14 +2,23 @@
 
 ### Requirement: Pull requests run the partial tier and Full evidence comes from main
 
-CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other than the core and harness shards, and the test modules that the pull request adds or changes: core modules on the supported floor Python (`requires-python`) and the newest supported runtime, and harness modules on the floor. A pull request SHALL run no core or harness shard. Every push to main SHALL run every core and harness shard on the floor Python. A failure that only the shards on main or the Full tier catch SHALL be fixed forward on main. Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. A reconciliation PR, which the cut controller opens from the same repository against `main`, SHALL run no test job only while merging it onto its base gives exactly the controller's projection of the accepted release origin for its source; code from the base SHALL check this, and any other content SHALL fail the required gate. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
+CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other than the core and harness shards, and the test modules that the pull request adds or changes together with a fixed, declared set of repository-wide guard modules: core modules on the supported floor Python (`requires-python`) and the newest supported runtime, and harness modules on the floor. A docs-only pull request SHALL run no guard module. A pull request SHALL run no core or harness shard. Every push to main SHALL run every core and harness shard on the floor Python. A failure that only the shards on main or the Full tier catch SHALL be fixed forward on main, and a failing required gate on a push to main SHALL open or update one tracking issue that a later passing gate closes. Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. A reconciliation PR, which the cut controller opens from the same repository against `main`, SHALL run no test job only while merging it onto its base gives exactly the controller's projection of the accepted release origin for its source; code from the base SHALL check this, and any other content SHALL fail the required gate. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
 
 #### Scenario: A pull request is opened or updated
 - **WHEN** a source PR, draft or ready, that is not docs-only, is opened, reopened or updated
 - **THEN** its partial-tier jobs other than the core and harness shards run, and no Full-only job runs
 - **AND** the core test modules that it adds or changes run on the supported floor Python and the newest supported runtime, and its harness test modules run on the floor
-- **AND** no core or harness job runs when it changes no test module
 - **AND** its run issues no Full receipt
+
+#### Scenario: A pull request that changes no test still runs the guard modules
+- **WHEN** a source PR that is not docs-only changes no test module
+- **THEN** the declared guard modules run, core ones on the supported floor Python and the newest supported runtime
+- **AND** a docs-only PR runs no guard module
+
+#### Scenario: A failing main run is tracked
+- **WHEN** the required gate fails on a push to main
+- **THEN** one open issue labelled `ci-main-failing` names the run and the commit, and a repeat failure comments on it instead of opening another
+- **AND** a later push run whose gate passes closes it
 
 #### Scenario: A push to main runs every partial shard
 - **WHEN** a commit is pushed to main

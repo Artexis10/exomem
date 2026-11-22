@@ -1,13 +1,13 @@
 """Choose the core and harness test jobs for this CI run.
 
 A pull request runs no core or harness shard. It runs its own changed test
-modules instead: core modules on every runtime that Full covers, and harness
-modules (those listed in `tests/harness_modules.txt`) on the floor runtime,
-the first one listed. A pull request that changes no test module runs no core
-or harness job. A push to main runs every shard of both tiers on the floor
-runtime, and a Full run (`release_evidence.FULL_EVENTS`) runs every shard on
-every runtime. A pull request whose history this script cannot compare runs
-every shard on the floor runtime.
+modules instead, and the repository-wide guard modules that
+`tests/pr_guard_modules.txt` lists: core modules on every runtime that Full
+covers, and harness modules (those listed in `tests/harness_modules.txt`) on
+the floor runtime, the first one listed. A push to main runs every shard of
+both tiers on the floor runtime, and a Full run (`release_evidence.FULL_EVENTS`)
+runs every shard on every runtime. A pull request whose history this script
+cannot compare runs every shard on the floor runtime.
 
 A pull request, draft or ready, that changes only prose and specifications
 runs only the docs tests: `docs/`, `openspec/`, or Markdown at the repository
@@ -18,9 +18,10 @@ docs-only change still runs every test that carries the `reads_repository_docs`
 marker, in shard 1 of each tier, and `tests/repository_docs_reads.py` fails any
 test that reads these paths without the marker.
 
-`changed_tests` names the test modules that the pull request adds or changes.
-Each changed-tests entry runs enough groups that each carries at most
-`_GROUP_SECONDS` of measured test time.
+`changed_tests` names the test modules that the pull request runs: those it adds
+or changes, plus the guard modules unless it is docs-only. Each changed-tests
+entry runs enough groups that each carries at most `_GROUP_SECONDS` of measured
+test time.
 
 Run from a merge checkout with at least two commits of history, naming what
 the calling job leaves out on a docs-only change. It writes `docs_only`,
@@ -55,6 +56,9 @@ _TEST_MODULE = re.compile(r"tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py")
 _DURATIONS = Path(".test_durations.json")
 #: The modules that the harness tier runs; every other changed module is core.
 _HARNESS_MODULES = Path("tests/harness_modules.txt")
+#: The modules that guard a repository-wide invariant, which a change elsewhere can break.
+#: A pull request that is not docs-only runs them whatever else it changes.
+_GUARD_MODULES = Path("tests/pr_guard_modules.txt")
 #: The measured test time one changed-tests group may carry. `--dist loadfile`
 #: can run one module's share on a single worker, so this stays below the core
 #: job's `--session-timeout` (1400 s) with room for one 180 s test and new tests.
@@ -111,6 +115,20 @@ def changed_test_modules(paths: list[str], root: Path = Path(".")) -> list[str]:
     )
 
 
+def pull_request_modules(paths: list[str], root: Path = Path(".")) -> list[str]:
+    """The test modules a pull request runs: its changed ones plus the guard modules, sorted.
+
+    A docs-only pull request adds no guard module; its docs tests run by marker instead.
+    A missing guard file fails the job; it never drops the guards silently.
+    """
+    modules = set(changed_test_modules(paths, root))
+    if not docs_only(paths):
+        lines = (root / _GUARD_MODULES).read_text(encoding="utf-8").splitlines()
+        guards = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+        modules.update(changed_test_modules(guards, root))
+    return sorted(modules)
+
+
 def changed_test_groups(
     modules: list[str], python: str, durations: dict[str, float], shards: int
 ) -> list[dict]:
@@ -159,7 +177,7 @@ def job_matrices(
     if docs_only(paths):
         # pytest_args selects every marked test in shard 1 of 1.
         return _shards(floor, 1), _shards(floor, 1)
-    modules = changed_test_modules(paths, root)
+    modules = pull_request_modules(paths, root)
     if not modules:
         return [], []
     listed = {line.strip() for line in (root / _HARNESS_MODULES).read_text(encoding="utf-8").splitlines()}
@@ -181,7 +199,7 @@ def main(omitted: str) -> int:
     only_docs = docs_only(paths)
     # The matrix and pytest consume this same decision so a single shard covers the whole docs tier.
     pytest_args = f"-m {DOCS_MARKER} --splits=1 --group=1" if only_docs else ""
-    modules = changed_test_modules(paths or [])
+    modules = pull_request_modules(paths) if paths is not None else []
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"docs_only={'true' if only_docs else 'false'}\n")
         output.write(f"pytest_args={pytest_args}\n")
