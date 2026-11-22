@@ -297,6 +297,34 @@ def test_a_dataset_replaced_together_with_its_card_is_searched_by_its_new_values
     assert result.path not in _paths(_find(vault, ACCOUNT))
 
 
+def test_a_card_unreadable_while_the_service_starts_is_found_once_it_reads(vault, monkeypatch):
+    # A starting file-mode service reads cards through the private-identity inventory, and a
+    # read that waits out its budget on the inventory build gives no page. That dataset must be
+    # found once reads work, not hidden for the life of the process.
+    from exomem import reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = reserved_paths.read_generic_bytes
+    starting = True
+
+    def read_while_starting(vault_root, relative, **options):
+        if starting and relative == result.sidecar_path:
+            raise reserved_paths.ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        return original_read(vault_root, relative, **options)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", read_while_starting)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: not starting)
+
+    during_start = _find_response(vault, ACCOUNT)
+    starting = False
+    assert result.path in _paths(_find(vault, ACCOUNT))
+
+    # The reply that missed the dataset said that its results may be incomplete.
+    assert isinstance(during_start, dict), "the reply during start-up carried no warming notice"
+    assert result.path not in _paths(during_start["hits"])
+    assert dataset_values.LANE in during_start["warming"]["components"]
+
+
 def test_an_original_that_no_longer_matches_its_card_is_not_served(vault):
     result = _preserve(vault, "supplier-profile.json", PROFILE)
     assert result.path in _paths(_find(vault, ACCOUNT))

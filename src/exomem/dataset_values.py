@@ -324,20 +324,38 @@ def _card_of(page: ParsedPage) -> Card | None:
     return Card(page.rel_path, original, page.snapshot_hash, sha, page)
 
 
-#: The qualified cards of each (vault, scope), valid while the scope's projection key holds.
-_CARDS: dict[tuple[str, str], tuple[tuple, tuple[Card, ...]]] = {}
+#: Per (vault, scope): the projection key, the qualified cards, and the card paths that gave no
+#: page when last read. The cards hold while the key holds; the unread paths are read again.
+_CARDS: dict[tuple[str, str], tuple[tuple, tuple[Card, ...], tuple[str, ...]]] = {}
+
+
+def _qualify(vault_root: Path, paths: Iterable[str]) -> tuple[list[Card], list[str]]:
+    """`(qualified cards, paths that gave no page)` for card paths of the recall projection."""
+    from . import find as find_module
+
+    qualified: list[Card] = []
+    unread: list[str] = []
+    for path in paths:
+        page = find_module._resolve_page(vault_root, path)
+        if page is None:
+            unread.append(path)
+            continue
+        card = _card_of(page)
+        if card is not None and access.is_indexable(vault_root, card.original):
+            qualified.append(card)
+    return qualified, unread
 
 
 def _cards_in_scope(
     vault_root: Path, scope: str, admit_path: Callable[[str], bool] | None
-) -> tuple[dict[str, Card], frozenset[str], str]:
-    """`(cards by original path, the scope's recall paths, scope prefix)` for a request.
+) -> tuple[dict[str, Card], frozenset[str], str, bool]:
+    """`(cards by original path, the scope's recall paths, scope prefix, cards unread)`.
 
     Cards come from the request's own recall projection, so the exclusion rules of ordinary
     recall (Records and Planning descendants, access tiers) apply to the card before it is
     read, and the access tier applies to the original. The caller's content admission then
     applies to the card and to the original, so a dataset the caller may not read never
-    reaches the pool.
+    reaches the pool. The last value says that some projected card gave no page.
     """
     from . import find as find_module
 
@@ -352,19 +370,22 @@ def _cards_in_scope(
         # Reading every card on every search would cost more than the lane. The projection key
         # moves whenever a card is added, changed or removed, or the access policy changes, so
         # a search with no change reads no card.
-        qualified = []
-        for path in sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix)):
-            page = find_module._resolve_page(vault_root, path)
-            card = _card_of(page) if page is not None else None
-            if card is not None and access.is_indexable(vault_root, card.original):
-                qualified.append(card)
-        _CARDS[key] = known = (version, tuple(qualified))
+        paths = sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
+        qualified, unread = _qualify(vault_root, paths)
+        _CARDS[key] = known = (version, tuple(qualified), tuple(unread))
+    elif known[2]:
+        # A projected card that gave no page may only have been unreadable for now, such as
+        # while a starting service still builds its identity inventory. Remembering it as
+        # absent would hide its dataset for the life of the process, so it is read again.
+        found, unread = _qualify(vault_root, known[2])
+        merged = tuple(sorted(known[1] + tuple(found), key=lambda card: card.card_path))
+        _CARDS[key] = known = (version, merged, tuple(unread))
     cards = {
         card.original: card
         for card in known[1]
         if admit_path is None or (admit_path(card.card_path) and admit_path(card.original))
     }
-    return cards, projected, prefix
+    return cards, projected, prefix, bool(known[2])
 
 
 def _read_original(vault_root: Path, card: Card) -> bytes | None:
@@ -802,9 +823,12 @@ def search(
     if not fts5_available():
         return Lane(failed=(LANE,))
     try:
-        cards, projected, prefix = _cards_in_scope(vault_root, scope, admit_path)
+        cards, projected, prefix, unread = _cards_in_scope(vault_root, scope, admit_path)
+        # Card reads wait on the private-identity inventory; until it exists, an unread card
+        # is still loading. Once it exists, an unread card is a page that does not parse.
+        loading = (LANE,) if unread and not reserved_paths.identity_catalogue_ready(vault_root) else ()
         if not cards:
-            return Lane()
+            return Lane(warming=loading)
         conn = _connect(vault_root)
         try:
             indexed, unindexed = _reconcile(conn, vault_root, cards, projected, prefix)
@@ -833,7 +857,7 @@ def search(
         for original, match in ordered
         if (hit := _hit(vault_root, cards[original], match, needles)) is not None
     ]
-    return Lane(hits, warming=(LANE,) if unindexed else ())
+    return Lane(hits, warming=(LANE,) if unindexed or loading else ())
 
 
 def fuse(pages: list[Hit], values: Iterable[Hit], *, limit: int, rrf_k: int) -> list[Hit]:
