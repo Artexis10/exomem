@@ -460,6 +460,14 @@ The helper then reads the per-document lists in key order, which is the order `C
 
 The bounds stay as they were. With no base, or past `_ADMITTED_BASE_TERMS_MAX` or `_UNIT_BASE_BYTES_MAX`, a build counts every document in order, as before. A corpus that holds an owner-only parent's units never enters the shared unit base.
 
+### 12. A catch-up that writes outran stays a catch-up
+
+The repair worker answers a lagging catalogue with a lag-only catch-up and runs the whole-corpus pass only when the catalogue then fails its exact-current proof. A write that lands between the catch-up's last read and that proof fails it too: the projection moved, but the catalogue is not wrong. An installed service on 2026-11-22 ran five whole-corpus passes in eight hours with about 330 writes. Three of them followed a catch-up whose proof then failed while writes held the mutation lock. A request-path repair request with no cause started the fourth, and the fifth was the warm after a promotion. They ran 233 to 1,773 s each, and readiness reported lagging in 58 of 120 samples over one hour.
+
+When the proof fails after a successful catch-up, the worker re-reads the lag the same way the catch-up does. A lag that is not empty means a write landed after the catch-up, so the worker queues another lag-only catch-up and logs the result `advanced`. No lag means the catalogue is wrong at the live checkpoint, and the whole-corpus pass runs as before. Any refusal of the re-read (schema, identity, instance, incomplete history, source proof) also keeps the pass and logs its own reason. Each re-queue needs a new write, so the chain ends when writes stop. A lagging catalogue stays reported as lagging, and only the strict proof admits it.
+
+Proof: `tests/test_lexical_deferred_upsert.py` injects a save between the catch-up and its proof and checks that no whole-corpus pass runs and that the catalogue ends exactly current. A sibling test refuses the proof with nothing lagging and checks that the pass still runs. The installed comparison belongs to task 3.24.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

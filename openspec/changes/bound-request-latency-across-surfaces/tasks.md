@@ -154,6 +154,8 @@
   - Verify: the own-CPU gap between a recall after a write and one with no write since the last recall, with a bootstrap interval.
   - Verify: `lexical.query` CPU per query in recalls that rebuilt their statistics, with a bootstrap interval.
   - Verify: the share of recalls that exhaust the request budget, for the canary and for agents.
+- [ ] 3.24 After installation, compare whole-corpus lexical passes per day and the share of readiness samples that report lagging, before and after the catch-up re-queue (design decision 12).
+  - Verify: each whole-corpus pass on the installed service names its cause or its catch-up decline, and none follows a catch-up that writes outran.
 
 ## 4. Verify installed behavior and deliver
 
