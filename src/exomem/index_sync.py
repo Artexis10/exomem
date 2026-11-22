@@ -2185,19 +2185,27 @@ def delete_after_remove(
         find,
         lexstore,
         memory_refs,
+        originals,
+        reserved_paths,
     )
 
     if not dispatch_lexstore and publish_corpus_change:
         raise ValueError("lexstore may be skipped only after an already-published watcher batch")
-    safe_paths = [
-        normalized
-        for item in removed_rel_paths
-        if (normalized := _safe_relative_path(str(item))) is not None
-    ]
-    from .originals import evicted
-
-    # Eviction publishes no deletion: an evicted original keeps its index rows.
-    safe_paths = [rel for rel in safe_paths if not evicted(vault_root, rel)]
+    safe_paths = []
+    for item in removed_rel_paths:
+        relative = _safe_relative_path(str(item))
+        if relative is None:
+            continue
+        try:
+            # Eviction publishes no deletion: an evicted original keeps its index rows.
+            if originals.evicted(vault_root, relative):
+                continue
+        except reserved_paths.ReservedPathLeafError as error:
+            # Only a confirmed directory proves the old binary could no longer be filed here.
+            if (error.code != "UNSAFE_PATH"
+                    or reserved_paths.inspect_generic_path(vault_root, relative).kind != "directory"):
+                raise
+        safe_paths.append(relative)
     requested_report, paths_truncated = _bounded_paths(safe_paths)
     if not safe_paths:
         return IndexSyncReport("delete", requested_report, requested_report, ())

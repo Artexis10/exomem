@@ -261,6 +261,33 @@ def test_a_live_change_during_lookup_prevents_release(vault, served, monkeypatch
     assert all(block.type != "image" for block in result.content)
 
 
+def test_pooled_preview_refuses_a_resident_replacement_during_lookup(vault, served, tmp_path, monkeypatch):
+    from test_shared_originals import _pooled_capture
+
+    mcp, _ = served
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    captured = _pooled_capture(vault, tmp_path, monkeypatch, "pooled-swatch.jpg", _photo(900, 600))
+    path = captured.artifact_path
+    assert not (vault / path).exists()
+    media_processing.reconcile_media(vault, path)
+    assert _drain(vault) == ["complete"]
+    assert any(block.type == "image" for block in _call(mcp, {"kind": "preview", "path": path}).content)
+    read = media_previews.read
+
+    def replace_during_lookup(*args):
+        jpeg = read(*args)
+        assert jpeg is not None
+        (vault / path).write_bytes(_photo(600, 900))
+        return jpeg
+
+    monkeypatch.setattr(media_previews, "read", replace_during_lookup)
+    result = _call(mcp, {"kind": "preview", "path": path})
+
+    assert all(block.type != "image" for block in result.content)
+    assert result.structured_content["error"]["code"] == "ORIGINAL_UNAVAILABLE"
+
+
 def test_a_hanging_codec_times_out_after_extraction_has_published(vault, served, monkeypatch):
     import subprocess
     import sys
@@ -502,3 +529,32 @@ def test_an_original_path_that_became_a_folder_never_hydrates_descendants(vault,
 
     assert result.structured_content["error"]["code"] == "ORIGINAL_UNAVAILABLE"
     assert originals.evicted(vault, child)
+
+
+@pytest.mark.parametrize("removal", ["watcher_event", "deletion_fanout"])
+def test_removal_retires_a_preview_when_an_original_becomes_a_directory(
+    vault, served, selected_store, monkeypatch, removal,
+):
+    from exomem import file_watcher, index_sync
+
+    _, client = served
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "previews")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    original = _photo(900, 600)
+    relative = _upload(client, "directory-replacement.jpg", original, "image/jpeg")
+    assert _drain(vault)
+    digest = hashlib.sha256(original).hexdigest()
+    assert media_previews.read(vault, relative, digest) is not None
+    path = vault / relative
+    path.unlink()
+    path.mkdir()
+
+    if removal == "watcher_event":
+        watcher = file_watcher.FileWatcher(vault)
+        watcher._record(path, deleted=True)
+        watcher._flush()
+    else:
+        index_sync.delete_after_remove(vault, [relative])
+
+    assert path.is_dir()
+    assert media_previews.read(vault, relative, digest) is None

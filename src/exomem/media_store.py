@@ -2329,6 +2329,14 @@ def _open_local_original(vault: Path, relative: str, snapshot: OriginalSnapshot,
         if (current is None or vault / current[0] != snapshot.sidecar_path
                 or originals.binary_binding(current[1]) != bound):
             raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
+        # The pool supplies bytes only while the logical path has no resident entry.
+        try:
+            reserved_paths.inspect_generic_path(vault, relative)
+        except reserved_paths.ReservedPathLeafError as error:
+            if error.code != "MISSING":
+                raise
+        else:
+            raise reserved_paths.ReservedPathLeafError("IDENTITY_CHANGED")
 
     try:
         require_binding()

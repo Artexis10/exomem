@@ -133,6 +133,11 @@ Where `read_media` is offered, its preview action SHALL accept the canonical ori
 - **WHEN** the original changes and processing has yet to publish a matching preview
 - **THEN** an authorized request reports the preview unavailable
 
+#### Scenario: A pooled original's logical path gains another entry
+
+- **WHEN** a file or directory appears at the logical path while a preview holds the pooled original
+- **THEN** the held proof refuses release or publication for the previous original
+
 ### Requirement: Removal retires the filing's preview
 
 Media removal cleanup SHALL retire the associated preview record. A preview that remains after an interrupted cleanup SHALL be unavailable as soon as its original can no longer pass the read boundary. Eviction of an original to its store SHALL preserve the preview.
@@ -147,6 +152,7 @@ Media removal cleanup SHALL retire the associated preview record. A preview that
 
 - **WHEN** cleanup confirms a directory occupies the original file's exact path
 - **THEN** cleanup retires the obsolete record under the publication guard
+- **AND** a file watcher deletion event invokes the same guarded cleanup
 
 #### Scenario: A deletion removes several original filings
 
