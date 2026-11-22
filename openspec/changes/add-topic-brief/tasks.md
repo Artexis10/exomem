@@ -46,6 +46,9 @@
 
 ## 4. Release and acceptance
 
-- [ ] 4.1 Release, and upgrade the personal service through its normal procedure.
-- [ ] 4.2 Prove a brief read from a real client against the personal store.
+- [x] 4.1 Release, and upgrade the personal service through its normal procedure.
+  - v0.189.0 is the first release with the second-hop member rule (2.9). The personal service was upgraded through its normal procedure and runs a later release.
+- [x] 4.2 Prove a brief read from a real client against the personal store.
+  - 2026-11-22, Claude Code over MCP against the personal store. A researched subject's brief, read to its last page, returned `ranked_by: "similarity"` and 8 compiled notes: the seed, 2 notes one hop away and 5 notes two hops away. It counted 38 more under `cap`, with an exact count. `changed_since` said `first_read`; a second read said `unchanged` at the same generation.
+  - Against that subject's independent answer key, the brief held both core members and 2 of the 4 peripheral members, and `related` named the other 2. Four of the 8 notes were outside the key.
 - [ ] 4.3 Run the evaluation (design, Evaluation) and record the per-case result.

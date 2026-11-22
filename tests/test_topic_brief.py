@@ -308,7 +308,10 @@ def test_a_second_hop_keeps_the_notes_nearest_the_seed_and_counts_the_rest(tmp_p
     assert notes == [f"{NOTES}/lagoon.md", f"{NOTES}/survey.md", *spokes[:topic_brief.SECOND_HOP_CAP]]  # nearest first
     assert brief["ranked_by"] == "similarity"
     (cut,) = brief["missing"]
-    assert (cut["role"], cut["reason"], cut["count"]) == ("compiled_note", "cap", 8 - topic_brief.SECOND_HOP_CAP)
+    # The walk inspected every second-hop candidate and nothing lies behind the last hop, so the count is exact.
+    assert (cut["role"], cut["reason"], cut["count"], cut["exact"]) == (
+        "compiled_note", "cap", 8 - topic_brief.SECOND_HOP_CAP, True
+    )
 
 
 def test_a_note_embedded_after_the_last_read_takes_its_place_on_the_next_read(tmp_path, monkeypatch) -> None:

@@ -8,6 +8,7 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -297,13 +298,23 @@ class PageScorer:
 
     A page withheld by the store or changed since the matrix (a lagging view's `stale_paths`) has no rows here.
     `token` names everything a score read from this scorer depends on, so a result kept under it stays correct.
-    `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
+    It names the withheld pages by a digest: a cache keyed on it keeps no copy of a set that a store census can
+    make large. `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
     """
 
     def __init__(self, resident: _EmbCache, withheld: frozenset[str]) -> None:
         self._resident = resident
         self._skip = withheld | (resident.stale_paths or frozenset())
-        self.token = (resident.epoch, resident.generation, resident.instance, resident.stale_paths, withheld)
+        self._withheld = withheld
+
+    @functools.cached_property
+    def token(self) -> tuple:
+        # Computed on first use: profile selection builds a scorer and never reads its token.
+        digest = hashlib.blake2b(digest_size=16)
+        for path in sorted(self._withheld):
+            digest.update(path.encode() + b"\0")  # NUL frames each path; a vault path cannot contain NUL
+        resident = self._resident
+        return (resident.epoch, resident.generation, resident.instance, resident.stale_paths, digest.digest())
 
     def rows(self, path: str) -> np.ndarray | None:
         if path in self._skip:
@@ -2877,32 +2888,20 @@ class EmbeddingIndex:
             defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
 
-    def best_scores_for_paths(self, query_vec: np.ndarray, paths: AbstractSet[str]) -> dict[str, float] | None:
-        """The best chunk score of each of `paths` that has rows, or None when no resident matrix serves them.
-
-        Profile scoring must cost O(profile chunks), not O(vault): this scores only those paths' rows, where
-        `_search` scores the whole matrix and masks afterwards. A path `_search` would mask scores nothing: one a
-        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
-        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
-        The disk-scoring profile keeps no matrix, so it answers None.
-
-        `metadata` is sorted by file_path, so each path's rows are one block that bisection finds
-        (`_without_paths` relies on the same order); no row pass and no memo is needed.
-        """
-        scorer = self.page_scorer()
-        return None if scorer is None else scorer.best_scores(query_vec, paths)
-
     def page_scorer(self) -> PageScorer | None:
         """A scorer bound to the matrix that serves now, or None when no resident matrix serves this profile.
 
-        It reads what `best_scores_for_paths` reads, once: a cold matrix starts the one background load and raises
-        `recall_space.CorpusMatrixCold`, and the disk-scoring profile answers None.
+        Scoring through it costs O(scored pages' chunks), not O(vault): it scores only those pages' rows, where
+        `_search` scores the whole matrix and masks afterwards. A page `_search` would mask scores nothing: one a
+        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
+        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
+        The disk-scoring profile keeps no matrix, so it answers None before reading what the store withholds.
         """
-        withheld = self._withheld()
-        if withheld.everything:
-            return None
         resident = self.require_resident_matrix()
         if resident is None:
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
             return None
         return PageScorer(resident, frozenset(withheld.paths))
 
