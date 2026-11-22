@@ -23,6 +23,7 @@ from exomem import (
     temporal,
     writer_lease,
 )
+from exomem import vault as vault_module
 from exomem.cli_ops import OpError, error_dict
 from exomem.commands import op_remember, product_commands_for
 from exomem.vault import content_hash
@@ -1229,3 +1230,40 @@ def test_a_save_to_the_page_after_a_curation_leaf_commits_leaves_the_step_commit
     with pytest.raises(curation.CurationError) as undo:
         curation.propose_compensation(vault, run_id=proposed["run_id"])
     assert undo.value.code == "CURATION_BINDING_STALE"
+
+
+def test_a_leaf_batch_that_could_not_remove_its_witness_is_not_recorded_as_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch rolls back in reverse, so its witness goes first. When that removal fails and the
+    page is restored, the witness outlives a batch that did not commit: it is no proof of the step."""
+    rel = "Knowledge Base/Notes/Insights/rollback-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c3")
+    before = (vault / rel).read_bytes()
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    evidence = curation.CurationStore(vault).evidence_dir(proposed["run_id"]).resolve()
+    real_unlink = vault_module._BatchWorkspace.unlink_installed
+    kept: list[Path] = []
+
+    def fail_after_the_witness_lands(path: Path) -> None:
+        if Path(path).resolve().parent == evidence:
+            raise OSError("the batch failed after its witness landed")
+
+    def keep_the_witness_once(self, final, expected, *, inverse_recheck):  # noqa: ANN001, ANN202
+        if Path(final).resolve().parent == evidence and not kept:
+            kept.append(Path(final))
+            raise OSError("the witness could not be removed")
+        return real_unlink(self, final, expected, inverse_recheck=inverse_recheck)
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_the_witness_lands)
+    monkeypatch.setattr(vault_module._BatchWorkspace, "unlink_installed", keep_the_witness_once)
+
+    with pytest.raises(Exception) as refused:
+        _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert error_dict(refused.value)["code"] == "CURATION_OUTCOME_UNCERTAIN"
+    assert kept and (vault / rel).read_bytes() == before
+    store = curation.CurationStore(vault)
+    assert store.reconstruct(proposed["run_id"])["phase"] != "completed"
+    assert [receipt["outcome"] for receipt in store._receipt_records(proposed["run_id"])] == []

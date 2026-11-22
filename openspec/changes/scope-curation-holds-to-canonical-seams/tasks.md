@@ -14,9 +14,15 @@
 - [x] 2.4 A link rewrite, which takes no guard of its own, commits under the boundary.
 - [x] 2.5 The existing crash-seam tests pass unchanged.
 - [x] 2.6 A move with a `fields` patch refuses with `SOURCE_CHANGED` when another writer changed the source after the seal, and that writer's change survives.
-- [x] 2.7 A save to a step's page after its leaf commit leaves the step committed, and the undo proposal reports it as stale.
+- [x] 2.7 A save to a step's page between its leaf commit and its settle hold leaves the step committed, and the undo proposal reports it as stale.
+- [x] 2.8 A witness that a failed batch's rollback could not remove is not taken as a commit: the run blocks as uncertain and holds no receipt.
 
 ## 3. Closure
 
 - [ ] 3.1 After the release is live, a day of the personal service's mutation journal shows curation holds with a p99 of at most 5 s and none over 30 s. A 1 s budget also needs the separate change to the semantic commit seam.
 - [ ] 3.2 Archive this change with `openspec archive scope-curation-holds-to-canonical-seams` after task 3.1, and run `openspec validate --all --strict` before and after.
+
+## Follow-ups for separate changes
+
+- The compensation seal compares receipts only. A forward step in another process, between its leaf commit and its settle hold, can then be left out of the undo. Under the seal hold, refuse with a retryable code while the forward evidence directory holds a witness with no receipt.
+- A store-mode move commits through `mutate_in_store`, which never calls the before-rename stage, so it does not recheck the source's sealed hash. Review reports that such a run already ends `CURATION_OUTCOME_UNCERTAIN` before this change. Pass the sealed hash as an explicit source expectation, as `_adopt_rename` does with `source_hash=binding["before_hash"]`.

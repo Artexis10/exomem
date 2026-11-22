@@ -2,7 +2,7 @@
 
 ### Requirement: Curation Holds The Boundary Only At Canonical Seams
 
-A curation apply or resume SHALL hold the vault mutation boundary only for each canonical write of a step, and SHALL run its planning and probing outside it, revalidating under it. The canonical writes are the prepared-state write, the leaf's commit with its same-batch witness, and the receipt with the run's final state. The check of the witness and of the live postcondition SHALL run under the same short hold as the receipt. When another writer changed a self-guarded step's page after its leaf committed, the step SHALL record its receipt from its witness, and its undo SHALL report the change as stale. A step whose leaf does not take the boundary itself and check its sealed binding under it SHALL run whole under one hold. A call that finds the same run executing in its process SHALL be refused at once with a retryable `CURATION_RUN_BUSY` that commits nothing, and SHALL NOT wait for that run while it holds the boundary. `EXOMEM_WIDE_MUTATION_BOUNDARY` SHALL restore one hold for the whole call.
+A curation apply or resume SHALL hold the vault mutation boundary only for each canonical write of a step, and SHALL run its planning and probing outside it, revalidating under it. The canonical writes are the prepared-state write, the leaf's commit with its same-batch witness, and the receipt with the run's final state. The check of the witness and of the live postcondition SHALL run under the same short hold as the receipt. When another writer changed a self-guarded step's page after the call saw its leaf's batch commit, that call SHALL record the step's receipt, and its undo SHALL report the change as stale. Recovery from any other witness SHALL keep the live check that it had under one wide hold. A step whose leaf does not take the boundary itself and check its sealed binding under it SHALL run whole under one hold. A call that finds the same run executing in its process SHALL be refused at once with a retryable `CURATION_RUN_BUSY` that commits nothing, and SHALL NOT wait for that run while it holds the boundary. `EXOMEM_WIDE_MUTATION_BOUNDARY` SHALL restore one hold for the whole call.
 
 #### Scenario: A note save during a slow curation step does not wait
 
@@ -22,8 +22,15 @@ A curation apply or resume SHALL hold the vault mutation boundary only for each 
 
 - **WHEN** a self-guarded curation step's leaf has committed
 - **AND** another writer saves the same page before the step records its receipt
-- **THEN** the step records a committed receipt from its witness, in this call or on the next resume
+- **THEN** the step records a committed receipt in this call
 - **AND** the undo proposal reports the step's page as stale instead of leaving the step out
+
+#### Scenario: A witness that a failed batch left behind does not prove the step
+
+- **WHEN** an `edit`, `observe-unit`, `create-note`, `move` or `unmove` step's leaf batch fails after it wrote its witness
+- **AND** the rollback restores the page but cannot remove the witness
+- **THEN** the run blocks as uncertain and holds no committed receipt
+- **AND** the page keeps its pre-step bytes
 
 #### Scenario: A second call on a run in flight is refused
 

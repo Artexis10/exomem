@@ -30,9 +30,9 @@ Each hold advances the commit generation once. A scoped step therefore advances 
 3. Run the leaf with no curation hold. The leaf takes the boundary for its commit.
 4. Take one short hold, the settle hold. Check the witness and the live postcondition, then write the receipt and the state. A leaf failure records its failed attempt under the same hold.
 
-The witness alone proves a self-guarded step's commit. Once the leaf releases the boundary, another writer may change the page that the step wrote. The live check, at the settle hold and at the next resume, therefore accepts such a change as later work: the step gets its receipt, and its undo reports `CURATION_BINDING_STALE`. An unsafe or unreadable path, and a Records receipt that does not corroborate, still make the outcome uncertain. A step that runs whole under one hold keeps the strict check.
+A self-guarded leaf releases the boundary when its batch commits, so another writer may change the page that the step wrote before the settle hold. When this call saw its own leaf's batch commit the witness, the live check at the settle hold accepts such a change as later work: the step gets its receipt, and its undo reports `CURATION_BINDING_STALE`. Recovery from any other witness keeps the live check that it had under the wide hold, because a batch whose rollback could not remove the witness restored the pages without it. That check covers a leaf that raised, every later resume, the `status` action and the wide hold. An unsafe or unreadable path, and a Records receipt that does not corroborate, make the outcome uncertain in every case.
 
-When the settle hold is refused, nothing more is written. A leaf that committed leaves its witness, so the caller gets `committed: true` and the next resume records `recovered-committed`. A leaf that did not commit leaves the run at its prepared state, and the next resume runs the step again.
+When the settle hold is refused, nothing more is written. A leaf that committed leaves its witness, so the caller gets `committed: true` and the next resume records `recovered-committed`. When another writer changes the step's page before that resume, the run blocks as uncertain, as a stop under the wide hold followed by such a change already did. A leaf that did not commit leaves the run at its prepared state, and the next resume runs the step again.
 
 ### D4. A per-run claim replaces the serialisation that the wide hold gave
 
@@ -46,6 +46,6 @@ The claim is per process. Writers in two processes that share a vault serialise 
 
 ## Risks
 
-- A note save that lands between a step's leaf commit and its settle hold changes a page that the step wrote. The step still gets its receipt from its witness, and its undo reports `CURATION_BINDING_STALE` for that page. This window is new and accepted.
+- A note save that lands between a step's leaf commit and its settle hold changes a page that the step wrote. The step still gets its receipt in that call, and its undo reports `CURATION_BINDING_STALE` for that page. When the call stops or its settle hold is refused first, the next resume blocks the run as uncertain. This window is new and accepted.
 - A page that another writer changes during a step's unlocked preflight makes the leaf refuse with its own stale-binding code. The run records a failed attempt where the wide hold made that writer wait.
 - The leaf's own commit hold is unchanged. It can still exceed one second on a large vault; the semantic commit seam is a separate change.

@@ -3659,8 +3659,9 @@ def _verify_live_postcondition(
     `drift` is the code for a readable page that differs. A step's own recovery cannot tell
     whose bytes those are, so it reports uncertain. Compensation reads a witness that matched
     when its step committed, so a difference there is later work and it passes the stale code.
-    None accepts the difference as later work (`_witness_drift`); an unsafe or unreadable path
-    and a Records receipt that does not corroborate still refuse.
+    None accepts the difference as later work: only a call that saw its own leaf's batch commit
+    passes it (`_execute_step`). An unsafe or unreadable path and a Records receipt that does not
+    corroborate still refuse.
     """
     if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
         from dataclasses import replace
@@ -4432,12 +4433,7 @@ def _validated_operation_witness(
     )
     if live:
         _verify_live_postcondition(
-            store.vault_root,
-            witness,
-            step=step,
-            binding=binding,
-            accepted=_chained_states(step, binding),
-            drift=_witness_drift(step, binding),
+            store.vault_root, witness, step=step, binding=binding, accepted=_chained_states(step, binding)
         )
     return witness
 
@@ -4739,16 +4735,6 @@ def _guards_itself(step: Mapping[str, Any], binding: Mapping[str, Any]) -> bool:
     )
 
 
-def _witness_drift(step: Mapping[str, Any], binding: Mapping[str, Any]) -> str | None:
-    """The live check's code for a page that no longer holds what this step's witness names.
-
-    A self-guarded leaf releases the boundary once its batch commits the witness, so another
-    writer may change the page before the receipt. The witness proves the commit, and the change
-    is later work that compensation reports as stale. Any other step runs whole under one hold.
-    """
-    return None if _guards_itself(step, binding) else "CURATION_OUTCOME_UNCERTAIN"
-
-
 def _execute_next(
     vault_root: Path,
     run_identity: str,
@@ -5021,13 +5007,18 @@ def _execute_step(
             binding=execution_binding,
             parent_compensation_plan_id=plan_identity if compensation else None,
         )
+        # This call saw its leaf's batch commit the witness, so the step committed. A scoped leaf
+        # released the boundary there, and a page that differs now holds a later writer's work. A
+        # witness found any other way proves the step only while its pages match it: a batch whose
+        # rollback could not remove the witness restored the pages without it.
+        proven = scoped and pending is not None and pending.consumed
         _verify_live_postcondition(
             vault_root,
             witness,
             step=step,
             binding=execution_binding,
             accepted=_chained_states(step, execution_binding),
-            drift=_witness_drift(step, execution_binding),
+            drift=None if proven else "CURATION_OUTCOME_UNCERTAIN",
         )
     except DefiniteNoEffect as error:
         if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
