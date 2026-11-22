@@ -16,6 +16,7 @@ from test_working_set_withheld_twins import _withhold
 from exomem import (
     activation_conventions,
     commands,
+    context_task,
     lexstore,
     positions,
     request_budget,
@@ -390,6 +391,30 @@ def test_a_turn_whose_collection_routing_could_not_be_read_reports_its_positions
     assert packet["positions"]["state"] == "partial" and packet["positions"]["reason"] == "lane_failed"
     # The lanes that still ran served the lead and its link, so the position they reach is served.
     assert [item["ref"].rpartition("/")[2] for item in packet["positions"]["items"]] == ["studio-equipment-log.md#slow-cool"]
+
+
+def test_a_turn_whose_lead_could_not_be_projected_reports_its_positions_as_not_the_whole(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discovered lead whose source could not be projected was dropped with its links, so the linked page that
+    holds the position was never read; the task context said `lane_failed` and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    lead, _long_page = _lead_linking_to_a_long_page(
+        vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n",
+    )
+    _ready(vault)
+    project_source = context_task.project_source
+
+    def unprojectable_lead(root, source_ref, caller, **kwargs):
+        return None if source_ref == lead else project_source(root, source_ref, caller, **kwargs)
+
+    monkeypatch.setattr(context_task, "project_source", unprojectable_lead)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    # Other leads were served, so the block read some pages: what it found is partial, not none.
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
 
 
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

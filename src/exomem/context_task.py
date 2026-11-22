@@ -638,7 +638,10 @@ def compile_context(
                 _add_missing(block, "budget")
                 break
             if source is None:
-                _add_missing(block, "lane_failed")
+                # A discovered lead the caller cannot be served in full is a page the turn reaches and no block reads.
+                _add_missing(block, _LANE_FAILED)
+                if reach is not None:
+                    reach.stop(_LANE_FAILED)
                 continue
             item = {
                 **candidate, "source_version": source.version,
