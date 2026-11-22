@@ -111,6 +111,11 @@ def reprojected(captured: str, metadata: str) -> str:
     return _json(preserved)
 
 
+def projects_changed(before: str, after: str) -> bool:
+    """Whether two manifest metadata values name different projects."""
+    return _metadata(before)["projects"] != _metadata(after)["projects"]
+
+
 def _pass_release_limit(error: collections.CollectionError) -> None:
     """Re-raise the typed summary release limit, which a generic not-found refusal would hide."""
     if error.code == RELEASE_LIMIT:

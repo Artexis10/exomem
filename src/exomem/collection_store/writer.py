@@ -3604,17 +3604,21 @@ class CollectionWriter:
             )
             self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
-            # A retracted row is not validated again; its history is judged on the revised projects. Rows share a
-            # few distinct captured values, so work per distinct value, never per retained row, and skip unchanged.
-            for (captured,) in self.connection.execute(
-                    "SELECT DISTINCT governance_json FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
-                    (current.collection_id,)).fetchall():
-                revised = governance.reprojected(captured, metadata)
-                if revised != captured:
-                    self._execute(
-                        "UPDATE item_rows SET governance_json=? "
-                        "WHERE collection_id=? AND retracted_txn IS NOT NULL AND governance_json=?",
-                        (revised, current.collection_id, captured))
+            # A retracted row is not validated again; its history is judged on the revised projects. Only a change of
+            # projects touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
+            before_metadata = self.connection.execute(
+                "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (current.collection_id, row["manifest_version"])).fetchone()[0]
+            if governance.projects_changed(before_metadata, metadata):
+                last = 0
+                while batch := self.connection.execute(
+                        "SELECT row_id,governance_json FROM item_rows "
+                        "WHERE collection_id=? AND retracted_txn IS NOT NULL AND row_id>? ORDER BY row_id LIMIT 500",
+                        (current.collection_id, last)).fetchall():
+                    last = batch[-1][0]
+                    self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
+                                  [(governance.reprojected(captured, metadata), row_id) for row_id, captured in batch],
+                                  many=True)
             for held_id, kind, encoded, captured, path in self.connection.execute(
                 "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id,),

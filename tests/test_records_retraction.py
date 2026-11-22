@@ -208,30 +208,30 @@ def test_a_retracted_rows_history_opens_after_the_collection_joins_a_project(sto
     assert [event["operation"] for event in agent["events"]] == ["revise", "retract", "append", "create"]
 
 
-def test_revising_a_collection_never_walks_its_retracted_rows_one_by_one(store):
-    """A collection that retracted many rows revises in work bounded by distinct metadata, and not at all if its projects are unchanged."""
+def test_revising_a_collection_reprojects_every_retracted_row_in_bounded_batches(store):
+    """Retracted rows keep their own tags whatever their number; a title-only revise leaves them alone and a project change reaches each."""
     create(store)
     keys = [append(store, f"row-{n}") for n in range(30)]
     for key in keys:
         retract(store, key)
-    writes = []
-    store.connection.set_trace_callback(writes.append)
+    for n, row_id in enumerate(r[0] for r in store.connection.execute(
+            "SELECT row_id FROM item_rows WHERE retracted_txn IS NOT NULL ORDER BY row_id")):
+        store.connection.execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
+                                 (f'{{"classes":[],"projects":[],"tags":["t{n}"]}}', row_id))
+    statements = []
+    store.connection.set_trace_callback(statements.append)
     guards = store.inspect_collection(CID)["lifecycle_guards"]
     store.revise_collection(CID, manifest_text=summary_text().replace("title: Work", "title: Renamed"),
                             why="rename only", **guards)
-    renamed = [q for q in writes if q.startswith("UPDATE item_rows SET governance_json=")]
-    writes.clear()
+    touched = [q for q in statements if "item_rows" in q and "retracted_txn IS NOT NULL" in q]
     guards = store.inspect_collection(CID)["lifecycle_guards"]
     store.revise_collection(CID, manifest_text=summary_text().replace("title: Work", "title: Renamed\nprojects: [Alpha]"),
                             why="file under a project", **guards)
     store.connection.set_trace_callback(None)
-    projected = [q for q in writes if q.startswith("UPDATE item_rows SET governance_json=")]
-    assert renamed == []
-    # Per-row updates differ in their bound row id; the per-value update is one statement however many rows it reaches.
-    assert len(set(projected)) == 1
-    assert store.connection.execute(
-        "SELECT count(DISTINCT governance_json) FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL",
-        (CID,)).fetchone()[0] == 1
+    assert touched == []
+    stored = [r[0] for r in store.connection.execute(
+        "SELECT governance_json FROM item_rows WHERE retracted_txn IS NOT NULL ORDER BY row_id")]
+    assert stored == [f'{{"classes":[],"projects":["alpha"],"tags":["t{n}"]}}' for n in range(30)]
 
 
 def test_a_cold_reopen_verifies_the_chain_and_a_later_write_commits(store):
