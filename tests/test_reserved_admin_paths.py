@@ -341,6 +341,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         index_paths,
         lexstore,
         media_jobs,
+        media_previews,
         memory_refs,
         ownership_rotation,
         procedure_approval,
@@ -395,6 +396,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "media-previews",
         "ownership-review",
         "procedure-approval-key",
         "procedure-approvals",
@@ -442,6 +444,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (collection_conversion.archive_folder(root, "c" * 32, 1) / "manifest.json", "collection-archive"),
         (media_jobs.job_store_path(root), "media-jobs-store"),
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
+        (state_paths.vault_state_dir(root) / media_previews.STORE / "aa" / ("a" * 64 + ".json"), "media-previews"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (
