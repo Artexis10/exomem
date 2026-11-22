@@ -1,37 +1,42 @@
-"""Decide whether a pull request's change can alter more than its docs tests.
+"""Choose the core and harness test jobs for this CI run.
 
-CI runs every test shard for Full scope (schedule and manual dispatch). A pull
-request, draft or ready, can narrow its checks when it changes only prose and
-specifications: `docs/`, `openspec/`, or Markdown at the repository root other
-than `README.md`. None of these paths is a package input (the wheel builds from
-`src/` only, and the sdist adds `README.md`, `LICENSE` and `pyproject.toml`),
-and no runtime code reads them. Tests can read them, so a docs-only change still
-runs every test that carries the `reads_repository_docs` marker, and
-`tests/repository_docs_reads.py` fails any test that reads these paths without
-the marker.
+A pull request runs no core or harness shard. It runs its own changed test
+modules instead: core modules on every runtime that Full covers, and harness
+modules (those listed in `tests/harness_modules.txt`) on the floor runtime,
+the first one listed. A pull request that changes no test module runs no core
+or harness job. A push to main runs every shard of both tiers on the floor
+runtime, and a Full run (`release_evidence.FULL_EVENTS`) runs every shard on
+every runtime. A pull request whose history this script cannot compare runs
+every shard on the floor runtime.
 
-A pull request's own test modules also run on the newest supported runtime,
-because feedback runs use only the 3.11 floor and a failure that only that
-runtime shows otherwise reaches main and stops the release evidence.
+A pull request, draft or ready, that changes only prose and specifications
+runs only the docs tests: `docs/`, `openspec/`, or Markdown at the repository
+root other than `README.md`. None of these paths is a package input (the wheel
+builds from `src/` only, and the sdist adds `README.md`, `LICENSE` and
+`pyproject.toml`), and no runtime code reads them. Tests can read them, so a
+docs-only change still runs every test that carries the `reads_repository_docs`
+marker, in shard 1 of each tier, and `tests/repository_docs_reads.py` fails any
+test that reads these paths without the marker.
+
 `changed_tests` names the test modules that the pull request adds or changes.
-When the caller names that runtime in `CHANGED_TESTS_PYTHON`,
-`changed_tests_include` lists the core matrix entries that run them: enough
-groups that each carries at most `_GROUP_SECONDS` of measured test time.
+Each changed-tests entry runs enough groups that each carries at most
+`_GROUP_SECONDS` of measured test time.
 
 Run from a merge checkout with at least two commits of history, naming what
 the calling job leaves out on a docs-only change. It writes `docs_only`,
-`pytest_args`, `changed_tests` and `changed_tests_include` to `$GITHUB_OUTPUT`
-and reports the omission in the job summary.
-On docs-only changes, each tier runs all marked tests in shard 1; CI omits its
-other shard jobs. The appended split options override the normal shard
-arguments in the workflow. Any event other than `pull_request`, or a history
-it cannot compare, gives a full run.
+`pytest_args` and `changed_tests` to `$GITHUB_OUTPUT` and reports the omission
+in the job summary. The caller that sets `FULL_PYTHON_VERSIONS` (a JSON list,
+floor first), `CORE_SHARDS` and `HARNESS_SHARDS` also gets `python_versions`
+(the runtimes of this run's full test jobs) and `core_matrix` and
+`harness_matrix`: JSON lists of matrix include entries with `python-version`,
+`shard` and `splits`, plus `selection` on a changed-tests entry.
 
 Usage: ci_change_scope.py "<what this job omits on a docs-only change>"
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import os
@@ -49,9 +54,12 @@ _TEST_MODULE = re.compile(r"tests/(?:[A-Za-z0-9_]+/)*test_[A-Za-z0-9_]+\.py")
 
 #: pytest-split's measured test durations, the same file the core shards split by.
 _DURATIONS = Path(".test_durations.json")
+#: The modules that the harness tier runs; every other changed module is core.
+_HARNESS_MODULES = Path("tests/harness_modules.txt")
 #: The measured test time one changed-tests group may carry. `--dist loadfile`
 #: can run one module's share on a single worker, so this stays below the core
 #: job's `--session-timeout` (1400 s) with room for one 180 s test and new tests.
+#: The slowest harness module measures under 250 s, so its 900 s cap holds too.
 _GROUP_SECONDS = 1000
 
 #: Repository layout, not vocabulary: these trees hold prose and specifications,
@@ -103,8 +111,8 @@ def changed_test_modules(paths: list[str], root: Path = Path(".")) -> list[str]:
     )
 
 
-def changed_tests_include(modules: list[str], python: str, durations: dict[str, float]) -> list[dict]:
-    """Core matrix entries that split `modules` into groups of at most `_GROUP_SECONDS`.
+def changed_test_groups(modules: list[str], python: str, durations: dict[str, float]) -> list[dict]:
+    """Matrix entries that split `modules` into groups of at most `_GROUP_SECONDS`.
 
     Group `i` of `k` runs as shard `i` with `--splits=k`; pytest-split balances
     the groups by the same durations. A module without measurements counts as zero.
@@ -118,24 +126,83 @@ def changed_tests_include(modules: list[str], python: str, durations: dict[str, 
     ]
 
 
+def _shards(runtimes: list[str], splits: int) -> list[dict]:
+    return [
+        {"python-version": python, "shard": shard, "splits": splits}
+        for python in runtimes
+        for shard in range(1, splits + 1)
+    ]
+
+
+def job_matrices(
+    paths: list[str] | None,
+    *,
+    full: bool,
+    runtimes: list[str],
+    core_shards: int,
+    harness_shards: int,
+    root: Path = Path("."),
+) -> tuple[list[dict], list[dict]]:
+    """The core and harness matrix include entries for this run.
+
+    `paths` is the pull request's change, or None for any other event and for
+    a pull request whose history cannot be compared. `runtimes` is Full's
+    runtime list, floor first.
+    """
+    floor = runtimes[:1]
+    if paths is None:
+        chosen = runtimes if full else floor
+        return _shards(chosen, core_shards), _shards(chosen, harness_shards)
+    if docs_only(paths):
+        # pytest_args selects every marked test in shard 1 of 1.
+        return _shards(floor, 1), _shards(floor, 1)
+    modules = changed_test_modules(paths, root)
+    if not modules:
+        return [], []
+    listed = {line.strip() for line in (root / _HARNESS_MODULES).read_text(encoding="utf-8").splitlines()}
+    harness = [module for module in modules if module in listed]
+    core = [module for module in modules if module not in listed]
+    durations = json.loads((root / _DURATIONS).read_text(encoding="utf-8"))
+    core_entries = [entry for python in runtimes for entry in changed_test_groups(core, python, durations)]
+    harness_entries = [entry for python in floor for entry in changed_test_groups(harness, python, durations)]
+    return core_entries if core else [], harness_entries if harness else []
+
+
+def _full_events() -> tuple[str, ...]:
+    """Full's events, owned by `release_evidence.ci_scope`; loaded by path for test imports."""
+    spec = importlib.util.spec_from_file_location(
+        "release_evidence", Path(__file__).with_name("release_evidence.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.FULL_EVENTS
+
+
 def main(omitted: str) -> int:
-    paths = changed_paths() if os.environ.get("EVENT_NAME", "") == "pull_request" else None
+    event = os.environ.get("EVENT_NAME", "")
+    paths = changed_paths() if event == "pull_request" else None
     only_docs = docs_only(paths)
     # The matrix and pytest consume this same decision so a single shard covers the whole docs tier.
     pytest_args = f"-m {DOCS_MARKER} --splits=1 --group=1" if only_docs else ""
     modules = changed_test_modules(paths or [])
-    # Only the job that builds the core matrix names the runtime; other callers add no jobs.
-    python = os.environ.get("CHANGED_TESTS_PYTHON", "")
-    include = (
-        changed_tests_include(modules, python, json.loads(_DURATIONS.read_text(encoding="utf-8")))
-        if modules and python
-        else []
-    )
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(f"docs_only={'true' if only_docs else 'false'}\n")
         output.write(f"pytest_args={pytest_args}\n")
         output.write(f"changed_tests={' '.join(modules)}\n")
-        output.write(f"changed_tests_include={json.dumps(include, separators=(',', ':'))}\n")
+        # Only the scope job builds the test matrices; other callers read the docs decision.
+        if "FULL_PYTHON_VERSIONS" in os.environ:
+            full = event in _full_events()
+            runtimes = json.loads(os.environ["FULL_PYTHON_VERSIONS"])
+            core, harness = job_matrices(
+                paths,
+                full=full,
+                runtimes=runtimes,
+                core_shards=int(os.environ["CORE_SHARDS"]),
+                harness_shards=int(os.environ["HARNESS_SHARDS"]),
+            )
+            output.write(f"python_versions={json.dumps(runtimes if full else runtimes[:1])}\n")
+            output.write(f"core_matrix={json.dumps(core, separators=(',', ':'))}\n")
+            output.write(f"harness_matrix={json.dumps(harness, separators=(',', ':'))}\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if only_docs and summary:
         with open(summary, "a", encoding="utf-8") as handle:
