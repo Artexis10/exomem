@@ -2801,6 +2801,25 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
             return False
         if _admit_if_current(vault_root):
             return True
+        # A write that landed between the catch-up's last read and the proof
+        # leaves the catalogue lagging again, not wrong: queue another lag-only
+        # catch-up, as above. Only a catalogue that no lag explains costs a full
+        # pass. Each re-queue needs a write after a catch-up that found no lag,
+        # so the chain ends when writes stop.
+        lagging_again = getattr(store, "_lagging_catch_up_paths", lambda: set())()
+        if lagging_again:
+            store._last_catch_up_advanced = True
+            log.info(
+                "lexical catch-up advanced (outrun before admission) paths=%d;"
+                " queueing a lag-only catch-up",
+                len(lagging_again),
+            )
+            _schedule_runtime_catalog_repair(
+                vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+            )
+            return True
+        if lagging_again is None:
+            return False  # the refusal that keeps the full pass is already logged
         return _log_catch_up_decline(store, CatchUpDecline.NOT_CURRENT)
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
