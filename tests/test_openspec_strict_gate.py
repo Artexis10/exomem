@@ -241,3 +241,23 @@ def test_missing_git_is_an_internal_error(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert "git" in result.stderr
+
+
+def test_node_below_the_engines_floor_exits_2(tmp_path: Path) -> None:
+    """An older Node (e.g. a .nvmrc 20) gets the floor message, not a CLI failure."""
+
+    _init_repo(tmp_path)
+    stub = _write_stub(tmp_path, _report())
+    wrapper = (
+        'Object.defineProperty(process.versions, "node", { value: "20.19.0" });'
+        f'import({json.dumps(str(GATE))})'
+    )
+    result = subprocess.run(
+        ["node", "-e", wrapper, "--", str(stub)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 2
+    assert "needs Node >= 22.20.0; this is v20.19.0" in result.stderr
