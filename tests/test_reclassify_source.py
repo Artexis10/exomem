@@ -214,7 +214,7 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         server,
     )
     from exomem import vault as vault_module
-    from exomem.governance import egress, lifecycle
+    from exomem.governance import egress, lifecycle, receipts
 
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
@@ -408,6 +408,26 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             find.evict_resolver_caches(vault)
             find.shared_resolver(vault)
             refreshed = await fresh_report()
+            receipt = next(receipts._events_root(vault).glob("*/*.jsonl"))
+            emit_receipt = egress.emit_boundary_receipt
+            untampered = None
+
+            def damage_receipt_after_disclosure(*args):
+                nonlocal untampered
+                emit_receipt(*args)
+                if untampered is None:
+                    untampered = receipt.read_bytes()
+                    receipt.write_bytes(b"{}\n" + untampered)
+
+            with monkeypatch.context() as damage:
+                damage.setattr(egress, "emit_boundary_receipt", damage_receipt_after_disclosure)
+                try:
+                    rejected = await preview(preview_run_id=refreshed["run_id"])
+                finally:
+                    if untampered is not None:
+                        receipt.write_bytes(untampered)
+            assert untampered is not None and rejected.get("is_error"), rejected
+            assert "result" not in rejected and "entries" not in rejected
             prepare_epoch = graph_sync.prepare_rename_epoch
             prior_graph = graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)
             late = vault / KB / "Notes" / "late-referrer.md"

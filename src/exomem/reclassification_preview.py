@@ -74,7 +74,6 @@ class RetainedReport(dict):
 class _Authority:
     key: str
     complete: bool
-    basis_key: str
     marker_revision: str | None
 
 
@@ -99,7 +98,7 @@ def _authority_binding(root: Path, who: RequestPrincipal) -> _Authority:
     admission = reclassify_source.preview_release_authority(root, who)
     basis_key = _basis_key(root, who, admission.basis)
     key = _digest((basis_key, admission.erasure.fingerprint))
-    return _Authority(key, admission.basis.complete, basis_key, admission.erasure.marker_revision)
+    return _Authority(key, admission.basis.complete, admission.erasure.marker_revision)
 
 
 def _snapshot_key(root: Path) -> str | None:
@@ -122,16 +121,12 @@ def retained_report_identity(root: Path, who: RequestPrincipal) -> _RetainedAdmi
 
 
 def retained_report_still_current(root: Path, who: RequestPrincipal, admission: _RetainedAdmission) -> bool:
-    """Recheck release after egress's full proof and the request's receipt append."""
-    try:
-        basis = reclassify_source.preview_release_basis(root, who)
-    except OpError:
-        return False
+    """Recheck the full release evidence after egress and disclosure recording."""
     markers = lifecycle.tombstone_marker_revision(root)
     return (
-        _basis_key(root, who, basis) == admission.authority.basis_key
-        and markers is not None and markers == admission.authority.marker_revision
-        and _snapshot_key(root) == admission.snapshot
+        markers is not None
+        and markers == admission.authority.marker_revision
+        and retained_report_identity(root, who) == admission
     )
 
 
