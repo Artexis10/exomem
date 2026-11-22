@@ -2465,12 +2465,16 @@ class MediaWorker:
                     # One handed-over row per pass, after the child watch above. The next pass starts at once
                     # while rows remain, and a stop ends the sweep after the row in hand.
                     requeuing = not self._stop_event.is_set() and self._requeue_next_runtime_block(self._store)
-                except Exception as exc:  # noqa: BLE001 - `_ledger_busy` names the one kind that a pass outlasts
-                    if not _ledger_busy(exc):
+                except Exception as exc:  # noqa: BLE001 - retry only the ledger availability failures below
+                    # A child can hand back its claim while the ledger still refuses writes. The next
+                    # pass reopens it and retains the existing claim and PID recovery order.
+                    readonly = (
+                        isinstance(exc, sqlite3.OperationalError)
+                        and getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_READONLY
+                    )
+                    if not readonly and not _ledger_busy(exc):
                         raise
-                    # The job ledger is busy past its own wait: another connection holds it, or its open meets
-                    # contention that is not SQLite's. The pass ends here and the next one starts after one poll.
-                    # Nothing recorded an answer, so it asks the store again.
+                    # Wait a poll before asking again. Without a completed pass there is no idle answer to cache.
                     idle_signature = None
                     # The first held pass warns, the passes after it log at debug, and the first free pass
                     # warns again, so a long hold writes two warnings.
@@ -2479,8 +2483,9 @@ class MediaWorker:
                         ledger_held_since = _clock()
                     log.log(
                         logging.WARNING if first else logging.DEBUG,
-                        "media worker: the job ledger is held; supervisor pass retried after %.1fs "
+                        "media worker: the job ledger is %s; supervisor pass retried after %.1fs "
                         "(child running: %s, handed-over rows waiting: %d)",
+                        "read-only" if readonly else "held",
                         _SUPERVISE_POLL_SECONDS,
                         self._child is not None and self._child.poll() is None,
                         len(self._runtime_requeues),

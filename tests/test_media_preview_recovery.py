@@ -595,6 +595,9 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
     connect = media_jobs.MediaJobStore._connect
     finish_preview = media_jobs.MediaJobStore.finish_preview
     refused_writes = []
+    supervisor = (
+        media_worker.MediaWorker(vault, execution_mode="process") if settlement_error == "persistent" else None
+    )
 
     with closing(sqlite3.connect(ledger.path, timeout=0)) as holder, monkeypatch.context() as fault:
         @contextmanager
@@ -618,14 +621,14 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
                         raise
             return connect(*args, **kwargs)
 
+        def readonly_connection(store, *args, **options):
+            connection = connect(store, *args, **options)
+            connection.execute("PRAGMA query_only=ON")
+            return connection
+
         def readonly_first_settlement(self, job, **kwargs):
             if refused_writes and settlement_error == "readonly":
                 return finish_preview(self, job, **kwargs)
-
-            def readonly_connection(store, *args, **options):
-                connection = connect(store, *args, **options)
-                connection.execute("PRAGMA query_only=ON")
-                return connection
 
             if settlement_error == "persistent":
                 if len(refused_writes) == 3:
@@ -665,23 +668,80 @@ def test_process_worker_settles_a_definitive_preview_without_accepting_old_recor
             else:
                 assert code == 0 and refused_writes == [sqlite3.SQLITE_READONLY]
 
-    if settlement_error == "persistent":
-        assert ledger.worker_pid() == os.getpid()
-        assert ledger.recover_interrupted() == 1
-        ledger.clear_worker(os.getpid())
-        acknowledgement = ledger.claim_next()
-        assert acknowledgement is not None and acknowledgement.id == claim.id
-        assert acknowledgement.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
-        assert acknowledgement.preview_receipt_id and acknowledgement.preview_receipt_id != first_receipt
-        monkeypatch.setattr(media_previews, "_decode", unexpected_decode)
-        monkeypatch.setattr(media_store, "open_original", unexpected_decode)
-        media_worker.MediaWorker(vault, execution_mode="process")._process(acknowledgement)
+        if supervisor is not None:
+            assert ledger.worker_pid() == os.getpid()
+            supervisor._child = SimpleNamespace(pid=os.getpid(), returncode=code, poll=lambda: code)
+            assert supervisor._store is not None
+            recover = supervisor._store.recover_interrupted
+            clear_worker = supervisor._store.clear_worker
+            recovery_faults = []
+            cleanup_faults = []
+            recovered_jobs = []
+            clock = media_worker._clock
+            now = 0.0
+            ordinary_id = None
+            processed = []
+
+            def recover_interrupted():
+                try:
+                    recovered = recover()
+                except sqlite3.OperationalError as error:
+                    recovery_faults.append(error.sqlite_errorcode)
+                    raise
+                recovered_jobs.append(recovered)
+                if len(recovered_jobs) == 1:
+                    fault.setattr(media_jobs.MediaJobStore, "_connect", readonly_connection)
+                return recovered
+
+            def clear(pid):
+                try:
+                    clear_worker(pid)
+                except sqlite3.OperationalError as error:
+                    cleanup_faults.append(error.sqlite_errorcode)
+                    raise
+
+            def wait(seconds):
+                nonlocal now, ordinary_id
+                now += seconds
+                if recovery_faults:
+                    # Opening a new connection works again. The first PID cleanup below hits one more outage.
+                    fault.setattr(media_jobs.MediaJobStore, "_connect", connect)
+                    if ordinary_id is None:
+                        fault.setattr(media_jobs.MediaJobStore, "finish_preview", finish_preview)
+                        ordinary_id = ledger.enqueue(media_jobs.MediaJob(
+                            claim.binary_path, claim.sidecar_path, "image", do_ocr=False, do_reembed=True,
+                        ))
+                if now > 10:
+                    pytest.fail("ordinary work did not resume after the ledger became writable")
+                return False
+
+            def launch_child():
+                with fault.context() as real_clock:
+                    real_clock.setattr(media_worker, "_clock", clock)
+                    returncode = media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.01)
+                supervisor._stop_event.set()
+                return SimpleNamespace(pid=os.getpid(), returncode=returncode, poll=lambda: returncode)
+
+            fault.setattr(supervisor._store, "recover_interrupted", recover_interrupted)
+            fault.setattr(supervisor._store, "clear_worker", clear)
+            fault.setattr(supervisor._wake, "wait", wait)
+            fault.setattr(supervisor, "_launch_child", launch_child)
+            fault.setattr(media_worker, "_clock", lambda: now)
+            fault.setattr(media_worker.MediaWorker, "_run_reembed", lambda _, job: processed.append(job.id))
+            fault.setattr(media_store, "open_original", unexpected_decode)
+            supervisor._supervise()
+
+            assert recovery_faults == cleanup_faults == [sqlite3.SQLITE_READONLY]
+            assert recovered_jobs == [1, 0]
+            assert ordinary_id is not None and processed == [ordinary_id]
+            assert ledger.get(ordinary_id) is None and ledger.worker_pid() is None
 
     settled = ledger.get(claim.id)
     assert settled is not None and settled.state == media_jobs.COMPLETED
     assert settled.attempts == media_jobs.MAX_PREVIEW_ATTEMPTS
     expected = "preview retry limit reached" if settlement_error == "persistent" else "preview original unavailable"
     assert settled.last_error == expected
+    assert settled.preview_receipt_id and settled.preview_receipt_id != first_receipt
     assert media_previews.read(vault, relative, claim.preview_sha256) == previous_jpeg
     if settlement_error != "busy":
         assert sum("SQLITE_READONLY" in record.getMessage() for record in caplog.records) == 1
