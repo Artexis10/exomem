@@ -182,6 +182,7 @@ class CandidateBundle:
     lexical_votes_withheld: dict[str, dict[str, int]] = field(default_factory=dict)
     frame_sources: dict[str, str] = field(default_factory=dict)
     ranking_pages: dict[str, RankingPage | None] = field(default_factory=dict)
+    neutral_prefix: tuple[str, ...] = ()
 
 
 def empty_bundle(
@@ -326,6 +327,7 @@ def collect_candidates(
     temporal: bool,
     intent: str | None,
     prefer_compiled: bool,
+    prefer_source_passages: bool = False,
     prefer_active: bool,
     prefer_used: bool,
     config: RankingConfig,
@@ -1199,6 +1201,14 @@ def collect_candidates(
             missing = {path for path, _score in fused if path not in ranking_pages}
             if missing:
                 ranking_pages.update(ranking_metadata(missing))
+        neutral_prefix = ()
+        if prefer_source_passages:
+            neutral = find_policy.apply_post_rrf_multipliers(
+                fused, query, config, prefer_compiled=False, prefer_active=prefer_active,
+                status_basis=status_basis, type_basis=type_basis, temporal=temporal,
+                page_of=ranking_of, usage_map=usage_map, top_n=3,
+            )
+            neutral_prefix = tuple(path for path, _score in neutral[:3])
         raw_fused_score_by_path = dict(fused) if capture_trace else {}
         multiplier_chain_by_path: (
             dict[str, list[dict[str, float | str]]] | None
@@ -1261,4 +1271,5 @@ def collect_candidates(
         lexical_votes_withheld=lexical_votes_withheld,
         frame_sources=frame_sources,
         ranking_pages=ranking_pages,
+        neutral_prefix=neutral_prefix,
     )

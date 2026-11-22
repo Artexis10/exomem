@@ -190,7 +190,7 @@ class ExomemBackend:
         from ..vault_store import availability
         from ..vault_store import mode as store_mode
 
-        # The service's rollout fence, so a session never serves a vault that the service refuses.
+        # Use the same vault admission checks as the service.
         availability.require_servable(self._vault)
 
         if store_mode.store_mode_for_reads(self._vault):

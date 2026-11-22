@@ -13,18 +13,21 @@ subprocess environment, so none shows in a process list, the record, the status 
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import json
 import logging
 import math
 import os
+import queue
 import random
 import re
 import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -397,12 +400,125 @@ def _write_record(vault: Path, record: dict[str, Any]) -> None:
 # --- staging the state that cannot be rebuilt -------------------------------------------------
 
 
-def _is_sqlite(path: Path) -> bool:
+#: Copies the files that SQLite refused, in a child process. Closing any descriptor of a file drops every POSIX lock
+#: the process that opened it holds on that file, and the service's own connections lock their databases: a
+#: database whose header is damaged reads as no database while a connection here still holds it. A child process
+#: holds no lock, so its reads and copies cannot drop one. It takes SQLite's header as hex in its argument, then
+#: reads one JSON `[source, target]` line at a time and answers each with one result line: `ok`, `gone`,
+#: `sqlite_header` (left uncopied) or `error`.
+_PLAIN_COPIER = r"""
+import json, os, shutil, sys
+magic = bytes.fromhex(sys.argv[1])
+for line in sys.stdin:
+    source, target = json.loads(line)
     try:
-        with path.open("rb") as source:
-            return source.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+        with open(source, "rb") as origin:
+            if origin.read(len(magic)) == magic:
+                result = "sqlite_header"
+            else:
+                origin.seek(0)
+                try:
+                    with open(target, "xb") as copy:
+                        shutil.copyfileobj(origin, copy, 1 << 20)
+                    os.chmod(target, 0o600)
+                except OSError:
+                    try:
+                        os.unlink(target)  # a part copy must not reach the snapshot
+                    except OSError:
+                        pass
+                    raise
+                result = "ok"
+    except FileNotFoundError:
+        result = "gone"
     except OSError:
-        return False
+        result = "error"
+    sys.stdout.write(result + "\n")
+    sys.stdout.flush()
+"""
+#: The longest the child may take for one backup's plain files.
+_PLAIN_COPY_TIMEOUT = 3600.0
+#: How often a wait for the child looks at the stop request.
+_PLAIN_COPY_POLL = 1.0
+
+
+def _copy_plain(pending: list[tuple[Path, Path, str]], findings: list[dict[str, str]], stop: threading.Event) -> int:
+    """Copy each `(source, target, name)` through one child process, one file at a time; the count copied.
+
+    A failure becomes a finding. A stop request ends it between files or during a copy, and a stopped copy is
+    removed. A child that stops answering, or runs past the timeout, leaves every file not yet copied as a finding.
+    """
+    if not pending:
+        return 0
+    try:
+        # The protocol is ASCII: JSON escapes every other character of a path, and the answers are fixed tokens.
+        helper = subprocess.Popen([sys.executable, "-I", "-c", _PLAIN_COPIER, _SQLITE_MAGIC.hex()], text=True,
+                                  encoding="utf-8", errors="strict", stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        findings.extend({"kind": "state", "path": name, "code": "state_copy_failed"} for _, _, name in pending)
+        return 0
+    answers: queue.Queue[str] = queue.Queue()
+
+    def read_answers() -> None:
+        # A thread reads the answers, so a wait can look at the stop request on every platform. An empty answer
+        # means the child stopped answering.
+        for line in helper.stdout:
+            answers.put(line.strip())
+        answers.put("")
+
+    threading.Thread(target=read_answers, daemon=True).start()
+    deadline = time.monotonic() + _PLAIN_COPY_TIMEOUT
+    copied = 0
+    try:
+        for index, (source, target, name) in enumerate(pending):
+            if stop.is_set():
+                raise BackupError("stopped", "staging")
+            try:
+                helper.stdin.write(json.dumps([str(source), str(target)]) + "\n")
+                helper.stdin.flush()
+            except OSError:
+                result = ""
+            else:
+                result = None
+            while result is None:
+                if stop.is_set():
+                    _end_copier(helper)
+                    target.unlink(missing_ok=True)
+                    raise BackupError("stopped", "staging")
+                if time.monotonic() > deadline:
+                    result = ""
+                    break
+                try:
+                    result = answers.get(timeout=_PLAIN_COPY_POLL)
+                except queue.Empty:
+                    pass
+            if result == "ok":
+                copied += 1
+            elif result == "":
+                # The child stopped answering: this copy is not trusted, and nothing after it was copied.
+                _end_copier(helper)
+                target.unlink(missing_ok=True)
+                findings.extend({"kind": "state", "path": rest, "code": "state_copy_failed"}
+                                for _, _, rest in pending[index:])
+                break
+            elif result != "gone":  # a removal after the listing; the next backup sees the new file
+                findings.append({"kind": "state", "path": name, "code": "state_copy_failed"})
+    finally:
+        if helper.poll() is None:
+            with contextlib.suppress(OSError):
+                helper.stdin.close()
+            try:
+                helper.wait(timeout=_PLAIN_COPY_POLL)
+            except subprocess.TimeoutExpired:
+                _end_copier(helper)
+    return copied
+
+
+def _end_copier(helper: subprocess.Popen) -> None:
+    """Kill the child and wait until it is gone. Only then may a copy it was writing be removed: a child still
+    running could write the file again after the removal."""
+    helper.kill()
+    helper.wait()
 
 
 def _copy_sqlite(source: Path, target: Path) -> bool:
@@ -422,22 +538,22 @@ def _copy_sqlite(source: Path, target: Path) -> bool:
         return copy.execute("PRAGMA quick_check(1)").fetchone() == ("ok",)
 
 
-def _copy_whole(source: Path, target: Path) -> None:
-    with source.open("rb") as origin, target.open("xb") as copy:
-        shutil.copyfileobj(origin, copy, _HASH_CHUNK)
-    os.chmod(target, 0o600)
+def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop: threading.Event,
+                plain: list[tuple[Path, Path, str]]) -> int:
+    """Stage one state file or tree; the count of databases and empty files staged. A file that SQLite refuses goes
+    to `plain`, for `_copy_plain`. A file it cannot stage becomes a finding. A stop ends it between files.
 
-
-def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop: threading.Event) -> int:
-    """Stage one state file or tree; the count of files staged. A file it cannot stage becomes a finding. A stop
-    ends it between files."""
+    This process opens a state file only through SQLite, which defers closing a file's descriptors while any of its
+    connections holds a lock on that file, so staging never drops a lock that the service's connections hold (see
+    `_PLAIN_COPIER`).
+    """
     if stop.is_set():
         raise BackupError("stopped", "staging")
     if source.is_symlink():
         return 0
     if source.is_dir():
         target.mkdir(mode=0o700)
-        return sum(_stage_tree(child, target / child.name, findings, stop) for child in sorted(source.iterdir()))
+        return sum(_stage_tree(child, target / child.name, findings, stop, plain) for child in sorted(source.iterdir()))
     if not source.is_file():
         return 0
     name = source.name
@@ -445,11 +561,28 @@ def _stage_tree(source: Path, target: Path, findings: list[dict[str, str]], stop
     if any(name.endswith(suffix) and (source.parent / name[:-len(suffix)]).is_file() for suffix in _SQLITE_SIDECARS):
         return 0
     try:
-        if _is_sqlite(source):
-            if not _copy_sqlite(source, target):
-                findings.append({"kind": "state", "path": name, "code": "state_integrity"})
-        else:
-            _copy_whole(source, target)
+        # SQLite reads a file of 0 or 1 bytes as an empty database (its unix layer reports a 1-byte file as empty) and
+        # would stage a new one. A database holds at least one page, so such a file is no database: an empty one is
+        # staged unopened, and a 1-byte one is copied whole.
+        size = source.stat().st_size
+        if size == 0:
+            target.touch(mode=0o600, exist_ok=False)
+            return 1
+        if size == 1:
+            plain.append((source, target, name))
+            return 0
+        try:
+            intact = _copy_sqlite(source, target)
+        except sqlite3.DatabaseError as error:
+            target.unlink(missing_ok=True)
+            if not source.exists():
+                return 0  # removed after the listing, as below
+            if getattr(error, "sqlite_errorname", None) != "SQLITE_NOTADB":
+                raise
+            plain.append((source, target, name))
+            return 0
+        if not intact:
+            findings.append({"kind": "state", "path": name, "code": "state_integrity"})
     except FileNotFoundError:
         return 0  # an atomic replace or a removal between the listing and the copy; the next backup sees the new file
     except (OSError, sqlite3.Error):
@@ -473,11 +606,12 @@ def stage_state(vault: Path, stage: Path, stop: threading.Event | None = None) -
     except FileNotFoundError:
         return 0, findings
     staged = 0
+    plain: list[tuple[Path, Path, str]] = []
     for name in names:
         if reserved_paths.classify_logical(name).descriptor_id in kept:
             staged += _stage_tree(state_paths.vault_state_dir(vault) / name, stage / name, findings,
-                                  stop or threading.Event())
-    return staged, findings
+                                  stop or threading.Event(), plain)
+    return staged + _copy_plain(plain, findings, stop or threading.Event()), findings
 
 
 # --- originals --------------------------------------------------------------------------------
@@ -502,11 +636,13 @@ def _write_targets(vault: Path, target: Path) -> int:
 
     An exclude pattern per original costs restic one comparison per file and pattern, so it grows as files times
     originals. A list costs one entry per file: a directory with no original below it is one entry, and a
-    directory that holds one lists its other entries. The original pool and each bound original are left out.
+    directory that holds one lists its other entries. The original pool and each bound original are left out,
+    and so is the upload stage: a stage is an upload's transient copy that a committed upload renames into
+    place, and its bytes may still be growing while restic reads them.
     """
-    from . import original_pool
+    from . import original_pool, upload_stage
 
-    omitted = {str(original_pool.pool_root(vault))}
+    omitted = {str(original_pool.pool_root(vault)), str(upload_stage.stage_root(vault))}
     count = 0
     for snapshot in _bound_originals(vault):
         count += 1

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from governance_projection_support import verified_namespace
 
-from exomem import embeddings, lifecycle_statuses, readiness
+from exomem import embeddings, extraction_parts, lifecycle_statuses, readiness, transcript_passages
 from exomem.governance import (
+    catalog_publication,
     principal,
     projected_graph,
     projected_retrieval,
@@ -19,6 +22,7 @@ from exomem.governance import (
     projection_timing,
     projections,
     schema_v4,
+    transcript_banks,
 )
 from exomem.governance.decisions import Decision
 from exomem.governance.policy import Policy
@@ -805,6 +809,193 @@ def test_projected_rank_policy_applies_type_and_status_multipliers(tmp_path):
         active_insight.item_identity,
         stale_source.item_identity,
     ]
+
+
+@pytest.mark.parametrize("layout", ["short-turn", "long-turn", "multipart", "catalog-capacity", "one-turn-head"])
+def test_projected_search_prefers_an_openable_passage_above_its_citing_summary(monkeypatch, tmp_path, layout):
+    background = "We went over the morning schedule. " * 130 if layout == "long-turn" else ""
+    quote = "Leave it open until the truck arrives."
+    earlier = "" if layout == "one-turn-head" else "[00:03] We inspected the gate.\n"
+    text = f"{earlier}[00:19] {background}{quote}"
+    path = "Knowledge Base/Sources/gate.md"
+    multipart = layout in {"multipart", "catalog-capacity", "one-turn-head"}
+    declaration = "extraction_parts: 2\n" if multipart else ""
+    policy = Policy(fingerprint="f" * 64)
+    source_item = catalog_publication.catalog_item(
+        vault_root=tmp_path, path=path,
+        source=f"---\ntitle: Gate log\ntype: source\n{declaration}---\n\n## Extracted text\n\n{text}\n",
+        policy=policy,
+        target_key=projections.ProjectionNamespaceKey(policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1),
+        pending={
+            extraction_parts.part_path(Path(path), 2).as_posix():
+                "---\npart_of: gate.md\n---\n\n## Extracted text\n\n[00:50] The meeting closed.\n",
+        } if multipart else {},
+    )
+    (source,) = source_item.variants
+    summary = _variant(
+        "Knowledge Base/Notes/gate.md", "2" * 64, "The truck can enter through the open gate.",
+        fields={"type": "insight", "sources": "Sources/gate"},
+    )
+    if layout == "catalog-capacity":
+        monkeypatch.setattr(projections, "MAX_GOVERNED_CATALOG_ITEMS", 3)
+        monkeypatch.setattr(
+            projections, "MAX_GOVERNED_SEARCH_BYTES_PER_ITEM",
+            sum(len(value.encode("utf-8")) for value in source.search_fields.values()),
+        )
+        unclipped_source, _ = catalog_publication.fit_parts((source_item, _item(summary)))
+        assert unclipped_source.variants[0].parts
+        withheld = projection_store.ProjectionItemVariants("Knowledge Base/Notes/withheld.md", "3" * 64, ())
+        fitted, *_ = catalog_publication.fit_parts((source_item, _item(summary), withheld))
+        (source,) = fitted.variants
+        assert not source.parts
+        assert source.search_fields == unclipped_source.variants[0].search_fields
+        assert projected_retrieval.transcript_samples(source) == projected_retrieval.transcript_samples(
+            unclipped_source.variants[0],
+        )
+    offset = text.index("[00:19]")
+    baseline = _runtime((_item(source), _item(summary)))
+    samples, _ = projected_retrieval.transcript_samples(source)
+    assert any(quote in match.text for _, match in samples)
+    bank = transcript_banks.publish(
+        tmp_path, baseline.namespace.namespace_key,
+        samples, [(1.0, 0.0) if quote in match.text else (0.0, 1.0) for _, match in samples],
+    )
+    if multipart:
+        assert len(samples) == (1 if layout == "one-turn-head" else 2)
+    vector = replace(_vector(source, (0.2, 0.8)), transcript_bank=bank)
+    rows = (vector, _vector(summary, (1.0, 0.0)))
+    runtime = _runtime((_item(source), _item(summary)), vectors=rows)
+    family = projection_measurement_store.MeasurementFamilyKey(
+        namespace_key=runtime.namespace.namespace_key,
+        lane="vector", extractor_version=_VECTOR_EXTRACTOR, model_version=embeddings.MODEL_NAME,
+    )
+    manifest = projection_measurement_store.stage_measurement_store(
+        tmp_path, namespace=runtime.namespace, family=family, measurements=rows,
+    )
+    _, stored_index = projection_measurement_store.load_vector_index(
+        tmp_path, namespace=runtime.namespace, family=family, expected_rows_digest=manifest.rows_digest,
+    )
+    runtime = replace(runtime, vector_index=stored_index)
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+    kwargs = dict(
+        query="Vehicle access instructions", limit=2, mode="hybrid", rerank=False, graph=False,
+        principal=principal.owner_principal(surface="mcp"), purpose=None,
+    )
+
+    compiled = projection_runtime.find_projected_hits(tmp_path, runtime, **kwargs)
+    default = projection_runtime.find_projected_hits(tmp_path, runtime, prefer_source_passages=True, **kwargs)
+    if layout == "catalog-capacity":
+        without_withheld = _runtime((unclipped_source, _item(summary)), vectors=rows)
+        assert projection_runtime.find_projected_hits(
+            tmp_path, without_withheld, prefer_source_passages=True, **kwargs,
+        ) == default
+
+    assert compiled.hits[0].path == summary.item_identity
+    hit = default.hits[0]
+    assert hit.path == source.item_identity
+    assert hit.transcript_ts == 19
+    assert default.incomplete_source_passages is multipart
+    passage = hit.passage
+    assert passage["part"] == 1 and quote in passage["text"]
+    assert offset <= passage["offset"] and passage["length"] <= 4000
+    assert passage["text"] == text[passage["offset"]:passage["offset"] + passage["length"]]
+
+
+@pytest.mark.parametrize("layout", [
+    "inline-heading", "fenced-heading", "unicode-separator", "ambiguous-first-part", "missing-later-part",
+])
+def test_projected_search_reports_incomplete_coverage_of_visible_unmapped_text(monkeypatch, tmp_path, layout):
+    path = "Knowledge Base/Sources/gate.md"
+    turn = "[00:19] Leave the gate open until the truck arrives."
+    ambiguous = layout == "ambiguous-first-part"
+    missing = layout == "missing-later-part"
+    example = {
+        "inline-heading": "A label example is `## Extracted text`.\n\n",
+        "fenced-heading": "```markdown\n## Extracted text\n```\n\n",
+        "unicode-separator": "A label example is\u2028## Extracted text\n\n",
+    }
+    opening = example[layout] + turn + "\n\n" if layout in example else ""
+    extracted = f"{turn}\n\n## Preserved notes\n\n{turn}\n" if ambiguous else turn if missing else ""
+    policy = Policy(fingerprint="f" * 64)
+    item = catalog_publication.catalog_item(
+        vault_root=tmp_path, path=path,
+        source=(
+            "---\ntitle: Gate log\ntype: source\nextraction_parts: 2\n---\n\n"
+            f"{opening}## Extracted text\n\n{extracted}"
+        ),
+        policy=policy,
+        target_key=projections.ProjectionNamespaceKey(policy.fingerprint, projections.PROJECTOR_SCHEMA_VERSION, 1),
+        pending={} if missing else {
+            extraction_parts.part_path(Path(path), 2).as_posix():
+                "---\npart_of: gate.md\n---\n\n## Extracted text\n\n[00:50] The meeting closed.\n",
+        },
+    )
+    (source,) = item.variants
+    runtime = _runtime((item,), vectors=(_vector(source, (1.0, 0.0)),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts is None and hit.passage is None
+    assert result.incomplete_source_passages is (ambiguous or missing)
+
+
+@pytest.mark.parametrize("visible", [False, True], ids=["withheld-body", "interrupted-position"])
+def test_projected_search_checks_coverage_only_for_visible_text(monkeypatch, tmp_path, visible):
+    path = "Knowledge Base/Sources/gate.md"
+    text = "[00:19] Leave the gate open until the truck arrives."
+    fields = {"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: projected_retrieval.TIMED_SOURCE_HEAD}
+    source = _variant(path, "1" * 64, text, fields=fields)
+    if visible:
+        source = replace(source, head=projections.ProjectionHead(0, len(text), ((8, 12),)))
+    else:
+        released = {key: value for key, value in source.search_fields.items() if key != "body"}
+        source = replace(source, search_fields=released)
+    runtime = _runtime((_item(source),), vectors=(_vector(source, (1.0, 0.0)),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts is None and hit.passage is None
+    assert result.incomplete_source_passages is visible
+
+
+def test_projected_search_reports_partial_when_another_visible_turn_cannot_be_opened(monkeypatch, tmp_path):
+    path = "Knowledge Base/Sources/gate.md"
+    turn = "[00:19] Leave the gate open until the truck arrives."
+    text = "[00:01] The electronic gate failed.\n" + turn
+    source = _variant(path, "1" * 64, text, fields={"type": "source", projected_retrieval.TIMED_SOURCE_FIELD: "true"})
+    source = replace(source, head=projections.ProjectionHead(0, len(text), ((8, 12),)))
+    item = _item(source)
+    namespace = _runtime((item,)).namespace.namespace_key
+    offset = text.index(turn) + 4
+    bank = transcript_banks.publish(
+        tmp_path, namespace, ((1, transcript_passages.TranscriptMatch(offset, offset + len(turn), turn, 19)),),
+        [(1.0, 0.0)],
+    )
+    runtime = _runtime((item,), vectors=(replace(_vector(source, (0.0, 1.0)), transcript_bank=bank),))
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, *, is_query: [[1.0, 0.0]])
+
+    result = projection_runtime.find_projected_hits(
+        tmp_path, runtime, query="Vehicle access instructions", limit=1, mode="hybrid",
+        graph=False, rerank=False, principal=principal.owner_principal(surface="mcp"),
+        purpose=None, prefer_source_passages=True,
+    )
+
+    (hit,) = result.hits
+    assert hit.path == path and hit.transcript_ts == 19
+    assert hit.passage["text"] == turn and hit.passage["offset"] == offset
+    assert result.incomplete_source_passages
 
 
 def test_projected_rank_policy_demotes_a_vault_defined_superseded_label(tmp_path):

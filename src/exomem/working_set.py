@@ -122,6 +122,7 @@ _CONNECTION_LAST_TIER_BEHAVIOURS: frozenset[str] = frozenset(
 _CONNECTION_INBOUND_REPLACES_BEHAVIOUR = "replaces"  # nosemgrep: ep-word-literal -- closed registry behaviour value
 #: The most characters a connection's `why` may occupy, cut on a word boundary.
 CONNECTION_WHY_MAX_CHARS = 140
+_CONNECTION_WHY_SEPARATOR = ": "
 
 #: Entries the working-continuity block may carry, and the characters they may
 #: spend. Both are hard: the block leads every packet, including an abstained
@@ -1239,6 +1240,7 @@ def run_lanes(
     neighbourhood: frozenset[str] | None = None,
     precedent_reach: Callable[[], tuple[frozenset[str], frozenset[str]]] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     reached: dict[str, set[str]] | None = None,
     analysis: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
@@ -1342,6 +1344,7 @@ def run_lanes(
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
                     visible=visible,
+                    purpose=purpose,
                     status_basis=status_basis,
                     parent_reads=parent_reads,
                     request_segment=request_segment,
@@ -1737,7 +1740,7 @@ def attach_task_links(
             links = read_connections(
                 vault_root, [c["source_ref"] for c in candidates],
                 by_path=link_targets, visible=caller.visible, per_seed=TASK_LINKS_PER_CANDIDATE,
-                defer_why=True,
+                defer_why=True, purpose=caller.purpose,
             )
     except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
         log.debug("task-context links unavailable", exc_info=True)
@@ -1896,10 +1899,14 @@ def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
 
 def _connection_why(
     vault_root: Path, *, relation: str, direction: str, authoring_rel: str,
-    target_rel: str, authoring_body: str | None, target_body: str | None,
+    target_rel: str, authoring_body: str | None, lede_body: str | None,
     resolver: Any, seen: Callable[[str], bool],
 ) -> str:
-    """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary."""
+    """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary.
+
+    Both bodies arrive as the caller's prose, each egressed under the page it was read from,
+    so a line inside an origin carrier is never a quoted line and the lede holds no carrier.
+    """
     from . import markdown_relations
     from .governance import egress
 
@@ -1930,10 +1937,8 @@ def _connection_why(
                     # so the line is not quoted and the lede stands in.
                     if "[[" in context:
                         context = ""
-    if not context and target_body:
-        context = working_set_index.lede(
-            egress.prose_for_caller(vault_root, target_body, owner_path=target_rel)
-        )
+    if not context and lede_body:
+        context = working_set_index.lede(lede_body)
         # A lede link is shown by its display name only when it names a page the caller sees;
         # otherwise the bare relation stands, so no path or withheld name reaches the reason.
         # The wikilink opener is a fixed syntax token: the display pass renders only the links the
@@ -1948,12 +1953,37 @@ def _connection_why(
                 context = ""
     if not context:
         return f"{relation} ({direction})"
-    prefix = f"{relation} ({direction}): "
+    # The release guard uses this protocol separator to recognize quoted reasons.
+    prefix = f"{relation} ({direction}){_CONNECTION_WHY_SEPARATOR}"
     room = CONNECTION_WHY_MAX_CHARS - len(prefix)
     if len(context) > room:
         cut = context[: room + 1].rpartition(" ")[0]
         context = cut or context[:room]
     return prefix + context
+
+
+def packet_has_graph_quotes(packet: Mapping[str, Any]) -> bool:
+    """Whether the compiled packet includes prose from a graph pointer's page body."""
+    roles = {role["id"] for role in packet.get("roles", ()) if role.get("lane") == "graph"}
+    return bool(roles) and any(
+        pointer.get("role") in roles
+        and _CONNECTION_WHY_SEPARATOR in str(pointer.get("why") or "")
+        for pointer in packet.get("pointers") or ()
+    )
+
+
+def graph_quote_access(vault_root: Path, *, purpose: str | None) -> bool:
+    """Use one source-access decision for this invocation's cache and graph compilation."""
+    from .governance import egress, principal
+
+    record = principal.invocation_served()
+    who = principal.effective_principal()
+    key = ("graph_quote_access", Path(vault_root), who, purpose)
+    if record is None:
+        return egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    if key not in record:
+        record[key] = egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    return record[key]
 
 
 def read_connections(
@@ -1964,6 +1994,8 @@ def read_connections(
     visible: Callable[[str], bool] | None,
     per_seed: int,
     defer_why: bool = False,
+    purpose: str | None = None,
+    quote_prose: bool | None = None,
 ) -> dict[str, tuple[list[Connection], int]] | None:
     """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
 
@@ -2027,8 +2059,11 @@ def read_connections(
             best[target] = (*key, connection)
     if not ranked:
         return {}
-    # The `why` reads pages, so it is built only for the connections a seed will serve.
-    resolver = find.borrow_query_resolver(Path(vault_root), visible)
+    # A reason can quote from anywhere in a body. Callers who need a page projection
+    # get a pointer and the relation, and can open the page through its release boundary.
+    if quote_prose is None:
+        quote_prose = egress.unrestricted_source_access(vault_root, purpose=purpose)
+    resolver = find.borrow_query_resolver(Path(vault_root), visible) if quote_prose else None
     seed_paths = set(seeds)
 
     def _seen(rel: str) -> bool:
@@ -2036,21 +2071,26 @@ def read_connections(
         return rel in seed_paths or (rel in by_path and (visible is None or visible(rel)))
 
     def _body(rel: str) -> str | None:
+        """The page's prose for this caller, egressed under the path it was read from."""
         page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
-        return None if page is None else str(page.body or "")
+        if page is None:
+            return None
+        return egress.prose_for_caller(Path(vault_root), str(page.body or ""), owner_path=rel)
 
     def _reason(seed: str, connection: Connection) -> str:
         bare = f"{connection.relation} ({connection.direction})"
-        if budget_exhausted("working_set.connection_why"):
+        if not quote_prose or budget_exhausted("working_set.connection_why"):
             # The connection still serves; only the context clause goes unfilled.
             return bare
         authoring_rel = seed if connection.direction == "outbound" else connection.target_path
         target_rel = connection.target_path if connection.direction == "outbound" else seed
         try:
+            authoring_body = _body(authoring_rel)
+            lede_body = authoring_body if authoring_rel == connection.target_path else _body(connection.target_path)
             return _connection_why(
                 Path(vault_root), relation=connection.relation, direction=connection.direction,
                 authoring_rel=authoring_rel, target_rel=target_rel,
-                authoring_body=_body(authoring_rel), target_body=_body(connection.target_path),
+                authoring_body=authoring_body, lede_body=lede_body,
                 resolver=resolver, seen=_seen,
             )
         except egress.ReaderViewUnavailable:
@@ -2287,6 +2327,7 @@ def _lane(
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     request_segment: str = "turn",
@@ -2336,7 +2377,7 @@ def _lane(
         return LaneResult(_entity_lane(vault_root, role, anchors=anchors))
     if role.lane == "graph":
         return LaneResult(
-            _graph_lane(vault_root, role, anchors=anchors, visible=visible)
+            _graph_lane(vault_root, role, anchors=anchors, visible=visible, purpose=purpose)
         )
     if role.lane == "evidence":
         return LaneResult(_evidence_lane(role, neighbourhood=neighbourhood))
@@ -2899,6 +2940,7 @@ def _graph_lane(
     *,
     anchors: Sequence[Any],
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
 ) -> tuple[LaneItem, ...]:
     """Each resolved anchor's ranked connections as pointers. A target's BODY belongs to another lane.
 
@@ -2933,6 +2975,7 @@ def _graph_lane(
         connections = read_connections(
             vault_root, seeds,
             by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR,
+            quote_prose=graph_quote_access(vault_root, purpose=purpose),
         )
     except Exception:  # noqa: BLE001 - the graph lane is optional by contract
         log.debug("activation graph connections failed", exc_info=True)
@@ -4493,6 +4536,7 @@ def _carried_material(
             freshness_snapshot=freshness_snapshot,
             neighbourhood=frozenset({path}),
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             admit=admit,
             status_basis=status_basis,
@@ -4775,6 +4819,7 @@ def _follow_up_packet(
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             status_basis=status_basis,
         )
@@ -5935,6 +5980,7 @@ def _compile_packet(
                 reached=reached,
             ),
             visible=visible,
+            purpose=purpose,
             reached=reached,
             analysis=analysis,
             request_anchors=resolution.anchors,

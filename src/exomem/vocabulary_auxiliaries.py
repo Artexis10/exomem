@@ -11,6 +11,7 @@ from typing import Any
 
 # A Source's original bytes, opaque under its page: `vocabulary_gate.begin_batch` binds their digest, never their content.
 SOURCE_ORIGINAL = "source-original"
+SOURCE_IMPORT_RECEIPT = "source-import-receipt"
 _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer manifest defines these code-owned roles of bound writes.
     {
         "relation-review",
@@ -22,6 +23,7 @@ _ROLES = frozenset(  # nosemgrep: ep-word-set -- The sealed vocabulary writer ma
         "registry-history",
         "compiled-history",  # The semantic writer retains its exact prior Markdown.
         SOURCE_ORIGINAL,
+        SOURCE_IMPORT_RECEIPT,
     }
 )
 # Primary-bound roles are admitted through their one primary (`vault._validate_batch_write_access`).
@@ -60,6 +62,7 @@ class DerivedAuxiliaryManifest:
     primary_before_sha256: str | None = None
     primary_before_source: str | None = field(repr=False, default=None)
     primary_guard: Any = field(repr=False, default=None)
+    retained_primary: bool = False
 
 
 def seal(
@@ -132,6 +135,39 @@ def seal(
     )
 
 
+
+def seal_retained_original(vault_root: Path, *, primary, original) -> DerivedAuxiliaryManifest:
+    """Seal an original whose already-installed Source is a read-only batch input."""
+    manifest = seal(vault_root, primary=primary, derived=((SOURCE_ORIGINAL, original),))
+    _retained_source_image(manifest)
+    return replace(manifest, retained_primary=True)
+
+
+def _retained_source_image(manifest: DerivedAuxiliaryManifest):
+    from . import vault
+
+    guard = manifest.primary_guard
+    text = manifest.primary_before_source
+    if (
+        not isinstance(guard, vault.PathGuard) or not guard.binds_bytes
+        or guard.target != manifest.primary_path or not isinstance(text, str)
+        or guard.expected_content_hash != manifest.primary_before_sha256
+        or manifest.primary_before_sha256 != manifest.primary_after_sha256
+        or _hash(text) != manifest.primary_after_sha256
+        or len(manifest.entries) != 1 or manifest.entries[0].role != SOURCE_ORIGINAL
+        or vault.in_append_only_tree(manifest.primary_path) != "Sources"
+    ):
+        raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+    guard.recheck(manifest.root)
+    fields = vault.parse_frontmatter(text, strict=True)[0]
+    claim = manifest.entries[0]
+    if fields.get("evidence_file") != claim.path or fields.get("binary_sha256") != claim.after_sha256:
+        raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+    return SimpleNamespace(
+        path=manifest.primary_path, after=text.encode("utf-8"),
+        before_sha256=manifest.primary_before_sha256, after_sha256=manifest.primary_after_sha256,
+    )
+
 def planned_images(vault_root: Path, writes: Iterable[Any]) -> Iterator[Any]:
     """Adapt complete guarded plans to the same validator as staged images.
 
@@ -192,6 +228,8 @@ def declared_originals(vault_root: Path, manifest: Any) -> dict[str, tuple[str, 
     for item in manifests:
         if not isinstance(item, DerivedAuxiliaryManifest) or item._seal is not _SEAL or item.root != root:
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+        if item.retained_primary:
+            _retained_source_image(item)
         declared.update(
             (claim.path, (claim.after_sha256, item.primary_path))
             for claim in item.entries if claim.role == SOURCE_ORIGINAL
@@ -235,6 +273,10 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         by_path[image.path] = image
     primary = by_path.get(manifest.primary_path)
+    if manifest.retained_primary:
+        if primary is not None:
+            raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+        primary = _retained_source_image(manifest)
     if (
         primary is None
         or primary.after_sha256 != manifest.primary_after_sha256
@@ -259,6 +301,14 @@ def validate(vault_root: Path, images: Iterable[Any], manifest: Any) -> dict[str
         ):
             raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
         roles[claim.path] = claim.role
+        if claim.role == SOURCE_IMPORT_RECEIPT:
+            from . import source_imports
+
+            if claim.before_sha256 is not None:
+                raise ValueError("VOCABULARY_AUXILIARY_CHANGED")
+            source_imports.validate_bound_receipt(
+                root, claim.path, image.after, page=manifest.primary_path, source=primary.after,
+            )
         if claim.role == "registry-history":
             from . import registry_history
 

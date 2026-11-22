@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: 2599a3be6252a403dabb5c088df1ae7b819d3e86492b8eab75a3c058fcc6a653
+  skill_contract: 8fe7d420e5443cd2d7fa79d55c2c102232843831b1dbc5d0b3a6189eb961ed7f
   version: "0.2.0"
 ---
 
@@ -25,8 +25,9 @@ Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
 Sources/Evidence content is immutable; their pointers change only through governed
-moves and pointer corrections. Content outside the managed Knowledge Base is
-read-only. Before a compiled write: reuse current relevant search/read results,
+moves and pointer corrections. Vault content outside the managed Knowledge Base is
+read-only; ordinary workspace files are not the vault, so write them with your own
+file tools. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.

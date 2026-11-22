@@ -956,7 +956,7 @@ def display_title_from_bytes(raw: bytes, path: Path | str) -> str | None:
     except UnicodeDecodeError:
         return None
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
-    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    fm, body, _ = parse_frontmatter(markdown_lf(text))
     return resolve_display_title(fm, body, path) or None
 
 
@@ -2320,6 +2320,8 @@ class _WorkspaceArtifact:
     installation_witness: held_fs.InstallationWitness | None = None
     requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
+    #: Renamed in from an upload stage: installing it renames it again and copies nothing.
+    adopted: bool = False
 
     @property
     def path(self) -> Path:
@@ -2455,6 +2457,14 @@ def _remove_created_workspace(
 
 def _batch_workspace_token(size: int) -> str:
     return secrets.token_hex(size)
+
+
+class _StageAdoptionUnavailable(Exception):
+    """A staged upload cannot be renamed into this workspace, so the batch copies it instead."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _after_batch_destination_published(_path: Path) -> None:
@@ -3091,6 +3101,155 @@ class _BatchWorkspace:
                     os.close(descriptor)
             raise
 
+    def adopt_staged_artifact(
+        self,
+        name: str,
+        staged: Any,
+        *,
+        expected_size: int,
+        expected_hash: str,
+    ) -> _WorkspaceArtifact:
+        """Rename a private upload stage into this workspace: no payload byte is read or written.
+
+        The stage was hashed and fsynced before the boundary, so this only proves that the file is still
+        the one that was staged, by its (dev, ino) and its (size, mtime, ctime) read after the fsync. A
+        stage that differs is refused without a hash, since reading it here is the cost this route removes.
+        Raises `_StageAdoptionUnavailable` when the workspace cannot take a rename; the caller then copies.
+        """
+        if (staged.size, staged.sha256) != (expected_size, expected_hash):
+            raise PathGuardError("PATH_GUARD_INVALID", "staged upload does not match the plan")
+        filesystem, directory = self.held_filesystem, self.held_directory
+        if filesystem is None or directory is None:
+            raise _StageAdoptionUnavailable("no held filesystem")
+        if not STAT_GENERATION_TRUSTED:
+            raise _StageAdoptionUnavailable("no trusted change witness")
+        try:
+            stage_relative = Path(os.path.abspath(staged.path)).relative_to(Path(os.path.abspath(staged.vault_root)))
+            Path(os.path.abspath(self.parent)).relative_to(Path(os.path.abspath(staged.vault_root)))
+        except ValueError as error:
+            raise PathGuardError("PATH_GUARD_TARGET", "staged upload is outside the vault") from error
+        self.recheck()
+        stage_directory = filesystem.parent(stage_relative.parent.as_posix())
+        if not stage_directory.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "upload stage directory is unavailable")
+        with stage_directory.require() as stage_parent:
+            opened = filesystem.file(stage_parent, stage_relative.name, access="mutate")
+            if not opened.ok:
+                raise PathGuardError("PATH_GUARD_CHANGED", "staged upload is unavailable")
+            with opened.require() as source:
+                before = source.version()
+                if (
+                    (before.identity.device, before.identity.inode) != (staged.device, staged.inode)
+                    or before.identity.link_count != 1
+                ):
+                    raise PathGuardError("PATH_GUARD_CONTENT", "staged upload changed after it was staged")
+                if (before.size, before.mtime_ns, before.change_time_ns) != staged.generation:
+                    # A touch that leaves the bytes alone (an xattr write, a timestamp reset by a sync client) moves the
+                    # generation too. The copy route hashes against `expected_hash`, so it commits those bytes and still
+                    # refuses an edited stage, the same trade `_WorkspaceArtifact.recheck` makes.
+                    raise _StageAdoptionUnavailable("the stage changed after it was staged")
+                moved = filesystem.rename(source, directory, name, replace=False)
+                if not moved.ok:
+                    if moved.error is not None and moved.error.code == "CROSS_DEVICE":
+                        raise _StageAdoptionUnavailable("the stage is on another filesystem")
+                    raise PathGuardError("PATH_GUARD_UNSAFE", "staged upload could not be adopted")
+        # The name is bound before anything else is checked, so a failure below leaves the file registered
+        # (not hashed: `content_bound` stays False) and the workspace cleanup still removes it.
+        reopened = filesystem.file(directory, name, access="read")
+        if not reopened.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage is unavailable")
+        held_file = reopened.require()
+        artifact: _WorkspaceArtifact | None = None
+        try:
+            descriptor = getattr(held_file, "descriptor", None)
+            if not isinstance(descriptor, int):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "adopted stage is unavailable")
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "adopted stage is unsafe")
+            artifact = _WorkspaceArtifact(
+                self, name, descriptor, _identity(name, info), expected_hash,
+                held_file=held_file, adopted=True,
+            )
+            self.artifacts[name] = artifact
+            # The rename moved the ctime, so size and mtime carry the proof that nothing wrote in between.
+            if (
+                (info.st_dev, info.st_ino) != (staged.device, staged.inode)
+                or (info.st_size, info.st_mtime_ns) != (staged.generation[0], staged.generation[1])
+            ):
+                raise PathGuardError("PATH_GUARD_CONTENT", "staged upload changed while it was adopted")
+            artifact.generation = artifact.current_generation(info)
+            artifact.content_bound = True
+            self.recheck()
+            return artifact
+        except Exception:
+            if artifact is None:
+                held_file.close()
+            raise
+
+    def install_adopted_artifact(
+        self,
+        artifact: _WorkspaceArtifact,
+        final: Path,
+        relative: str,
+        *,
+        inverse_recheck: Callable[[], None] | None,
+    ) -> PathIdentity:
+        """Rename an adopted stage onto its missing destination, reading nothing.
+
+        The identity comes from the descriptor already held. The rename also flushes the directories, and
+        that can fail once the stage is installed: the caller then binds the destination through
+        `_bind_adopted_installation`, which needs the artifact still open and still in the census.
+        """
+        absolute_final = Path(os.path.abspath(final))
+        filesystem, parent, directory = self.held_filesystem, self.held_parent, self.held_directory
+        if filesystem is None or parent is None or directory is None or absolute_final.parent != self.parent:
+            raise PathGuardError("PATH_GUARD_TARGET", "batch destination left the workspace parent")
+
+        def recheck_precondition() -> None:
+            if inverse_recheck is not None:
+                inverse_recheck()
+            self.recheck()
+            artifact.recheck()
+            current = filesystem.file(parent, absolute_final.name)
+            if current.ok:
+                current.require().close()
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch destination appeared")
+            if current.error is None or current.error.code != "MISSING":
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch destination changed")
+
+        recheck_precondition()
+        opened = filesystem.file(directory, artifact.name, access="mutate")
+        if not opened.ok:
+            raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage is unavailable")
+        with opened.require() as source:
+            descriptor = getattr(source, "descriptor", None)
+            if not isinstance(descriptor, int) or not _same_identity(artifact.identity, os.fstat(descriptor)):
+                raise PathGuardError("PATH_GUARD_CHANGED", "adopted stage changed")
+            before = source.version()
+            _before_batch_destination_published(final, restoring=False)
+            if inverse_recheck is not None:
+                inverse_recheck()
+            moved = filesystem.rename(source, parent, absolute_final.name, replace=False)
+            if not moved.ok:
+                refused = moved.error is not None and moved.error.code in {"DESTINATION_EXISTS", "IDENTITY_CHANGED"}
+                raise PathGuardError(
+                    "PATH_GUARD_CHANGED" if refused else "PATH_GUARD_UNSAFE",
+                    "batch destination publish was refused",
+                )
+            info = os.fstat(descriptor)
+            try:
+                installed = source.version()
+            except OSError:
+                installed = None
+            # Vouch for the installed bytes by their generation only when the rename left size and mtime
+            # alone; otherwise the batch hashes the installed file, as it does after a copy that moved.
+            if installed is not None and (installed.size, installed.mtime_ns) == (before.size, before.mtime_ns):
+                artifact.installed_generation = (installed.size, installed.mtime_ns, installed.change_time_ns)
+        artifact.close()
+        self.artifacts.pop(artifact.name, None)
+        return _identity(relative, info)
+
     def _replace_once(self, artifact: _WorkspaceArtifact, final: Path) -> None:
         if os.replace in getattr(os, "supports_dir_fd", set()):
             os.replace(
@@ -3146,6 +3305,16 @@ class _BatchWorkspace:
                 raise PathGuardError(
                     "PATH_GUARD_TARGET", "batch destination escaped the vault"
                 ) from error
+            if (
+                artifact.adopted
+                and expected_destination is None
+                and published_metadata is None
+                and custody is None
+                and custody_factory is None
+            ):
+                return self.install_adopted_artifact(
+                    artifact, final, relative.as_posix(), inverse_recheck=inverse_recheck
+                )
             # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
             content = held_fs.Chunks(functools.partial(_verified_chunks, artifact))
             acquired = held_fs.acquire(root)
@@ -3389,6 +3558,8 @@ class _BatchWorkspace:
             if absolute_final.parent != self.parent:
                 return None
             if self.held_filesystem is not None and self.held_parent is not None:
+                if artifact.adopted:
+                    return self._bind_adopted_installation(artifact, absolute_final)
                 self.recheck()
                 artifact.recheck()
                 current = self.held_filesystem.file(
@@ -3479,6 +3650,38 @@ class _BatchWorkspace:
             return artifact.identity
         except (OSError, PathGuardError):
             return None
+
+    def _bind_adopted_installation(
+        self, artifact: _WorkspaceArtifact, absolute_final: Path
+    ) -> PathIdentity | None:
+        """Record an adopted stage that the rename installed before the install call raised.
+
+        The rename consumed the stage's workspace name, so neither the artifact's name recheck nor the
+        workspace census can prove it any more. The artifact's open descriptor still holds the inode: a
+        destination that is that inode, with no other link and the bound bytes, is the installed stage.
+        The artifact leaves the census here so that the rollback's workspace recheck passes.
+        """
+        assert self.held_filesystem is not None and self.held_parent is not None
+        self.recheck_identity()
+        if artifact.closed or not _same_identity(artifact.identity, os.fstat(artifact.descriptor)):
+            return None
+        current = self.held_filesystem.file(self.held_parent, absolute_final.name)
+        if not current.ok:
+            return None
+        with current.require() as installed:
+            descriptor = getattr(installed, "descriptor", None)
+            if not isinstance(descriptor, int) or installed.identity.link_count != 1:
+                return None
+            info = os.fstat(descriptor)
+            if not _same_identity(artifact.identity, info):
+                return None
+            installed_identity = _identity(absolute_final.name, info)
+            if _descriptor_hash(descriptor, installed_identity) != artifact.content_hash:
+                return None
+        artifact.close()
+        self.artifacts.pop(artifact.name, None)
+        self.recheck()
+        return installed_identity
 
     def unlink_installed(
         self, final: Path, expected: _BatchArtifactGuard, *, inverse_recheck: Callable[[], None]
@@ -5048,6 +5251,20 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
     """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
+    data, guard, _ = _read_guarded_path(vault_root, path, with_generation=False)
+    return data, guard
+
+
+def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, PathGuard | None]:
+    """Read text and return a guard when its bytes can be rechecked without reading it again."""
+    data, content, generation = _read_guarded_path(vault_root, path, with_generation=True)
+    guard = content if content.leaf_policy == "store" else generation
+    return data.decode("utf-8"), guard
+
+
+def _read_guarded_path(
+    vault_root: Path, path: Path, *, with_generation: bool
+) -> tuple[bytes, PathGuard, PathGuard | None]:
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -5064,27 +5281,40 @@ def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
     absolute = root / relative
     from .vault_store import read
 
-    # A stored page's size is the store's: its file may be absent, or differ until it is projected.
-    # A page that the store lacks raises FileNotFoundError, as the missing file does.
-    stored = read.owned_meta(root, relative.as_posix())
+    # Read the stored bytes and their guard in one snapshot. The disk copy can
+    # be absent or older than the stored page.
+    target = relative.as_posix()
+    stored = read.owned_page(root, target)
+    if stored is not None:
+        _require_read_limit(stored.meta.size)
+        guard = _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
+        return stored.body, guard, None
     try:
-        limit = absolute.lstat().st_size if stored is None else stored.size
+        limit = absolute.lstat().st_size
     except FileNotFoundError:
         raise
     except OSError as error:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
+    if with_generation:
+        return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+    return data, guard, None
 
 
 @dataclass
 class PreparedBinaryContent:
-    """One seekable binary payload with its exact precomputed identity."""
+    """One seekable binary payload with its exact precomputed identity.
+
+    `staged` is the same bytes already hashed and fsynced in a private upload stage (`upload_stage`). The
+    batch renames it in and installs it without reading a byte; `stream` is the copy it falls back to.
+    """
 
     stream: IO[bytes]
     size: int
     sha256: str
+    staged: Any | None = None
 
 
 @dataclass
@@ -5989,6 +6219,7 @@ def batch_atomic_write(
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _publish_originals: Callable[[], None] | None = None,
+    _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
@@ -6024,8 +6255,10 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals,
+                publish_originals=_publish_originals, retained_original=_retained_original,
             )
+    if _retained_original is not None:
+        raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -6132,6 +6365,37 @@ def _require_distinct_destinations(writes: Iterable[PlannedWrite]) -> None:
         if portable_destination in destinations:
             raise PathGuardError("PATH_GUARD_TARGET", "batch destinations collide")
         destinations.add(portable_destination)
+
+
+def _stage_binary_artifact(
+    workspace: _BatchWorkspace,
+    name: str,
+    content: PreparedBinaryContent,
+    *,
+    adoptable: bool,
+    custody: _ArtifactCustody | None = None,
+) -> _WorkspaceArtifact:
+    """Adopt a staged upload into the workspace by rename, or copy the stream when the stage cannot be adopted."""
+    if content.staged is not None:
+        try:
+            if not adoptable or custody is not None:
+                raise _StageAdoptionUnavailable("payload custody needs its own copy")
+            return workspace.adopt_staged_artifact(
+                name, content.staged, expected_size=content.size, expected_hash=content.sha256
+            )
+        except _StageAdoptionUnavailable as unavailable:
+            # The copy runs under the boundary, so the log names why this commit moved bytes there.
+            from .writer_lease import log_active_mutation_phase
+
+            log.info("upload stage copied under the boundary: %s", unavailable.reason)
+            log_active_mutation_phase("upload_stage_copy_fallback", reason=unavailable.reason.replace(" ", "_"))
+    return workspace.create_stream_artifact(
+        name,
+        content.stream,
+        expected_size=content.size,
+        expected_hash=content.sha256,
+        **({"custody": custody} if custody is not None else {}),
+    )
 
 
 def _batch_atomic_write_locked(
@@ -6423,11 +6687,8 @@ def _batch_atomic_write_locked(
                         "PATH_GUARD_INVALID",
                         "binary batch content requires an exact missing destination",
                     )
-                artifact = workspace.create_stream_artifact(
-                    f"stage-{index}.tmp",
-                    write.content.stream,
-                    expected_size=write.content.size,
-                    expected_hash=write.content.sha256,
+                artifact = _stage_binary_artifact(
+                    workspace, f"stage-{index}.tmp", write.content, adoptable=_payload_custody is None,
                     **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
@@ -6668,8 +6929,12 @@ def _batch_atomic_write_locked(
                 guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
+                # Before the first flip the whole batch is admitted, so a refusal installs nothing;
+                # each later flip readmits the write it installs, against the live access state.
+                # Revalidating every pending write at every flip made a batch's hold quadratic.
                 _validate_batch_write_access(
-                    root, writes[index:], proposed=writes, auxiliary_manifest=_vocabulary_auxiliaries,
+                    root, writes if index == 0 else writes[index:index + 1], proposed=writes,
+                    auxiliary_manifest=_vocabulary_auxiliaries,
                     granted_paths=(
                         additive_guard.effect_paths() if additive_guard is not None else frozenset()
                     ),
@@ -7052,6 +7317,40 @@ def _batch_state_target(vault_root: Path, target: Path) -> bool:
     )
 
 
+class _PlanByPath(Mapping[str, PlannedWrite]):
+    """A plan's writes by resolved vault-relative path, resolved on the first lookup.
+
+    Only a confined writer or a capture-namespace target reads it (`connector_boundary.require_write`
+    returns first for every other write), and building it eagerly resolved the whole plan once per
+    admitted write.
+    """
+
+    def __init__(self, vault_resolved: Path, plan: tuple[PlannedWrite, ...]) -> None:
+        self._vault_resolved = vault_resolved
+        self._plan = plan
+        self._by_path: dict[str, PlannedWrite] | None = None
+
+    def _resolved(self) -> dict[str, PlannedWrite]:
+        if self._by_path is None:
+            by_path = {}
+            for write in self._plan:
+                try:
+                    by_path[write.path.resolve().relative_to(self._vault_resolved).as_posix()] = write
+                except (ValueError, OSError):
+                    continue  # The ordinary target check owns external-state and invalid paths.
+            self._by_path = by_path
+        return self._by_path
+
+    def __getitem__(self, key: str) -> PlannedWrite:
+        return self._resolved()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._resolved())
+
+    def __len__(self) -> int:
+        return len(self._resolved())
+
+
 def _validate_batch_write_access(
     vault_root: Path,
     writes: Iterable[PlannedWrite],
@@ -7103,12 +7402,7 @@ def _validate_batch_write_access(
         if registry_primary is not None and "registry-history" in roles.values()
         else set()
     )
-    proposed_by_path = {}
-    for write in full_plan:
-        try:
-            proposed_by_path[write.path.resolve().relative_to(vault_resolved).as_posix()] = write
-        except (ValueError, OSError):
-            continue  # The ordinary target check below owns external-state and invalid paths.
+    proposed_by_path = _PlanByPath(vault_resolved, full_plan)
     for write in writes:
         for target in (write.path, *write.ensure_directories):
             if _batch_state_target(vault_root, target):
@@ -7130,6 +7424,13 @@ def _validate_batch_write_access(
                 if rel in primary_bound_paths and primary_admission is not None:
                     if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
+                elif roles.get(rel) == vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT:
+                    # The sealed manifest binds this create-only receipt to its
+                    # exact Source. The caller still needs to be able to create that Source.
+                    connector_boundary.require_write(
+                        vault_root, auxiliary_manifest.primary_path,
+                        content=proposed_by_path[auxiliary_manifest.primary_path].content.encode("utf-8"),
+                    )
                 elif not (defer_registry and rel in registry_storage):
                     connector_boundary.require_write(
                         vault_root, rel,
@@ -9535,7 +9836,7 @@ class WikilinkResolver:
                         continue  # deleted since the corpus was listed
                     self._add_entry(rel, *_keyed_title(display_title_from_bytes(page.body, rel)))
                 else:
-                    self._add_entry(rel, *_keyed_title(self._read_title(md)))
+                    self._add_entry(rel, *_keyed_title(self.read_title(md)))
 
     @classmethod
     def from_maps(
@@ -9689,10 +9990,11 @@ class WikilinkResolver:
         abs_path = vault_root / rel_path
         if not abs_path.is_file():
             return False, None
-        return True, self._read_title(abs_path)
+        return True, self.read_title(abs_path)
 
     @staticmethod
-    def _read_title(abs_path: Path) -> str | None:
+    def read_title(abs_path: Path) -> str | None:
+        """The display title that a build indexes for a file; None when it cannot be read as text."""
         try:
             raw = abs_path.read_bytes()
         except OSError:
@@ -10548,6 +10850,11 @@ def document_newline(text: str) -> str:
 def with_newline(text: str, newline: str) -> str:
     """Rewrite `text`'s LF and CRLF line endings to `newline`."""
     return text.replace("\r\n", "\n").replace("\n", newline)
+
+
+def markdown_lf(text: str) -> str:
+    """Use CommonMark's physical line breaks for parsed text and character positions."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def render_frontmatter_document(

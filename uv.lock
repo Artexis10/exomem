@@ -846,7 +846,7 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.193.0" # x-release-please-version
+version = "0.196.0" # x-release-please-version
 source = { editable = "." }
 dependencies = [
     { name = "aiofile" },

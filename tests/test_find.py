@@ -95,6 +95,26 @@ def test_semantic_chunk_inside_origin_carrier_uses_complete_parent(vault: Path) 
     assert "regulator" in find_module._stem_anchored_excerpt(page, "regulation")
 
 
+def test_a_matched_chunk_with_no_prose_gives_way_to_the_keyword_excerpt(vault: Path) -> None:
+    """A heading or a stub as the excerpt hid which page held the fact an agent needed."""
+    path = vault / "Knowledge Base/Notes/Insights/stub-chunk.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: insight\n---\n\n# Stub chunk\n\n## Relations\n\n"
+        "The regulator doubled the staffing quota for the north depot in March.\n",
+        encoding="utf-8",
+    )
+    page = find_module._CACHE.get(path, vault)
+    keyword = "The regulator doubled the staffing quota for the north depot in March."
+
+    assert find_module._semantic_excerpt(page, "regulator", "## Relations", keyword) == keyword
+    assert find_module._semantic_excerpt(page, "regulator", "Too short.", keyword) == keyword
+    prose = "The regulator doubled the staffing quota for the north depot in March, citing the audit."
+    assert find_module._semantic_excerpt(page, "regulator", "## Staffing\n\n" + prose, keyword).endswith("the audit.")
+    # With no keyword excerpt to give way to, the chunk is still served.
+    assert find_module._semantic_excerpt(page, "regulator", "## Relations", None) == "## Relations"
+
+
 def test_origin_excerpt_keeps_raw_capture_and_withholds_a_literal_example(vault: Path) -> None:
     """A raw capture keeps every byte; search fields withhold a reserved opener even in code."""
     carrier = "<!-- exomem-origin:v9 literal-attribution -->"

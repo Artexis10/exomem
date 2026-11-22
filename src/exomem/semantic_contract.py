@@ -51,6 +51,7 @@ from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
+from .vocabulary import registry as vocabulary_registry
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -1246,6 +1247,10 @@ class SemanticCorpusContext:
     #: ones: a move's after corpus binds the claims its commit leaves (`PriorClaims.with_pages`).
     prior_claims: Any = field(default=None, repr=False, compare=False)
     capture_inventory: Any = field(default=None, repr=False, compare=False)
+    #: In store mode, the title that the writer's resolver indexes for each corpus path that holds no
+    #: page state here (a file that cannot be read as text, a stored page that the identity walk prunes,
+    #: such as one in the trash). None when that set is not known: the writer then builds from the disk.
+    unparsed_titles: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -2066,6 +2071,63 @@ def reference_identity_snapshot_is_current(
             )
 
 
+@dataclass(slots=True)
+class _WriterCensus:
+    proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None
+
+
+_WRITER_CENSUS: contextvars.ContextVar[_WriterCensus | None] = contextvars.ContextVar(
+    "writer_disk_census", default=None
+)
+
+
+@contextmanager
+def share_writer_disk_census() -> Iterator[None]:
+    """Let one save's initial preflight use its resolver's disk proof once."""
+    token = _WRITER_CENSUS.set(_WriterCensus())
+    try:
+        yield
+    finally:
+        _WRITER_CENSUS.reset(token)
+
+
+def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | None:
+    """A detached resolver over the resident corpus of a store-mode vault, else None.
+
+    The corpus holds the resolver maps of every page that it parses, and the titles of the other paths
+    that a build of the writer's resolver indexes (the store's pages and the files that it does not own),
+    and the store-mode proof that the corpus is current (``_store_resident_entry``) needs no walk of the
+    stored pages. A miss reads and builds nothing: the caller's own build from the store and the disk
+    handles it.
+    """
+    request_budget.checkpoint()
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    entry = _store_resident_entry(
+        root,
+        _corpus_cache_key(root),
+        relation_registry.core_registry(),
+        semantic_language_registry.core_registry(),
+        writer_resolver=True,
+    )
+    if entry is None:
+        return None
+    context = entry[1]
+    if context.unparsed_titles is None:
+        return None
+    resolver = vault.WikilinkResolver.from_maps(
+        root,
+        full_paths=context.resolver_full_paths,
+        kb_stripped=context.resolver_kb_stripped,
+        stems=context.resolver_stems,
+        titles=context.resolver_titles,
+        candidates_by_key=context.resolver_candidates_by_key,
+    )
+    resolver.on_entries_changed(context.unparsed_titles.items(), ())
+    return resolver
+
+
 def current_writer_resolver_entries(
     vault_root: Path,
     *,
@@ -2304,6 +2366,47 @@ def _published_corpus_entry(
     return resident[0] if resident is not None and resident[1] == checkpoint else None
 
 
+def _store_resident_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    writer_resolver: bool = False,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """In store mode, the resident entry when the store and the disk both stand where it was built.
+
+    The store's revision and its recorded registry revisions are in the configuration census, and
+    every commit moves them, so a census that holds them equal needs no row of the store: the stored
+    pages are those that the entry was built or advanced from (``advance_corpus_for_store_commit``).
+    The files that the store does not own have no such revision, so a walk proves them. This needs no
+    freshness registry: a store-mode watcher seeds none. A file's entry holds what its build reads of it
+    besides its bytes (``_file_entry``), so a chmod or a new hard link fails the proof as an edit does.
+    """
+    share = _WRITER_CENSUS.get() if writer_resolver else None
+    if _store_census_owns(root) is None:
+        return None
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    if resident is None:
+        return None
+    entry = resident[0]
+    # The entry and its configuration still match the resolver's proof. The first
+    # eligible preflight consumes it. Creation revalidation and ordinary readers
+    # take their own census.
+    if writer_proof is not None and writer_proof[0] == root and writer_proof[1] is entry:
+        return entry
+    disk = _disk_page_census(root)
+    if disk is None or disk != frozenset(item for item in entry[0] if item[1] == "f"):
+        return None
+    if share is not None:
+        from .collection_store.preview import bound_writer
+
+        if bound_writer(root) is not None:
+            share.proof = (root, entry)
+    return entry
+
+
 def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
     """Borrow an immutable generation without serializing readers behind its publisher."""
     root = Path(vault_root)
@@ -2362,7 +2465,7 @@ def borrow_capture_inventory(vault_root: Path):
         return None
     entry, _caption = resident
     inventory = entry[1].capture_inventory
-    if (inventory is None or inventory.type_dependency is None or inventory.type_dependency[0] == "unavailable"
+    if (inventory is None or inventory.type_dependency is None or vocabulary_registry.dependency_unavailable(inventory.type_dependency)
             or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
         return None
     if inventory.store_identity is not None:
@@ -2599,34 +2702,83 @@ def _config_inputs(root: Path) -> tuple[Path, ...]:
     )
 
 
-def _corpus_census(root: Path) -> tuple | None:
-    """Stat census of every filesystem input ``build_corpus_context`` reads.
+def _markdown_name(name: str) -> bool:
+    """Whether a file name has the ``.md`` suffix, in any letter case (``Path.suffix``: a name that is only
+    the suffix has none). A file extension is a closed set that the format fixes."""
+    return len(name) > 3 and name.casefold().endswith(".md")
+
+
+_FileEntry = tuple[str, str, int, int, int, int, int, int]
+
+
+def _file_entry(rel: str, info: os.stat_result, path: str | os.PathLike[str]) -> _FileEntry:
+    """The census entry of a Markdown file, from the one ``lstat`` that the walk takes of it.
+
+    Size and mtime say that its bytes may have changed. The mode (type and permission bits), the link
+    count and the owner say what a build makes of it: the vault walk leaves out a file that has another
+    hard link, and a page that the process cannot read has no title. A chmod, a link or a chown moves
+    neither size nor mtime. An access-control list or a security label is in no stat result, so no entry
+    carries it.
+
+    The link count is the one that the vault walk's rule reads (``lstat``). A directory entry's own stat
+    withholds it (zero) on Windows, so only there is the file stat'ed again, as ``semantic_census`` does
+    for the file id; on POSIX the entry costs no further stat. A walk and a patch then record the same
+    entry for the same file on every platform.
+    """
+    if not info.st_nlink:
+        info = os.stat(path, follow_symlinks=False)
+    return (rel, "f", info.st_size, info.st_mtime_ns, info.st_mode, info.st_nlink, info.st_uid, info.st_gid)
+
+
+def _lstat_is_page_file(info: os.stat_result) -> bool:
+    """Whether an ``lstat`` result is a file that the vault walk can yield: regular, and no link or reparse point.
+
+    The walk (``vault._walk_vault_md_entry``) judges each entry by ``lstat`` and leaves out a link, whatever it
+    points to. A census that followed links would hold the stats of the target and miss the swap of a file for a
+    link to a copy with the same stats, which a build over the disk then leaves out.
+    """
+    return stat.S_ISREG(info.st_mode) and not vault._is_reparse(info)
+
+
+def _listing_is_reparse_folder(child: os.DirEntry) -> bool:
+    """Whether a listed folder is a reparse point, which the vault walk leaves out as it does a link.
+
+    ``DirEntry.is_dir(follow_symlinks=False)`` reads a Windows junction as a folder, and ``is_symlink()`` is false
+    for it, so the listing's type alone would enter it. Only Windows stat results carry ``st_file_attributes``
+    (``os.stat_result`` has no such field elsewhere), and the listing supplies them with no further call; a POSIX
+    folder is judged by the listing's type alone, with no stat. The rule is the one that the walk and the page
+    check apply (``vault._is_reparse``).
+    """
+    return hasattr(os.stat_result, "st_file_attributes") and vault._is_reparse(child.stat(follow_symlinks=False))
+
+
+def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
+    """Stat census of every Markdown file that ``build_corpus_context`` reads from the disk.
 
     Mirrors both production walks — ``_build_identity_census`` (every canonical
     ``.md`` under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
-    (the full vault minus skip dirs and sync-conflict copies) — and appends
-    the non-Markdown inputs in ``_config_inputs``: ``_access.yaml`` (page
-    eligibility via ``access.access_tier``) and the selected note-type
-    overlay (the owner's compiled eligibility). In store mode the walks skip
-    the stored pages, and each stored page that a cold build reads has its
-    store row's entry instead. Returns
-    ``None`` when the tree cannot be fingerprinted safely; callers must then
-    build uncached so the build path surfaces its own safety errors.
+    (the full vault minus skip dirs and sync-conflict copies). In store mode both
+    walks leave out the stored pages, whose files are projections: the folders that
+    the store owns are listed by name only, and a path that the store holds is judged
+    by its string, with no stat. Returns ``None`` when the tree cannot be fingerprinted
+    safely; callers must then build uncached so the build path surfaces its own safety
+    errors.
     """
     request_budget.checkpoint()
-    entries: set[tuple[str, str, int, int]] = set()
+    entries: set[_FileEntry] = set()
     kb = vault.kb_root(root)
     owned = _store_census_owns(root)
 
-    def strict_walk(directory: Path) -> None:
+    def strict_walk(directory: Path, directory_rel: str) -> None:
         # Mirror of _build_identity_census: every canonical entry under KB,
         # alias-free. Closed runtime namespaces are never knowledge inputs.
+        at_kb_root = directory == kb
         for child in os.scandir(directory):
             request_budget.checkpoint()
-            if _prune_identity_census_directory(kb, directory, child.name):
+            rel = f"{directory_rel}/{child.name}"
+            if owned is not None and owned(rel):
                 continue
-            path = Path(child.path)
-            if owned is not None and owned(path.relative_to(root).as_posix()):
+            if _prune_identity_census_name(child.name, at_kb_root=at_kb_root):
                 continue
             # Alias refusal comes first and applies to EVERY entry, exactly as
             # in the walk this mirrors: an aliased subtree can hide or
@@ -2644,7 +2796,7 @@ def _corpus_census(root: Path) -> tuple | None:
             # between the listing and the stat raised FileNotFoundError, which
             # the handler below turns into a census of `None` -- degrading
             # every caller to an uncached full build (#561).
-            if not is_directory and path.suffix.casefold() != ".md":
+            if not is_directory and not _markdown_name(child.name):
                 continue
             # A `.md` that vanishes in that same window still fails closed,
             # unlike in `_build_identity_census`, which skips it. That walk
@@ -2655,39 +2807,34 @@ def _corpus_census(root: Path) -> tuple | None:
             if vault._is_reparse(info):
                 raise _CensusUnsafe
             if stat.S_ISDIR(info.st_mode):
-                strict_walk(path)
+                strict_walk(Path(child.path), rel)
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add((path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns))
+            entries.add(_file_entry(rel, info, child.path))
 
-    def loose_walk(directory: Path) -> None:
-        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
-        # with the same is_dir()/is_file() semantics (which traverse links).
+    def loose_walk(directory: Path, directory_rel: str) -> None:
+        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies, and leave out every link or reparse
+        # point, a folder or a page, as its `lstat` rule does. The listing says a link is one with no stat on POSIX.
         for child in os.scandir(directory):
             request_budget.checkpoint()
-            path = Path(child.path)
-            if owned is not None and owned(path.relative_to(root).as_posix()):
+            rel = f"{directory_rel}/{child.name}" if directory_rel else child.name
+            if owned is not None and owned(rel):
                 continue
-            if child.is_dir():
-                if vault.in_excluded_scan_dir(path.relative_to(root).as_posix()):
+            if child.is_dir(follow_symlinks=False):
+                if vault.in_excluded_scan_dir(rel) or _listing_is_reparse_folder(child):
                     continue
-                loose_walk(path)
-            elif (
-                child.is_file()
-                and path.suffix.lower() == ".md"
-                and ".sync-conflict-" not in child.name
-            ):
+                loose_walk(Path(child.path), rel)
+            elif _markdown_name(child.name) and ".sync-conflict-" not in child.name:
                 try:
-                    info = child.stat()
+                    info = child.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     # Same race, same answer as the strict walk above: a page
                     # that vanished between the listing and the stat is not in
                     # this snapshot.
                     continue
-                entries.add(
-                    (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
-                )
+                if _lstat_is_page_file(info):
+                    entries.add(_file_entry(rel, info, child.path))
 
     try:
         try:
@@ -2699,9 +2846,38 @@ def _corpus_census(root: Path) -> tuple | None:
             # census must refuse to vouch for that tree rather than mask it.
             if not stat.S_ISDIR(kb_info.st_mode) or vault._is_reparse(kb_info):
                 raise _CensusUnsafe
-            strict_walk(kb)
-        loose_walk(root)
-        request_budget.checkpoint()
+            strict_walk(kb, kb.relative_to(root).as_posix())
+        loose_walk(root, "")
+    except _CensusUnsafe:
+        # A deliberate refusal: the tree holds an alias or a nonregular page.
+        log.debug("corpus census refused an unsafe tree at %s", root)
+        return None
+    except (OSError, ValueError):
+        # Anything else -- and the two used to be indistinguishable in
+        # production, so a vanished sidecar and a genuine refusal looked the
+        # same from the outside (#561).
+        log.debug("corpus census could not read %s", root, exc_info=True)
+        return None
+    return frozenset(entries)
+
+
+def _corpus_census(root: Path) -> tuple | None:
+    """Stat census of every filesystem input ``build_corpus_context`` reads.
+
+    The Markdown files of the disk (``_disk_page_census``), and the non-Markdown inputs in
+    ``_config_inputs``: ``_access.yaml`` (page eligibility via ``access.access_tier``) and
+    the selected note-type overlay (the owner's compiled eligibility). In store mode
+    each stored page that a cold build reads has its store row's entry instead of its
+    file's. Returns ``None`` when the tree cannot be fingerprinted safely; callers must
+    then build uncached so the build path surfaces its own safety errors.
+    """
+    request_budget.checkpoint()
+    disk = _disk_page_census(root)
+    if disk is None:
+        return None
+    entries = set(disk)
+    owned = _store_census_owns(root)
+    try:
         if owned is None:
             config = _config_census(root)
         else:
@@ -2714,14 +2890,7 @@ def _corpus_census(root: Path) -> tuple | None:
         if config is None:
             raise OSError("the semantic configuration inputs could not be read")
         entries.update(config)
-    except _CensusUnsafe:
-        # A deliberate refusal: the tree holds an alias or a nonregular page.
-        log.debug("corpus census refused an unsafe tree at %s", root)
-        return None
     except (OSError, ValueError):
-        # Anything else -- and the two used to be indistinguishable in
-        # production, so a vanished sidecar and a genuine refusal looked the
-        # same from the outside (#561).
         log.debug("corpus census could not read %s", root, exc_info=True)
         return None
     return tuple(sorted(entries))
@@ -2883,7 +3052,7 @@ def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
 
     if not find_corpus.store_serves(root):
         return None
-    return lambda rel: ownership.classify(rel) is ownership.Ownership.PAGE
+    return ownership.page_classifier()
 
 
 def _is_page_entry(entry: tuple) -> bool:
@@ -3044,11 +3213,15 @@ def _patch_markdown_census(
             continue
         path = root / rel_path
         try:
-            info = path.stat()
+            info = path.lstat()
         except FileNotFoundError:
             entries.pop(rel_path, None)
         else:
-            entries[rel_path] = (rel_path, "f", info.st_size, info.st_mtime_ns)
+            # What the walk does with the path: a link, a folder or another file type has no entry.
+            if _lstat_is_page_file(info):
+                entries[rel_path] = _file_entry(rel_path, info, path)
+            else:
+                entries.pop(rel_path, None)
     return tuple(sorted(entries.values()))
 
 
@@ -3075,11 +3248,14 @@ def _registries_match_disk(
 def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | None:
     """Return changed Markdown paths, or ``None`` for a non-page delta.
 
-    Census entries are ``(path, kind, size, mtime_ns)``. A removed path only
+    Census entries are ``(path, kind, size, mtime_ns, ...)``; a file's carry its mode, link count and
+    owner after those (``_file_entry``). A removed path only
     exists in ``before`` and an added path only in ``after``; both remain safe
     incremental page changes when their surviving entry is a page's
     (``_is_page_entry``). The store revision names no page: the stored pages'
-    entries say what its move changed, so it is no delta of its own.
+    entries say what its move changed, so it is no delta of its own. A file whose mode, links or owner
+    moved is none either: a delta reads bytes, and cannot tell whether the walk still admits the file
+    or whether the process can still read it, as the build from nothing does.
     """
     before_by_path = {str(entry[0]): entry for entry in _without_store_revision(before)}
     after_by_path = {str(entry[0]): entry for entry in _without_store_revision(after)}
@@ -3096,6 +3272,8 @@ def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | Non
         if (old is not None and not _is_page_entry(old)) or (
             new is not None and not _is_page_entry(new)
         ):
+            return None
+        if old is not None and new is not None and old[1] == new[1] == "f" and old[4:] != new[4:]:
             return None
     return changed
 
@@ -3193,8 +3371,12 @@ def _reconcile_markdown_delta(
     *,
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
-) -> SemanticCorpusContext:
+    patch_only: bool = False,
+) -> SemanticCorpusContext | None:
     """Apply current Markdown bytes to an already-materialized context.
+
+    With ``patch_only`` a delta whose locality is not provable returns None, where otherwise the
+    whole corpus is derived: a caller that must stay cheap leaves that derivation to its next reader.
 
     The stable-identity census intentionally covers every canonical Markdown
     file under the KB, including scan-excluded paths. Closed runtime namespaces
@@ -3205,7 +3387,10 @@ def _reconcile_markdown_delta(
 
     In store mode a stored page is read from the store, as the cold build reads
     it, and judged by the cold build's rules for a stored page, its strict
-    frontmatter parse included.
+    frontmatter parse included. A file is judged as the walk judges it
+    (``vault.walk_vault_md_admits``) and read as the cold build reads it
+    (``_read_loose_page``), so that a new hard link or a file that cannot be read
+    is what a build from nothing makes of it.
     """
     from . import capture_inventory
 
@@ -3221,6 +3406,8 @@ def _reconcile_markdown_delta(
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     owned = _store_census_owns(root)
     stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
+    unparsed = None if context.unparsed_titles is None else dict(context.unparsed_titles)
+    walk_listings: dict[Path, frozenset[str] | None] = {}
     stored_bodies: Mapping[str, bytes] = {}
     if stored:
         from .vault_store import read
@@ -3230,6 +3417,8 @@ def _reconcile_markdown_delta(
             stored_bodies = view.bodies(stored)
     for rel_path in changed_paths:
         request_budget.checkpoint()
+        if unparsed is not None:
+            unparsed.pop(rel_path, None)
         reference_only_path = _is_reference_only_path(rel_path)
         if reference_only_path:
             # Read as the reference scan reads it and as leniently: a deleted
@@ -3250,7 +3439,8 @@ def _reconcile_markdown_delta(
             # The cold build parses a stored page only when the identity census admits it, and
             # keeps its state when the vault corpus holds it too.
             identity_member = _stored_identity_member(kb_rel + "/", rel_path)
-            included = identity_member and read.corpus_member(rel_path, "vault")
+            corpus_member = read.corpus_member(rel_path, "vault")
+            included = identity_member and corpus_member
             raw = stored_bodies.get(rel_path) if identity_member else None
             try:
                 source = None if raw is None else raw.decode("utf-8")
@@ -3260,18 +3450,25 @@ def _reconcile_markdown_delta(
                 # The cold build's refusal, so that whether a page is accepted never depends on
                 # the cache. A parse that it accepts reads the identity that the state below holds.
                 _strict_page_identity(rel_path, source)
+            # Only a page that a build over the disk indexes but the identity walk prunes (the cold
+            # build's `eligible` less its states); a page outside the vault corpus, such as a trashed
+            # one, is in no resolver.
+            if unparsed is not None and rel_path in stored_bodies and corpus_member and not identity_member:
+                unparsed[rel_path] = vault.display_title_from_bytes(stored_bodies[rel_path], rel_path)
         else:
             identity_member = in_kb and not reference_only_path
-            included = not vault.in_excluded_scan_dir(rel_path) and (
-                ".sync-conflict-" not in PurePosixPath(rel_path).name
-            )
+            # The walk's own rule (`vault.walk_vault_md_admits`), as the cold build gets its paths from the
+            # walk: a hard link, an alias, a conflict copy or a path in a skipped folder is no page of the corpus.
+            included = vault.walk_vault_md_admits(root, source_path, walk_listings)
             if in_kb:
                 source = _identity_guarded_delta_source(root, rel_path)
+            elif included:
+                source = _read_loose_page(root, rel_path, source_path)
+                if source is None and unparsed is not None:
+                    # The cold build indexes such a path with the title that it can read, and no page state.
+                    unparsed[rel_path] = vault.WikilinkResolver.read_title(source_path)
             else:
-                try:
-                    source = _read_corpus_source(root, source_path)
-                except FileNotFoundError:
-                    source = None
+                source = None
         if capture_inventory.raw_path(root, rel_path):
             raw_changes[rel_path] = (capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
                                      if source is not None else None)
@@ -3315,6 +3512,8 @@ def _reconcile_markdown_delta(
         writer_visibility=context.writer_visibility,
     )
     if candidate is None:
+        if patch_only:
+            return None
         candidate = _context_from_state_map(
         root,
         states,
@@ -3332,7 +3531,11 @@ def _reconcile_markdown_delta(
             with read.snapshot(root) as view:
                 identity = store_identity(view.connection)
                 inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
-    return replace(candidate, capture_inventory=inventory)
+    return replace(
+        candidate,
+        capture_inventory=inventory,
+        unparsed_titles=None if unparsed is None else MappingProxyType(unparsed),
+    )
 
 
 def on_corpus_files_changed(
@@ -3615,6 +3818,87 @@ def _patch_corpus_files_changed_locked(
     return _CORPUS_PATCH_APPLIED
 
 
+def _store_census_revision(census: tuple) -> int | None:
+    """The store revision that a census stands at, from its ``<store>`` entry."""
+    for entry in census:
+        if entry[0] == _STORE_CENSUS_MARKER:
+            return entry[2]
+    return None
+
+
+def advance_corpus_for_store_commit(
+    vault_root: Path, before_revision: int, after_revision: int, paths: Iterable[str]
+) -> bool:
+    """Move the resident corpus context across one store commit, so the next save's build is a hit.
+
+    A commit evicts nothing by itself, but it moves the store revision that the census holds, so the
+    next reader walked and reconciled every page to learn what the commit's own paths already say.
+    Here the context and the census stand at ``before_revision``, and the commit's Markdown ``paths``
+    (a move names both) are the only pages that differ: re-derive those from the store at
+    ``after_revision`` by the same page delta that a file event applies. Returns whether it advanced.
+
+    Any other state leaves the entry as it is, and the next reader's census walk reconciles or
+    rebuilds it as before: a context at another revision, a changed registry, overlay or policy
+    input, more than ``_PAGE_DELTA_LIMIT`` pages (a bulk change is cheaper derived once, by its
+    reader), a delta whose locality is not provable, or a store that moved again. The advance drops
+    the event caption, so the next reader proves the files that the store does not own by a walk.
+    """
+    if not corpus_context_cache_enabled():
+        return False
+    root = Path(vault_root)
+    changed = tuple(sorted({rel for rel in paths if PurePosixPath(rel).suffix.casefold() == ".md"}))
+    if len(changed) > _PAGE_DELTA_LIMIT:
+        return False
+    cache_key = _corpus_cache_key(root)
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+        if entry is None or _store_census_revision(entry[0]) != before_revision:
+            return False
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
+        if language_hash != f"{language.schema_version}:{language.content_hash}" or (
+            entry[1].registry.core_version, entry[1].registry.extension_hash,
+        ) != (relation_definitions.core_version, relation_definitions.extension_hash):
+            return False
+        from .vault_store import read
+
+        # The pages, the census entries and the configuration read one store state.
+        with read.request_snapshot(root):
+            config = _config_census(root)
+            if (
+                config is None
+                or _store_census_revision(config) != after_revision
+                or _without_store_revision(config)
+                != _without_store_revision(_stored_config_census(entry[0]))
+            ):
+                return False
+            context = (
+                entry[1]
+                if not changed
+                else _reconcile_markdown_delta(
+                    root, entry[1], changed,
+                    relation_definitions=relation_definitions, language=language, patch_only=True,
+                )
+            )
+            if context is None:
+                return False
+            patched = _patch_markdown_census(
+                root, entry[0], changed_paths=changed, deleted_paths=()
+            )
+        census = tuple(sorted((*(item for item in patched if _is_page_entry(item)), *config)))
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+                return False
+            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+            # A store-mode vault's registry never sees a file event (the watcher seeds none), so a
+            # kept caption always matches and every build would be an event hit that never proves the
+            # files the store does not own. The next reader proves them (`_store_resident_entry`).
+            _drop_corpus_caption_locked(cache_key)
+    return True
+
+
 def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
     """Evict other vaults down to the bound; call with the cache lock held."""
     while len(_CORPUS_CONTEXT_CACHE) > _CORPUS_CONTEXT_CACHE_MAX_VAULTS:
@@ -3882,6 +4166,7 @@ def build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    writer_preflight: bool = False,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """Enrich admitted pages without publishing caller facts into the shared cache.
 
@@ -3889,22 +4174,25 @@ def build_corpus_context_with_census(
     decision. A restricted caller's admissions are collected in their own
     disclosure boundary: they shape this context, not the caller's receipt.
 
-    The enrichment memo holds the enrichment of every page. Only a build that
-    enriches every page writes it, and only when no caller lacks an admission that
-    the build had (a dependency of "unavailable" is never written). A restricted
-    caller never writes it and never enriches a page it may not see. It reads the
-    memo when it can validate it, with each such page at its raw state. When it
-    cannot, it enriches the pages it may see and keeps nothing.
+    The enrichment memo holds the enrichment of every page. A build that withholds
+    any page, or whose type or status dependency is unavailable, never writes it. A
+    restricted caller never enriches a page it may not see. It reads the memo when
+    it can validate it, with each such page at its raw state. When it cannot, it
+    enriches the pages it may see and keeps nothing.
     """
     from .governance import egress
 
     root = Path(vault_root)
     basis = status_basis or lifecycle_statuses.Basis(root)
     type_basis = type_basis or note_types.Basis(root)
+    share = _WRITER_CENSUS.get() if writer_preflight else None
+    if share is not None:
+        _WRITER_CENSUS.set(None)
     context, census = _build_corpus_context_with_census(
         root,
         registry=relation_registry.core_registry(),
         language_registry=semantic_language_registry.core_registry(),
+        writer_proof=share.proof if share is not None else None,
     )
     # A supplied registry is the meaning of every page without its own binding,
     # so its identity is a dependency of each enriched page.
@@ -3936,11 +4224,18 @@ def build_corpus_context_with_census(
                 memo = None
             if memo is not None and memo[0] is context and not restricted:
                 return memo[2], census
-        previous = memo[0].pages if memo is not None else {}
-        reused = memo[3] if memo is not None else {}
         # A filter decides every page: as one set, under one snapshot.
         admitted = None if visible is None else egress.admitted(visible, context.pages)
         withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
+        # The current admission proved every page. Reuse the validated enrichment
+        # without copying its page states into a second mapping.
+        if not withheld and memo is not None and memo[0] is context:
+            enriched = memo[2]
+            if writer_visibility is not None:
+                enriched = replace(enriched, writer_visibility=writer_visibility)
+            return enriched, census
+        previous = memo[0].pages if memo is not None else {}
+        reused = memo[3] if memo is not None else {}
         # A page this caller may not see keeps its raw state and is enriched by no one on its behalf:
         # nothing it enriches reaches the caller's context, and the memo only ever holds a build of every page.
         states = {
@@ -4028,21 +4323,18 @@ def build_corpus_context_with_census(
         # This caller's context is its own: cut from the owner's memo when it validates it, else built in
         # full, and never kept.
         return derive(states, writer_visibility, patching=memo[2] if memo is not None else None), census
-    if memo is not None and memo[0] is context:
-        enriched = memo[2]
-    else:
-        # The shared enrichment stands for no caller: it carries no writer view.
-        enriched = derive(states, None, patching=memo[2] if memo is not None else None)
-        # The reused states keep this basis object, so record the dependency it will have once a
-        # later read loads it.
-        dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
-        # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
-        # match it, so it is no enrichment to share, and it must not replace one that others can.
-        if "unavailable" not in (dependency[0][0], dependency[1][0]):
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
-                if cached is not None and cached[1] is context:
-                    _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
+    # The shared enrichment stands for no caller: it carries no writer view.
+    enriched = derive(states, None, patching=memo[2] if memo is not None else None)
+    # The reused states keep this basis object, so record the dependency it will have once a
+    # later read loads it.
+    dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
+    # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
+    # match it, so it is no enrichment to share, and it must not replace one that others can.
+    if not any(vocabulary_registry.dependency_unavailable(each) for each in dependency[:2]):
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
+            if cached is not None and cached[1] is context:
+                _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
     if writer_visibility is not None:
         enriched = replace(enriched, writer_visibility=writer_visibility)
     return enriched, census
@@ -4096,6 +4388,7 @@ def _build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     warm: bool = False,
     join_deadline: float | None = None,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -4134,6 +4427,14 @@ def _build_corpus_context_with_census(
                     len(event_entry[1].pages),
                 )
                 return event_entry[1], event_entry[0]
+        store_entry = _store_resident_entry(
+            root, cache_key, relation_definitions, language, writer_proof=writer_proof
+        )
+        if store_entry is not None:
+            log.info(
+                "semantic corpus context store-hit pages=%d", len(store_entry[1].pages)
+            )
+            return store_entry[1], store_entry[0]
         miss_reason = _event_miss_reason(
             root, cache_key, event_checkpoint, relation_definitions, language
         )
@@ -4438,11 +4739,8 @@ def _build_corpus_context_uncached(
     eligible: dict[str, Path] = {}
     paths = find_corpus.corpus_paths(root, "vault", lambda **walk: vault.walk_vault_md(root, **walk))
     # A stored page's path is the store's: resolving its file would stat a projection.
-    stored = (
-        {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages}
-        if isinstance(paths, find_corpus.StoreCorpus)
-        else {}
-    )
+    store_mode = isinstance(paths, find_corpus.StoreCorpus)
+    stored = {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages} if store_mode else {}
     for disk_path in sorted(paths, key=lambda item: item.as_posix()):
         request_budget.checkpoint()
         rel_path = stored.get(disk_path)
@@ -4472,19 +4770,9 @@ def _build_corpus_context_uncached(
         request_budget.checkpoint()
         if rel_path.startswith(kb_prefix):
             continue
-        try:
-            source = _read_corpus_source(root, disk_path)
-        except (OSError, UnicodeDecodeError) as error:
-            if (
-                activation.is_managed_governed_path(root, disk_path)
-                and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
-            ):
-                raise activation_manifest.ActivationManifestError(
-                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
-                    f"could not read governed semantic page {disk_path}: {error}",
-                ) from error
-            continue
-        consume(rel_path, source)
+        source = _read_loose_page(root, rel_path, disk_path)
+        if source is not None:
+            consume(rel_path, source)
     if candidate is not None:
         states[candidate.path] = candidate
         identity_census = identity_census.with_page(
@@ -4496,9 +4784,63 @@ def _build_corpus_context_uncached(
         _copy_registry(relation_definitions),
         identity_census,
     )
+    return replace(
+        context,
+        capture_inventory=capture_inventory.collect(root, raw_inputs),
+        unparsed_titles=(
+            _unparsed_titles(
+                root,
+                {rel: path for rel, path in eligible.items() if rel not in states},
+                frozenset(stored.values()),
+            )
+            if store_mode
+            else None
+        ),
+    )
 
 
-    return replace(context, capture_inventory=capture_inventory.collect(root, raw_inputs))
+def _unparsed_titles(
+    root: Path, skipped: Mapping[str, Path], stored: frozenset[str]
+) -> Mapping[str, str | None]:
+    """The title that the writer's resolver build indexes for each ``skipped`` corpus path.
+
+    A stored page's title comes from the store's bytes, a file's from the disk, and a path that
+    cannot be read is indexed with no title, as ``WikilinkResolver`` builds it.
+    """
+    from .vault_store import read
+
+    bodies: Mapping[str, bytes] = {}
+    held = [rel for rel in skipped if rel in stored]
+    if held:
+        with read.snapshot(root) as view:
+            bodies = view.bodies(held)
+    titles: dict[str, str | None] = {}
+    for rel, disk_path in skipped.items():
+        if rel not in stored:
+            titles[rel] = vault.WikilinkResolver.read_title(disk_path)
+        elif rel in bodies:  # a stored page that the store no longer holds is not in a build either
+            titles[rel] = vault.display_title_from_bytes(bodies[rel], rel)
+    return MappingProxyType(titles)
+
+
+def _read_loose_page(root: Path, rel_path: str, disk_path: Path) -> str | None:
+    """The text of a Markdown page outside the Knowledge Base that the walk yields; None when it is skipped.
+
+    The cold build and the page delta share this rule. A file that is not UTF-8 text, or that the process
+    cannot read, is no page state; one in a read-write governed folder refuses the build instead.
+    """
+    try:
+        return _read_corpus_source(root, disk_path)
+    except (OSError, UnicodeDecodeError) as error:
+        if (
+            activation.is_managed_governed_path(root, disk_path)
+            and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+        ):
+            raise activation_manifest.ActivationManifestError(
+                "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+                f"could not read governed semantic page {disk_path}: {error}",
+            ) from error
+        return None
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:

@@ -277,7 +277,7 @@ existing injection budget, and SHALL inject the returned packet as `additionalCo
 under a fixed data header that names it as retrieved memory, never as instructions.
 The rendered block SHALL carry current state first, then units, then pointers, each
 with its provenance ref, SHALL keep whole items only, and SHALL never exceed the
-render ceiling (`EXOMEM_RETRIEVE_INJECT_MAX_CHARS`, default 4,000 characters), dropping
+render ceiling (`EXOMEM_RETRIEVE_INJECT_MAX_CHARS`, default 6,000 characters), dropping
 trailing items rather than cutting one. A packet abstained as `ambiguous` SHALL inject
 the data header, the competing anchors' titles and refs and one line telling the agent
 to call `activate_context` with `anchor` set to the ref it chooses. A packet abstained

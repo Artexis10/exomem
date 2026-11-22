@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import memory_refs, page_names, reserved_paths, vault
+from . import get_page, memory_refs, page_names, reserved_paths, vault
 from .governance import egress
 
 # The compact write terminal validates what this module produces, so it owns the bounds: a method that
@@ -54,6 +54,10 @@ def locate(
         if not page:
             return None
         path = page_names.resolve_page(root, page, serve_stale=True, resolver_for=resolver_for)
+        # Accept the same missing suffix as a direct read, retaining the spelling for containment checks.
+        read_path = get_page.missing_path_for(path)
+        if read_path == f"{path}.md":
+            path = read_path
         confined = (root / path).resolve()
         # A path that leaves the vault, or that a link spelled around, is no page of this vault.
         if (

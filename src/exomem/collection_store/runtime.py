@@ -487,6 +487,10 @@ class CollectionStoreRuntime:
             self._handle = None
             self._writer_token = None
             handle.close()
+            # The commit's resident resolver belongs to the writer that held the store.
+            from ..vault_store import resident_catalogue
+
+            resident_catalogue.forget(self.root)
         return True
 
     def retire_idle_handle(self):

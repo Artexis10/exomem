@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.196.0](https://github.com/Artexis10/exomem/compare/v0.195.0...v0.196.0) (2026-11-21)
+
+
+### Features
+
+* **capture:** save each claim at its true strength, with the full rule outside the hook's block ([#2985](https://github.com/Artexis10/exomem/issues/2985)) ([1e667b9](https://github.com/Artexis10/exomem/commit/1e667b9545db9a4bedcbe0f4ac5df7728140f811))
+* **positions:** lead the first answer with the person's recorded position ([#2991](https://github.com/Artexis10/exomem/issues/2991)) ([210a251](https://github.com/Artexis10/exomem/commit/210a251a577eefe9f769342d39c6437ed303e3cd))
+* **vault-store:** release opt-in store mode ([#3000](https://github.com/Artexis10/exomem/issues/3000)) ([ca88a9d](https://github.com/Artexis10/exomem/commit/ca88a9d54601114c30eef477b2e10cb07011c804))
+
+
+### Bug Fixes
+
+* **audit:** limit pointer checks to source and evidence cards ([#2995](https://github.com/Artexis10/exomem/issues/2995)) ([f7c7811](https://github.com/Artexis10/exomem/commit/f7c7811fe9c6b65b7853b8b41955ca0e27674741))
+* **mcp:** show readable titles in write summaries ([#3002](https://github.com/Artexis10/exomem/issues/3002)) ([287d089](https://github.com/Artexis10/exomem/commit/287d0895164e78938f41b77d977c00de675e0aa6))
+* **media:** report whether image OCR retained text ([#2994](https://github.com/Artexis10/exomem/issues/2994)) ([a8152e5](https://github.com/Artexis10/exomem/commit/a8152e5620afab984ed7228a5d61ce935f6d616d))
+* **recall:** keep catalogue lock waits within the request budget ([#3001](https://github.com/Artexis10/exomem/issues/3001)) ([1040f70](https://github.com/Artexis10/exomem/commit/1040f70ee0df5592fa6a973e651530bde950fa86))
+* **recall:** keep connection reasons within release bounds ([#2951](https://github.com/Artexis10/exomem/issues/2951)) ([4321a00](https://github.com/Artexis10/exomem/commit/4321a005d8fdff37423b33932d072337e47b80ce))
+* **records:** resolve capture method links without a Markdown suffix ([#3009](https://github.com/Artexis10/exomem/issues/3009)) ([ee869c4](https://github.com/Artexis10/exomem/commit/ee869c4849acf8b4ad80ec6594a06e7ac473836d))
+* **vault-store:** guard top index write-backs with the stored bytes ([#3004](https://github.com/Artexis10/exomem/issues/3004)) ([8091430](https://github.com/Artexis10/exomem/commit/8091430d2384a15ec0be3b6f41dffff800975729))
+
+
+### Performance
+
+* **media:** keep model work and fan-out out of the background media boundary holds ([#3008](https://github.com/Artexis10/exomem/issues/3008)) ([9add2fc](https://github.com/Artexis10/exomem/commit/9add2fca65bf65d37a682a712c522008f79fdf68))
+* **media:** reuse the CUDA diarizer in WSL2 ([#2999](https://github.com/Artexis10/exomem/issues/2999)) ([96b772b](https://github.com/Artexis10/exomem/commit/96b772be87b0687367f4a584e6642f4e25f65137))
+* **upload:** stage upload bytes before the boundary, install by rename ([#2989](https://github.com/Artexis10/exomem/issues/2989)) ([85d7b98](https://github.com/Artexis10/exomem/commit/85d7b98efd7fb90037a1418edc6a0b0f9197a90b))
+* **vault-store:** a save keeps the corpus and the writer resolver resident ([#2981](https://github.com/Artexis10/exomem/issues/2981)) ([fbfe8df](https://github.com/Artexis10/exomem/commit/fbfe8df99551e13456850196d82c5a02d283b068))
+* **vault-store:** share save census and count index rows ([#3006](https://github.com/Artexis10/exomem/issues/3006)) ([f7d5f52](https://github.com/Artexis10/exomem/commit/f7d5f520a9b93a1bc6065a72e3dcd59d3e2a5235))
+
+## [0.195.0](https://github.com/Artexis10/exomem/compare/v0.194.0...v0.195.0) (2026-11-21)
+
+
+### Features
+
+* **capture-nudge:** deliver the capture reminder on the next prompt (opt-in) ([#2986](https://github.com/Artexis10/exomem/issues/2986)) ([8ff42b7](https://github.com/Artexis10/exomem/commit/8ff42b707e23b4b42da037f7d9c22212bdf62976))
+
+
+### Bug Fixes
+
+* **agent:** stop agents misreading empty recall arrays, stub excerpts and the read-only rule ([#2980](https://github.com/Artexis10/exomem/issues/2980)) ([4958bbd](https://github.com/Artexis10/exomem/commit/4958bbd4132dc7e19e9aca84b441931fade369f4))
+* **backup:** keep the governance store in vault backups ([#2975](https://github.com/Artexis10/exomem/issues/2975)) ([1bd28ac](https://github.com/Artexis10/exomem/commit/1bd28acf1ac371572f740ab42bebc9d9b0298f42))
+
+## [0.194.0](https://github.com/Artexis10/exomem/compare/v0.193.0...v0.194.0) (2026-11-21)
+
+
+### Features
+
+* **backup:** back up a personal vault with restic, check it and prove restores ([#2968](https://github.com/Artexis10/exomem/issues/2968)) ([bcf8f8a](https://github.com/Artexis10/exomem/commit/bcf8f8a577b1c4d93f46942ad6ec4d318063a65f))
+* **capture:** save held views, open questions and settled values ([#2953](https://github.com/Artexis10/exomem/issues/2953)) ([991d329](https://github.com/Artexis10/exomem/commit/991d3299e071e17fa09475f6c527713665fdf893))
+* **media:** index capture date and place for photos and videos, withheld per original ([#2961](https://github.com/Artexis10/exomem/issues/2961)) ([6f2a8fa](https://github.com/Artexis10/exomem/commit/6f2a8fab6cfe64171773623d77b068a928639c10))
+* **media:** keep verified replicas of originals in several declared stores ([#2954](https://github.com/Artexis10/exomem/issues/2954)) ([f529d96](https://github.com/Artexis10/exomem/commit/f529d96d6d8f46a3527ea5ed750ca7638fba3081))
+* **sources:** keep the files a user hands the agent, and fix Source capture gaps ([#2938](https://github.com/Artexis10/exomem/issues/2938)) ([493b6a7](https://github.com/Artexis10/exomem/commit/493b6a733b00ec735b7d694dd03122381cdabe15))
+
+
+### Bug Fixes
+
+* **egress:** clear a hit's borrowed content when its source page is withheld ([#2955](https://github.com/Artexis10/exomem/issues/2955)) ([30d0e71](https://github.com/Artexis10/exomem/commit/30d0e718a6d8627f4d8e38b0fc187ed14fe46683))
+* **records:** resolve collection titles when served, name the id edit takes, and close the import hardening change ([#2965](https://github.com/Artexis10/exomem/issues/2965)) ([29cea43](https://github.com/Artexis10/exomem/commit/29cea43c60e71e89449deafa640c62a606c20119))
+* **sources:** let an agent correct a mislabelled Source from what it reads ([#2974](https://github.com/Artexis10/exomem/issues/2974)) ([7766c48](https://github.com/Artexis10/exomem/commit/7766c48d61ed04c06e42d01cf9acff7bca8b9561))
+
+
+### Performance
+
+* **passage-evidence:** hold passage search under concurrent callers ([#2963](https://github.com/Artexis10/exomem/issues/2963)) ([42fe397](https://github.com/Artexis10/exomem/commit/42fe39714f594d2f5c741537f782d13d01298a78))
+* **passage-evidence:** keep passage search fast during a capture ([#2976](https://github.com/Artexis10/exomem/issues/2976)) ([a4dd717](https://github.com/Artexis10/exomem/commit/a4dd71772be1cd7b809c0d8f70c1e7fbfb1c03f0))
+* **runtime:** background passes give way to requests in flight ([#2970](https://github.com/Artexis10/exomem/issues/2970)) ([25739fc](https://github.com/Artexis10/exomem/commit/25739fc930471659418305db257838215b365dc5))
+* **service:** shorten the worker's GIL switch interval to 1 ms ([#2979](https://github.com/Artexis10/exomem/issues/2979)) ([3cc021d](https://github.com/Artexis10/exomem/commit/3cc021dd5b60a4e8cb8e1802299b7a8398751f23))
+* **vault-store:** a save enriches and derives only the page it adds ([#2969](https://github.com/Artexis10/exomem/issues/2969)) ([833780f](https://github.com/Artexis10/exomem/commit/833780ff825cefd74f0d981083d5d7786d25a05c))
+
 ## [0.193.0](https://github.com/Artexis10/exomem/compare/v0.192.0...v0.193.0) (2026-11-20)
 
 

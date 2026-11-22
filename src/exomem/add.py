@@ -24,7 +24,7 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from . import (
     call_spans,
@@ -40,6 +40,7 @@ from . import (
     schema,
     source_capture,
     source_corrections,
+    source_imports,
     source_result_attribution,
     source_taxonomy,
     tag_variants,
@@ -195,6 +196,13 @@ class AddError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+class PooledOriginalRaceLost(AddError):
+    """An identical upload published the shared original first, so this filing's stage is no longer the winner.
+
+    A fresh stage confirms that winner before the boundary; the upload doors run it once more.
+    """
+
+
 @dataclass(frozen=True)
 class SourceArtifact:
     """Bytes being captured as a Source, already staged on readable disk.
@@ -208,6 +216,9 @@ class SourceArtifact:
     staged_path: Path | IO[bytes]
     filename: str
     content_type: str | None = None
+    #: The same bytes in a private upload stage (`upload_stage.StagedUpload`), already hashed before the
+    #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
+    staged: Any | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -296,7 +307,7 @@ def artifact_identity(path: Path | IO[bytes], *, ceiling: int | None = None) -> 
 
 
 def artifact_binary_write(
-    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int
+    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int, *, staged: Any | None = None
 ) -> tuple[PlannedWrite, IO[bytes]]:
     """The create-only write that publishes staged bytes at `artifact_path`.
 
@@ -305,13 +316,18 @@ def artifact_binary_write(
     batch checks the bytes against `digest` and `size`, so a file that changed
     after the identity read fails the whole batch instead of publishing.
     A supplied stream remains caller-owned; a Path opens a stream for the caller.
+    An upload `staged` before the boundary is opened through its own identity check and carried
+    on the write, so the batch renames it in rather than copying `staged_path`.
     """
-    stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
+    if staged is not None:
+        stream = staged.open()
+    else:
+        stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
     stream.seek(0)
     return (
         PlannedWrite(
             path=artifact_path,
-            content=PreparedBinaryContent(stream, size, digest),
+            content=PreparedBinaryContent(stream, size, digest, staged=staged),
             create_only=True,
             expected_hash=MISSING_CONTENT_HASH,
         ),
@@ -319,9 +335,11 @@ def artifact_binary_write(
     )
 
 
-def pools_original(vault_root: Path, artifact_path: Path) -> bool:
-    """Whether a new filing's bytes go to the shared original pool rather than its logical path.
+def pools_named_original(vault_root: Path, name: str) -> bool:
+    """Whether a new filing named `name` has its bytes in the shared original pool rather than at its logical path.
 
+    The rule reads only the name's suffix and the pool's marker, so an upload door asks it before the
+    boundary, for the name the filing will take, and the filing asks it again under the boundary.
     Notes stay ordinary pages. Every other original of an activated archive is pooled; its
     companion alone binds the logical path. A name with no suffix stays an ordinary file
     (`originals.may_share_bytes`), like a dataset.
@@ -329,17 +347,22 @@ def pools_original(vault_root: Path, artifact_path: Path) -> bool:
     from . import original_pool
     from .originals import is_note_path, may_share_bytes
 
-    relative = artifact_path.relative_to(vault_root).as_posix()
-    return not is_note_path(relative) and may_share_bytes(relative) and original_pool.enabled(vault_root)
+    return not is_note_path(name) and may_share_bytes(name) and original_pool.enabled(vault_root)
+
+
+def pools_original(vault_root: Path, artifact_path: Path) -> bool:
+    """`pools_named_original` for the file at `artifact_path`."""
+    return pools_named_original(vault_root, artifact_path.name)
 
 
 def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, stream: IO[bytes],
-                            digest: str, size: int) -> Callable[[], None]:
+                            digest: str, size: int, *, prepared: Any | None = None) -> Callable[[], None]:
     """Stage and verify every byte now; return the publication the batch runs before its first install.
 
     The stack keeps the stage and its physical pin until the filing commits. A concurrent
     identical upload that publishes first makes this filing retry instead of hashing the
-    winner under the canonical boundary.
+    winner under the canonical boundary. A `prepared` stage that the caller made before the
+    boundary (`upload_stage.stage(pooled=True)`, which also owns its pin) is published as it is.
     """
     from . import held_fs, original_pool
 
@@ -348,14 +371,15 @@ def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, strea
         while chunk := stream.read(1024 * 1024):
             yield chunk
 
-    prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
+    if prepared is None:
+        prepared = stack.enter_context(original_pool.prepare(vault_root, digest, size, held_fs.Chunks(chunks)))
 
     def publish() -> None:
         try:
             prepared.publish()
         except original_pool.PublicationRace:
-            raise AddError(code="MUTATION_BUSY", missing=[],
-                           reason="an identical upload was stored at the same moment; retry") from None
+            raise PooledOriginalRaceLost(code="MUTATION_BUSY", missing=[],
+                                         reason="an identical upload was stored at the same moment; retry") from None
 
     return publish
 
@@ -512,6 +536,8 @@ def add(
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
+    import_capture: source_imports.ImportCapture | None = None,
+    _import_resume: tuple[source_imports.Receipt, PathGuard] | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -612,7 +638,11 @@ def add(
     if artifact is not None:
         safe_name = source_artifact_name(artifact.filename)
         artifact_suffix = source_artifact_suffix(artifact.filename)
-        artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
+        if artifact.staged is not None:
+            # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
+            artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
+        else:
+            artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
@@ -659,6 +689,13 @@ def add(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
+    if _import_resume is not None:
+        prior_receipt, retained_original = _import_resume
+        _allocation = {"captured": prior_receipt.captured, "destination": prior_receipt.page,
+                       "artifact": prior_receipt.artifact}
+    else:
+        retained_original = None
+
     if _allocation is not None:
         captured = temporal.parse(_allocation["captured"])
         if captured is None:
@@ -780,7 +817,9 @@ def add(
         artifact_path = vault_root / str(_allocation["artifact"]) if _allocation.get("artifact") else None
         if source_path.parent != folder_path or (artifact_path is not None and artifact_path.parent != folder_path):
             raise ValueError("native capture destination changed")
-        if os.path.lexists(source_path) or artifact_path is not None and os.path.lexists(artifact_path):
+        if os.path.lexists(source_path) or (
+            artifact_path is not None and retained_original is None and os.path.lexists(artifact_path)
+        ):
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
     allocation = {
         "captured": stamp_iso, "destination": source_path.relative_to(vault_root).as_posix(),
@@ -807,7 +846,9 @@ def add(
 
     tags_clean = _clean_tags(tags)
     tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
-    exomem_id = memory_refs.new_id()
+    exomem_id = (
+        memory_refs.parse_memory_ref(_import_resume[0].ref) if _import_resume is not None else memory_refs.new_id()
+    )
 
     source_md = _render_source(
         title=title,
@@ -909,7 +950,7 @@ def add(
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
-            artifact.staged_path, artifact_path, artifact_digest, artifact_size
+            artifact.staged_path, artifact_path, artifact_digest, artifact_size, staged=artifact.staged
         )
         pooled_artifact = pools_original(vault_root, artifact_path)
         if not pooled_artifact:
@@ -940,8 +981,11 @@ def add(
         if pooled_artifact:
             assert artifact_stream is not None and artifact_digest is not None and artifact_size is not None
             publish_original = staged_pool_publication(
-                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size)
+                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size,
+                prepared=artifact.staged.pool if artifact.staged is not None else None)
         if artifact_stream is not None and document_containers.is_container(artifact_path):
+            # Known residual: reading a document container's members still grows with the payload, under the
+            # boundary. Only the upload copy, hash and install moved out of it.
             container_plan = container_stack.enter_context(document_containers.plan(
                 vault_root, parent=artifact_path.relative_to(vault_root).as_posix(),
                 parent_page=source_path.relative_to(vault_root).as_posix(), digest=artifact_digest,
@@ -1014,14 +1058,34 @@ def add(
             derived.extend(("index", write) for write in sub_writes)
             writes[1:1] = [write for _role, write in derived]
         # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_receipts = []
+        if import_capture is not None:
+            assert artifact_path is not None and artifact_digest == import_capture.original_sha256
+            receipt = import_capture.receipt(
+                source_path.relative_to(vault_root).as_posix(), source_reference,
+                artifact_path.relative_to(vault_root).as_posix(), content_hash(writes[0].content),
+                captured=stamp_iso,
+            )
+            receipt_write = import_capture.planned_write(vault_root, receipt)
+            if _import_resume is None:
+                import_capture.prepare(vault_root, receipt)
+            writes.append(receipt_write)
+            bound_receipts.append((vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT, receipt_write))
+            from . import reserved_paths
+
+            container_stack.enter_context(reserved_paths._subsystem_authority_scope(source_imports.OWNER))
         bound_outputs = vocabulary_auxiliaries.seal(
             vault_root, primary=writes[0],
-            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+            derived=[*derived, *bound_receipts,
+                     *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
         payload_custody = container_stack.enter_context(source_payload_custody.capture(
             vault_root, reference=source_reference, primary=writes[0], writes=writes,
             auxiliaries=bound_outputs, enabled=custody_started,
         ))
+        if import_capture is not None and _prepare is None:
+            registrations = [*taxonomy_plan.writes, *project_plan.writes, *form_plan.writes]
+            writes = registrations + [write for write in writes if write not in registrations]
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
@@ -1065,6 +1129,7 @@ def add(
                                _validate_prepared_bindings=validate_bindings,
                                _prepare=prepare_final if _prepare is not None else None,
                                _publish_originals=publish_original,
+                               _retained_original=retained_original,
                                **({"_payload_custody": payload_custody} if payload_custody is not None else {}))
     except _NativePrepared:
         raise

@@ -1640,6 +1640,7 @@ def find(
     updated_before: str | None = None,
     recency_days: int | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -2409,6 +2410,7 @@ def find(
             filter_key,
             _relation_key(relations, relation_of, relation_direction),
             effective_result_level,
+            prefer_source_passages,
             prefer_compiled,
             prefer_active,
             widen_outside_kb,
@@ -2757,6 +2759,7 @@ def find(
             hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,
@@ -2799,6 +2802,7 @@ def find(
                 temporal=temporal,
                 intent=intent,
                 prefer_compiled=prefer_compiled,
+                prefer_source_passages=prefer_source_passages and mode == "hybrid" and not mixed,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
                 type_basis=type_basis,
@@ -6614,6 +6618,33 @@ def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
     return extraction_parts.listed(vault_root / page.rel_path)
 
 
+def _transcript_match(
+    vault_root: Path, page: ParsedPage, query: str, chunk: str | None,
+    *, type_basis: note_types.Basis,
+):
+    from . import extraction_parts, transcript_passages
+    from .governance import egress
+
+    if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
+        return None
+    if not transcript_passages.allows_window(page.frontmatter.get("type"), type_basis):
+        return None
+    text = transcript_passages.source_text(page.body, media_sidecar=bool(page.frontmatter.get("media_type")))
+    return transcript_passages.match(
+        text, chunk=chunk, title=page.title, query=query,
+        withheld=egress.carrier_spans_for_caller(vault_root, text, owner_path=page.rel_path),
+    )
+
+
+def _cites_source(vault_root: Path, page: ParsedPage, source_path: str) -> bool:
+    from . import epistemic_graph, transcript_passages
+    from .vault import kb_root
+
+    targets = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
+    targets.extend(find_results.wikilink_targets(page.search_body))
+    return transcript_passages.cites_path(targets, source_path, kb_name=kb_root(vault_root).name)
+
+
 def _part_match(
     vault_root: Path, page: ParsedPage, matched: ParsedPage, query_norm: str, *, chunk: str | None = None
 ) -> dict[str, object] | None:
@@ -6647,7 +6678,7 @@ def _frame_image_page(frame_image: str) -> str:
 
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
-    *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+    *, type_basis: note_types.Basis, scene_frame: str | None = None, scene_frame_ts: float | None = None,
     part_match: dict[str, object] | None = None,
 ) -> Hit:
     """The keyword result projection, including its parent-first frame fallback."""
@@ -6658,7 +6689,12 @@ def _keyword_hit(
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
         snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
-    hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
+    transcript = _transcript_match(vault_root, page, query_norm, None, type_basis=type_basis)
+    if transcript is not None:
+        hit.passage = transcript.passage()
+        hit.matched_part = 1
+        hit.excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
+    hit.transcript_ts = transcript.timestamp if transcript else _transcript_ts_for_hit(page, None, query_norm)
     # The persisted video handler defines this media family and its frame fallback.
     if (hit.scene_frame is None and page.media_type == "video"
             and page.media_file and hit.transcript_ts is not None):
@@ -6673,7 +6709,7 @@ def _keyword_hit(
 
 
 def _find_managed_keyword(
-    vault_root: Path, *, query_norm: str, scope: str, limit: int,
+    vault_root: Path, *, query_norm: str, scope: str, limit: int, type_basis: note_types.Basis,
     allowed_paths: set[str] | None, freshness_key: tuple | None, pending: Any | None,
     pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
@@ -6753,6 +6789,7 @@ def _find_managed_keyword(
         child = source.rel_path != page.rel_path
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt,
+            type_basis=type_basis,
             scene_frame=source.media_file if child else None,
             scene_frame_ts=source.frame_ts if child else None,
             part_match=_part_match(vault_root, page, source, query_norm),
@@ -6774,6 +6811,7 @@ def _find_keyword(
     vault_root: Path,
     *,
     query_norm: str,
+    type_basis: note_types.Basis,
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
@@ -6813,6 +6851,7 @@ def _find_keyword(
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             return _find_managed_keyword(
                 vault_root, query_norm=query_norm, scope=scope, limit=limit,
+                type_basis=type_basis,
                 allowed_paths=eligible_paths if eligible_paths is not None else admitted_paths,
                 freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
                 types=types, projects=projects, tags=tags, speakers=speakers,
@@ -6951,6 +6990,7 @@ def _find_keyword(
             continue
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt or "",
+            type_basis=type_basis,
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
             part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
@@ -6984,6 +7024,7 @@ def _find_semantic(
     temporal: bool = True,
     intent: str | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     config: RankingConfig = DEFAULT_RANKING,
@@ -7016,7 +7057,7 @@ def _find_semantic(
     """
     with _span(timings, "semantic.preflight"):
         # Lazy imports — keep keyword-mode users out of the torch import path.
-        from . import access, embeddings, lexstore, readiness, scene_frames
+        from . import access, embeddings, lexstore, readiness, scene_frames, transcript_passages
 
         status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
         type_basis = type_basis or note_types.Basis(vault_root)
@@ -7099,6 +7140,7 @@ def _find_semantic(
             temporal=temporal,
             intent=intent,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             status_basis=status_basis,
             type_basis=type_basis,
@@ -7163,6 +7205,7 @@ def _find_semantic(
             fallback_hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,
@@ -7329,6 +7372,8 @@ def _find_semantic(
             yield path
 
     paths = ranked_paths()
+    extra_paths: set[str] = set()
+    verified_transcripts: set[str] = set()
     # Collect and rank with the original limit. Only an entirely proved page
     # prefix can join units before hydration; rerank passages retain their path.
     if (
@@ -7366,17 +7411,17 @@ def _find_semantic(
         # report a walk, so it contributes nothing to the walk sentinel, and
         # `WALKER_STAGES` in the gate now says so instead of counting it.
         _mark_source(timings, "filter_hits", find_types.SOURCE_INDEX)
-        for rel_path in paths:
+        def selected_page(rel_path: str) -> tuple[str, ParsedPage, str | None] | None:
             needs_corroboration = _needs_corroboration(rel_path)
             page = _page_of(rel_path)
             if page is None:
-                continue
+                return None
             attr = frame_attribution.get(rel_path)
             if attr is not None and rel_path in bundle.frame_sources:
                 if _page_of(bundle.frame_sources[rel_path]) is None:
-                    continue
+                    return None
             if eligible_paths is not None and rel_path not in eligible_paths:
-                continue
+                return None
             if not _passes_filters(
                 page,
                 vault_root=vault_root,
@@ -7387,7 +7432,7 @@ def _find_semantic(
                 file_types=file_types,
                 exclude_file_types=exclude_file_types,
             ):
-                continue
+                return None
             keyword_excerpt = _make_excerpt(page, query_norm)
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
@@ -7398,7 +7443,7 @@ def _find_semantic(
                 # BM25's own top-ranked evidence survives interrogative
                 # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
-                    continue
+                    return None
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
             elif (
                 rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
@@ -7416,9 +7461,23 @@ def _find_semantic(
                 if keyword_excerpt is None:
                     body = page.body_stripped
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
-            selected.append((rel_path, page, keyword_excerpt))
-            if len(selected) >= target_n:
-                break
+            return rel_path, page, keyword_excerpt
+
+        for rel_path in paths:
+            if row := selected_page(rel_path):
+                selected.append(row)
+                if len(selected) >= target_n:
+                    break
+
+        selected_paths = {path for path, _page, _excerpt in selected}
+        for rel_path in bundle.neutral_prefix:
+            if (
+                rel_path not in selected_paths
+                and transcript_passages.is_source(rel_path)
+                and (row := selected_page(rel_path))
+            ):
+                selected.append(row)
+                extra_paths.add(rel_path)
 
         # Freeze the eligible prefix before proof checks. Missing selected text
         # reduces coverage; it must not pull lower fused rows into the answer.
@@ -7479,6 +7538,11 @@ def _find_semantic(
             # that collapsed into this Source, else the Source itself.
             matched_page = (chunk_page if ref is not None else frame_page) or page
             part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
+            transcript = _transcript_match(vault_root, page, query, chunk, type_basis=type_basis)
+            if transcript is not None:
+                verified_transcripts.add(page.rel_path)
+                part_match = {"matched_part": 1, "passage": transcript.passage()}
+                excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
             hit = Hit(
                 path=page.rel_path,
                 type=page.page_type,
@@ -7507,7 +7571,9 @@ def _find_semantic(
                 snapshot_hash=page.snapshot_hash,
                 **(part_match or {}),
             )
-            hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+            hit.transcript_ts = (
+                transcript.timestamp if transcript else _transcript_ts_for_hit(page, chunk, query_norm)
+            )
             if hit.scene_frame is None and page.media_type == "video" and page.media_file:
                 # A localized match on a video — CLIP keyframe first (existing), else a
                 # timed-transcript match — attaches the nearest PERSISTED frame so the
@@ -7736,6 +7802,31 @@ def _find_semantic(
             reason=rerank_outcome["reason"],
         )
 
+        passage_preference = None
+        if bundle.neutral_prefix:
+            passages = {
+                hit.path: hit for hit in hits
+                if hit.path in verified_transcripts and hit.passage is not None and hit.transcript_ts is not None
+            }
+            hits = [hit for hit in hits if hit.path not in extra_paths]
+            for path in bundle.neutral_prefix:
+                candidate = passages.get(path)
+                if candidate is None or not transcript_passages.is_source(path):
+                    continue
+                def cites(other: str, source_path: str = path) -> bool:
+                    summary = _page_of(other)
+                    return (
+                        summary is not None
+                        and type_basis.selects(summary.page_type, note_types.ranks_as_compiled)
+                        and _cites_source(vault_root, summary, source_path)
+                    )
+
+                position = transcript_passages.preferred_position([hit.path for hit in hits], path, cites)
+                if position >= len(hits) or hits[position].path != path:
+                    hits = [hit for hit in hits if hit.path != path]
+                    hits.insert(position, candidate)
+                    passage_preference = path
+                break
         final_hits = hits[:limit]
         if retrieval_trace is not None:
             retrieval_trace.record_page_candidates(
@@ -7747,6 +7838,10 @@ def _find_semantic(
                 scorer_input_count=scorer_input_count,
                 unscored_tail_count=unscored_tail_count,
             )
+            if passage_preference in retrieval_trace.evidence_by_id:
+                retrieval_trace.evidence_by_id[passage_preference]["ordering_path"].append(
+                    {"stage": "source_passage_preference"},
+                )
         return final_hits
 
     return _SelectedHits(hits, finish) if defer_finish else finish()
@@ -9223,6 +9318,11 @@ def _writer_resolver_snapshot(
                 if cached and cached[0] == current_freshness:
                     measured["forked"] = 1
                     return cached[1].fork()
+            if find_corpus.store_serves(root):
+                resident = semantic_contract.current_store_writer_resolver(root)
+                if resident is not None:
+                    measured["store_resident"] = 1
+                    return resident
             declined: dict[str, int] = {}
             entries = semantic_contract.current_writer_resolver_entries(
                 root,
@@ -9486,19 +9586,30 @@ def on_store_commit(
     after: tuple[int, int, str],
     entries: Iterable[tuple[str, str | None]],
     deleted: Iterable[str],
+    paths: Iterable[str] = (),
 ) -> None:
-    """Advance the resident recall resolver across one store commit, else leave it for a rebuild.
+    """Advance the resident recall resolver and corpus context across one store commit, else leave
+    each for its next reader.
 
-    ``before`` and ``after`` are the store's vault triples around the commit, and ``entries`` and
-    ``deleted`` the resolver delta that its derivation applied. A store reader builds the resolver
-    from the store's page rows that the live access policy indexes, so a resident resolver at
-    ``before`` with this policy, patched by the indexed part of the delta, holds the maps of a build
-    at ``after``. Any other resident resolver stays as it is, and the next reader rebuilds it.
+    ``before`` and ``after`` are the store's vault triples around the commit, ``entries`` and
+    ``deleted`` the resolver delta that its derivation applied, and ``paths`` every path that the
+    commit names. A store reader builds the resolver from the store's page rows that the live access
+    policy indexes, so a resident resolver at ``before`` with this policy, patched by the indexed
+    part of the delta, holds the maps of a build at ``after``. The corpus context moves the same way,
+    by the pages that the commit names (``semantic_contract.advance_corpus_for_store_commit``). Any
+    other resident state stays as it is, and its next reader rebuilds or reconciles it.
     """
+    root = Path(vault_root)
     try:
-        _advance_recall_resolver(Path(vault_root), before, after, list(entries), list(deleted))
+        _advance_recall_resolver(root, before, after, list(entries), list(deleted))
     except Exception:  # noqa: BLE001 - the commit has landed; a resolver left behind is rebuilt by its next reader.
-        return
+        log.debug("recall resolver left behind by a store commit", exc_info=True)
+    try:
+        from . import semantic_contract
+
+        semantic_contract.advance_corpus_for_store_commit(root, before[1], after[1], list(paths))
+    except Exception:  # noqa: BLE001 - the commit has landed; a context left behind is reconciled by its next reader.
+        log.debug("corpus context left behind by a store commit", exc_info=True)
 
 
 def _advance_recall_resolver(
@@ -9606,6 +9717,10 @@ def unload_ram_caches(
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
+        from .vault_store import resident_catalogue
+
+        resident_catalogue.forget()
     if not keep_recall_resolver:
         from . import epistemic_graph, graph_read_publication
 

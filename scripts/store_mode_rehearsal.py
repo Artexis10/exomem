@@ -10,10 +10,11 @@ root and two case files, and runs the product code (never a prototype) through t
 3. File mode: serve the copy, run the answer cases, stop. These answers are the baseline.
 4. ``store-mode migrate --dry-run`` and ``--apply``, with times and the store's size.
 5. Store mode on the same bytes: the same answer cases, compared case by case with the baseline.
-6. A write stream through the served door, then hard kills (SIGKILL). Kills alternate between a
-   random moment of the stream and a random moment just after a write's canonical commit
-   starts, which is where a kill can leave work behind. After each kill the run restarts the
-   service, waits for the projection queue to drain, and checks the three things the design
+6. A write stream through the served door, then hard kills (SIGKILL). Each trial waits for its
+   first write to commit. Kills alternate between a random moment of the stream and a random
+   moment just after a write's canonical commit starts. A missed trigger fails the trial.
+   After each kill the run restarts the service, waits for the projection queue to drain,
+   and checks the three things the design
    names: nothing held that the kill created, no differing row in a whole-table diff against
    what the files derive, and every projection equal to the store's bytes.
 7. The answer cases again, then ``store-mode rollback --dry-run`` and ``--apply --export-to``.
@@ -45,8 +46,7 @@ unset ``EXOMEM_STATE_ROOT`` falls back to the live state root. So the run refuse
 
 The driver runs on Linux only: it finds and stops its processes through /proc.
 
-The two rollout guards of store mode (``VAULT_STORE_NOT_RELEASED``, ``VAULT_STORE_NOT_SERVED``)
-are lifted only in the children, by the same ``sitecustomize`` as the installed-wheel journey.
+Use an installed build that supports store mode. The driver runs its migration and serving checks as shipped.
 
 The JSON report may hold page paths of the vault it ran on; it goes only where ``--out`` says.
 The Markdown summary opens with counts only, safe to quote.
@@ -215,10 +215,6 @@ class Layout:
         return self.scratch / "work"
 
     @property
-    def rollout(self) -> Path:
-        return self.scratch / "rollout"
-
-    @property
     def coordinator_db(self) -> Path:
         return self.scratch / "coordinator" / "leases.sqlite"
 
@@ -285,8 +281,6 @@ def child_env(layout: Layout, settings: Settings, *, file_watcher: bool = True) 
             "EXOMEM_DISABLE_QUERY_LOG": "1",
             "EXOMEM_DISABLE_RANKING_CONFIG": "1",
             "EXOMEM_DISABLE_MODE_WATCH": "1",
-            # The store-mode release guards, lifted in the children only.
-            "PYTHONPATH": str(layout.rollout),
         }
     )
     if not file_watcher:
@@ -408,11 +402,9 @@ def preflight(
         layout.lease,
         layout.tmp,
         layout.work,
-        layout.rollout,
         layout.coordinator_db.parent,
     ):
         directory.mkdir(parents=True, exist_ok=True)
-    (layout.rollout / "sitecustomize.py").write_text(loop._ROLLOUT_OVERRIDE, encoding="utf-8")
     seen = check_interpreter(python, child_env(layout, settings), layout, settings)
     return {"interpreter": seen, "never_paths": len(never)}
 
@@ -1048,14 +1040,13 @@ class Stream:
         self.planned = 0
         self.rng = random.Random(seed)
         knowledge = vault / "Knowledge Base"
-        # Pages of the copy are the source of bodies, link targets and folders; `_` folders
+        # Pages of the copy are the source of bodies and link targets; `_` folders
         # hold the product's own state.
         self.samples = sorted(
             str(path.relative_to(vault))
             for path in knowledge.rglob("*.md")
             if not any(part.startswith("_") for part in path.relative_to(knowledge).parts)
         )[:5000]
-        self.folders = sorted({str(Path(rel).parent) for rel in self.samples})
         self.pages: list[Page] = []
         self.made = 0
 
@@ -1116,8 +1107,8 @@ class Stream:
         elif kind == "move":
             page = self.rng.choice(live)
             op["page"] = page
-            target = self.rng.choice(self.folders)
-            op["new_path"] = f"{target}/{Path(page.path).name}"
+            # A compiled note keeps its valid destination when the stream renames it.
+            op["new_path"] = str(Path(page.path).with_name(f"{page.slug}-moved-{self.planned}.md"))
             op["tool"], op["arguments"] = (
                 "manage_memory",
                 {
@@ -1499,22 +1490,21 @@ class Rehearsal:
         }
         in_flight: dict[str, Any] | None = None
         served = await Served(self.rig, f"kill{number:02d}-write").__aenter__()
+        timer: asyncio.Task[None] | None = None
+        fired = False
+
+        async def kill_later(mark: int) -> None:
+            nonlocal fired
+            if by_commit:
+                trial["commit_seen"] = await self._commit_started(mark, 2 * window + 60)
+                if not trial["commit_seen"]:
+                    return
+            await asyncio.sleep(offset if by_commit else delay)
+            served.kill()
+            fired = True
+
         try:
             await await_warm(served.client)
-            fired = asyncio.Event()
-            log = self.layout.logs / "exomem.log"
-            mark = log.stat().st_size if log.exists() else 0
-
-            async def kill_later() -> None:
-                if by_commit:
-                    trial["commit_seen"] = await self._commit_started(mark, 2 * window + 60)
-                    await asyncio.sleep(offset)
-                else:
-                    await asyncio.sleep(delay)
-                served.kill()
-                fired.set()
-
-            timer = asyncio.create_task(kill_later())
             for _ in range(self.args.max_ops_per_kill):
                 op = self.stream.plan()
                 try:
@@ -1523,20 +1513,32 @@ class Rehearsal:
                     in_flight = op
                     trial["in_flight"] = op["kind"]
                     break
+                outcome = self.stream.settle(op, data)
                 trial["ops"].append(
                     {
                         "kind": op["kind"],
-                        "outcome": self.stream.settle(op, data),
+                        "outcome": outcome,
                         "repeats": repeats,
                         "message": refusal_message(data),
                     }
                 )
-                if fired.is_set():
+                if timer is not None and timer.done():
                     break
-            timer.cancel()
+                # Recall can answer while the writer is warming. Arm after a committed write.
+                if timer is None and outcome == "committed":
+                    log = self.layout.logs / "exomem.log"
+                    mark = log.stat().st_size if log.exists() else 0
+                    timer = asyncio.create_task(kill_later(mark))
         finally:
-            served.kill()
-            await served.discard()
+            try:
+                if timer is not None:
+                    timer.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await timer
+            finally:
+                served.kill()
+                await served.discard()
+        trial["trigger_fired"] = fired
         trial["acknowledged_before_kill"] = len(trial["ops"])
         recovered = await Served(self.rig, f"kill{number:02d}-recover").__aenter__()
         try:
@@ -1748,7 +1750,11 @@ class Rehearsal:
                     "left_work": len(trial["left_work_for_a_person"]),
                     "wrong": len(trial["wrong_after_recovery"]),
                 }
-                entry["ok"] = not (trial["left_work_for_a_person"] or trial["wrong_after_recovery"])
+                if not trial["trigger_fired"]:
+                    entry["error"] = f"the {trial['trigger']} trigger did not fire"
+                entry["ok"] = trial["trigger_fired"] and not (
+                    trial["left_work_for_a_person"] or trial["wrong_after_recovery"]
+                )
             reap_served()
         with self.step("the registry catches up while a service runs") as entry:
             async with Served(rig, "registry") as served:
@@ -1914,6 +1920,7 @@ def summary_markdown(report: dict[str, Any], totals: dict[str, Any]) -> str:
             (
                 "kill",
                 "trigger",
+                "trigger fired",
                 "after (s)",
                 "acknowledged",
                 "cut write",
@@ -1926,6 +1933,7 @@ def summary_markdown(report: dict[str, Any], totals: dict[str, Any]) -> str:
                 (
                     t["trial"],
                     t["trigger"],
+                    t["trigger_fired"],
                     t["kill_after_seconds"],
                     t["acknowledged_before_kill"],
                     t.get("in_flight", "none"),

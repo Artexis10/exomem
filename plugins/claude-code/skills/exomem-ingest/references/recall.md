@@ -185,15 +185,16 @@ same generation show a pointer to the map; a changed generation shows it again.
 
 ### Recorded positions
 
-A maps packet may also carry `positions` as its last field. The block names its
-units as the person's own recorded positions, found on the pages its task
-context serves and on the pages those leads link to. Its `about` passage comes
-first. Each item gives the position's text, its date when it has one, its page
-title and its unit ref. Follow `about` when the turn bears on a position. A
-position is the person's view, not an established fact: weigh new evidence on its
-own merits and attribute the position to them. Read an `overflow_refs` entry with
-`read_page` when the turn needs it. The block is chosen for each turn, so an
-empty block means that no position was in reach, not that the person holds none.
+A maps packet may also carry `positions` as its first field. The block holds the
+person's own recorded positions, found on the pages its task context serves and
+on the pages those leads link to. Its `about` passage comes first. Each item
+gives the position's text, its date when it has one, its page title and its unit
+ref. When the turn bears on a recorded position, follow the block's `about`.
+Read an `overflow_refs` entry with `read_page` when the turn needs it. `omitted`
+counts the positions the block cannot name. The block is chosen for each turn,
+so an empty block means that no position was in reach and an `unavailable` block
+means that none could be served this turn. Neither says that the person holds
+none.
 
 An unresolved packet can mean an unidentified subject or missing facts about a
 known subject. Use the turn and relevant held context to distinguish them. For an

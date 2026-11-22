@@ -41,6 +41,7 @@ from . import (
     reserved_paths,
     upload_handoff,
     upload_sessions,
+    upload_stage,
     upload_tokens,
 )
 from .governance import egress
@@ -125,14 +126,47 @@ def _preserve_under_guard(
     manager: Any,
     vault_root: Path,
     preserve_stream: Any,
+    *,
+    stream: Any,
     **kwargs: Any,
 ) -> Any:
-    """Run the complete upload read-plan-write path under vault authority.
+    """Copy an upload into a private stage, then plan and install it under vault authority.
 
-    The stream is read only once the guard is held, so only the acquire waits out contention.
+    The bytes are copied, hashed and fsynced once, before the boundary, so a large upload never holds
+    it while it moves. The commit then renames the stage into place. Only the acquire waits out
+    contention, and the commit body runs once.
     """
-    with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
-        return preserve_stream(vault_root, **kwargs)
+    preserve_module = _preserve_module()
+    artifact, _protected = preserve_module.evidence_artifact(
+        vault_root, scope=kwargs["scope"], category=kwargs["category"], filename=kwargs["filename"],
+        raw_protection=bool(kwargs.get("raw_protection")),
+    )
+    limit = kwargs["max_bytes"]
+
+    def attempt() -> Any:
+        with upload_stage.stage(
+            vault_root, stream, limit=limit, too_large=lambda: preserve_module.too_large(limit),
+            pooled=preserve_module.pools_evidence_original(vault_root, artifact.name),
+        ) as staged:
+            with manager.absorbing_mutation_guard(vault_root, operation="upload_preserve"):
+                return preserve_stream(vault_root, staged=staged, **kwargs)
+
+    return _restaged_once(attempt, stream)
+
+
+def _restaged_once(attempt: Any, stream: Any) -> Any:
+    """Run one stage-and-commit attempt; when an identical upload published the shared original first, run it once more.
+
+    The second stage confirms that winner before the boundary, so nothing hashes under it. One rerun is enough:
+    once a winner exists, a later stage confirms it instead of racing it.
+    """
+    from . import add as add_module
+
+    try:
+        return attempt()
+    except add_module.PooledOriginalRaceLost:
+        stream.seek(0)
+        return attempt()
 
 
 def _preserve_members_under_guard(manager: Any, vault_root: Path, **kwargs: Any) -> Any:
@@ -163,40 +197,44 @@ def _capture_source_under_guard(
 ) -> Any:
     """Capture an out-of-band upload as a Source, under vault authority.
 
-    The bytes are spooled to a private temporary file first because `add` copies
-    from a path: it writes the artifact and its page in one operation, and a
-    half-consumed request stream cannot be replayed if that operation refuses.
+    The bytes are copied into a private stage first, before the boundary: `add` writes the artifact
+    and its page in one operation, and a half-consumed request stream cannot be replayed if that
+    operation refuses. The capture takes the boundary only to plan and install the stage.
 
     A person may post from the upload form with no agent to ask, so a missing
     kind is recorded as `unclassified` rather than refused.
     """
-    import tempfile
-
     source_type = add_module.capture_kind(vault_root, source_type, unattended=True)
-    with tempfile.TemporaryDirectory(prefix="exomem-upload-") as staging:
-        staged = Path(staging) / (Path(filename).name or "upload.bin")
-        written = 0
-        with staged.open("wb") as sink:
-            while chunk := stream.read(1024 * 1024):
-                written += len(chunk)
-                if written > max_bytes:
-                    raise ValueError("TOO_LARGE: upload exceeds the configured limit")
-                sink.write(chunk)
-        with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
-            return add_module.add(
-                vault_root,
-                source_schema,
-                content="",
-                title=title,
-                source_type=source_type,
-                domain=domain,
-                artifact=add_module.SourceArtifact(
-                    staged_path=staged,
-                    filename=filename,
-                    content_type=content_type,
-                ),
-                raw_protection=raw_protection,
-            )
+
+    def attempt() -> Any:
+        with upload_stage.stage(
+            vault_root, stream, limit=max_bytes,
+            too_large=lambda: ValueError("TOO_LARGE: upload exceeds the configured limit"),
+            pooled=_source_pools_original(add_module, vault_root, filename),
+        ) as staged:
+            with manager.absorbing_mutation_guard(vault_root, operation="upload_capture"):
+                return add_module.add(
+                    vault_root,
+                    source_schema,
+                    content="",
+                    title=title,
+                    source_type=source_type,
+                    domain=domain,
+                    artifact=add_module.SourceArtifact(
+                        staged_path=staged.path,
+                        filename=filename,
+                        content_type=content_type,
+                        staged=staged,
+                    ),
+                    raw_protection=raw_protection,
+                )
+
+    return _restaged_once(attempt, stream)
+
+
+def _source_pools_original(add_module: Any, vault_root: Path, filename: str) -> bool:
+    """Whether a Source artifact filed from `filename` pools, by the suffix `add` gives its stored name."""
+    return add_module.pools_named_original(vault_root, f"artifact{add_module.source_artifact_suffix(filename)}")
 
 
 def _reconcile_under_guard(
@@ -207,9 +245,14 @@ def _reconcile_under_guard(
     media_processing = _media_processing_module()
     if media_processing.classify_media(binary_path) is None:
         return None
-    # The upload has committed and a failed reconcile only logs, so it does not wait out contention.
-    with manager.mutation_guard(vault_root, operation="upload_reconcile"):
-        return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
+
+    def commit_guard():
+        # The upload has committed and a failed reconcile only logs, so it does not wait out contention.
+        return manager.mutation_guard(vault_root, operation="upload_reconcile_commit", holder_kind="background")
+
+    # The provenance hash of the binary reads every byte, so it runs outside the boundary:
+    # reconcile takes `commit_guard` itself, only for the sidecar write.
+    return media_processing.reconcile_media(vault_root, binary_path, explicit=False, commit_guard=commit_guard)
 
 
 def _source_session_destination(vault_root: Path, target: dict, *, size: int, sha256: str) -> str:
@@ -255,7 +298,7 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             result = add.add(
                 root, schema.load_source_schema(root), content="", title=target["title"],
                 source_type=target["source_type"], domain=target.get("domain"), url=target.get("url"),
-                artifact=add.SourceArtifact(part, target["filename"], target.get("content_type")),
+                artifact=add.SourceArtifact(part, target["filename"], target.get("content_type"), staged=staged),
                 raw_protection=target["raw_protection"], expected_sha256=sha256,
             ).as_dict()
         except BatchWriteError as error:
@@ -265,15 +308,22 @@ def _commit_source_session(vault_root: Path, part: Path, record: dict) -> dict:
             raise
         return _source_upload_receipt(root, result)
 
+    # The session's bytes are copied into a private stage before `invoke_command` takes the boundary, so the
+    # commit plans and installs without moving them. A replay that finds its result stored discards the stage.
     try:
-        result = invoke_command(
-            Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
-                    cli_writes=True, response_detail="legacy"),
-            vault_root,
-            target=record["target"], length=record["length"],
-            sha256=record["sha256"], session_id=record["id"],
-            idempotency_key=record["id"], public_idempotency_key=None,
-        )
+        with part.open("rb") as stream, upload_stage.stage(
+            vault_root, stream, limit=int(record["length"]),
+            too_large=lambda: upload_sessions.CommitFailed("SOURCE_BYTES_CHANGED", "the held Source bytes grew; upload again"),
+            pooled=_source_pools_original(add, vault_root, record["target"]["filename"]),
+        ) as staged:
+            result = invoke_command(
+                Command(name="upload_source_session", leaf=publish, params=(), surfaces=frozenset(),
+                        cli_writes=True, response_detail="legacy"),
+                vault_root,
+                target=record["target"], length=record["length"],
+                sha256=record["sha256"], session_id=record["id"],
+                idempotency_key=record["id"], public_idempotency_key=None,
+            )
     except OpError as error:
         raise upload_sessions.CommitFailed(
             error.code, "the Source mutation is not settled; uploaded bytes remain held", retryable=True,
@@ -397,6 +447,11 @@ def resume_upload_sessions(vault_root: Path) -> None:
     until promotion, and a stdio server serves no session route, so neither may
     commit an upload beside the worker that owns it.
     """
+    try:
+        # Before any resumed commit stages a new file, so a stage found now belongs to a process that is gone.
+        upload_stage.sweep(vault_root)
+    except OSError:
+        log.warning("upload stage sweep failed; leftover stages stay until the next start", exc_info=True)
     committer = functools.partial(commit_session, vault_root)
     for pending in upload_sessions.startup_sweep(vault_root):
         upload_sessions.start_commit(pending, committer)
@@ -744,6 +799,7 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
                     filename=filename,
                     content_type=upload.content_type, max_bytes=maximum,
                     expected_sha256=ticket["expected_sha256"],
+                    import_key=ticket.get("import_key"),
                     # An import upload is named again by `imports.file` from the ticket token alone.
                     secret=(upload_handoff.hold_secret(ticket["nonce"])
                             if ticket["lane"] == held_uploads.IMPORT_LANE else None),

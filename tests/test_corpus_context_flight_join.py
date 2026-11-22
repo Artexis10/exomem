@@ -759,6 +759,12 @@ _DECLARED_UNBOUNDED_JOINS = {
         "thread.join",
     ): "shutdown joins the owned refresh after scheduling closes; the supervisor bounds process retirement",
     (
+        "vault_backup.py",
+        "_end_copier",
+        "helper.wait",
+    ): "the backup's staging thread reaps a copier it has just killed, before it removes the copy the "
+    "copier was writing; a bounded wait would let a late write reach the snapshot; not a request path",
+    (
         "writer_lease.py",
         "LeaseManager.writer_authority_guard",
         "renewer.join",
