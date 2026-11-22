@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import workflow_skills
+from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
@@ -238,10 +239,10 @@ _PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
     "SessionEnd": "exomem-continuation-checkpoint.sh",
     "SessionStart": "exomem-continuation-checkpoint.sh",
 }
-# The checkpoint core requires --client (argparse required=True); the nudge cores infer
-# it, so only this wrapper needs it. The CLI installer passes the same value.
+# The checkpoint core requires --client; the nudge cores infer it, so only this wrapper
+# needs it. The value comes from the installer's own continuation command.
 _PLUGIN_HOOK_ARGS: dict[str, str] = {
-    "exomem-continuation-checkpoint.sh": "--client claude",
+    "exomem-continuation-checkpoint.sh": CLAUDE_CONTINUATION_CLIENT_ARG,
 }
 
 

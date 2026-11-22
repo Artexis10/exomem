@@ -144,14 +144,20 @@ def test_hook_commands_resolve_through_the_plugin_root_placeholder() -> None:
                 assert (PLUGIN_ROOT / "hooks" / script).is_file(), script
 
 
-@pytest.mark.parametrize("event", ["SessionStart", "PreCompact", "SessionEnd"])
-def test_continuation_hook_commands_run_without_the_missing_client_error(
-    event: str, tmp_path: Path
-) -> None:
-    """Claude Code runs the generated command verbatim. The checkpoint core requires
-    --client, so a command without it fails every compact, resume and session end."""
+@pytest.mark.skipif(
+    shutil.which("python3") is None and shutil.which("python") is None,
+    reason="the checkpoint wrapper needs python3 or python on PATH",
+)
+def test_plugin_checkpoint_survives_a_compaction(tmp_path: Path) -> None:
+    """Claude Code runs the generated commands verbatim: a checkpoint saved at PreCompact
+    must come back as SessionStart context after the compaction."""
     document = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    command = document["hooks"][event][0]["hooks"][0]["command"]
+    pre_compact = document["hooks"]["PreCompact"][0]["hooks"][0]["command"]
+    session_start = next(
+        entry["hooks"][0]["command"]
+        for entry in document["hooks"]["SessionStart"]
+        if "compact" in entry.get("matcher", "")
+    )
     home = tmp_path / "home"
     home.mkdir()
     env = {
@@ -161,18 +167,23 @@ def test_continuation_hook_commands_run_without_the_missing_client_error(
         "USERPROFILE": str(home),
     }
 
-    result = subprocess.run(
-        ["bash", "-c", command],
-        input=json.dumps({"hook_event_name": event, "session_id": "s1", "cwd": str(tmp_path)}),
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=tmp_path,
-        timeout=60,
-    )
+    def run(command: str, payload: dict) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", command],
+            input=json.dumps({"session_id": "s1", "cwd": str(tmp_path), **payload}),
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            timeout=60,
+        )
 
-    assert "arguments are required" not in result.stderr, result.stderr
-    assert "usage:" not in result.stderr, result.stderr
+    run(pre_compact, {"hook_event_name": "PreCompact", "trigger": "auto"})
+    resumed = run(session_start, {"hook_event_name": "SessionStart", "source": "compact"})
+
+    output = json.loads(resumed.stdout)["hookSpecificOutput"]
+    assert output["hookEventName"] == "SessionStart"
+    assert output["additionalContext"], resumed.stderr
 
 
 def test_marketplace_points_at_the_plugin_directory() -> None:
