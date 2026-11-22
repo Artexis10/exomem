@@ -8113,8 +8113,10 @@ def _op_activate_context_body(
         # carries none, and the caller then gets the whole map.
         held_map = working_set_runtime_module.decode_continuity(continuity)
 
-        # The paths of the pages the task context serves for this turn; the positions block reads only these.
-        reach: set[str] = set()
+        from . import context_task as context_task_module
+
+        # The pages the task context serves for this turn; the positions block reads only these.
+        reach = context_task_module.Reach()
         # Already bounded by the caller; bounding a bounded value again would return none.
         task_conversation = conversation if conversation is not None else working_set_conversation_module.NONE
 
@@ -8135,7 +8137,8 @@ def _op_activate_context_body(
             from . import positions
 
             return positions.compile_block(
-                vault_root, caller, reach=reach, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
+                vault_root, caller, reach=reach.paths, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
+                discovery_gap=reach.gap(),
             )
 
         try:
