@@ -45,11 +45,14 @@ scripts/generic/substitutions.txt
 # checkouts; ignored so a stray `git add` can't leak them into the public repo.
 .omc/
 *.storage-state.json
-# Ignore everything under .claude/ EXCEPT shared tooling that should travel with
-# the repo (OpenSpec's /opsx: commands). settings.local.json, skills/, and
-# worktrees/ (machine paths) stay ignored.
+# Ignore everything under .claude/ EXCEPT the OpenSpec skills, which travel
+# with the repo for contributors and cloud agents (OpenSpec 2.0 dropped the
+# /opsx: commands). settings.local.json, other skills/, and worktrees/
+# (machine paths) stay ignored.
 .claude/*
-!.claude/commands/
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/openspec-*/
 
 # Hosted IaC: state, plans, generated inventory, and plaintext secret material.
 **/.terraform/*
