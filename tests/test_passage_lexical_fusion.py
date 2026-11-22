@@ -74,7 +74,7 @@ def test_a_passage_that_shares_only_word_forms_with_the_query_reaches_the_top_k(
 
     assert keys(reply) == ["repeats-one-word", "inflected"]
     assert reply["ranking"] == "fused"
-    assert reply["diagnostics"] == {"lexical": "ready"}
+    assert reply["diagnostics"] == {"lexical": "ready", "lexical_candidates": 3}
     # Each rank keeps the dense score of that rank, so a caller's score map still applies.
     assert [hit["score"] for hit in reply["hits"]] == pytest.approx([
         cosine(encoder, "Lantern lantern oil"), cosine(encoder, "lantern oil ledger notes"),
@@ -152,7 +152,9 @@ def test_a_search_without_a_mode_ranks_by_exact_dense_similarity_alone(vault, pa
 
 
 def test_lexical_matches_outside_the_requested_tags_are_never_candidates(vault, passage_tools):
-    """The lexical ranking reads chunk rows of every Source in the sidecar."""
+    """The lexical ranking reads chunk rows of every Source in the sidecar, and no later step
+    checks the eligible paths again. The reader passage that shares no word with the query
+    ranks last, so an excluded lexical match would take its place."""
     call, _encoder = passage_tools
     save(call, "Excluded log", [{"key": "excluded", "text": "Lanterns burned lamp oil"}],
          tags=["excluded"])
@@ -160,17 +162,18 @@ def test_lexical_matches_outside_the_requested_tags_are_never_candidates(vault, 
         {"key": "repeats-one-word", "text": "Lantern lantern oil"},
         {"key": "inflected", "text": "The lanterns burned whale oil"},
         {"key": "mentions-one-word", "text": "lantern oil ledger notes"},
+        {"key": "no-shared-word", "text": "The keeper sleeps"},
     ], tags=["readers"])
     embeddings.index_incremental(vault)
     publish_reference(vault)
 
     reply = call("search_memory", {
-        "query": QUERY, "limit": 3, "tags": ["readers"],
+        "query": QUERY, "limit": 4, "tags": ["readers"],
         "options": {"result_level": "passage", "mode": "hybrid"},
     })
 
     assert "error" not in reply, reply
-    assert keys(reply) == ["repeats-one-word", "inflected", "mentions-one-word"]
+    assert keys(reply) == ["repeats-one-word", "inflected", "mentions-one-word", "no-shared-word"]
     assert reply["ranking"] == "fused"
     assert reply["withheld_chunks"] == 0
 
@@ -252,8 +255,8 @@ def test_a_failed_lexical_backfill_is_a_diagnostic_and_waits_before_it_runs_agai
 
     assert first["user_summary"] == "Found 2 passage matches."
     assert first["ranking"] == "dense"
-    assert first["diagnostics"] == {"lexical": "failed"}
-    assert second["diagnostics"] == {"lexical": "failed"}
+    assert first["diagnostics"] == {"lexical": "failed", "lexical_candidates": None}
+    assert second["diagnostics"] == first["diagnostics"]
     assert len(attempts) == 1
 
 
@@ -291,9 +294,9 @@ def test_a_chunk_rewritten_by_a_release_without_lexical_terms_is_matched_on_its_
 def test_a_word_that_a_write_made_common_no_longer_chooses_the_lexical_matches(
     vault, passage_tools, monkeypatch
 ):
-    """Term selection keeps a query's rarest words by row counts that the index keeps, with the
-    rows' names, for one sidecar generation. Counts kept from before a write would still pick
-    the word it made common."""
+    """Term selection keeps a query's rarest words by row counts that the index keeps for one
+    sidecar generation. Counts kept from before a write would still pick the word it made
+    common."""
     # Keeping one word makes the rarer word alone decide which rows match.
     monkeypatch.setattr(passage_terms, "term_budget", lambda: lexstore.QueryTermBudget(
         max_units=1, max_stems=40, common_fraction=1.0, common_min_pages=100,
@@ -318,3 +321,37 @@ def test_a_word_that_a_write_made_common_no_longer_chooses_the_lexical_matches(
     embeddings.index_incremental(vault)
 
     assert matched_paths({lantern, whale, more}) == {whale}
+
+
+def test_terms_that_an_earlier_release_kept_without_names_are_rebuilt_before_they_rank(
+    vault, passage_tools
+):
+    """The release before the names table kept the terms under its own coverage marker. Its
+    sidecar has no names to read, and triggers that wrote names to a missing table would fail
+    every chunk write."""
+    call, _encoder = passage_tools
+    save(call, "Harbour survey", [{"key": "repeats-one-word", "text": "Lantern lantern oil"}])
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    assert search(call, mode="hybrid")["ranking"] == "fused"
+    index = embeddings.get_embedding_index(vault)
+    with contextlib.closing(sqlite3.connect(index.path)) as older, older:
+        older.execute(f"DROP TABLE {passage_terms.NAMES}")
+        older.execute(
+            "DELETE FROM meta WHERE key IN (?, ?)", (passage_terms.COVERAGE, passage_terms.ROWS)
+        )
+        older.execute(
+            "INSERT INTO meta (key, value) SELECT 'chunk_terms_through', value FROM meta "
+            "WHERE key = 'generation'"
+        )
+
+    save(call, "Lamp log", [{"key": "inflected", "text": "The lanterns burned whale oil"}])
+    embeddings.index_incremental(vault)
+    publish_reference(vault)
+    reply = search(call, mode="hybrid")
+
+    assert keys(reply) == ["repeats-one-word", "inflected"]
+    assert reply["diagnostics"] == {"lexical": "ready", "lexical_candidates": 2}
+    with contextlib.closing(sqlite3.connect(index.path)) as conn:
+        # The earlier release must not trust the rebuilt terms after a rollback.
+        assert conn.execute("SELECT 1 FROM meta WHERE key = 'chunk_terms_through'").fetchone() is None

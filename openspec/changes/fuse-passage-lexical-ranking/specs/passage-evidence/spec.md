@@ -9,6 +9,7 @@ No `mode` and `mode: "vector"` SHALL both rank by dense similarity alone.
 Lexical matching SHALL use the lexical store's analyser over the stored text of the same chunk rows that dense ranking scores.
 The lexical terms SHALL match those rows at the generation that the request reads, or a `hybrid` request SHALL rank by dense similarity alone.
 A `hybrid` reply SHALL report the lexical state, `ready`, `preparing` or `failed`, as `diagnostics.lexical`, and its summary SHALL NOT mention it.
+It SHALL report the number of lexical candidates that entered fusion as `diagnostics.lexical_candidates`, or null when the lexical stage took no part.
 Both rankings SHALL receive the same eligible chunks before ranking, and a lexical candidate SHALL pass the same byte verification as a dense candidate.
 A rebuild that replaces every chunk row SHALL NOT derive lexical terms inside its publication transaction. It SHALL mark the terms out of date, and the background backfill SHALL derive them again in batches.
 After a failed backfill, no request SHALL start another backfill, inline or in the background, before the retry delay has passed.
