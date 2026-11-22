@@ -21,5 +21,5 @@
 
 ## 4. Release
 
-- [ ] 4.1 Independent review, merge and release.
-- [ ] 4.2 Archive this change with `openspec archive` after the release.
+- [x] 4.1 Independent review, merge and release. Merged as #2985, released in 0.196.0, verified on the installed service 2026-11-22.
+- [x] 4.2 Archive this change with `openspec archive` after the release. Archived in this PR.

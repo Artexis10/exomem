@@ -1330,15 +1330,18 @@ A vault whose episodes hold several revision files SHALL keep working after upgr
 - **WHEN** an owner compensates a fold
 - **THEN** each rewritten page keeps its file permissions, and each history directory that the fold created and that ends empty is removed
 
-### Requirement: The capture predicate covers held views, open questions and established values
+### Requirement: The capture predicate saves each claim at its true strength
 
-At a stepping stone, the capture predicate SHALL include three classes besides the durable conclusion, the recurring entity and the executed method:
+At a stepping stone, the capture predicate SHALL include four classes besides the durable conclusion, the recurring entity and the executed method. The agent SHALL save each class at its true strength: the agent SHALL NOT write a claim more certain, more general or more settled than its source made it.
 
-- a held view, which is a view someone holds, such as an interpretation or a working hypothesis, saved attributed to its holder with its uncertainty and never as an established fact;
-- a question the work leaves open, saved as an open question;
+- a held view, which is a view someone holds, such as an interpretation or a working hypothesis that the evidence does not settle, saved attributed to its holder with its uncertainty and never as an established fact; a remark made in passing is not a held view;
+- a person's unsure report that later work could use, saved as unsure and attributed to that person, with its doubt, and never as a fact, an event or a baseline;
+- a question the work leaves open, saved as an open question, including whether something happened at all;
 - the concrete values a task settled, such as times, prices, terms, contacts and limits, saved in full and never as a pointer to a working file.
 
-The activation `capture_policy` block, at every disposition except `off`, SHALL carry the three classes. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. The rule that tentative claims stay quiet SHALL be scoped to personal baseline context wherever it is served. A casual tentative personal claim, and mid-thought exploration or a tangent, SHALL remain unwritten. A person's unsure report of an event or its details is a tentative event, not a question left open, and SHALL remain unwritten unless a collection offers a note field for it. A question the work leaves open, including whether something happened, SHALL still be saved as an open question. A held view, an open question or settled values SHALL count as a stepping stone even when nothing was decided. A write SHALL NOT mention material a capture rule keeps unwritten, not even to say that it was left out.
+Trivia and one-offs get no note, because nothing later needs them. A remark with no reuse value, and mid-thought exploration or a tangent, SHALL remain unwritten. The reason is reuse value, not uncertainty. A tentative claim SHALL NOT be written as an event that happened.
+
+The activation `capture_policy` block, at every disposition except `off`, SHALL carry these classes and the rule, as `context-activation` states. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. A held view, an unsure report, an open question or settled values SHALL count as a stepping stone even when nothing was decided. A write SHALL NOT mention material that a capture rule leaves unwritten, not even to say that it was left out.
 
 #### Scenario: A held view is saved attributed, with its uncertainty
 
@@ -1360,20 +1363,27 @@ The activation `capture_policy` block, at every disposition except `off`, SHALL 
 
 #### Scenario: A casual tentative personal claim stays quiet
 
-- **WHEN** a person says in passing that they might switch gyms
-- **THEN** the agent performs no durable write for that statement
+- **WHEN** a person says in passing that they might switch gyms, and nothing later needs it
+- **THEN** the agent saves no held view and performs no durable write for that statement
 - **AND** mid-thought exploration also stays unwritten
 
-#### Scenario: A person's unsure report of an event stays unwritten
+#### Scenario: A person's unsure report is saved as unsure
 
-- **WHEN** a person says they think something happened but are not sure, and no collection offers a note field for it
-- **THEN** the agent writes nothing about it
-- **AND** it does not save the doubt as an open question
+- **WHEN** a person says they think something happened but are not sure, and later work could use the report
+- **THEN** the agent saves the report attributed to that person, and states the doubt in the saved text
+- **AND** it does not save the report as a fact, as an event or as a baseline
+
+#### Scenario: A claim is saved no stronger than its source
+
+- **WHEN** a source says that one client asked for a feature, and a person guesses that the total is about forty
+- **THEN** the saved text names one client and does not say that clients ask for the feature
+- **AND** the saved text gives the total as a guess that it attributes to the person, not as a count
 
 #### Scenario: A question the work leaves open about an event is saved
 
-- **WHEN** the work leaves open whether something happened
-- **THEN** the agent saves it as an open question
+- **WHEN** the work leaves open whether something happened at all
+- **THEN** the agent saves that as an open question
+- **AND** it does not write the event as having happened
 
 #### Scenario: A session that ends on a held view saves it
 
@@ -1382,6 +1392,6 @@ The activation `capture_policy` block, at every disposition except `off`, SHALL 
 
 #### Scenario: Unwritten material leaves no trace in a write
 
-- **WHEN** a person's unsure report of an event or a mid-thought tangent stays unwritten
+- **WHEN** a trivial one-off or a mid-thought tangent stays unwritten
 - **THEN** no write mentions it
 - **AND** no write records that it was left out
