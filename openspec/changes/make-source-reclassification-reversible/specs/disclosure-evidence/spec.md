@@ -4,10 +4,11 @@
 
 Receipts SHALL be appended to a per-machine hash-chained log under
 `_Governance/events/<instance-id>/`, each record linking to the previous by hash,
-so a synced vault never forks a single chain. Month boundaries SHALL link across
-files. Concurrent appenders sharing one instance id SHALL be serialized by a
-process-safe receipt lock. The JSONL chain SHALL remain the evidence authority;
-the sidecar SHALL be only an anchor and recovery index.
+with month boundaries linked across files. A process-safe receipt lock SHALL
+serialize appenders of one instance. The JSONL chain SHALL be the evidence
+authority and the sidecar only an anchor that separates the fsync'd durable head
+from the observed head. No append, reconcile or recovery SHALL fork the chain or
+move the durable head backward.
 
 #### Scenario: Tamper is detected
 
@@ -20,17 +21,6 @@ the sidecar SHALL be only an anchor and recovery index.
 - **WHEN** two machines each append receipts to a synced vault
 - **THEN** each writes its own per-instance chain and neither corrupts the other's
   sequence
-
-## ADDED Requirements
-
-### Requirement: Receipt appends advance a durable head only from a confirmed tail
-
-The sidecar SHALL distinguish the last fsync'd durable head and sequence from the
-latest flushed observed head and sequence. No append SHALL allocate a sequence
-until a bounded final-record read confirms the actual tail matches an adopted
-observed head. Critical events SHALL fsync JSONL before advancing the durable
-head. A tail behind or divergent from the durable head SHALL stay blocked as
-truncation or tamper.
 
 #### Scenario: Stale anchor cannot fork the chain
 
@@ -45,19 +35,14 @@ truncation or tamper.
 - **THEN** recovery verifies and promotes that suffix before allocating another
   sequence, without duplicating or forking the record
 
-### Requirement: Receipt recovery never rolls durable evidence back
-
-Reconcile SHALL verify and promote a file-ahead suffix before a later append. It
-MAY discard a power-loss-missing observed suffix only when the actual file
-remains a valid extension of the durable head, and it SHALL never move the
-durable head backward.
-
 #### Scenario: Buffered suffix loss cannot roll back durable evidence
 
 - **WHEN** power loss removes some non-fsynced read receipts after the observed
   head advanced
 - **THEN** recovery may reset the observed cache only to a valid actual tail at
   or after the durable head, and never rolls the durable head backward
+
+## ADDED Requirements
 
 ### Requirement: Receipt evidence rotates into bounded parts
 
