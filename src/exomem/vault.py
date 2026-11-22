@@ -956,7 +956,7 @@ def display_title_from_bytes(raw: bytes, path: Path | str) -> str | None:
     except UnicodeDecodeError:
         return None
     # A text-mode read translates newlines before it parses; the bytes path parses the same text.
-    fm, body, _ = parse_frontmatter(text.replace("\r\n", "\n").replace("\r", "\n"))
+    fm, body, _ = parse_frontmatter(markdown_lf(text))
     return resolve_display_title(fm, body, path) or None
 
 
@@ -5259,6 +5259,19 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
     """Read the exact bytes of a vault file; the returned guard binds the resolved vault root."""
+    root, target, limit = _guarded_read_target(vault_root, path)
+    return read_bounded_guarded_bytes(root, target, limit=limit)
+
+
+def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, PathGuard | None]:
+    """Read text and return a guard when its bytes can be rechecked without reading it again."""
+    root, target, limit = _guarded_read_target(vault_root, path)
+    data, content, generation = read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+    guard = content if content.leaf_policy == "store" else generation
+    return data.decode("utf-8"), guard
+
+
+def _guarded_read_target(vault_root: Path, path: Path) -> tuple[Path, str, int]:
     configured_root = Path(vault_root).absolute()
     root = configured_root.resolve()
     absolute = Path(path).absolute()
@@ -5286,7 +5299,7 @@ def read_guarded_bytes(vault_root: Path, path: Path) -> tuple[bytes, PathGuard]:
         raise PathGuardError(
             "PATH_GUARD_IO", "guarded content could not be opened"
         ) from error
-    return read_bounded_guarded_bytes(root, relative.as_posix(), limit=limit)
+    return root, relative.as_posix(), limit
 
 
 @dataclass
@@ -6205,6 +6218,7 @@ def batch_atomic_write(
     _validate_prepared_bindings: Callable[[], None] | None = None,
     _prepare: Callable[[list[PlannedWrite]], None] | None = None,
     _publish_originals: Callable[[], None] | None = None,
+    _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
@@ -6240,8 +6254,10 @@ def batch_atomic_write(
                 defer_graph_completion=defer_graph_completion,
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals,
+                publish_originals=_publish_originals, retained_original=_retained_original,
             )
+    if _retained_original is not None:
+        raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:
         if defer_graph_completion and (post_commit_fanout or vault_root is None):
             raise ValueError(
@@ -7407,6 +7423,13 @@ def _validate_batch_write_access(
                 if rel in primary_bound_paths and primary_admission is not None:
                     if not primary_admission(rel):
                         raise ValueError("WRITE_REFUSED: target is unavailable")
+                elif roles.get(rel) == vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT:
+                    # The sealed manifest binds this create-only receipt to its
+                    # exact Source. The caller still needs to be able to create that Source.
+                    connector_boundary.require_write(
+                        vault_root, auxiliary_manifest.primary_path,
+                        content=proposed_by_path[auxiliary_manifest.primary_path].content.encode("utf-8"),
+                    )
                 elif not (defer_registry and rel in registry_storage):
                     connector_boundary.require_write(
                         vault_root, rel,
@@ -10826,6 +10849,11 @@ def document_newline(text: str) -> str:
 def with_newline(text: str, newline: str) -> str:
     """Rewrite `text`'s LF and CRLF line endings to `newline`."""
     return text.replace("\r\n", "\n").replace("\n", newline)
+
+
+def markdown_lf(text: str) -> str:
+    """Use CommonMark's physical line breaks for parsed text and character positions."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def render_frontmatter_document(

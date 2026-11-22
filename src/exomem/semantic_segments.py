@@ -26,9 +26,10 @@ import os
 import re
 from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ def _max_seg_words() -> int:
 
 def _topic_scores(lines: list[TimedLine], embed_fn: EmbedFn) -> list[float]:
     """TextTiling-style valley depth per gap, normalized by DEPTH_NORM (unclamped)."""
+    import numpy as np
+
     n_gaps = len(lines) - 1
     left_texts = [
         " ".join(li.text for li in lines[max(0, g - WINDOW_LINES + 1) : g + 1])
@@ -221,6 +224,8 @@ def _force_split_by_words(lines: list[TimedLine], gap_scores: list[float]) -> li
     words = sum(len(li.text.split()) for li in lines)
     if words <= _max_seg_words() or len(lines) < 2:
         return [lines]
+    import numpy as np
+
     # Best interior gap by score; ties/no-signal → the gap nearest the word midpoint.
     cum = np.cumsum([len(li.text.split()) for li in lines])
     target = words / 2.0
