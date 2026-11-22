@@ -65,6 +65,10 @@ For page-local release, retain the page evidence that the background job already
 
 The release check covers a production-sized reference report, existing governed erasures, a long receipt history, and independent disclosure appends. Compare the same route with and without the change. Require every bounded page to finish within its deadline. Edit historical evidence between disclosure recording and release, and verify that no report facts reach the caller.
 
+### Known limit: large governed previews
+
+A governed vault does not yet meet the load target. On 10,001 governed referrers in one flat folder, each referrer costs about 20 ms of admission work. Most of that time goes to re-listing the folder to resolve one physical name. The background build needs about 209 s, so it stops at the 50 s request budget with no saved progress. Without that cap, it fails its final snapshot check, because index and governance generations move during a long build. These costs predate this change. Ungoverned vaults meet the target. A follow-up change takes governed preview scale and bounded release for referrers with dependencies.
+
 ## Controls and costs
 
 - The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.

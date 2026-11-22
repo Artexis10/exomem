@@ -53,12 +53,17 @@ A move of raw bytes beside an unpaired card left the card and its referrers nami
 
 ## 6. Bounded managed preview and paged approval
 
-- [ ] 6.1 Prove current inbound links and published prose candidates on the request deadline. Leave incomplete evidence to the existing recovery workers.
-- [ ] 6.2 Send proven overflow to the maintenance job runner. Release the complete summary and bounded report pages under the same live owner authority.
-- [ ] 6.3 Bind the approval digest to the complete report. Refuse stale approval before the first write and verify a fresh approval through the normal apply operation.
+- [x] 6.1 Prove current inbound links and published prose candidates on the request deadline. Leave incomplete evidence to the existing recovery workers.
+  - Done 2026-11-22: an incomplete prose lookup returns warming without a digest. Watcher and resolver recovery run off the request path, and an overlapping Records read succeeds.
+- [x] 6.2 Send proven overflow to the maintenance job runner. Release the complete summary and bounded report pages under the same live owner authority.
+  - Done 2026-11-22: a frozen file-mode run on 10,001 Notes and 10,001 Sources, with 10,000 referrers, returned the handle in 96 ms. A concurrent Records read took 102 ms and the job 11.9 s. 10,001 entries arrived over 79 pages, median 48 ms, largest 10,393 JSON bytes. Neither flat folder was enumerated.
+- [x] 6.3 Bind the approval digest to the complete report. Refuse stale approval before the first write and verify a fresh approval through the normal apply operation.
+  - Done 2026-11-22: the large preview route test refuses a stale digest without a write, then applies a fresh one and moves the Source.
 - [ ] 6.4 Exercise a 20,000-page vault with 10,000 referrers to one Source. Verify all report pages and a concurrent Records read. Obtain exact independent review, required CI, and installed proof.
-- [ ] 6.5 Prove governed paging with a long receipt history and concurrent disclosure appends. Withhold all report facts after historical receipt edits or a pending erasure.
+- [x] 6.5 Prove governed paging with a long receipt history and concurrent disclosure appends. Withhold all report facts after historical receipt edits or a pending erasure.
+  - Done 2026-11-22: ten rotated receipt parts (524,670 bytes) held a governed erasure while another thread appended disclosure receipts. Every page answered within the request budget, median 47 to 71 ms. A same-size edit to a closed part, and an active-part edit after disclosure, both withheld every report fact.
 - [ ] 6.6 Prove bounded terminal release for an oversized governed referrer, including its custody and any bridge dependencies.
+  - Partly done 2026-11-22: a simple governed referrer (no container parent, no bridge) is released from the job's held proof with zero reads of the referrer. Ten 2 MiB referrers went from a 15.4 ms to a 1.1 ms median page. A referrer with a container or bridge dependency still takes the full terminal path, so this task stays unchecked.
 
 ## Phase 1 released delivery evidence
 
