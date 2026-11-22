@@ -531,6 +531,7 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger, ledger:
         ledger.execute("UPDATE media_replica_queue SET attempts = ? WHERE store = ?",
                        (media_replicas._MAX_ATTEMPTS - 1, first_store))
+    _due_again(vault)
 
     started, release, copied, checked = (threading.Event() for _ in range(4))
     upload = media_store.FilesystemStore.upload
@@ -553,8 +554,9 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
             copied.set()
 
     def verification_round(work_vault, **kwargs):
+        assert started.wait(5)
         result = check(work_vault, **kwargs)
-        if started.is_set() and _replica_row(vault, store="test-store")["checked_at"] > 0:
+        if _replica_row(vault, store="test-store")["checked_at"] > 0:
             checked.set()
         return result
 
@@ -564,9 +566,6 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
     worker = media_replicas.start(vault)
     try:
         assert started.wait(5)
-        _due_again(vault)
-        monkeypatch.setitem(media_replicas._checked, vault, 0.0)
-        media_replicas.wake()
         assert copied.wait(5) and checked.wait(5)
         assert len(stalled_uploads) == 1
         assert media_replicas.progress(vault, first_store)["remaining"] == 1
