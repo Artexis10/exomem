@@ -637,7 +637,7 @@ def test_owner_status_counts_bound_objects_and_reports_the_actual_wait(vault, lo
     assert status["waiting"] == "key_not_exported"
 
 
-def test_inventory_keeps_its_last_complete_count_when_a_shared_filing_loses_recovery(
+def test_inventory_keeps_its_last_complete_count_when_a_shared_filing_cannot_be_read(
     vault, local_store, monkeypatch,
 ):
     store, _ = local_store
@@ -661,7 +661,7 @@ def test_inventory_keeps_its_last_complete_count_when_a_shared_filing_loses_reco
 
     companion = vault / second.sidecar_path
     fields, body, _ = vault_files.parse_frontmatter(companion.read_text(encoding="utf-8"), custody=True)
-    del fields["stored_object"]
+    fields["stored_object"] = "not a stored object"  # the walk can no longer read this filing's custody
     companion.write_text(
         vault_files.render_frontmatter_document(vault_files.serialize_frontmatter(fields), body), encoding="utf-8",
     )

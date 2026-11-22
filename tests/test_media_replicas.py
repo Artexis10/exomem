@@ -3002,18 +3002,15 @@ def test_a_reuse_that_stops_after_it_protected_the_replacement_publishes_nothing
     first, second, pointer = _two_filings_of_one_version(vault, selected_store)
     media_store.recopy(vault, first, pointer.store)
     replacement = _entry(vault, first, pointer.store)
-    confirmed = media_store._confirmed
-    asked: list[object] = []
+    confirm_publication = media_store._confirm_publication
 
-    def filing_deleted_after_the_hold_was_taken(backend, reference):
-        found = confirmed(backend, reference)
-        if reference == replacement:
-            asked.append(reference)
-            if len(asked) == 2:  # the first answer picks the replacement; the second comes after the hold, before the write
-                media_store.forget_original(vault, first)
-        return found
+    def filing_deleted_after_the_hold_was_taken(held, backend, reference):
+        witness = confirm_publication(held, backend, reference)
+        if reference == replacement:  # the store confirmed the replacement after the hold, before the write
+            media_store.forget_original(vault, first)
+        return witness
 
-    monkeypatch.setattr(media_store, "_confirmed", filing_deleted_after_the_hold_was_taken)
+    monkeypatch.setattr(media_store, "_confirm_publication", filing_deleted_after_the_hold_was_taken)
 
     with pytest.raises(media_store.MediaStoreError) as stopped:
         media_store.recopy(vault, second, pointer.store)
@@ -3152,23 +3149,23 @@ def test_offload_does_not_publish_a_version_that_a_finding_condemned_after_it_wa
     first = _preserved(vault, category="first")
     pointer = _offload(vault, first)
     second = _preserved(vault, category="second")
-    confirmed = media_store._confirmed
+    confirm_publication = media_store._confirm_publication
 
-    def found_bad_right_after_it_answered_well(backend, replica):
-        answer = confirmed(backend, replica)
-        if replica == pointer and answer:
+    def found_bad_right_after_it_answered_well(held, backend, replica):
+        witness = confirm_publication(held, backend, replica)
+        if replica == pointer:  # the store confirmed the version; the finding lands before the binding's write
             media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer,
                                       level=media_replicas.CONTENT, failure="digest_mismatch")
-        return answer
+        return witness
 
-    monkeypatch.setattr(media_store, "_confirmed", found_bad_right_after_it_answered_well)
+    monkeypatch.setattr(media_store, "_confirm_publication", found_bad_right_after_it_answered_well)
 
     with pytest.raises(media_store.MediaStoreError) as stopped:
         media_store.offload(vault, second)
 
     assert stopped.value.code == media_store.STORE_BUSY_CODE
     assert originals.original_state(vault, second).reference is None
-    monkeypatch.setattr(media_store, "_confirmed", confirmed)
+    monkeypatch.setattr(media_store, "_confirm_publication", confirm_publication)
 
     assert _offload(vault, second).object != pointer.object  # the retry gives these bytes a version of their own
 

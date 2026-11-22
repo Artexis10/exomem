@@ -4737,6 +4737,7 @@ def test_the_status_reports_the_two_meters_without_counting_a_cached_original_tw
     used = 10_000 + allocated
     monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=_WINDOW_VOLUME, used=used, free=_WINDOW_VOLUME - used))
     both = _stored_census(vault)
+    media_store.take_census(vault)  # A personal status reads the census that the worker's offload batch recorded.
 
     status = _window_status(vault, series_id="series-a", next_window_bytes=1)
 

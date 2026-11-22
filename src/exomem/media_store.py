@@ -645,7 +645,8 @@ def _declare_held_store(
 def _require_distinct_device(vault: Path, filesystem: held_fs.HeldFilesystem) -> None:
     with held_fs.acquire(vault).require() as vault_filesystem:
         if filesystem.root_identity.device == vault_filesystem.root_identity.device:
-            raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED", "the store and vault are on the same device")
+            raise MediaStoreError("MEDIA_STORE_DECLARATION_REFUSED",
+                                  "the store's root is on the vault's own device, so it would not survive that device's loss")
 
 
 @contextmanager
@@ -4275,7 +4276,10 @@ def _personal_eviction_pass(
         return count, waiting
     finally:
         # The owner commands use the same boundary. These local ledger rows do not advance the canonical generation.
-        with (suppress(*_LEDGER_UNREADABLE, ValueError, OpError),
+        # A busy boundary skips this status row until the next pass, so its refusal is absorbed, not reported.
+        from . import mutation_lock
+
+        with (suppress(*_LEDGER_UNREADABLE, ValueError, OpError), mutation_lock.absorbing_busy(),
               get_manager().projection_guard(vault, operation="media_personal_eviction_status"),
               closing(ledger._connect()) as conn, conn):
             conn.execute("BEGIN IMMEDIATE")
@@ -4490,8 +4494,7 @@ def _physical_drain_census(vault: Path, conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT INTO drain_census(object_key, sha256, size, binary_rel, reference) "
         "SELECT object_key, MIN(sha256), MIN(size), "
-        "COALESCE(MIN(CASE WHEN reference IS NULL THEN binary_rel END), MIN(binary_rel)), "
-        "CASE WHEN COUNT(reference) = COUNT(*) THEN MIN(reference) END "
+        "COALESCE(MIN(CASE WHEN reference IS NOT NULL THEN binary_rel END), MIN(binary_rel)), MIN(reference) "
         "FROM media_bindings GROUP BY object_key")
     conn.commit()
     blocked = []
