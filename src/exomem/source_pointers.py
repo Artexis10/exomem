@@ -218,7 +218,7 @@ def target_refusal(
     if found.state == UNREADABLE:
         return "POINTER_INVALID", f"{target}: {PROBLEM_TEXT[UNREADABLE]}."
     if found.state != PRESENT:
-        return "POINTER_TARGET_MISSING", f"no file exists at {target}."
+        return "POINTER_TARGET_MISSING", f"{PROBLEM_TEXT[MISSING]}."
     size = frontmatter.get("binary_size")
     if type(size) is int and found.size is not None and found.size != size:
         return "POINTER_MISMATCH", f"{target} is {found.size} bytes; the card records {size}."
