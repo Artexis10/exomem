@@ -1087,7 +1087,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and method scope/exclusions with a page read.\nDiscard held methods on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and an approach's scope/exclusions with a page read.\nDiscard held skills, collections and approaches on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

@@ -392,13 +392,24 @@ def file_signature(info) -> tuple[int, ...]:
 
 
 def read_input(root: Path, path: str, info) -> CaptureInput:
-    before = file_signature(info)
-    data, guard = vault.read_bounded_guarded_bytes(root, path, limit=info.st_size)
-    after = file_signature((root / path).lstat())
-    guard.recheck(root)
-    if before != after:
-        raise ValueError("canonical raw input changed during publication")
-    return replace(input_from_bytes(root, path, data), signature=after)
+    """Read one raw input measured by `info`, measuring again when a commit replaced it meanwhile."""
+    for attempt in range(vault.MOVED_READ_ATTEMPTS):
+        last = attempt + 1 == vault.MOVED_READ_ATTEMPTS
+        before = file_signature(info)
+        try:
+            data, guard = vault.read_bounded_guarded_bytes(root, path, limit=info.st_size)
+            after = file_signature((root / path).lstat())
+            guard.recheck(root)
+        except vault.PathGuardError as error:
+            if last or not vault.moved_during_read(error):
+                raise
+        else:
+            if before == after:
+                return replace(input_from_bytes(root, path, data), signature=after)
+            if last:
+                raise ValueError("canonical raw input changed during publication")
+        info = (root / path).lstat()
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 def refreshed(root: Path, view: CaptureInventory, pending: Mapping[str, int], *, census: bool, excluded: frozenset[str]):

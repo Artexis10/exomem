@@ -16,6 +16,11 @@ from . import vault
 # The skill page's file name and frontmatter keys are fixed by the published Agent Skills format.
 SKILL_FILE = "SKILL.md"
 
+# The two kinds of item the catalogue lists and of method the task context projects: a skill page, and a Records
+# collection's manifest. The spec fixes this closed pair; an item names the one it is.
+KIND_SKILL = "skill"
+KIND_COLLECTION = "collection"
+
 # The published Agent Skills format limits a description to 1,024 characters; the catalogue keeps that much of it,
 # so the vault's summary bound (`budgets.skill_summary_max_chars`, at most 1,000) never meets the stored text first.
 DESCRIPTION_MAX_CHARS = 1024
@@ -75,7 +80,12 @@ def bounded_native_names(names: object) -> frozenset[str]:
 
 
 def item_line(item: Mapping[str, Any]) -> str:
-    text = f"- {item['name']}: {item['summary']}" if item.get("summary") else f"- {item['name']}"
+    """One catalogue item as the start-of-turn hook writes it, which is also how the block's bound counts it.
+
+    The kind leads the line, so a reader tells a skill from a collection; an item with no kind is a skill.
+    """
+    kind = KIND_COLLECTION if item.get("kind") == KIND_COLLECTION else KIND_SKILL
+    text = f"- {kind} {item['name']}: {item['summary']}" if item.get("summary") else f"- {kind} {item['name']}"
     return f"{text} [{item['ref']}]"
 
 
