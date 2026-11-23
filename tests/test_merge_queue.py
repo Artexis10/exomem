@@ -86,10 +86,11 @@ def test_a_member_of_a_failed_batch_is_retested_alone_before_new_work():
 
 
 def test_a_failed_pull_request_waits_until_auto_merge_is_enabled_on_it_again():
-    failed = _pull(1, status=_status("failure", "failed alone after failing in a batch"))
+    failed = _pull(1, status=_status("failure", "failed: the queue run failed twice", minutes_ago=10), enabled_minutes_ago=30)
+    enabled_again = _pull(1, status=_status("failure", "failed: the queue run failed twice", minutes_ago=10), enabled_minutes_ago=2)
 
     assert queue.plan([failed], NOW).wait
-    assert [pull.number for pull in queue.plan([failed], NOW, requeued=1).members] == [1]
+    assert [pull.number for pull in queue.plan([enabled_again], NOW).members] == [1]
 
 
 @pytest.mark.parametrize(
@@ -204,7 +205,6 @@ def test_the_candidate_is_the_tree_that_squash_merging_each_pull_request_gives_m
     # A clash with a pull request ahead of it defers the change; only a clash with main fails it.
     assert blocked is None
     assert alone is not None
-
 
 
 def test_main_skips_the_shards_only_for_the_tree_the_queue_passed(tmp_path, monkeypatch):

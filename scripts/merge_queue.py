@@ -125,7 +125,7 @@ query($owner: String!, $name: String!, $cursor: String) {
       nodes {
         number title isDraft isCrossRepository headRefOid headRefName
         autoMergeRequest { enabledAt }
-        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes {
           __typename
           ... on CheckRun { name conclusion }
           ... on StatusContext { context state description createdAt targetUrl }
@@ -150,7 +150,9 @@ def open_pulls() -> tuple[str, list[PullRequest]]:
         page = data["pullRequests"]
         for node in page["nodes"]:
             commits = node["commits"]["nodes"]
-            rollup = commits[0]["commit"]["statusCheckRollup"] if commits else None
+            # Statuses are written to the head, so read them only from the head.
+            current = commits and commits[0]["commit"]["oid"] == node["headRefOid"]
+            rollup = commits[0]["commit"]["statusCheckRollup"] if current else None
             contexts = rollup["contexts"]["nodes"] if rollup else []
             passed = {c.get("name") for c in contexts if c.get("conclusion") == "SUCCESS"}
             statuses = [c for c in contexts if c.get("context") == CONTEXT]
@@ -221,12 +223,11 @@ class Plan:
     members: tuple[PullRequest, ...] = ()
 
 
-def plan(pulls: list[PullRequest], now: datetime, requeued: int | None = None) -> Plan:
+def plan(pulls: list[PullRequest], now: datetime) -> Plan:
     """What the queue does next, from the pull requests' state alone.
 
     Main moves only between batches, so a queue run always tests the tree main
-    gets. `requeued` is the pull request whose auto-merge was just enabled
-    again: enabling it again after a failure asks for a fresh test.
+    gets. Enabling auto-merge again after a failure asks for a fresh test.
     """
     for pull in pulls:
         if _is(pull.queue, "pending", TESTING) and now - pull.queue.created < TESTING_TIMEOUT:
@@ -245,7 +246,8 @@ def plan(pulls: list[PullRequest], now: datetime, requeued: int | None = None) -
         if status is None or status.state == "pending":
             # Pending here is a retest, a requeue, or a testing status whose run was lost.
             return True
-        return status.state in ("failure", "error") and pull.number == requeued
+        # Auto-merge enabled after the failure asks for a fresh test.
+        return status.state in ("failure", "error") and pull.auto_merge > status.created
 
     queued = sorted((pull for pull in pulls if waiting(pull)), key=lambda pull: pull.auto_merge)
     retests = [pull for pull in queued if _is(pull.queue, "pending", RETEST)]
@@ -299,9 +301,9 @@ def rerun_failed_jobs(pulls: list[PullRequest]) -> None:
                     break
                 time.sleep(10)
             run("gh", "run", "rerun", identifier, "--failed", "--repo", repository())
-        except subprocess.CalledProcessError as error:
+        except (subprocess.CalledProcessError, KeyError, ValueError) as error:
             # The testing status times out and queues the members again; the rest of the queue moves on.
-            print(f"Could not rerun run {identifier}: {error.stderr}", file=sys.stderr)
+            print(f"Could not rerun run {identifier}: {getattr(error, 'stderr', error)}", file=sys.stderr)
             continue
         for pull in members:
             description = pull.queue.description.removesuffix(RERUN).rstrip(": ")
@@ -315,10 +317,6 @@ def wake() -> None:
 
 
 def advance() -> int:
-    event = json.loads(open(os.environ["GITHUB_EVENT_PATH"]).read()) if os.environ.get("GITHUB_EVENT_PATH") else {}
-    requeued = None
-    if os.environ.get("GITHUB_EVENT_NAME") == "pull_request_target" and event.get("action") == "auto_merge_enabled":
-        requeued = event["pull_request"]["number"]
     now = datetime.now(timezone.utc)
     main, pulls = open_pulls()
 
@@ -336,7 +334,7 @@ def advance() -> int:
         wake()
         return 0
 
-    decision = plan(pulls, now, requeued)
+    decision = plan(pulls, now)
     if decision.wait:
         print(f"Nothing to start: {decision.wait}.")
         return 0

@@ -4,9 +4,10 @@ name: merge queue
 # Each event can make a queued pull request ready or free the queue for the
 # next batch: auto-merge enabled, a pull request's checks finishing, a batch
 # landing on main, and a queue run's verdict or the controller itself
-# (dispatches). The schedule recovers a run whose wake-up was lost.
+# (dispatches). The schedule recovers a lost wake-up. No pull_request_target
+# trigger: public repositories block it by default from 2026-12-02.
 on:
-  pull_request_target:
+  pull_request:
     types: [auto_merge_enabled]
   workflow_run:
     # A pull request's two required checks; the queue takes it once both passed.
@@ -19,9 +20,23 @@ on:
     - cron: "*/15 * * * *"
 
 jobs:
+  # A pull_request run uses the pull request's own workflow file, so it only wakes
+  # main's controller; a fork's read-only token cannot, and forks never join anyway.
+  wake:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Wake the queue on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run merge-queue.yml --repo "$GITHUB_REPOSITORY" --ref main
+
   advance:
     # A pull request's checks finishing matter; main's own push runs are covered by the push event.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request' }}
+    if: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request') }}
     # One controller at a time; GitHub keeps the newest waiting job and drops older
     # ones, and each job reads the whole queue again. The group sits on the job so a
     # skipped run never takes the waiting slot from a real wake-up.
