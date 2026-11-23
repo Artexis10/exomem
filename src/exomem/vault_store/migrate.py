@@ -24,6 +24,7 @@ from .. import (
     cloud_cell,
     deferred_index,
     epistemic_graph,
+    freshness,
     index_sync,
     lexstore,
     memory_refs,
@@ -344,6 +345,10 @@ def catch_up_graph_work(vault_root: Path) -> dict | None:
     if queued is None:
         return None
     started = time.monotonic()
+    if not freshness.recall_is_live(vault_root, "vault"):
+        # A fresh process has no live recall projection, and the drain declines every receipt
+        # without one; a service's watcher is what makes it live, and this process runs none.
+        epistemic_graph.EpistemicGraphIndex(vault_root).publish_recall_projection()
     passes = stalled = 0
     stopped = "the queue drained"
     while deferred_index.graph_queue_pending(vault_root):
@@ -369,7 +374,11 @@ def catch_up_graph_work(vault_root: Path) -> dict | None:
             f"the graph index is not current after {passes} catch-up pass(es), with {left} of "
             f"{queued['receipts']} queued receipt(s) left ({stopped}), so nothing was staged",
             "Run `exomem maintain --reconcile --rebuild-graph` to bring the graph index up to date, then run this command again.",
-            details={"before": queued, "left": left},
+            details={
+                "before": queued,
+                "left": left,
+                "recall_live": freshness.recall_is_live(vault_root, "vault"),
+            },
         )
     return {
         **queued,
