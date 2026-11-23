@@ -9,6 +9,10 @@ The agent decides what counts as a new subject; no word list or detector SHALL d
 - **WHEN** a later turn in a conversation raises a subject the held context does not cover
 - **THEN** the instructions the agent holds tell it to recall for that subject before answering
 
+#### Scenario: The first subject from the user's life comes on a later turn
+- **WHEN** a conversation in a client without hooks opens with a general question, and a later turn opens a subject from the user's own life or work
+- **THEN** the server instructions tell the agent to recall before it answers that later turn, and they say that the balanced and maximal levels recall on any such subject
+
 #### Scenario: A follow-up on the same subject
 - **WHEN** a later turn continues the subject the held context already covers
 - **THEN** the instructions ask for no new recall

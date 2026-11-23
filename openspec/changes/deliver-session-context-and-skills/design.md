@@ -138,3 +138,15 @@ Evidence, 2026-11-23, invented seed vault, one draw:
 So the catalogue leads, and the selector stays an off-by-default deployment option for the start-of-turn hook path. A catalogue that fits is listed whole, because it is cheap; one that overflows a real vault (about 90 Records collections) keeps one turn-independent listing, so it is still sent once per conversation and pointed at once, and names beside it, on each turn, the unlisted items of the turn's touched domains from the domain registry (then those the task context reached), within their own small bound. No vocabulary enters code.
 
 Text a person or agent reads says skill and collection. The packet keeps its existing field names, such as `task_context.methods`, because renaming them would break every client and hook for no gain to the reader.
+
+## A later subject in a client without hooks
+
+A client without hooks sends Exomem nothing until the agent calls a tool. In the scale run, both misses were conversations that opened with a general question and then turned to the user's own life: the agent made no Exomem call in the whole session. The server therefore has no signal from which to detect the switch, and no word list over the turn may stand in for one. The lever is the text the agent already holds.
+
+The server instructions now ask for recall before answering, per subject, even mid-conversation, and say that the balanced and maximal levels recall on any subject of the user's life or work; before, they defined only the off and light levels. The text stays within its 900-character bound by trimming wording that no test or ruling protects.
+
+Evidence, 2026-11-23, tool-only Sonnet client, one draw, run record `subject-switch-s1`:
+
+- 12 fresh cases (8 positive, 4 negative): 9/12 exact against 7/12 on main, +0.17 [0.00, +0.42]. Both wins were sessions in which main made no Exomem call. No negative made a call on either arm.
+- The 24 scale cases: exact unchanged (12/24 each), positives fully delivered 16/16 against 14/16, no record written to a wrong collection on either arm.
+- One fresh case still makes no call after a general first turn on either arm.
