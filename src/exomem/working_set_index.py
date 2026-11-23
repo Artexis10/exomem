@@ -1660,22 +1660,35 @@ def _collection_candidates(
     collection store, so the store collections are read through the store
     the service serves (`runtime.read_served`): the manifests in one short
     read, and each store Planning collection's items in a read of its own.
-    Where the store cannot be read now (no admitted writer while it opens,
+    Where the store refuses that read (no admitted writer while it opens,
     after an idle release, or while a peer holds it), the files are read as
-    they are, and each store collection keeps the anchors this index last
-    built for it (`carried`). The build goes on and drops nothing; the set it
-    discovered is then incomplete, so it publishes none.
+    they are, each store collection keeps the anchors this index last built
+    for it (`carried`), and the registry keeps the store manifests it last
+    published. A store that is rolled back serves no collection, so its
+    collections leave recall, as they do without a store. Whenever a build
+    could not read collections that a store owns, it says so (`_note_store_unread`),
+    and the first request after a writer is admitted builds again.
     """
     from .cli_ops import OpError
+    from .collection_store import capability
     from .collection_store import runtime as store_runtime
     from .collection_store.connection import CollectionStoreError
 
+    refused = False
     try:
-        discovered, unreachable = store_runtime.read_served(vault_root, lambda: _discovered_manifests(vault_root))
+        discovered, unreachable, manifests = store_runtime.read_served(
+            vault_root, lambda: _discovered_manifests(vault_root)
+        )
     except (CollectionStoreError, OpError):
         log.debug("activation index: the collection store could not be read now", exc_info=True)
-        discovered, unreachable = _discovered_manifests(vault_root)
-    unreachable = list(unreachable)
+        refused = True
+        discovered, unreachable, manifests = _discovered_manifests(vault_root)
+    if refused and unreachable and manifests is not None:
+        held = _held_store_manifests(vault_root, unreachable)
+        manifests = None if held is None else (*manifests, *held)
+    _note_discovered_manifests(manifests)
+    carry = list(unreachable) if refused else []
+    unread = bool(unreachable) and not capability.records_summary_disabled(Path(vault_root))
     records: list[_Candidate] = []
     plans: list[_Candidate] = []
     for manifest, rel, stored in discovered:
@@ -1715,15 +1728,20 @@ def _collection_candidates(
                     vault_root, functools.partial(_planning_candidates, vault_root, manifest, rel)))
             except (CollectionStoreError, OpError):
                 log.debug("activation index: a store Planning collection could not be read now", exc_info=True)
-                unreachable.append(rel)
-    for candidate in carried(unreachable) if carried is not None and unreachable else ():
+                carry.append(rel)
+                unread = True
+    for candidate in carried(carry) if carried is not None and carry else ():
         (records if candidate.kind == "collection" else plans).append(candidate)
+    _note_store_unread(unread)
     return records, plans
 
 
-def _discovered_manifests(vault_root: Path) -> tuple[list[tuple[Any, str, str | None]], list[str]]:
+def _discovered_manifests(
+    vault_root: Path,
+) -> tuple[list[tuple[Any, str, str | None]], list[str], tuple[Any, ...] | None]:
     """Each discovered manifest with its path and, where the store owns it, its store manifest version (else None);
-    and the store collections that discovery could not reach in this call, by manifest path."""
+    the store collections that discovery could not reach in this call, by manifest path; and the manifests found,
+    or None when discovery failed."""
     from . import structured_collections
     from .cli_ops import OpError
     from .collection_store.connection import CollectionStoreError
@@ -1734,17 +1752,28 @@ def _discovered_manifests(vault_root: Path) -> tuple[list[tuple[Any, str, str | 
         raise  # the store refused this read: the caller reads the files and carries the store's anchors
     except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
         log.debug("activation index: collection discovery failed", exc_info=True)
-        _note_discovered_manifests(None)
-        return [], []
+        return [], [], None
     unreachable = [row.path for row in unreadable if row.code == structured_collections.STORE_UNAVAILABLE]
-    # A set without the store's collections would keep them out of the registry until the next update.
-    _note_discovered_manifests(None if unreachable else manifests)
     discovered = [
         (manifest, rel, manifest.manifest_version.hash if selected_writer(vault_root, manifest) is not None else None)
         for manifest in manifests
         if (rel := str(getattr(manifest, "path", "") or ""))
     ]
-    return discovered, unreachable
+    return discovered, unreachable, tuple(manifests)
+
+
+def _held_store_manifests(vault_root: Path, paths: Collection[str]) -> tuple[Any, ...] | None:
+    """The manifests at `paths` that this process last published for the vault, or None unless it holds them all.
+
+    Store manifests a build could not read keep what the registry last offered for them, so request threads do not
+    sweep again while the store is unreadable.
+    """
+    key = _vault_key(vault_root)
+    with _MANIFEST_REGISTRY_LOCK:
+        held = _MANIFEST_REGISTRY.get(key)
+        latest = held[1][max(held[1])] if held is not None and held[1] else ()
+    found = tuple(manifest for manifest in latest if str(getattr(manifest, "path", "") or "") in set(paths))
+    return found if {str(manifest.path) for manifest in found} == set(paths) else None
 
 
 def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Candidate]:
@@ -2264,6 +2293,18 @@ def records_manifests(
     )
 
 
+#: Whether THIS update's discovery could not read collections that a store owns. A box like `_PENDING_MANIFESTS`
+#: and for the same reason; `_write` records it beside the freshness stamp (`store_unread`).
+_STORE_UNREAD: ContextVar[list[bool] | None] = ContextVar("exomem_working_set_store_unread", default=None)
+
+
+def _note_store_unread(unread: bool) -> None:
+    """Hold whether this update's discovery missed store collections until its write records it."""
+    box = _STORE_UNREAD.get()
+    if box is not None:
+        box[0] = unread
+
+
 def _note_discovered_manifests(manifests: Sequence[Any] | None) -> None:
     """Hold what THIS update just discovered until its write names a generation.
 
@@ -2320,6 +2361,14 @@ _CATALOGUE_TABLES: tuple[tuple[str, tuple[str, ...], int], ...] = (
     ("page_names", ("name", "path"), 2),
     ("term_anchor_counts", ("term", "anchor_count"), 1),
 )
+
+
+def _record_store_unread(conn: sqlite3.Connection, unread: bool) -> None:
+    """Record, inside the caller's transaction, whether this build missed store collections (`store_unread`)."""
+    if unread:
+        conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('store_unread', '1')")
+    else:
+        conn.execute("DELETE FROM index_meta WHERE key = 'store_unread'")
 
 
 def _catalogue_rows(
@@ -2637,6 +2686,21 @@ class WorkingSetIndex:
             return ""
         return str(row[0]) if row else ""
 
+    def store_unread(self) -> bool:
+        """Whether the last build could not read collections that a collection store owns.
+
+        Such a build kept what it last built for them, or had nothing to keep. Either way it is behind the store
+        once the store can be read again, whatever the freshness stamp says.
+        """
+        conn = self._connect()
+        if conn is None:
+            return False
+        try:
+            row = conn.execute("SELECT value FROM index_meta WHERE key = 'store_unread'").fetchone()
+        except sqlite3.Error:
+            return False
+        return bool(row and row[0])
+
     def project_registry_hash(self) -> str:
         """Effective project registry this generation's anchors were built from."""
         conn = self._connect()
@@ -2914,6 +2978,8 @@ class WorkingSetIndex:
         # write is what keeps two concurrent updates of one vault out of each
         # other's way, so it is never reset: the next write replaces it.
         _PENDING_MANIFESTS.set([None])
+        unread_box = [False]
+        _STORE_UNREAD.set(unread_box)
         from . import project_keys
         from .governance import principal
 
@@ -2952,6 +3018,7 @@ class WorkingSetIndex:
                         "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('freshness_key', ?)",
                         (freshness_stamp,),
                     )
+                _record_store_unread(conn, unread_box[0])
                 generation = sidecar_store.bump_meta(conn, "generation")
                 vector_token = sidecar_store.read_meta_token(conn)
                 conn.commit()
@@ -2964,8 +3031,7 @@ class WorkingSetIndex:
         if not changed:
             # The vault did not move, so the rows and the generation must not
             # either; only the stamp advances, so the next request stops asking.
-            if freshness_stamp is not None:
-                self._stamp(conn, freshness_stamp)
+            self._stamp(conn, freshness_stamp, store_unread=unread_box[0])
             unchanged_token = sidecar_store.read_meta_token(conn)
             # Published even here: this update DID re-read the manifests, so the
             # registry entry for this generation is current whether or not the
@@ -3022,6 +3088,7 @@ class WorkingSetIndex:
                     "('freshness_key', ?)",
                     (freshness_stamp,),
                 )
+            _record_store_unread(conn, unread_box[0])
             conn.execute(
                 "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
                 "('learned_alias_rejected', ?)",
@@ -3056,6 +3123,16 @@ class WorkingSetIndex:
         conn = self._connect()
         if conn is None or not manifest_paths:
             return []
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")  # one snapshot for the anchors and their aliases, categories and terms
+        try:
+            return self._carried_rows(conn, manifest_paths)
+        finally:
+            if own:
+                conn.rollback()
+
+    def _carried_rows(self, conn: sqlite3.Connection, manifest_paths: Collection[str]) -> list[_Candidate]:
         wanted = set(manifest_paths)
         prefixes = tuple(f"plan:{path}#" for path in wanted)
         rows = [
@@ -3251,14 +3328,17 @@ class WorkingSetIndex:
                 (plan.fingerprint,),
             )
 
-    def _stamp(self, conn: sqlite3.Connection, freshness_stamp: str) -> None:
-        """Record the freshness key without touching the write generation."""
+    def _stamp(self, conn: sqlite3.Connection, freshness_stamp: str | None, *, store_unread: bool) -> None:
+        """Record the freshness key and whether the build missed store collections, without touching the
+        write generation."""
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
-                "('freshness_key', ?)",
-                (freshness_stamp,),
-            )
+            if freshness_stamp is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
+                    "('freshness_key', ?)",
+                    (freshness_stamp,),
+                )
+            _record_store_unread(conn, store_unread)
             conn.commit()
         except sqlite3.Error:
             log.debug("activation index freshness stamp could not be written", exc_info=True)

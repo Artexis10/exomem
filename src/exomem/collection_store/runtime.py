@@ -1099,6 +1099,21 @@ def _unbound_server(root):
     return server, proof
 
 
+def writer_admitted(vault_root):
+    """Whether this process serves the vault's store with an admitted writer that a read can borrow now.
+
+    A cheap check for the request path: it opens nothing and never waits on the store thread.
+    """
+    with _SERVERS_LOCK:
+        server = _SERVERS.get(Path(vault_root).resolve())
+    if server is None or server.runtime is None:
+        return False
+    with server.manager._lock:
+        token = server.manager._fencing_token
+    handle = server.runtime._handle
+    return token is not None and handle is not None and not handle._closed and server.runtime._writer_token == token
+
+
 def read_served(vault_root, work):
     """Run read-only ``work`` over the store this process serves for the vault, from a thread no request binds.
 

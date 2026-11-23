@@ -3092,7 +3092,49 @@ def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_
 
     monkeypatch.setattr(runtime.StoreServer, "read_beside", refused)
     assert {manifest_path(), A_PATH} <= _built_on_a_thread_of_its_own(service.root, "second")
-    assert working_set_index.WorkingSetIndex(service.root).freshness_stamp() == "second"
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert index.freshness_stamp() == "second" and index.store_unread()
+    # The map keeps the store's list too, so a request thread does not sweep the vault for it while the store refuses.
+    published = working_set_index.published_collection_manifests(service.root, index.token()[1], token=index.token())
+    assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def test_a_build_that_could_not_read_the_store_builds_again_once_a_writer_is_admitted(service, monkeypatch):
+    """A first build with no writer to read beside has no anchors to keep for the store's lists. Recorded as fresh,
+    it would leave them out of recall until the vault next changed."""
+    from exomem import working_set_index, working_set_runtime
+
+    def refused(*_args, **_kwargs):
+        raise connection.busy("the store is opening")
+
+    with monkeypatch.context() as opening:
+        opening.setattr(runtime.StoreServer, "read_beside", refused)
+        assert manifest_path() not in _built_on_a_thread_of_its_own(service.root, "opening")
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert index.freshness_stamp() == "opening" and index.store_unread()
+
+    working_set_runtime.ensure_index(service.root, freshness_stamp="opening")
+
+    _until(lambda: manifest_path() in {row.path for row in index.anchors() if row.kind == "collection"})
+    _until(lambda: not index.store_unread())
+
+
+def test_a_rolled_back_store_takes_its_lists_out_of_recall(service):
+    """A rollback stops the store serving its collections. A build that kept their anchors would offer lists that
+    every read then refuses, for as long as the rollback lasts."""
+    from exomem import working_set_index
+    from exomem.collection_store import capability
+
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "served")
+    with closing(sqlite3.connect(connection.store_path(service.root))) as raw:
+        raw.execute("INSERT OR IGNORE INTO store_meta(key, value) VALUES(?, '1')", (capability.DISABLED_KEY,))
+        raw.commit()
+
+    assert manifest_path() not in _built_on_a_thread_of_its_own(service.root, "rolled-back")
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert not index.store_unread()
+    published = working_set_index.published_collection_manifests(service.root, index.token()[1], token=index.token())
+    assert published is not None and CID not in {manifest.collection_id for manifest in published}
 
 
 def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(service):
