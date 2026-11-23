@@ -167,9 +167,9 @@ _MCP_ACTIVATION_HEAD = (
     "answering, with `turn` equal to the raw user turn verbatim on the first call, then use "
     "the returned context. Advice on the user's own case needs that recall; general questions "
     "need none. "
-    "No Exomem tools, only an authenticate tool, or authorization failure mean Exomem is "
-    "disconnected: tell the user nothing is saved; reconnect Exomem in the app's MCP or "
-    "connector settings. "
+    "Exomem is disconnected when tool discovery offers no Exomem tools or only an "
+    "authenticate tool, or an Exomem call fails authorization. Tell the user nothing is "
+    "saved and to reconnect Exomem in the app's MCP or connector settings. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.
