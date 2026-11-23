@@ -57,7 +57,8 @@ SEED_WORKER = Path(__file__).resolve().parent / "session_seed.py"
 #: The engagement levels, read from the product so the list lives in one place; a typo would
 #: silently read as balanced.
 ENGAGEMENTS = prominence.CANON
-#: A fresh server answers `RETRIEVAL_INDEX_WARMING` for about ten seconds; the first turn waits for the index.
+#: The hold covers the actor's server start. A cold catalogue keeps a fresh server answering warming for longer; only
+#: `--ready-graph` seeding builds it first, so a run that reads recall needs that option.
 WARM_HOLD_SECONDS = 15.0
 TURN_TIMEOUT_SECONDS = 300.0
 EXIT_GRACE_SECONDS = 30.0
@@ -66,6 +67,8 @@ RECAP_FOLDER = "Sources/Episodes/"
 #: Files the server maintains itself; a change to them is not a page the agent wrote.
 GENERATED_PAGES = ("index.md", "log.md")
 WARMING_MARK = "RETRIEVAL_INDEX_WARMING"
+#: The abstention reason `recall_context` gives while its catalogue warms (`activation_result.INDEX_WARMING`).
+WARMING_REASON = "index_warming"
 HOOK_EVENTS = ("Stop", "UserPromptSubmit")
 #: The retrieve hook's inject modes a run may pin: the hook's own documented values, one for every arm of a run.
 HOOK_INJECTS = ("mcp", "working_set")
@@ -561,10 +564,24 @@ def tool_trail(stdout: str) -> dict:
     compile_blocks: list[object] = []
     warming = 0
     for call in calls:
-        warming += WARMING_MARK in json.dumps(call["result"])
+        warming += WARMING_MARK in json.dumps(call["result"]) or warming_abstention(call["result"])
         if str(call["name"]).endswith("record_episode"):
             compile_blocks.append(compile_block_of(call["result"]))
     return {"calls": calls, "compile": compile_blocks, "warming": warming}
+
+
+def warming_abstention(content: object) -> bool:
+    """Whether a tool reply is a `recall_context` packet that abstained because its catalogue was still warming."""
+    blocks = content if isinstance(content, list) else [content]
+    for block in blocks:
+        text = block.get("text") if isinstance(block, dict) else block
+        try:
+            packet = json.loads(text) if isinstance(text, str) else None
+        except ValueError:
+            continue
+        if isinstance(packet, dict) and (packet.get("abstention") or {}).get("reason") == WARMING_REASON:
+            return True
+    return False
 
 
 def compile_block_of(content: object) -> object:
