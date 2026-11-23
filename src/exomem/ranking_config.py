@@ -29,6 +29,13 @@ class RankingConfig:
     """
 
     rrf_k: int = 60  # Cormack/Clarke/Buettcher 2009 default; fusion.py
+    # ---- Passage lexical term budget (`passage_terms.term_budget` has the measurement) ----
+    # A fused passage search keeps the rarest `passage_terms_max_units` query units that are
+    # on at most `passage_terms_common_fraction` of the chunks, once the sidecar holds
+    # `passage_terms_common_min_chunks` chunks.
+    passage_terms_max_units: int = 6
+    passage_terms_common_fraction: float = 0.03
+    passage_terms_common_min_chunks: int = 500
     # Note-type role knobs; `note_type_factor` maps each role to one of them.
     compiled_boost: float = 1.15
     source_penalty: float = 0.85

@@ -226,3 +226,26 @@ With four callers it is +10.474 ms, 95% interval [0.120, 20.509]. Both intervals
 The dense four-caller p95 was 3.124 ms under its bar, so this shared host left the bar almost no room.
 In warm-up, the second dense segment received four replies scored from disk while its resident matrix was loading. No timed call did.
 Both arms shared one container and one shared host, so compare the arms with each other, not with the 14 November values.
+
+A [second 22 November run](qualification-hybrid-snapshot-2026-11-22.json) measured the lexical stage that reads in the dense selection's snapshot and names matches from the names table.
+It used the same reference, container, image, profiles and three repeats, with 1,200 complete calls and zero busy refusals.
+
+| Request mode | Single-caller p50 / p95 | Four-caller p50 / p95 | Replies by ranking |
+| --- | ---: | ---: | --- |
+| Dense default | 141.881 / 206.972 ms | 314.092 / 490.228 ms | 600 dense |
+| `mode: "hybrid"` | 159.371 / 196.713 ms | 307.942 / 470.137 ms | 600 fused |
+
+The p95 of each repeat, from 40 single-caller and 160 four-caller calls per arm:
+
+| Request mode | Callers | Repeat 1 | Repeat 2 | Repeat 3 |
+| --- | ---: | ---: | ---: | ---: |
+| Dense default | 1 | 238.296 ms | 141.881 ms | 202.162 ms |
+| `mode: "hybrid"` | 1 | 224.159 ms | 177.404 ms | 176.380 ms |
+| Dense default | 4 | 483.997 ms | 498.236 ms | 489.753 ms |
+| `mode: "hybrid"` | 4 | 466.468 ms | 459.457 ms | 478.934 ms |
+
+Hybrid met both bars, and the dense default breached the single-caller bar by 6.972 ms.
+Other work loaded the host during the run: host CPU pressure was 6.42 to 9.04% of each segment's wall time.
+The run therefore qualifies neither arm.
+The mean hybrid-minus-dense difference is +13.418 ms with one caller, 95% interval [8.806, 17.948].
+With four callers it is −13.833 ms, 95% interval [−23.171, −4.931]. Both intervals are conditional on the captured rounds.
