@@ -1,0 +1,23 @@
+# Licence elections for the image licence check (scripts/check-image-licences.sh).
+#
+# A distribution offered under a choice of licences passes when one option is not
+# GPL or AGPL, and this file records the option elected. trivy reads each option as
+# its own finding, so an entry ignores one GPL or AGPL option of one distribution.
+# Add an entry only after reading the distribution's own licence terms.
+#
+# `id` is the SPDX identifier trivy reports. `paths` names the distribution's
+# metadata file with its version, so a new version fails the check until someone
+# reads its terms again. `statement` is the one-line reason: the licence elected.
+licenses:
+  - id: GPL-2.0-or-later
+    paths:
+      - "**/text_unidecode-1.3.dist-info/METADATA"
+    statement: text-unidecode 1.3 is offered under the Artistic License or the GPL; the Artistic License is elected.
+  - id: GPL-3.0-or-later
+    paths:
+      - "**/text_unidecode-1.3.dist-info/METADATA"
+    statement: text-unidecode 1.3 is offered under the Artistic License or the GPL; the Artistic License is elected.
+  - id: GPL-3.0-or-later
+    paths:
+      - "**/docutils-0.22.4.dist-info/METADATA"
+    statement: docutils 0.22.4 is public domain with BSD 2-Clause files, and its only GPL file is an Emacs script that no wheel installs; public domain and BSD 2-Clause are elected.
