@@ -469,6 +469,6 @@ def test_the_native_text_asks_for_recall_per_new_subject() -> None:
 
     assert "once" not in nudge and "once" not in instructions
     assert "subject" in nudge and "conversation.focus" in nudge
-    assert "New subject/evidence, before answering" in instructions
+    assert "before answering" in instructions and "per subject even mid-chat" in instructions
     assert "conversation.focus" in instructions
     assert len(instructions) <= 900

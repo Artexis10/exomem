@@ -51,3 +51,5 @@
 - [x] 6.3 Serve `advice` in the catalogue and apply the no-hook lever the tool-only dev run supports (next action, task projection or server instructions); name skills and collections in agent-facing text.
 - [x] 6.4 Seed the session-close bench warm (catalogue built before the actor's first recall), count warming abstentions, and let an arm carry a selector placement.
 - [x] 6.5 Decide the catalogue shape on a fresh held-out set with a tool-only real client: catalogue alone against catalogue plus the selector, per-case exact with intervals; keep the selector off by default.
+- [x] 6.6 Ask for recall on a later turn that opens a subject from the user's life or work, in clients without hooks, through the server instructions within their 900-character bound; prove it with a tool-only real client on the cases that exposed the miss and on fresh cases, with general-only negatives.
+  - Server instructions only; proved on fresh cases and the scale set (design, "A later subject in a client without hooks"; run record `subject-switch-s1`).

@@ -567,7 +567,11 @@ def _connect_readonly(vault_root: Path, *, deadline: float | None = None) -> sql
             identity_may_change=False,
             deadline=deadline,
         ):
-            return _connect_readonly_owned(vault_root, timeout=0.0 if deadline else 5.0)
+            # A deadline bounds the wait for a lock; it does not refuse one at once.
+            return _connect_readonly_owned(
+                vault_root,
+                timeout=5.0 if deadline is None else max(0.0, deadline - time.monotonic()),
+            )
 
 
 def _connect_readonly_owned(vault_root: Path, *, timeout: float = 5.0) -> sqlite3.Connection:

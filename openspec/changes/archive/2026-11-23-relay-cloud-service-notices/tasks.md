@@ -7,5 +7,5 @@
 
 ## 2. Delivery
 
-- [ ] 2.1 Review the change independently; resolve findings; pass scoped tests and CI.
-- [ ] 2.2 Merge, and hand the cell image to the Exomem Cloud release owner for the next release.
+- [x] 2.1 Review the change independently; resolve findings; pass scoped tests and CI.
+- [x] 2.2 Merge, and hand the cell image to the Exomem Cloud release owner for the next release.

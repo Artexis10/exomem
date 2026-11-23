@@ -12,8 +12,8 @@ SCAFFOLD_SKILL = Path(__file__).resolve().parents[1] / "src/exomem/_scaffold/_Sc
 def test_the_instructions_still_ask_for_the_message_verbatim() -> None:
     text = server.SERVER_INSTRUCTIONS
     assert "verbatim" in text
-    assert "a turn whose Evermatter working set a hook already injected" in text
-    assert "Follow `next_action` when present" in text
+    assert "skip if a hook injected this turn's working set" in text
+    assert "Follow `next_action`" in text
 
 
 def test_the_instructions_point_at_the_tool_and_stay_within_the_length_bound() -> None:

@@ -15,14 +15,15 @@
 - [x] 2.6 Replace pillow-heif with pi-heif.
 - [x] 2.7 Build a decode-only LGPL FFmpeg with dav1d, and PyAV against it, in the image builder; keep the PyAV version bound; prove decoder parity with the old wheel and the audio, video-frame, preview and metadata paths in the built image; record the FFmpeg source and configure flags in the notices.
 - [x] 2.8 Add a per-release check of the published images' Python distribution licences with an off-the-shelf tool against SPDX identifiers.
-- [ ] 2.9 List the shared libraries in every published image (lean, ml, cuda, cloud, cellctl) with their licences, with the operating-system layer in its own section; record the result.
+- [x] 2.9 List the shared libraries in every published image (lean, ml, cuda, cloud, cellctl) with their licences, with the operating-system layer in its own section; record the result.
 
 ## 3. Licence cut (at the rename, or at the first commercial release if earlier)
 
 - [ ] 3.1 Replace `LICENSE` with FSL-1.1-ALv2; keep the AGPL-3.0 text as the prior licence and name the last AGPL commit.
 - [ ] 3.2 Update `pyproject.toml` licence metadata and the OCI image labels to `FSL-1.1-ALv2 AND Apache-2.0`; update the README licence map and badge, `TRADEMARK.md`, the CLA repository reference, `docs/ARCHITECTURE.md`, and the image labels that the active `add-docker-distribution` change specifies.
 - [ ] 3.3 Update the hosted service's source offer and terms wording in the control-plane repository.
-- [ ] 3.4 Publish one plain statement: what changed, from which release, that self-hosting stays free, and the two-year Apache-2.0 conversion.
+- [ ] 3.4 Regenerate `docs/licensing/image-shared-libraries.md` from the first FSL release's published images on every platform (lean, ml, cuda, cloud, cellctl), with Unmapped and Strong copyleft at 0 in every row; record it before the release statement.
+- [ ] 3.5 Publish one plain statement: what changed, from which release, that self-hosting stays free, and the two-year Apache-2.0 conversion.
 
 ## 4. Platform boundary (after `contain-cloud-controller-compromise` and `make-cloud-cells-operator-resistant` ship)
 
