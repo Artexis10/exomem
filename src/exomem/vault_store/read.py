@@ -397,6 +397,29 @@ def derived_behind():
     )
 
 
+def rows_behind():
+    """The refusal of a lookup that would answer that nothing matches while the rows of writes
+    acknowledged before it are still being derived (``request_snapshot``): never a false absence."""
+    from ..cli_ops import OpError
+
+    return OpError(
+        DERIVED_BEHIND,
+        "Some recently saved pages are not yet in the search, graph and link rows, so Exomem "
+        "cannot say yet that nothing matches.",
+        "Retry shortly: the running service derives the rows after each save, and status shows "
+        "how many still wait.",
+    )
+
+
+def require_caught_up(vault_root: Path) -> None:
+    """Refuse a direct read that found no page while the rows of the writes acknowledged before this
+    request still lag (``request_snapshot``): its old path or its title may name a page that those
+    rows do not hold yet."""
+    scope = _REQUEST.get()
+    if scope is not None and scope.held_back and scope.root == _as_path(vault_root):
+        raise rows_behind()
+
+
 def require_link_rows(conn: Connection) -> None:
     """Refuse a read of the store's link rows while a store that an older build set up lacks some:
     between the batches of its pass the tables exist, but the pages after its cursor lack rows."""
@@ -410,9 +433,10 @@ def require_link_rows(conn: Connection) -> None:
 class StoreReadiness:
     """How current the derived rows of one snapshot are: what a store reader serves and shows.
 
-    A page's rows follow its derivation intent, which commits with the page (``derivation``): the
-    writing request derives its own before it returns, so only a reader that runs during that drain
-    meets ``derived_pending`` intents. ``derived_failed`` counts intents that failed their retries.
+    A page's rows follow its derivation intent, which commits with the page (``derivation``). A
+    request waits for the intents of the writes acknowledged before it (``request_snapshot``), so it
+    meets ``derived_pending`` intents when that wait ran out or when writes committed after it began.
+    ``derived_failed`` counts intents that failed their retries, and the age is the oldest intent's.
     The registries are the other input that can lag the rows (``rederive``): ``registry`` is that
     module's closed state, ``current``, ``rebuilding`` or ``unknown``.
     """
@@ -428,6 +452,7 @@ class StoreReadiness:
     unowned_rows_as_of: str | None
     derived_pending: int = 0
     derived_failed: int = 0
+    derived_oldest_seconds: int | str | None = None
 
 
 def readiness(vault_root: Path) -> StoreReadiness:
@@ -442,7 +467,7 @@ def readiness(vault_root: Path) -> StoreReadiness:
             waiting = 0 if registry.state == rederive.CURRENT else rederive.waiting_on(
                 view.connection, root
             )
-            pending, failed = derivation.lag(view.connection)
+            pending, failed, oldest = derivation.lag(view.connection)
             found = view.memo["readiness"] = StoreReadiness(
                 view.revision,
                 registry.state,
@@ -452,6 +477,7 @@ def readiness(vault_root: Path) -> StoreReadiness:
                 unowned_sweep(view.connection).get("at"),
                 pending,
                 failed,
+                oldest,
             )
         return found
 
@@ -520,6 +546,7 @@ def registry_notice(state: StoreReadiness) -> dict | None:
             "waiting_on_paths": state.waiting_on_paths,
             "derived_pending": state.derived_pending,
             "derived_failed": state.derived_failed,
+            "oldest_derivation_age_seconds": state.derived_oldest_seconds,
         },
     }
 
@@ -615,11 +642,16 @@ def checkpoint_is_current(vault_root: Path, scope: str, expected) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class _RequestScope:
-    """The snapshot that one request holds open, and the thread and vault it belongs to."""
+    """The snapshot that one request holds open, and the thread and vault it belongs to.
+
+    ``held_back`` says that rows of the writes acknowledged before the request began were still
+    pending when its door stopped waiting for them (``request_snapshot``).
+    """
 
     root: Path
     thread: int
     view: StoreSnapshot
+    held_back: bool = False
 
 
 #: The open request scope of this context. A connection cannot cross threads, so a worker thread
@@ -630,7 +662,7 @@ _REQUEST: ContextVar[_RequestScope | None] = ContextVar(
 
 
 @contextmanager
-def request_snapshot(vault_root: Path) -> Iterator[None]:
+def request_snapshot(vault_root: Path, *, catch_up: bool = False) -> Iterator[None]:
     """Hold one snapshot of the store for a whole request: every ``snapshot`` call that the request
     makes on this thread, for this vault, joins it.
 
@@ -639,23 +671,71 @@ def request_snapshot(vault_root: Path) -> Iterator[None]:
     request reads one revision. A vault that is not in store mode binds only its mode answer
     (``mode.read_mode_scope``), so a file-mode request pays one read of the mode records and no stat
     at each chokepoint; the scope nests, and an inner one joins the outer.
+
+    A write acknowledges once its page commits, and the store thread derives the page's rows after
+    that (``derivation``). So the request door of a read (``catch_up``, the dispatcher's read-only
+    invocation) first waits for the intents at or below the revision that it first read
+    (``_caught_up``): what it reads then reflects every write acknowledged before it began. Any
+    other scope reads at once, so no write, drain, warm-up or cache build waits for rows.
     """
     root = Path(vault_root)
     with mode.read_mode_scope(root) as stored:
         if _REQUEST.get() is None and stored:
             with ExitStack() as scope:
                 try:
-                    view = scope.enter_context(snapshot(root))
+                    view, held_back = _caught_up(root, scope, catch_up)
                 except connection.CollectionStoreError as error:
                     if error.code != NOT_ACTIVE:
                         raise
                     # The records stopped saying store mode: the request reads files.
                 else:
-                    token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view))
+                    token = _REQUEST.set(_RequestScope(root, threading.get_ident(), view, held_back))
                     scope.callback(_REQUEST.reset, token)
                     yield
                     return
         yield
+
+
+def _caught_up(root: Path, scope: ExitStack, catch_up: bool) -> tuple[StoreSnapshot, bool]:
+    """The request's snapshot, opened once the writes acknowledged before it are derived, and
+    whether intents at or below its first revision were still pending when it stopped waiting.
+
+    Only a read's request door waits (``catch_up``), and only while a store thread in this process
+    derives the rows (``runtime.drains``); with none, the read answers at once and says what lags.
+    The store thread and a holder of a mutation boundary never wait: the thread derives the rows
+    itself, and a hold would make every queued writer wait too. The wait lasts at most
+    ``derivation.READ_WAIT_SECONDS`` and ``derivation.READ_WAIT_BUDGET_SHARE`` of the request's
+    remaining budget, which leaves the rest for the read itself. It holds no store connection: the
+    first snapshot closes before it, and each look opens and closes its own. A write that commits
+    after the first snapshot is not waited for, and neither is an intent with a recorded failure.
+    """
+    from .. import mutation_lock, request_budget
+    from . import derivation
+
+    first = ExitStack()
+    with first:
+        view = first.enter_context(snapshot(root))
+        if not catch_up or runtime.on_store_thread(root) or mutation_lock.current_thread_holds_boundary():
+            scope.enter_context(first.pop_all())
+            return view, False
+        target = view.revision
+        behind = derivation.holds_back(view.connection, target)
+        if not behind or not runtime.drains(root):
+            scope.enter_context(first.pop_all())
+            return view, behind
+
+    def held_back() -> bool:
+        with snapshot(root, join_request=False) as look:
+            return derivation.holds_back(look.connection, target)
+
+    budget = request_budget.current()
+    seconds = derivation.READ_WAIT_SECONDS if budget is None else min(
+        derivation.READ_WAIT_SECONDS, derivation.READ_WAIT_BUDGET_SHARE * budget.remaining()
+    )
+    if derivation.caught_up(held_back, seconds):
+        return scope.enter_context(snapshot(root)), False
+    view = scope.enter_context(snapshot(root))
+    return view, derivation.holds_back(view.connection, target)
 
 
 @contextmanager

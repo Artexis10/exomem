@@ -3471,7 +3471,7 @@ def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.G
     try:
         page = get_page_module.get_page(vault_root, path=path)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if egress_module.page_withheld_entirely(
         vault_root,
         page.as_dict(include_raw=False),
@@ -3632,6 +3632,25 @@ def op_search(
     return {"results": [_search_result_from_hit(hit) for hit in hits]}
 
 
+def _page_read_error(vault_root: Path, error: get_page_module.GetError) -> Exception:
+    """A ``GetError`` from a direct page read, as the error that its caller sees.
+
+    A read that found no page answers ``NOT_FOUND``. While rows of the writes acknowledged before
+    this request still lag, a moved path or a title may name a page that those rows do not hold
+    yet, so the read refuses with ``VAULT_STORE_DERIVED_BEHIND`` instead
+    (``vault_store.read.require_caught_up``). Only a caller from whom nothing can be withheld gets
+    that refusal: a restricted caller's withheld pages answer ``NOT_FOUND`` on other exits, so its
+    absent ones answer ``NOT_FOUND`` too. The page seed of a graph context or a link ranking comes
+    here; a hint, a conversation ref, a topic brief's seed and an anchor do not, because a name
+    that resolves to nothing degrades there, and the read's derived-behind notice says what lags.
+    """
+    from .vault_store import read as store_read
+
+    if error.code == "NOT_FOUND" and not egress_module.caller_restricted(vault_root):
+        store_read.require_caught_up(vault_root)
+    return ValueError(f"{error.code}: {error.reason}")
+
+
 def _refuse_policy_tree_read(
     candidate: object,
     *,
@@ -3688,7 +3707,7 @@ def op_fetch(
         )
         page = get_page_module.get_page(vault_root, path=id, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     # Release gate. `fetch` is the deep-research read step between metadata-only
     # `search` and full `get`, and it reached `get_page` directly — so a
     # sub-notice item's body, title, frontmatter and canonical path crossed the
@@ -3708,7 +3727,9 @@ def op_fetch(
         stable_ref=snapshot_ref,
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {id}")
+        # The absent branch's own spelling, as in `op_get`: the raw `id` kept a
+        # suffix-less or backslashed spelling that the absent refusal normalizes.
+        raise ValueError(f"NOT_FOUND: file does not exist: {prepared.missing_path}")
     body_for_text = str(released.get("body", ""))
     # Below full disclosure the ladder caps what may be rendered: `annotate_page`
     # has already bounded the body at L5, so honour that ceiling rather than
@@ -4713,7 +4734,7 @@ def op_get(
     except get_page_module.GetError as e:
         if e.code == "NOT_FOUND" and (row := _retired_item(vault_root, path)) is not None:
             return row
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     _refuse_policy_tree_read(
         prepared.resolved_relative,
         missing_path=prepared.missing_path,
@@ -4722,7 +4743,7 @@ def op_get(
         with call_spans_module.span("read.page"):
             result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if frontmatter_only:
         out = {
             "path": result.path,
@@ -6889,7 +6910,8 @@ def op_get_video_frames(
     # Local reads gate before extraction. Cloud's preparation handshake supplies
     # the exact retained source proof before the worker decodes anything.
     if not cloud_cell_module.cloud_mode_enabled() and not egress_module.release_allows_frames(vault_root, path):
-        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+        # `get_frames`' own absent text, so a withheld video reads as a missing one.
+        raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}")
     video_frames_module = _video_frames_module()
     try:
         result = video_frames_module.get_frames(
@@ -7396,11 +7418,15 @@ def op_activate_context(
                         # delivered on attach, so like upkeep it waits for the agent's first recall with a turn.
                         if str(turn or "").strip():
                             vocabulary_delta_module.for_packet(vault_root, packet, session=session)
-                        # A store-mode vault serves its rows while a registry pass re-derives them:
-                        # the diagnostics name the pass, and the lanes serve.
+                        # A store-mode vault serves its rows while a registry pass re-derives them,
+                        # or while the rows of recent saves are still being derived: the packet says
+                        # so in the words of every store-mode reader, the diagnostics name the pass,
+                        # and the lanes serve.
                         registry_lag = store_read_module.request_registry_notice(vault_root)
-                        if registry_lag is not None and isinstance(packet.get("generation"), dict):
-                            packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
+                        if registry_lag is not None:
+                            packet.update(_store_registry_lag(vault_root) or {})
+                            if isinstance(packet.get("generation"), dict):
+                                packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
                     _carry_thread_through_abstention(packet, continuity)
                     # Last among the paths that set the token: the token names the policy its holder holds.
                     capture_carrier_module.stamp(packet, capture_policy)
@@ -8604,7 +8630,7 @@ def read_memory_stored(
         try:
             prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         _refuse_policy_tree_read(
             prepared.resolved_relative,
             missing_path=prepared.missing_path,
@@ -8612,7 +8638,7 @@ def read_memory_stored(
         try:
             page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         # The page decision `op_get` takes, taken BEFORE any unit is resolved.
         # A unit, its parent citation and its surrounding Markdown are the
         # page's own contents, and whether a reference resolves is itself a

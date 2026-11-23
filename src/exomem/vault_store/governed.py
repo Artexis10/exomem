@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -67,12 +67,15 @@ def committing(operation: Any) -> Iterator[None]:
 
     The abort settles the receipt only while every item is still at its source, so a commit that
     refused, which moves nothing, aborts, and a write that raised after its commit and its renames
-    stays pending for reconcile.
+    stays pending for reconcile. A governed transition's request derives its rows before it settles
+    and acknowledges (``derivation.own_rows``), so its reply reports the rows that settled it.
     """
     from ..governance import lifecycle
+    from . import derivation
 
     try:
-        yield
+        with derivation.own_rows() if operation is not None else nullcontext():
+            yield
     except BaseException:
         if operation is not None:
             if operation.operation == "recovery":
