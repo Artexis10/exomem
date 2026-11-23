@@ -386,9 +386,17 @@ def mark_replay_reached_commit() -> None:
     if replay is None:
         return
     with replay.lock:
-        # A thread that inherited the replay's context and outlived it writes under its own name.
-        if replay.commit_reached or replay.closed:
+        if replay.commit_reached:
             return
+        if replay.closed:
+            # Work that outlived its replay (the drainer requeued it while a store call still ran)
+            # must not commit unmarked: a later reclaim could replay it under a fresh identity.
+            raise OpError(
+                "MUTATION_BUSY",
+                "the queued save's replay already ended, so this late attempt wrote nothing",
+                "Nothing to do: the service applies the queued save again.",
+                details={"status": "retryable", "committed": False},
+            )
         try:
             _mark_commit_reached(replay)
         except Exception as error:

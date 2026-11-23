@@ -9,6 +9,7 @@ holds, with the serving process's drainer running.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 import time
 from dataclasses import replace
@@ -674,3 +675,47 @@ def test_a_resend_waits_for_its_original_only_within_its_own_request_budget(drai
         request_budget.reset_current(token)
         drainer.end_accept("origin-2")
     assert time.monotonic() - started < 5
+
+
+def test_the_commit_marker_is_written_from_the_store_thread_and_refused_after_the_replay_ends(
+    vault: Path, managers, drainer
+) -> None:
+    # Store-routed saves reach the commit gate on the collection store's thread, not the drainer's.
+    # Work that outlives its replay must refuse instead of committing without a marker.
+    _writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 30)))
+    intake_id = receipt["queued_write"]["ref"].removeprefix(write_intake.REF_PREFIX)
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    with write_intake._write(vault) as conn:  # stand the row back up as a claimed replay
+        conn.execute("UPDATE intake SET state = 'applying', commit_reached = 0 WHERE id = ?", (intake_id,))
+    claim = write_intake._Claim(
+        id=intake_id, command="remember", arguments={}, principal={}, surface=None,
+        attempts=1, generation=0, origin=None, origin_ttl=None,
+    )
+    with write_intake._store(vault, mode="write") as conn:
+        replay = write_intake._Replay(vault, claim, conn=conn)
+        token = write_intake._REPLAY.set(replay)
+        try:
+            errors: list[BaseException] = []
+
+            def gate() -> None:
+                try:
+                    write_intake.mark_replay_reached_commit()
+                except BaseException as error:  # noqa: BLE001 - the test inspects it
+                    errors.append(error)
+
+            other = threading.Thread(target=contextvars.copy_context().run, args=(gate,))
+            other.start()
+            other.join(10)
+            assert errors == []
+            with write_intake._store(vault, mode="read") as reader:
+                marked = reader.execute("SELECT commit_reached FROM intake WHERE id = ?", (intake_id,)).fetchone()[0]
+            assert marked == 1
+            replay.commit_reached = False
+            replay.closed = True
+            with pytest.raises(OpError) as late:
+                write_intake.mark_replay_reached_commit()
+            assert late.value.code == "MUTATION_BUSY"
+            assert late.value.details["committed"] is False
+        finally:
+            write_intake._REPLAY.reset(token)
