@@ -325,12 +325,12 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
 
 ### Requirement: Migration catches up queued file-mode index work
-Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the sidecar it copies matches the files. It SHALL refuse before staging, and name the reconcile command, when that queue does not drain within a bounded time and number of passes that clear nothing. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
+Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the sidecar it copies matches the files. It SHALL refuse before staging, and name the reconcile command, when the graph index is not current after a bounded catch-up; receipts left while the graph is current do not refuse. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
 
 #### Scenario: Migrate catches up queued file-mode index work before it stages
 - **WHEN** an operator migrates a file-mode vault whose stopped service left graph repair queued
 - **THEN** the migration drains that queue into the graph index before it copies any sidecar, and the derived rows then equal the files
-- **AND** a queue that does not drain refuses before staging and names the reconcile command
+- **AND** a graph index that is still not current after the catch-up refuses before staging and names the reconcile command
 - **AND** a dry run reports the queue's depth and age and drains nothing
 
 ### Requirement: Knowledge writes share the store's availability

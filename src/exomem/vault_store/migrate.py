@@ -45,8 +45,9 @@ _COPY_BATCH = 5000
 #: `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass, so a deep queue takes many.
 #: Past it, `exomem maintain --reconcile --rebuild-graph` (no ceiling) is the remedy.
 CATCH_UP_SECONDS = 600.0
-#: Consecutive passes that clear nothing end the catch-up. What is left is receipts the drain declines, and each pass
-#: rotates the declined ones behind fresh work, so a few passes reach any real receipt that queued behind them.
+#: Consecutive passes that clear nothing end the catch-up. What is left is receipts the drain declines; each pass
+#: rotates declined ones behind the rest, so the stall rule steps past at most this many times `DRAIN_LIMIT` of them.
+#: A deeper residue ends the catch-up early, which refuses only if the graph is still behind (nothing is staged).
 CATCH_UP_STALLED_PASSES = 3
 CATCH_UP_RETRY_SECONDS = 1.0
 
@@ -351,7 +352,7 @@ def catch_up_graph_work(vault_root: Path) -> dict | None:
             break
         try:
             cleared = index_sync.drain_graph_work(vault_root)
-        except Exception as error:  # noqa: BLE001 - a failed pass is a refusal that names its cause, not a traceback
+        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result or the refusal names its cause, not a traceback
             stopped = f"a pass failed with {type(error).__name__}: {error}"
             break
         passes += 1
@@ -374,6 +375,7 @@ def catch_up_graph_work(vault_root: Path) -> dict | None:
         **queued,
         "passes": passes,
         "left": left,
+        "stopped": stopped,
         "seconds": round(time.monotonic() - started, 2),
     }
 
