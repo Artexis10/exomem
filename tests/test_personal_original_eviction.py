@@ -434,7 +434,8 @@ def test_an_expired_parked_commit_releases_space_without_another_upload(vault, s
 
     upload_sessions.start_commit(session, busy)
     record = session.store / f"{session.id}.json"
-    deadline = time.monotonic() + 8
+    # A bound, not a latency: the release takes under 2 s locally, but a shared CI runner can stall the timers.
+    deadline = time.monotonic() + 30
     while record.exists():
         assert time.monotonic() < deadline
         time.sleep(0.025)

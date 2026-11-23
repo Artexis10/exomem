@@ -556,7 +556,7 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
             copied.set()
 
     def verification_round(work_vault, **kwargs):
-        assert started.wait(5)
+        assert started.wait(30)
         result = check(work_vault, **kwargs)
         if _replica_row(vault, store="test-store")["checked_at"] > 0:
             checked.set()
@@ -567,8 +567,10 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
     monkeypatch.setattr(media_replicas, "check", verification_round)
     worker = media_replicas.start(vault)
     try:
-        assert started.wait(5)
-        assert copied.wait(5) and checked.wait(5)
+        # Bounds, not latencies: the copy spawns an encryption process and syncs directories, which a
+        # shared CI runner can delay for seconds. A hang still fails.
+        assert started.wait(30)
+        assert copied.wait(30) and checked.wait(30)
         assert len(stalled_uploads) == 1
         assert media_replicas.progress(vault, first_store)["remaining"] == 1
     finally:
