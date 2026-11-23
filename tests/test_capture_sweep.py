@@ -599,7 +599,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,471 and 1,456 — 29 and 44 bytes of
+    into. The prominent blocks sit at 1,481 and 1,466 — 19 and 34 bytes of
     headroom — so no wording of this clause (about 190 bytes) fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the
@@ -627,7 +627,10 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
     # "get no note" cost 6 bytes per block. 2026-11-20: the balanced block
     # dropped "or open questions" (-17 bytes), giving 1489/1474. 2026-11-21: the
     # tail no longer lists tentative events as quiet (-18 bytes), giving 1471/1456.
-    assert sizes == {"maximal": 1471, "balanced": 1456}, sizes
+    # 2026-11-22: the Records route replaced "Records only for a compatible measurement"
+    # (+17 bytes), giving 1488/1473. Later that day the route became its own sentence,
+    # "Items compared or tracked: Records rows, not a note." (-7 bytes), giving 1481/1466.
+    assert sizes == {"maximal": 1481, "balanced": 1466}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
     assert 1500 - sizes["maximal"] >= 11, sizes

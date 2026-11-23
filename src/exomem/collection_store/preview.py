@@ -746,6 +746,9 @@ def dispatch(
             _validate_create(writer, profile, args)
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
+    if action == "manifest_text":
+        current, text = writer.manifest_text(args["collection"])
+        return True, (current, text, writer.created_automatically(current.collection_id))
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
     if action == "inspect" and profile == "records":

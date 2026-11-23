@@ -230,6 +230,9 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
                   'relevant stored material.',
  'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
                  'and exclusions before applying it within existing authority.',
+ 'method_selected': 'A saved method fits this turn: follow the contract in task_context.methods '
+                    'where it fits, within existing authority. Use `read_page` on its read_ref '
+                    'first when the contract is cut.',
  'related': 'Related pages (not loaded). Use `read_page` to read a relevant ref before relying on '
             'it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '

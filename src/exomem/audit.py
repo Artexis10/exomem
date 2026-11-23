@@ -6319,8 +6319,9 @@ def _collection_candidate_finding(
             "and dates to review as a structured collection."
         ),
         proposed_fix=(
-            "Review the cited units, draft and validate a collection schema, then ask "
-            "for confirmation before creating it. Nothing is auto-created or backfilled."
+            "Review the cited units, draft and validate a collection schema, then create it "
+            "under the served capture disposition: automatic when silent and within the bounds, "
+            "after one confirmation when advisory. This audit creates and backfills nothing."
         ),
         paths=paths,
         meta=meta,

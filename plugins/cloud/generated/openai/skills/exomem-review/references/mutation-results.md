@@ -188,6 +188,16 @@ following their `retry`: wait before retrying a warming or busy call; retry a pe
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
 
+A collection write that ends `MUTATION_ACKNOWLEDGEMENT_PENDING` was accepted by the store and
+may still commit. Recover in one of two ways, and never with a new identity or a changed
+payload:
+
+1. Replay the call with the same identity and the same payload. The product returns the
+   recorded result and never writes twice.
+2. Read the collection and the row by its natural key, then write only what is missing.
+
+A read refused `COLLECTION_STORE_BUSY` committed nothing; retry it later.
+
 ## Refusals
 
 A refused call returns `{"error": {"code", "message", "retry"?, "candidates"?}}` and

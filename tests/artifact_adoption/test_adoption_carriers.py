@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.reads_repository_docs
@@ -50,7 +51,8 @@ def test_every_active_non_hosted_capture_carrier_maps_adoption_authority(vault: 
     assert envelope["classes"]["restructure_execution"]["ceiling"] == "confirm-required"
     for name, carrier in _active_capture_carriers(vault).items():
         assert "proactive_capture" in carrier, name
-        assert "structural_suggestions" in carrier, name
+        # A missing collection is created minimal under the same disposition, never a structural suggestion.
+        assert "missing collection" in carrier, name
         # The hand-over rule runs under the live capture policy, never as a standing write permission.
         assert "under proactive_capture" in carrier, name
 
