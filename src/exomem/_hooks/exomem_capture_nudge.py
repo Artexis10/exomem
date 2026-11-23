@@ -118,8 +118,11 @@ import time
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
-# The server-name token that marks an Evermatter tool; a host fixes it, a vault does not.
-_KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
+# The server-name token that marks an Evermatter tool; a host fixes it, a vault does not. A host
+# builds tool names from the server key or the connector name, and a connector carries the product's
+# name: Evermatter now, Exomem or Knowledge Base from before the renames.
+# nosemgrep: ep-word-search, ep-lexical-intent -- the closed set of this product's own names.
+_KB_SERVER = r"(?:evermatter|exomem|knowledge[_-]?base)"
 # Every Evermatter call that lands durable work: a typed write tool by its name, a door write as
 # `manage_memory:<area>.<action>`. Stamped from `exomem.public_surface.write_selectors()`; the hook
 # cannot import the package, and `tests/test_single_purpose_guidance.py` fails when the two drift.
@@ -1186,7 +1189,7 @@ def _exomem_tool_seen(tools: list[dict]) -> bool:
     only ever used to answer "did the client restart yet".
     """
     return any(
-        re.search(r"exomem|knowledge[_-]?base", str(tool.get("name") or ""), re.I)
+        re.search(_KB_SERVER, str(tool.get("name") or ""), re.I)
         for tool in tools
     )
 
