@@ -89,7 +89,6 @@ _promoting = False
 #: standing then. Promotion may retire that marker only while the durable
 #: generation is still the one the proof sampled.
 _proof_signal: Any = None
-_proof_marker: tuple[int, int] | None = None
 #: The latest attempt, held or not: what it sampled before it ran (the signal and
 #: the cheap stat), and when it ended. The waiting standby re-proves when these
 #: move, at most once per interval after the last attempt ended.
@@ -367,7 +366,7 @@ def prove_graph_snapshot(vault_root: Path, *, prior_reads: Any = None) -> bool:
     proof stops with `proof_cancelled` as soon as promotion or discard begins:
     its result would be dropped, and promotion re-proves on its own.
     """
-    global _proved_token, _adoption, _proof_signal, _proof_marker
+    global _proved_token, _adoption, _proof_signal
     global _attempt_signal, _attempt_stat, _attempt_ended_at
     from . import epistemic_graph
 
@@ -376,7 +375,6 @@ def prove_graph_snapshot(vault_root: Path, *, prior_reads: Any = None) -> bool:
     # and whole-vault debt raised during it is never retired on its account.
     stat = _graph_stat(vault_root)
     signal = (_durable_generation(vault_root), snapshot_token(vault_root))
-    marker = _observe_full_marker(vault_root)
     with _lock:
         if _promoting or _promoted or _discarded:
             return False
@@ -414,7 +412,6 @@ def prove_graph_snapshot(vault_root: Path, *, prior_reads: Any = None) -> bool:
         _adoption = adoption
         _proved_token = token
         _proof_signal = signal if token is not None else None
-        _proof_marker = marker if token is not None else None
     log.info(
         "standby snapshot adoption adopted=%s residue=%d reason=%s",
         adoption.adopted,
@@ -480,7 +477,7 @@ def _observe_full_marker(vault_root: Path) -> tuple[int, int] | None:
 
 def _invalidate_graph_proof() -> bool:
     """Withdraw the graph proof before replacing its adopted recall lineage."""
-    global _proved_token, _adoption, _proof_signal, _proof_marker
+    global _proved_token, _adoption, _proof_signal
     from . import runtime_readiness
 
     with _lock:
@@ -489,7 +486,6 @@ def _invalidate_graph_proof() -> bool:
         _proved_token = None
         _adoption = None
         _proof_signal = None
-        _proof_marker = None
         runtime_readiness.invalidate_cached_readiness()
     return True
 
@@ -901,16 +897,8 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     module's own record instead, for the same reason `cutover_components` does:
     one fact, one place to read it.
 
-    `graph_snapshot` is carried only on a `current` verdict. That is the one
-    where the checkpoint this process adopted is the checkpoint on disk: the
-    held proof's, or the one promotion re-proved after the serving worker
-    published past it. Re-adopting would buy nothing -- 19.5 s of it on the
-    0.85.0 cutover, and every write refused for the length of the handoff.
-    `advanced` (a moved snapshot whose re-proof declined), `unproven` and
-    `rebuild-after-promotion` all mean the opposite, and each leaves the
-    component out so `warm_all` runs the handoff in full. (A residue failure
-    rewrites the verdict to `rebuild-after-promotion`, so it is covered by the
-    same test.)
+    The graph handoff and startup validation share the observer's sealed proof.
+    If promotion leaves either pending, activation runs the original fallback.
     """
     from . import readiness
 
@@ -922,8 +910,8 @@ def _carried_at_promotion(record: dict[str, Any]) -> frozenset[str]:
     with _lock:
         if _corpus_built:
             carried.add("semantic_corpus")
-    if record.get("snapshot") == "current":
-        carried.add("graph_handoff")
+    if record.get("startup_validation") == "carried":
+        carried.update(("graph_handoff", "startup_validation"))
     if record.get("lexical_catalogue") == "adopted":
         # Not a readiness component: it tells the promoted worker's warm that
         # the live catalogue is one this process built before the serving
@@ -1041,37 +1029,11 @@ def _reprove(
 
     try:
         return epistemic_graph.EpistemicGraphIndex(vault_root).adopt_published_snapshot(
-            apply_residue=False, prior_reads=prior_reads, deadline=deadline
+            apply_residue=False, prior_reads=prior_reads, deadline=deadline, prime_resolver=False
         )
     except Exception:  # noqa: BLE001 - a failed re-proof rebuilds after promotion
         log.warning("standby snapshot re-proof failed", exc_info=True)
         return epistemic_graph.SnapshotAdoption(False, reason="reproof_raised")
-
-
-def _apply_residue(vault_root: Path, adoption: Any) -> tuple[int, str]:
-    """Enqueue the repair this adoption owes, now that this process owns it.
-
-    Returns how many paths were queued and, when something was owed and could
-    not be, the reason the cold path uses for the same failure. Owing nothing
-    and failing to record what you owe are different events: collapsing them
-    made an upgrade that silently lost its repair look like a clean one.
-    """
-    from . import epistemic_graph
-
-    residue = getattr(adoption, "residue", ()) if adoption is not None else ()
-    if not residue or not getattr(adoption, "adopted", False):
-        return 0, ""
-    try:
-        applied = epistemic_graph.EpistemicGraphIndex(vault_root).apply_adopted_residue(
-            residue
-        )
-    except Exception:  # noqa: BLE001 - the coalesced rebuild owns an unenqueued residue
-        log.warning("promoted worker could not enqueue its adopted residue", exc_info=True)
-        return 0, "residue_enqueue_failed"
-    if not applied:
-        log.warning("promoted worker could not enqueue its adopted residue")
-        return 0, "residue_enqueue_failed"
-    return len(residue), ""
 
 
 def _retire_covered_full_marker(
@@ -1150,8 +1112,6 @@ def promote(
             raise RuntimeError("only a standby worker can be promoted")
         _promoting = True
         proved = _proved_token
-        proof_marker = _proof_marker
-        proof_generation = None if _proof_signal is None else _proof_signal[0]
     try:
         return _promote_owned(
             Path(vault_root),
@@ -1160,8 +1120,6 @@ def promote(
                 LEGACY_PROMOTE_REQUEST_SECONDS if request_seconds is None else request_seconds
             ),
             proved=proved,
-            proof_marker=proof_marker,
-            proof_generation=proof_generation,
         )
     except BaseException:
         # A promotion that raised promoted nothing; the standby keeps proving.
@@ -1177,96 +1135,78 @@ def _promote_owned(
     migrated: bool,
     request_seconds: float,
     proved: str | None,
-    proof_marker: tuple[int, int] | None,
-    proof_generation: Any,
 ) -> dict[str, Any]:
     """`promote` once it has claimed the standby; see there."""
     global _promoted, _standby, _adoption, _carried, _proved_token
-    # `revalidated` says promotion re-checked the snapshot at all; `reproved`
-    # says it re-ran the SOURCE proof: the migrated branch always does, and the
-    # other branch only when the checkpoint pair moved under the held proof.
-    # Comparing the pair is a real re-validation, and deliberately cheaper, but
-    # not a proof, and calling it one overstated what the handoff record was
-    # attesting to.
+    from . import epistemic_graph
+
     record: dict[str, Any] = {
         "ok": True,
         "migrated": bool(migrated),
         "revalidated": False,
         "reproved": False,
+        "startup_validation": "pending",
+        "residue_applied": 0,
     }
     started = time.monotonic()
+    deadline = started + request_seconds * PROMOTION_REPROOF_SHARE
     adoption = _adoption
-    # The whole-vault marker standing before the source proof this promotion
-    # relies on, and so the only debt that proof may be said to have paid.
-    covered_marker: tuple[int, int] | None = None
-    covered_generation: Any = None
+
+    # Observation and durable repair belong to the replacement only after
+    # ownership. The normal activation retains this exact observer and buffer.
+    _acquire_ownership()
+    epistemic_graph.require_startup_source_proof(vault_root)
+    arm = getattr(_activation, "arm_promotion_observation", None)
+    watcher = arm(deadline=deadline) if callable(arm) and time.monotonic() < deadline else None
+    record["snapshot"] = "unproven"
     if proved is None:
-        record["snapshot"] = "unproven"
         if adoption is not None and adoption.reason:
-            # Names why: a proved schema change reads differently from a proof
-            # that never finished.
             record["proof_declined"] = adoption.reason
-    elif migrated:
-        # The offline migrator is the only writer between the two workers, and
-        # it ran. Re-run the whole proof rather than compare a checkpoint pair
-        # that describes state it may have rewritten.
-        # Generation before marker, the order the warm-time proof samples in.
-        covered_generation = _durable_generation(Path(vault_root))
-        covered_marker = _observe_full_marker(Path(vault_root))
-        adoption = _reprove(Path(vault_root))
-        with _lock:
-            # The re-proof supersedes the warm's: `adoption_record()` must
-            # report the residue this process actually owes.
-            _adoption = adoption
-        record["revalidated"] = True
-        record["reproved"] = True
-        record["snapshot"] = "current" if adoption.adopted else "rebuild-after-promotion"
     else:
-        current = snapshot_token(Path(vault_root))
-        # A checkpoint-pair comparison, not a source proof: see `record` above.
+        current = snapshot_token(vault_root)
         record["revalidated"] = True
-        if current is None:
-            record["snapshot"] = "rebuild-after-promotion"
-        elif current != proved:
-            record["snapshot"] = "advanced"
-            reads = getattr(adoption, "proof_reads", None)
-            if reads is not None:
-                # The serving worker published after the held proof, which under
-                # live writes is the usual case. Prove the snapshot on disk now,
-                # from the pages the held proof read: only the pages that moved
-                # since are read again, and the old worker has exited, so
-                # nothing publishes during it. The promoted worker then holds an
-                # adoption of the snapshot it inherits, and its warm need not
-                # run the handoff in full with every write refused meanwhile.
-                # A decline keeps `advanced` and the held adoption, and the
-                # promoted worker's warm runs the handoff in full as before.
-                # Generation before marker, the order the warm-time proof samples in.
-                generation = _durable_generation(Path(vault_root))
-                marker = _observe_full_marker(Path(vault_root))
+        record["snapshot"] = (
+            "advanced" if current is not None and current != proved and not migrated
+            else "rebuild-after-promotion"
+        )
+        if watcher is None:
+            record["reproof_declined"] = (
+                "proof_deadline_passed" if time.monotonic() >= deadline else "observer_unavailable"
+            )
+        else:
+            graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+            observe = watcher.promotion_observation_stamp
+            initial = graph.promotion_proof_stamp(observe)
+            if initial is None:
+                record["reproof_declined"] = "promotion_sample_unavailable"
+            elif time.monotonic() >= deadline:
+                record["reproof_declined"] = "proof_deadline_passed"
+            else:
+                covered_generation = _durable_generation(vault_root)
+                covered_marker = _observe_full_marker(vault_root)
                 reproof = _reprove(
-                    Path(vault_root),
-                    prior_reads=reads,
-                    deadline=started + request_seconds * PROMOTION_REPROOF_SHARE,
+                    vault_root,
+                    prior_reads=None if migrated else getattr(adoption, "proof_reads", None),
+                    deadline=deadline,
                 )
                 record["reproved"] = True
-                if reproof.adopted:
-                    adoption = reproof
-                    with _lock:
-                        _adoption = adoption
-                        _proved_token = reproof.proved_token
-                    record["snapshot"] = "current"
-                    covered_marker = marker
-                    covered_generation = generation
+                carried_graph, decline = graph.seal_promoted_snapshot(
+                    initial, reproof, observe=observe, deadline=deadline,
+                )
+                if carried_graph is None:
+                    record["reproof_declined"] = decline
                 else:
-                    record["reproof_declined"] = reproof.reason
-        else:
-            record["snapshot"] = "current"
-            covered_marker = proof_marker
-            covered_generation = proof_generation
-    # The writer lease is what makes this process the owner, so it comes first:
-    # enqueueing the repair the adoption owes is a write, and this process has
-    # no standing to make it until the lease says the vault is its own.
-    _acquire_ownership()
+                    carried_graph.bind(vault_root)
+                    watcher.carry_startup_graph(carried_graph)
+                    adoption = reproof
+                    _adoption = reproof
+                    _proved_token = reproof.proved_token
+                    record["snapshot"] = "current"
+                    record["startup_validation"] = "carried"
+                    record["residue_applied"] = len(reproof.residue)
+                    _retire_covered_full_marker(
+                        vault_root, reproof, record, covered_marker, covered_generation,
+                    )
     # Owned now, and the worker that kept an earlier release's catalogue current
     # has exited, so the catalogue this standby built may replace it.
     catalogue = _adopt_detached_catalog(
@@ -1293,16 +1233,6 @@ def _promote_owned(
         record["identity_catalogue"] = "rebuild-after-promotion"
         record["identity_catalogue_cause"] = identity_cause
         reserved_paths.schedule_identity_catalogue_warm(Path(vault_root))
-    applied, residue_failure = _apply_residue(Path(vault_root), adoption)
-    record["residue_applied"] = applied
-    if residue_failure:
-        # The repair this process owes is not recorded anywhere durable, so the
-        # coalesced rebuild is what will fix the projection. Say so.
-        record["snapshot"] = "rebuild-after-promotion"
-        record["reason"] = residue_failure
-    _retire_covered_full_marker(
-        Path(vault_root), adoption, record, covered_marker, covered_generation
-    )
     carried = _carried_at_promotion(record)
     record["carried_from_standby"] = sorted(carried)
     from . import runtime_readiness
@@ -1315,7 +1245,7 @@ def _promote_owned(
         if getattr(_adoption, "proof_reads", None) is not None:
             # Only a standby's next proof starts from the page reads; a
             # promoted worker would hold one entry per page for nothing.
-            _adoption = dataclasses.replace(_adoption, proof_reads=None)
+            _adoption = dataclasses.replace(_adoption, proof_reads=None, proved_resolver=None)
         # Under the same lock as the flip: a readiness proof that reads
         # `standby: false` measured part of its state as a standby, and the
         # supervisor reads readiness as soon as this POST returns.
@@ -1344,12 +1274,11 @@ def reset_for_tests() -> None:
     global _carried, _corpus_built, _corpus_attempted, _collections_settled
     global _detached_catalog, _detached_built, _detached_attempted
     global _discarded, _discard_requested
-    global _promoting, _proof_signal, _proof_marker
+    global _promoting, _proof_signal
     global _attempt_signal, _attempt_stat, _attempt_ended_at
     with _lock:
         _promoting = False
         _proof_signal = None
-        _proof_marker = None
         _attempt_signal = None
         _attempt_stat = None
         _attempt_ended_at = None

@@ -133,6 +133,7 @@ class LocalRuntimeActivation:
         # admission nor arms the liveness fallback that would start schedulers
         # beside the worker still serving (`seamless-managed-worker-handoff` D7).
         self._deferred = deferred
+        self._needs_cold_graph_proof = not deferred
         if warmup.warmup_enabled() and not deferred:
             readiness.manage_runtime()
         self.vault_root = vault_root
@@ -162,6 +163,7 @@ class LocalRuntimeActivation:
         self.media_replicas: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
         self.vault_backup: threading.Thread | None = None
+        self.upload_session_sweeper: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -169,6 +171,14 @@ class LocalRuntimeActivation:
         if not deferred:
             self._bind_graph_rebuild_lifetime()
             self._commit_recall_reembed()
+
+    def _fence_cold_graph_origin(self) -> None:
+        if self._needs_cold_graph_proof:
+            from . import epistemic_graph
+
+            if epistemic_graph.sidecar_path(self.vault_root).exists():
+                epistemic_graph.require_startup_source_proof(self.vault_root)
+            self._needs_cold_graph_proof = False
 
     def _bind_graph_rebuild_lifetime(self) -> None:
         from . import graph_sync, working_set_runtime
@@ -197,6 +207,7 @@ class LocalRuntimeActivation:
         with self._lock:
             if self._started or self._shutdown.is_set() or self._deferred:
                 return
+            self._fence_cold_graph_origin()
             self._started = True
             timer = self._timer
             thread = threading.Thread(
@@ -278,6 +289,10 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("maintenance jobs", self._recover_maintenance_jobs)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
+        self._start_component("write intake", self._start_write_intake)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
@@ -390,8 +405,11 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import maintenance_jobs, working_set_runtime
+        from . import maintenance_jobs, working_set_runtime, write_intake
 
+        # First, so no queued save starts a replay while the workers below stop; a replay in
+        # flight is claimed by this process and re-claimed after the restart.
+        write_intake.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -485,7 +503,9 @@ class LocalRuntimeActivation:
         """Finish owned native work after activation can no longer assign workers."""
         from . import working_set_runtime
 
-        for thread in (self.retrieval_warmup, self.matrix_warmup, self.recall_reembed):
+        for thread in (
+            self.retrieval_warmup, self.matrix_warmup, self.recall_reembed, self.upload_session_sweeper,
+        ):
             if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
                 thread.join()
         working_set_runtime.join_builds(self.vault_root)
@@ -531,12 +551,31 @@ class LocalRuntimeActivation:
         self.review_pass = review_pass.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
-        """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
+        """Resume interrupted uploads and own their expiry while serving HTTP."""
         if not self.serves_upload_sessions:
             return
         from .server_transfer import resume_upload_sessions
+        from .upload_sessions import run_expiry_sweep
 
+        sweeper = threading.Thread(
+            target=run_expiry_sweep, args=(vault_root, self._shutdown),
+            name="upload-session-expiry", daemon=True,
+        )
+        sweeper.start()
+        self.upload_session_sweeper = sweeper
         resume_upload_sessions(vault_root)
+
+    def _start_write_intake(self, vault_root: Path) -> None:
+        """Apply queued saves, in the serving HTTP runtime only.
+
+        Acceptance needs this drainer, so a stdio server or the CLI keeps the busy refusal: a
+        process that may exit with the client must not take custody of a save.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import write_intake
+
+        write_intake.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""
@@ -620,8 +659,25 @@ class LocalRuntimeActivation:
 
         self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
 
+    def arm_promotion_observation(self, *, deadline: float) -> Any | None:
+        """Arm this activation's own observer before standby proof replay."""
+        with self._lock:
+            if self._shutdown.is_set() or not self._deferred or self._started:
+                return None
+            if self.file_watcher is None:
+                self.file_watcher = _create_file_watcher(self.vault_root)
+            watcher = self.file_watcher
+        if watcher is None or not watcher.arm_promotion_observation(deadline=deadline):
+            return None
+        return watcher
+
     def _start_file_watcher(self, vault_root: Path) -> None:
-        self.file_watcher = _start_file_watcher(vault_root)
+        watcher = self.file_watcher
+        if watcher is None:
+            self.file_watcher = _start_file_watcher(vault_root)
+        elif not watcher.start():
+            watcher.stop()
+            self.file_watcher = None
 
     def _start_vault_projector(self, vault_root: Path) -> None:
         self.vault_projector = _start_vault_projector(vault_root)
@@ -650,11 +706,26 @@ class LocalRuntimeActivation:
     def _start_dreamer(self, vault_root: Path) -> None:
         self.dreamer = _start_dreamer(vault_root)
 
-    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+    def _finish_file_watcher_startup(self, vault_root: Path) -> None:
         watcher = self.file_watcher
         finish = getattr(watcher, "finish_startup_recovery", None)
         if callable(finish):
             finish()
+            return
+
+        from . import epistemic_graph
+
+        if not epistemic_graph.graph_enabled() or not epistemic_graph.startup_source_proof_pending(vault_root):
+            return
+        graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+        with foreground_priority.bulk(stop=self._shutdown):
+            while True:
+                foreground_priority.check_cancelled()
+                admission = graph.validate_startup_snapshot()
+                if admission is not None:
+                    graph.recover_startup_graph(admission)
+                    return
+                foreground_priority.wait_for_retry(0.25)
 
     async def _finish_shutdown(self) -> None:
         """Finish the tracked shutdown before process teardown."""
@@ -729,6 +800,8 @@ class LocalRuntimeActivation:
             timer.daemon = True
             with self._lock:
                 if not self._started and not self._deferred:
+                    # HTTP can serve before the liveness endpoint starts workers.
+                    self._fence_cold_graph_origin()
                     self._timer = timer
                     timer.start()
             try:
@@ -876,14 +949,15 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
     try:
         from . import cloud_cell
 
-        # Optional passage residency applies only after published metadata identifies passages.
+        # Passage preparation applies only after published metadata identifies passages:
+        # the lexical terms always, and the resident matrix when its budget allows one.
         if cloud_cell.resource_policy() == "service-v1":
-            from . import embeddings, passage_evidence, passage_matrix, semantic_contract
+            from . import embeddings, passage_evidence, semantic_contract
 
-            if passage_matrix.ceiling():
-                publication = semantic_contract.borrow_published_corpus(vault_root)
-                if publication is not None and passage_evidence.declared_sources(vault_root, publication):
-                    loading = embeddings.get_embedding_index(vault_root).prepare_passage_matrix()
+            publication = semantic_contract.borrow_published_corpus(vault_root)
+            if publication is not None and passage_evidence.declared_sources(vault_root, publication):
+                index = embeddings.get_embedding_index(vault_root)
+                for loading in (index.prepare_passage_terms(), index.prepare_passage_matrix()):
                     if loading is not None:
                         loading.join()
             return

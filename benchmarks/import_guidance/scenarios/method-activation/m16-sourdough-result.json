@@ -1,0 +1,12 @@
+{
+  "id": "m16-sourdough-result",
+  "title": "The result of a baking trial is reported",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "Update on the sourdough hydration trials: I baked three loaves at 78 percent.",
+    "The crumb was much more open but all three spread flat on the tray, so I'm going back to 72 for sandwich bread and only using 78 for the weekend loaf.",
+    "That's it, thanks."
+  ]
+}

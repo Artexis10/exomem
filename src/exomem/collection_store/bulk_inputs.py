@@ -183,7 +183,7 @@ def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
         if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
                 or not isinstance(raw.get("item"), Mapping)):
             candidate.error = records._bulk_reject(index, "INVALID_BULK_ROW",
-                "a row is an object of item, optional body and optional source")
+                "a row is an object of item, optional body and source; a source is required on the row or once for the batch")
             continue
         body = raw.get("body")
         reference = raw["source"] if raw.get("source") is not None else source

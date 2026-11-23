@@ -388,6 +388,11 @@ class Command:
     #: because every page parameter takes those. A command whose subject is a file keeps `path`:
     #: a file tool takes no title or id.
     names_pages: bool = False
+    #: A save the serving process queues durably instead of refusing while the mutation boundary
+    #: stays busy (`write_intake`). Only knowledge saves declare it: a job, an upload, a protocol
+    #: step or a credential must not run later than its caller expects. Within a declaring command,
+    #: `commands.busy_intake_applies` decides per operation (`OperationEntry.queues_when_busy`).
+    busy_intake: bool = False
     #: Resolve read-only handles before writer admission; the leaf revalidates the bound guards.
     prepare_arguments: Callable[..., dict[str, typing.Any]] | None = field(
         default=None, compare=False, hash=False
@@ -1405,18 +1410,16 @@ def mcp_request_context(
     Yields the minted per-call token: the failure-signal key that stays unique
     even when concurrent calls share a client-supplied request id.
 
-    The request-scoped deadline is created here, beside the call token, because
-    this is the one place every MCP tool call passes through: a budget minted
-    anywhere further in would be a bound on some paths and not others. `tool`
-    and `arguments` are read only to exempt the reconcile-class commands, whose
-    terminal is the derived state and whose graph join is unbounded by design.
+    Reuse the managed preview deadline from authorization. Other requests bind
+    their deadline here. The reconcile-class commands wait for the derived state
+    and keep their existing graph join.
     """
     with mcp_request_correlation(request_id):
         call_token = uuid.uuid4().hex
         call_reset = _MCP_CALL_TOKEN.set(call_token)
-        budget = (
-            None
-            if request_budget.is_reconcile_class(tool, arguments)
+        check = request_budget.current_checkpoint()
+        budget = check.budget if check is not None else (
+            None if request_budget.is_reconcile_class(tool, arguments)
             else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
         )
         budget_reset = request_budget.set_current(budget)
@@ -1429,6 +1432,21 @@ def mcp_request_context(
             _MCP_ACTIVATION_RESULT.reset(activation_reset)
             request_budget.reset_current(budget_reset)
             _MCP_CALL_TOKEN.reset(call_reset)
+
+
+async def mcp_preview_warming(context, arguments, surface_descriptor=None):
+    """Render the same content-free preview retry at either MCP boundary."""
+    from . import cli_ops
+    from .reclassify_source import preview_warming
+
+    error = preview_warming()
+    name = context.message.name
+    tool = await context.fastmcp_context.fastmcp.get_tool(name)
+    surface = capabilities.active_surface(surface_descriptor) if surface_descriptor is not None else nullcontext()
+    with surface:
+        return tool.convert_result(agent_refusal_result(
+            cli_ops.public_refusal(error), error, name, arguments, arguments, write=False,
+        ))
 
 
 _SCHEMA_MAPPING_KEYS = ("properties", "$defs", "patternProperties")

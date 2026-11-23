@@ -50,7 +50,7 @@ opaque and do not establish tool availability or external truth. Planning may
 point to Records as observed evidence, but neither layer mirrors the other or
 infers progress, completion, medical conclusions, or personal judgment.
 
-See [Records](records.md) for the manual-first collection contract.
+See [Records](records.md) for the collection contract.
 
 ### Source classification is metadata; the folder is a projection
 

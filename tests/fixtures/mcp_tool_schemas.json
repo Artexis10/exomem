@@ -128,7 +128,7 @@
     }
   },
   "add_record": {
-    "description": "Add a row to a Records collection the person owns. Outcomes go here; intentions go to Planning.",
+    "description": "Add a Records row. Outcomes go here; intentions go to Planning. If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, your proposals and outside claims each get a field; `options.new_fields` adds one.",
     "inputSchema": {
       "properties": {
         "collection": {
@@ -141,17 +141,18 @@
         "why": {
           "type": "string"
         },
+        "new_collection": {
+          "type": "object",
+          "description": "{natural_key: [item fields that identify a row]}"
+        },
         "body": {
-          "type": "string",
-          "description": "Free text kept with the row."
+          "type": "string"
         },
         "hold": {
-          "type": "boolean",
-          "description": "Hold a row that fails validation."
+          "type": "boolean"
         },
         "held": {
-          "type": "string",
-          "description": "The id of a held row to resume."
+          "type": "string"
         },
         "options": {
           "type": "object",
@@ -201,7 +202,7 @@
     }
   },
   "create_note": {
-    "description": "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
+    "description": "Save a conclusion. Named items compared or tracked: add_record. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -612,6 +613,10 @@
           "type": "boolean",
           "description": "Rebuild the row's Markdown view; `changes` may then be empty."
         },
+        "options": {
+          "type": "object",
+          "description": "Rare knobs: new_fields."
+        },
         "detail": {
           "enum": [
             "compact",
@@ -665,6 +670,7 @@
             "review.provenance",
             "review.evolution",
             "review.advisory_result",
+            "review.queued_write",
             "review.held",
             "connections.suggest_links",
             "connections.suggest_relations",
@@ -1297,6 +1303,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1366,6 +1376,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1568,11 +1582,11 @@
     }
   },
   "upload_files": {
-    "description": "Get a one-use upload. Follow the reply, then pass its handle to save_source or save_evidence.",
+    "description": "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Original, proof, or personal-server folder archive.",
+          "description": "Source, Evidence or import archive.",
           "enum": [
             "source",
             "evidence",
@@ -1582,15 +1596,20 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of the file to upload."
+          "description": "File SHA-256."
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer",
+          "description": "Exact Source bytes."
         },
         "import_identity": {
           "type": "string",
-          "description": "Durable external ID for a held Source upload."
+          "description": "Held Source import ID."
         },
         "hold": {
           "type": "boolean",
-          "description": "Keep the upload for this session; needs expected_sha256."
+          "description": "Hold bytes for a later save."
         },
         "detail": {
           "enum": [

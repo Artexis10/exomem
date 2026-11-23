@@ -52,6 +52,7 @@ def _constructor_map():
         served_context,
         source_imports,
         voice_profiles,
+        write_intake,
     )
     from exomem.governance import (
         projection_measurement_store,
@@ -100,6 +101,7 @@ def _constructor_map():
         "refs-store": (memory_refs.sidecar_path,),
         "generated-fragments-index": (generated_fragment_store.cache_path,),
         "maintenance-jobs-store": (maintenance_jobs.store_path,),
+        "write-intake-store": (write_intake.store_path,),
         "media-jobs-store": (media_jobs.job_store_path, media_jobs.worker_lock_path),
         "media-previews": (media_previews.store_path,),
         "governance-store": (index_paths.governance_sidecar_path,),
@@ -174,6 +176,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "source-import-intents",
     "voice-profile-store",
     "brief-watermarks",
+    "write-intake-store",
 }
 
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
@@ -367,6 +370,7 @@ def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable()
         "collection-archive",
         "procedure-approval-key",
         "source-import-intents",
+        "write-intake-store",
     }
     assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
 

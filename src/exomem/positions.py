@@ -106,20 +106,26 @@ def _limit(root: Path) -> int:
 
 def compile_block(
     root: Path, caller: Any, *, reach: Collection[str], turn: str, focus: str, snapshot: Any,
-    today: date | None = None,
+    today: date | None = None, discovery_gap: str | None = None,
 ) -> dict[str, Any]:
     """The current position units on the `reach` page paths that this caller may see, ranked for the turn.
 
-    Every outcome is pinned for terminal egress, so an empty or unavailable block reaches the wire with its own
-    state and reason.
+    `discovery_gap` names why task discovery stopped short of the turn's reach, if it did: the block then covers
+    only the pages it was given, so it is `unavailable` when it was given none and `partial` otherwise, never
+    `empty`. Every outcome is pinned for terminal egress, so an empty or unavailable block reaches the wire with
+    its own state and reason.
     """
-    block, served, counted = _compile(root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today())
+    block, served, counted = _compile(
+        root, caller, reach=reach, query=f"{turn}\n{focus}", snapshot=snapshot, today=today or date.today(),
+        discovery_gap=discovery_gap,
+    )
     _pin(root, caller, block, served, counted)
     return block
 
 
 def _compile(
     root: Path, caller: Any, *, reach: Collection[str], query: str, snapshot: Any, today: date,
+    discovery_gap: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
     """The block, the units it serves in full, and the pages of the units it only counts."""
     limit = _limit(root)
@@ -127,7 +133,8 @@ def _compile(
         return _empty(reason="disabled"), [], set()
     parents = {path for path in reach if caller.sees(path)}
     if not parents:
-        return _empty(), [], set()
+        # No page to read is a quiet turn only when discovery finished; otherwise nothing was looked at.
+        return (_empty("unavailable", discovery_gap) if discovery_gap else _empty()), [], set()
     registry = semantic_language_registry.load_admitted(root) or semantic_language_registry.core_registry()
     categories, kinds = registry.categories_with(TRAIT), registry.kinds_with(TRAIT)
     if not categories and not kinds:
@@ -231,6 +238,9 @@ def _compile(
         block = {"about": ABOUT, **block, "state": "ready"}
     if len(hits) > ROWS_PER_RECALL:
         block.update(state="partial", reason="truncated")
+    if discovery_gap:
+        # The pages read are only part of the turn's reach, whatever they held; the gap outranks the row cap's reason.
+        block.update(state="partial", reason=discovery_gap)
     return block, served, counted
 
 

@@ -181,12 +181,31 @@ failed file. Retry the failed files in a new call that names only them, under a
 new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
 committed and the same identity and payload are retried.
 
+A save can instead return `state: "queued"` with `committed: false` and a
+`queued_write.ref`. The memory was busy, so the service holds the save durably
+and applies it in arrival order. It is not saved yet: tell the user it is
+queued, never that it is saved. Do not resend it; a resend with the same
+identity returns the same receipt. Read its outcome later with the `route`
+the reply gives (`review_memory` mode `queued-write` with that `ref`): it ends
+`applied`, or `failed` with its refusal and the original arguments to correct
+and send again.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
 following their `retry`: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
+
+A collection write that ends `MUTATION_ACKNOWLEDGEMENT_PENDING` was accepted by the store and
+may still commit. Recover in one of two ways, and never with a new identity or a changed
+payload:
+
+1. Replay the call with the same identity and the same payload. The product returns the
+   recorded result and never writes twice.
+2. Read the collection and the row by its natural key, then write only what is missing.
+
+A read refused `COLLECTION_STORE_BUSY` committed nothing; retry it later.
 
 ## Refusals
 

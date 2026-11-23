@@ -254,6 +254,26 @@ def test_paired_slots_alternate_modes_and_keep_every_repeat_client_and_query():
     assert len({driver.slot_key(slot) for slot in slots}) == len(slots)
 
 
+def test_a_ranking_arm_sends_its_request_mode_and_expects_its_ranking():
+    profile = driver.load_profile(driver.PROFILE.parent / "ranking-profile.json")
+    frozen = driver.frozen_cases({**profile, "queries": 1}, {"model": "test", "fingerprint": "test", "dim": 1})
+
+    dense, hybrid = (driver.arm_cases(profile, arm, frozen)[0] for arm in profile["modes"])
+
+    assert dense["arguments"]["options"] == {"result_level": "passage"}
+    assert hybrid["arguments"]["options"] == {"result_level": "passage", "mode": "hybrid"}
+    for case, ranking in ((dense, "dense"), (hybrid, "fused")):
+        schema = case["expected"]["response_schema"]
+        assert schema["properties"]["scoring_mode"] == {"const": "resident"}
+        assert schema["properties"]["ranking"] == {"const": ranking}
+        assert "ranking" in schema["required"]
+    # The base profile declares no arms, so a mode keeps naming its own scoring mode and request.
+    undeclared = driver.arm_cases({}, "disk", frozen)[0]
+    assert undeclared["arguments"] == frozen[0]["arguments"]
+    assert undeclared["expected"]["response_schema"]["properties"]["scoring_mode"] == {"const": "disk"}
+    assert "ranking" not in undeclared["expected"]["response_schema"]["properties"]
+
+
 def test_a_missing_paired_call_stays_visible_and_prevents_a_comparison():
     profile = {"modes": ["disk", "resident"], "repeats": 1, "callers": [1],
                "pairing": {"confidence": 0.95, "resamples": 100, "seed": 7}}

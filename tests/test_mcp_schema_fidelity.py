@@ -320,9 +320,19 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     assert write["annotations"]["readOnlyHint"] is False
     assert read["annotations"]["readOnlyHint"] is True
     # The registered command keeps the path contract and the three response detail levels.
-    process = _hidden(mcp, "process_media")["inputSchema"]["properties"]
+    process_schema = _hidden(mcp, "process_media")["inputSchema"]
+    process = process_schema["properties"]
     assert "governed" in process["path"]["description"].lower()
+    assert process["diarize"]["type"] == "boolean"
+    assert "diarize" not in process_schema.get("required", ())
     assert process["response_detail"]["enum"] == ["compact", "full", "legacy"]
+    for kind in ("process", "reprocess"):
+        door, arguments = public_call("change_media", {
+            "operation": {"kind": kind, "path": "Evidence/Audio/recording.wav", "diarize": False},
+        })
+        assert door == "manage_memory"
+        assert arguments["operation"] == f"media.{kind}"
+        assert arguments["arguments"]["diarize"] is False
 
     result = asyncio.run(
         mcp.call_tool(*public_call("read_media", {"operation": {"kind": "status"}}), run_middleware=True)
@@ -330,3 +340,19 @@ def test_process_media_mcp_schema_annotations_and_leaf_result(
     structured = result.structured_content
     assert structured["operation"] == "status"
     assert structured["counts"] == media_jobs.status(vault)["counts"]
+
+
+def test_public_file_capture_accepts_only_boolean_speaker_choices() -> None:
+    from pydantic import ValidationError
+
+    from exomem.public_tools import SaveEvidence, SaveSource
+
+    file = {"download_url": "https://example.com/a.wav", "file_id": "audio"}
+    for model, fields in (
+        (SaveEvidence, {"scope": "Test", "category": "Audio"}),
+        (SaveSource, {"title": "Recording"}),
+    ):
+        value = model.model_validate({**fields, "files": [{**file, "diarize": False}]})
+        assert value.files[0].diarize is False
+        with pytest.raises(ValidationError):
+            model.model_validate({**fields, "files": [{**file, "diarize": "false"}]})

@@ -13,6 +13,10 @@ from .clip_index import CLIP_DIM
 class OnnxClipQueryEncoder:
     """Run the complete query graph, including its trained projection, on CPU."""
 
+    # The tokenizer is configured once at load and an ONNX Runtime session serves calls side by
+    # side, so query encodes may overlap (`embeddings.embed_clip_text`).
+    concurrent_encodes = True
+
     def __init__(self) -> None:
         import onnxruntime as ort
         from tokenizers import Tokenizer

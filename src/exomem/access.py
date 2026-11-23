@@ -111,12 +111,30 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
     Unreadable, replaced, or over-limit bytes fail closed; an absent policy has
     the stable explicit ``missing`` identity.
     """
+    evidence = _publication_policy_evidence(vault_root)
+    return None if evidence is None else evidence[0]
+
+
+def publication_policy_exclusions(vault_root: Path) -> tuple[str, bool] | None:
+    """Decide exclusions from the same bounded bytes that supply the fingerprint."""
+    evidence = _publication_policy_evidence(vault_root)
+    if evidence is None:
+        return None
+    snapshot, raw = evidence
+    try:
+        excluded = raw is not None and bool(parse_config(raw)["excluded"])
+    except (UnicodeError, yaml.YAMLError, TypeError):
+        return None
+    return snapshot.fingerprint, excluded
+
+
+def _publication_policy_evidence(vault_root: Path) -> tuple[PublicationPolicySnapshot, bytes | None] | None:
     root = Path(vault_root)
     path = access_config_path(root)
     try:
         path.lstat()
     except FileNotFoundError:
-        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT)
+        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT), None
     except OSError:
         return None
     try:
@@ -129,7 +147,7 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
         )
     except (OSError, ValueError):
         return None
-    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest())
+    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest()), raw
 
 
 def _policy_signature(path: Path) -> _PolicySignature:

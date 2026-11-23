@@ -13,7 +13,7 @@ from urllib.parse import unquote
 
 import yaml
 
-from .. import memory_refs, reserved_paths, vault
+from .. import memory_refs, request_budget, reserved_paths, vault
 from . import (
     authorization_custody,
     authorization_session_authority,
@@ -25,6 +25,10 @@ from .principal import OWNER_AUDIENCE, RequestPrincipal
 PREFIX = "__exomem_raw_v1__"
 COMPATIBILITY_ID = "raw-protection-v1"
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+
+
+class AuthorityUnreadable(RuntimeError):
+    """The protected authority stores could not be checked."""
 
 
 def marked(path: str) -> bool:
@@ -65,9 +69,9 @@ def is_owner(who: RequestPrincipal) -> bool:
     return who.resolved and who.audience_id == OWNER_AUDIENCE
 
 
-def has_unrestricted_access(root: Path, who: RequestPrincipal) -> bool:
+def has_unrestricted_access(root: Path, who: RequestPrincipal, *, report_unreadable: bool = False) -> bool:
     """Keep owner recall unrestricted only while its authority remains valid."""
-    return is_owner(who) and _authority(root, who)[0]
+    return is_owner(who) and _authority(root, who, report_unreadable=report_unreadable)[0]
 
 
 def protect(page: str, *, artifact_path: str, digest: str) -> str:
@@ -91,11 +95,13 @@ def _binding_candidates(path: str, *, artifact_copy: reserved_paths.GenericFileC
     return candidates
 
 
-def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[dict, str, str] | None:
+def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileCopy | None = None,
+            page_snapshot: bytes | None = None) -> tuple[dict, str, str] | None:
     """Resolve only the named pair; an orphan never acquires a release."""
-    for candidate in _binding_candidates(path, artifact_copy=artifact_copy):
+    candidates = (path,) if page_snapshot is not None else _binding_candidates(path, artifact_copy=artifact_copy)
+    for candidate in candidates:
         try:
-            raw = reserved_paths.read_generic_bytes(root, candidate).data
+            raw = reserved_paths.read_generic_bytes(root, candidate).data if page_snapshot is None else page_snapshot
             fm, _, _ = vault.parse_frontmatter(raw.decode("utf-8"), strict=True)
             block = fm.get("raw_protection")
             if not isinstance(block, dict) or set(block) != {
@@ -123,7 +129,9 @@ def binding(root: Path, path: str, *, artifact_copy: reserved_paths.GenericFileC
     return None
 
 
-def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
+def _authority(
+    root: Path, who: RequestPrincipal, *, report_unreadable: bool = False,
+) -> tuple[bool, str | None]:
     """Verify issuer and live session once, retaining its trusted release purpose."""
     if not who.resolved or not who.issuer_family:
         return False, None
@@ -132,26 +140,43 @@ def _authority(root: Path, who: RequestPrincipal) -> tuple[bool, str | None]:
     if who.authorization_session_id is not None and context is None:
         return False, None
     if context is not None:
+        checkpoint = request_budget.current_checkpoint()
         connection = None
         try:
             if context.issuer_family != who.issuer_family:
                 return False, None
-            connection = store.open_authorization_session_connection(root)
+            connection = store.open_authorization_session_read_connection(root)
             now = int(time.time())
-            custody = authorization_custody.load_authorization_custody(root, now=now)
+            custody = authorization_custody.load_authorization_custody(
+                root, now=now, require_readable_membership=report_unreadable,
+            )
             authorization_session_lifecycle.status_verified_session(
                 connection, custody=custody, context=context, now=now,
             )
             trusted_purpose = authorization_session_authority.active_session_purpose(
                 connection, context=context, audience=who.audience_id, now=now,
             )
-        except (OSError, sqlite3.Error, store.UnsupportedGovernanceSchema,
+        except (OSError, sqlite3.Error,
+                authorization_custody.AuthorizationCustodyUnreadable,
+                authorization_session_lifecycle.AuthorizationSessionUnreadable):
+            if report_unreadable:
+                raise AuthorityUnreadable("authorization session could not be checked") from None
+            if checkpoint is not None:
+                # An unproved live recheck of a verified credential cannot admit a preview
+                # or send it down the restricted path. Transport verifies it again on retry.
+                raise request_budget.ReadBudgetExhausted() from None
+            return False, None
+        except (store.UnsupportedGovernanceSchema,
                 authorization_custody.AuthorizationCustodyUnavailable,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
+            if checkpoint is not None:
+                raise request_budget.ReadBudgetExhausted() from None
             return False, None
         finally:
             if connection is not None:
                 connection.close()
+        if checkpoint is not None:
+            checkpoint()
     return True, trusted_purpose
 
 

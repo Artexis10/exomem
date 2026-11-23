@@ -14,7 +14,7 @@ import secrets
 import sys
 import threading
 import unicodedata
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Set
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Generic, Literal, TypeVar
@@ -125,11 +125,21 @@ class Capabilities:
     stable_identity: bool
     same_device_rename: bool
     hard_link: bool
+    no_replace_rename: bool
     reason: str = ""
 
     @classmethod
     def disabled(cls, reason: str) -> Capabilities:
-        return cls(False, False, False, False, False, reason)
+        return cls(False, False, False, False, False, False, reason)
+
+
+Capability = Literal["relative_operations", "no_follow", "stable_identity", "same_device_rename",
+                     "hard_link", "no_replace_rename"]
+# Hard links have always been optional for the default vault and state-root acquisition.
+# nosemgrep: ep-word-set -- the fields of the held-filesystem capability contract above.
+_DEFAULT_REQUIREMENTS: frozenset[Capability] = frozenset({
+    "relative_operations", "no_follow", "stable_identity", "same_device_rename", "no_replace_rename",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +323,9 @@ class HeldFilesystem:
         creator can split a folder by case or Unicode form. `scratch=True` marks
         a randomly named working folder that the caller removes again: it cannot
         collide, so it skips the parent listing that the check costs.
+
+        `access="flush"` lets the caller publish a child and flush this
+        directory, including the held root at `.`.
         """
         raise NotImplementedError
 
@@ -497,10 +510,13 @@ def probe(root: Path) -> Capabilities:
         return capability
 
 
-def acquire(root: Path) -> HeldResult[HeldFilesystem]:
-    """Acquire a root anchor or return a content-free capability/IO refusal."""
+def acquire(root: Path, *, required: Set[Capability] = _DEFAULT_REQUIREMENTS) -> HeldResult[HeldFilesystem]:
+    """Acquire a root anchor with the requested capabilities, defaulting to vault and state-root requirements."""
     root = Path(root)
-    return _backend().acquire(root, capability=probe(root))
+    capability = probe(root)
+    if any(not getattr(capability, name) for name in required):
+        return HeldResult(error=HeldFsError("CAPABILITY_UNAVAILABLE", "required filesystem primitives are unavailable"))
+    return _backend().acquire(root, capability=capability)
 
 
 def flush_directory_path(path: Path) -> HeldResult[None]:

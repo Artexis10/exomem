@@ -6,6 +6,49 @@ A replica is a second encrypted copy of an original file in a store that you dec
 Exomem checks each replica on a cycle, reports a damaged one as a finding and copies it again when it can.
 This page says what each check proves, how to set the sample budget and how to read a finding.
 
+## Free space on a personal vault disk
+
+A personal install can put encrypted originals on a separate filesystem store.
+The store supports WSL-mounted Windows drives that provide hard links and directory flushes.
+Eviction removes plaintext from the vault and its current mirrors. Keep the store and the exported key for recovery.
+
+Place the vault's media store configuration in `media-store.json` in its state directory.
+Keep the existing `vaults` object and store descriptors. Remove `EXOMEM_MEDIA_STORE_CONFIG` from the process environment before using the owner commands.
+
+The following commands use the example vault `/srv/archive` and a configured store named `disk`.
+
+1. Run `exomem media-replicas declare-store disk --vault /srv/archive`. The store gets an identity marker.
+2. Export the decryption key outside the machine. You can then record that export.
+3. Run `exomem media-replicas confirm-key-export --vault /srv/archive`. The ledger records the current key version.
+4. Run `exomem media-replicas enable-eviction disk --vault /srv/archive --free-bytes 10737418240`. Eviction targets 10 GiB of free space.
+
+The store must have no replica entries. A switch also requires the previous store to have no remaining pointers, including pointers in Trash.
+The store must be on a different device from the vault. Declaration writes its marker through the open store directory.
+If the store disappears, put the original volume and marker back before retrying.
+The default margin frees an extra tenth of the requested space. The upload floor reserves half of the requested space.
+Use `--margin-bytes` and `--upload-floor-bytes` to set those values. An upload at the floor returns `MEDIA_SPACE_BUSY` with a retry hint.
+The final part of a resumable upload reserves space for its commit stages. The service keeps accepted parts if commit must wait.
+Hydration, signed-container extraction and each final storage copy use the same vault-volume budget.
+The budget covers database, search and graph writes for stored Markdown originals. Their projected files keep the floor protection.
+When an outside rename meets the floor, the next retry checks both paths. Other imports continue.
+
+After a copy settles for ten minutes, eviction checks its whole ciphertext before it removes the local bytes.
+The service flushes the version directory and store root before relying on that copy for eviction.
+Eviction confirms the configured path still reaches that same copy immediately before removal.
+On personal installs, eviction starts and stops using the disk space available to the service. A bounded walk continues across passes.
+Use `--eviction-settle-seconds` to set that time. An unknown publication time keeps the original local.
+Reading an evicted original verifies and decrypts it from the store. A missing store reports `MEDIA_STORE_UNAVAILABLE`.
+
+Run `exomem media-replicas disable-eviction --vault /srv/archive` to stop eviction.
+The worker restores originals that fit. You can still read the remaining originals from the store.
+
+The owner’s `process_media` status has a `replicas.eviction` section. It reports bound physical originals and plaintext bytes from the last complete inventory.
+The inventory counts a shared object once. Its `observed_at` field gives the time of the count.
+If the latest walk cannot prove a count, `inventory_state` reports `failed` at `inventory_attempted_at` and retains the preceding counts.
+The `waiting` field gives the last eviction pass's reason and `waiting_observed_at` gives its time.
+If a shared original has too many bindings or distinct versions to check in one pass, `binding_proof_limit` reports why its local bytes stay.
+Unknown inventory counts and wait reasons appear as null.
+
 ## What each check proves
 
 A check proves one of three levels. The status names the level that each replica last passed.
@@ -32,6 +75,29 @@ Add an adapter named `b2` to the vault's `stores` list. Supply the exact `bucket
 Set `credential_file` to an absolute path on the serving host. Keep `key_id` and `application_key` in that private JSON file. Use a bucket-and-prefix restricted key with read and write access and no delete permission. Keep the bucket's referenced versions available for recovery.
 
 Use the existing replica operation to request copies. A direct B2 store serves replica copies and exact-version restore. Keep the vault's primary eviction store configured separately.
+
+## Protect originals with a storage policy
+
+Add a `protection` object to the vault's media store configuration to request verified copies.
+Set `minimum_verified_copies`, `minimum_failure_domains`, and the eligible store names in `replica_stores`.
+Give each eligible store a `failure_domain` that identifies where its data can fail together.
+To count a verified local copy, set `local_failure_domain`.
+
+Set `copy_bytes_per_month` to the automatic upload allowance, in ciphertext bytes per UTC calendar month.
+The worker reserves the bytes before a transfer. An uncertain result keeps its reservation.
+An existing confirmed version can settle the original reservation when the worker retries.
+Owner-requested copies and repairs use their existing queues.
+
+Automatic policy transfers require a store that can confirm a preassigned version.
+The filesystem replica adapter supports this. The store serving eviction gets its copies through offload.
+
+Watch `replicas.protection` in media status for the latest sweep, pending copy reasons and the current month's transfer allowance.
+A sweep reports coverage during its observation window. Unreadable bindings and incomplete proof remain unknown.
+The worker requires a content proof, usable recovery key and no quarantine finding before it counts a replica.
+
+Set `eviction_authorized` only after you approve automated local eviction under this policy.
+The worker still requires verified coverage for every filing of the local original after removal.
+Omit the `protection` object to use the ordinary media worker.
 
 ## Set the cycle and the read rate
 

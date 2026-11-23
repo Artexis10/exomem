@@ -644,8 +644,10 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
     assert "not mid-thought exploration" in blocks["balanced docs"]
     # The generic "records" marker above is satisfied by the Planning/Records
     # routing line, so it cannot tell whether the engagement reference still carries the
-    # Records-compatibility rule. Pin it.
-    assert "records only" in " ".join(blocks["scaffold"].lower().split())
+    # Records route. Pin it: recurring items reuse a collection, else a minimal one.
+    scaffold_block = " ".join(blocks["scaffold"].lower().split())
+    assert "goes to records" in scaffold_block and "minimal one" in scaffold_block
+    assert "records only" not in scaffold_block
 
 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))

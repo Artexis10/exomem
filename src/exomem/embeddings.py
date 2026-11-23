@@ -17,6 +17,7 @@ Sidecar lives outside `_Schema/` deliberately:
 from __future__ import annotations
 
 import contextlib
+import functools
 import gc
 import hashlib
 import logging
@@ -112,9 +113,17 @@ _INTERACTIVE_GATE_LOCK = threading.Lock()
 #: can encode concurrently, waits only for other such queries (`query_turn`).
 _QUERY_TURN_GATE: runtime_resources.ModelAdmissionGate | None = None
 _QUERY_TURN_GATE_LOCK = threading.Lock()
-_QUERY_TURN: ContextVar[runtime_resources.ModelAdmissionGate | None] = ContextVar(
-    "embedding_query_turn", default=None
-)
+
+
+@dataclass(frozen=True)
+class _QueryLane:
+    """Set by `query_turn`: the lane a search query's batches take, and what ends their wait."""
+
+    gate: runtime_resources.ModelAdmissionGate
+    cancel_event: runtime_resources.StopSignal | None
+
+
+_QUERY_TURN: ContextVar[_QueryLane | None] = ContextVar("embedding_query_turn", default=None)
 #: Tokens of an activation turn that are read, the model's special tokens on
 #: top. A turn's head says what it is about, and the request path has no budget
 #: for reading a pasted page.
@@ -332,23 +341,28 @@ def get_model():
 def get_reranker():
     """Load the configured CrossEncoder backend lazily."""
     global _RERANKER
+    resident = _RERANKER
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        return resident
+    backend = RERANKER_BACKEND
+    if backend not in _RERANKER_BACKENDS:
+        raise ValueError(
+            f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
+            f"valid: {sorted(_RERANKER_BACKENDS)}"
+        )
+    # The tokenizer guard first, before any import a lean install lacks. Both run before the
+    # model slot: a cold import under it held every query encode behind it for tens of seconds.
+    embedding_backend.require_tokenizer(RERANKER_NAME)
+    from sentence_transformers import CrossEncoder
+
     with runtime_resources.model_execution():
         if _RERANKER is not None:
             return _RERANKER
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
-            backend = RERANKER_BACKEND
-            if backend not in _RERANKER_BACKENDS:
-                raise ValueError(
-                    f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
-                    f"valid: {sorted(_RERANKER_BACKENDS)}"
-                )
-            # The tokenizer guard first, before any import a lean install lacks.
-            embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
-            from sentence_transformers import CrossEncoder
-
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s with %s", RERANKER_NAME, backend)
 
@@ -476,6 +490,11 @@ def get_clip_model():
 def get_clip_query_model():
     """Lazy multilingual query tower aligned to the existing image vectors."""
     global _CLIP_QUERY_MODEL
+    resident = _CLIP_QUERY_MODEL
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        CLIP_GUARD.touch()
+        return resident
     with runtime_resources.model_execution():
         with _CLIP_LOCK:
             if _CLIP_QUERY_MODEL is None:
@@ -534,12 +553,13 @@ def embed_image(path: Path) -> np.ndarray:
 
 def embed_clip_text(query: str) -> np.ndarray:
     """Encode a text query into CLIP space → float32 (512,), L2-normalized."""
-    with CLIP_GUARD.active(), runtime_resources.model_execution():
+    with CLIP_GUARD.active():
         try:
             model = get_clip_query_model()
         except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
             raise ClipUnavailable(f"multilingual image query encoder unavailable: {error}") from error
-        vec = model.encode([query])[0]
+        with _turn_for(model)():
+            vec = model.encode([query])[0]
     return vec.astype(np.float32, copy=False)
 
 
@@ -1382,11 +1402,7 @@ def _embed_texts(
     prefix = query_prefix if is_query else passage_prefix
     if prefix:
         texts = [prefix + t for t in texts]
-    execution = runtime_resources.model_execution
-    lane = _QUERY_TURN.get()
-    if lane is not None and getattr(model, "concurrent_encodes", False):
-        # Inside `query_turn` the query's turn is on its own lane, not the shared slot.
-        execution = lane.execution
+    execution = _turn_for(model)
     with BGE_GUARD.active():
         vectors = _encode_in_turns(
             model,
@@ -1524,32 +1540,45 @@ def _interactive_execution(model, bulk_execution):
 
 @contextlib.contextmanager
 def query_turn(*, cancel_event: runtime_resources.StopSignal | None = None):
-    """The execution turn of one search query that waits for its turn.
+    """Mark the encodes inside as one search query's; hold nothing.
 
-    The caller keeps its own model admission. A resident model that can encode
-    concurrently (an ONNX Runtime session) serves these queries on a lane of
-    their own: a query waits only for other queries, never for the passage
-    inferences that a capture or a drain runs one turn at a time on the shared
-    slot. Any other model takes the shared turn. A set `cancel_event` ends the
-    wait with `ModelBusyError`.
+    Each batch takes its turn inside the encode (`_turn_for`), so the wait is
+    measured as `execution_wait_us` and the turn follows the encoder that
+    actually runs. On an encoder that runs inferences side by side (an ONNX
+    Runtime session) the query waits only for other queries, never for the
+    passage inferences that a capture or a drain runs one turn at a time on the
+    shared slot. Any other encoder takes the shared turn; a previous encoder
+    during a re-embed keeps its own gate. A set `cancel_event` ends the wait
+    with `ModelBusyError`.
     """
     global _QUERY_TURN_GATE
-    if not getattr(_MODEL, "concurrent_encodes", False):
-        with runtime_resources.model_execution(cancel_event=cancel_event):
-            yield
-        return
     with _QUERY_TURN_GATE_LOCK:
         if _QUERY_TURN_GATE is None:
             _QUERY_TURN_GATE = runtime_resources.ModelAdmissionGate(
                 runtime_resources.resolve_policy().model_admission
             )
         gate = _QUERY_TURN_GATE
-    with gate.execution(cancel_event=cancel_event):
-        marker = _QUERY_TURN.set(gate)
-        try:
-            yield
-        finally:
-            _QUERY_TURN.reset(marker)
+    marker = _QUERY_TURN.set(_QueryLane(gate, cancel_event))
+    try:
+        yield
+    finally:
+        _QUERY_TURN.reset(marker)
+
+
+def _turn_for(model):
+    """The execution turn one batch of `model` takes: a search query's lane inside `query_turn` when
+    the model runs inferences side by side, otherwise the shared slot."""
+    lane = _QUERY_TURN.get()
+    if lane is None:
+        return runtime_resources.model_execution
+    turn = lane.gate.execution if getattr(model, "concurrent_encodes", False) else runtime_resources.model_execution
+    return functools.partial(turn, cancel_event=lane.cancel_event)
+
+
+def encode_query(index: Any, query: str, *, cancel_event: runtime_resources.StopSignal | None = None) -> np.ndarray:
+    """One search query's vector, in `index`'s encoder space and in the query's own turn."""
+    with query_turn(cancel_event=cancel_event), recall_space.encoding_for(index):
+        return embed_texts([query], is_query=True)[0]
 
 
 def embed_query_if_loaded(text: str, *, max_tokens: int | None = None) -> np.ndarray | None:

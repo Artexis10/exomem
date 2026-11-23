@@ -1,0 +1,15 @@
+{
+  "reference": "The person agrees to a trial with an explicit scope: Litestream replication, on the laptop copy only, to the spare NAS, for about a week, with file consistency as the test. That is a deliberate scoped go decision. A correct assistant serves the technology-signal method, finds or creates the item for this feature and project, moves it to ready to test, and writes the scope and time box in the item. It adds a Planning item in the Engineering Experiments collection with the same scope and success measure, and links it from the signal. It does not mark the trial as testing or tested, because nothing has run, and does not touch the real database or the decision to keep the data in one SQLite file. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Entities/Decisions/Keep Pebble Ledger data in one SQLite file.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

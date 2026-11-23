@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    automatic_collection,
     call_spans,
     capabilities,
     collection_claims,
@@ -2140,6 +2141,28 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         )
     inventory, selections = [], []
     accounted: set[str] = set()
+    # One read of the activity log answers for every file collection, and one read of the store's create records
+    # answers for every store collection: the inventory grows with the collections, and these reads do not.
+    file_automatic = (
+        automatic_collection.file_created_ids(root)
+        if semantic_profile == "records" and any(store_writer is None for _, store_writer in released)
+        else (frozenset(), True)
+    )
+    store_automatic: dict[int, frozenset[str]] = {}
+    if semantic_profile == "records":
+        for _, store_writer in released:
+            if store_writer is not None and id(store_writer) not in store_automatic:
+                store_automatic[id(store_writer)] = store_writer.automatic_collection_ids()
+
+    def created_automatically(manifest: Any, store_writer: Any) -> bool | None:
+        """True or False when the create record answers; None when the log could not be read in full."""
+        if store_writer is not None:
+            return manifest.collection_id in store_automatic[id(store_writer)]
+        if file_automatic is None:
+            return None
+        ids, complete = file_automatic
+        return True if manifest.collection_id in ids else (False if complete else None)
+
     for manifest, store_writer in released:
         coverage, selection, items = _inventory_coverage(
             root, manifest, authorize, observations=observations[str(manifest.path)],
@@ -2153,6 +2176,8 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
             "lifecycle": manifest.lifecycle,
             "storage_strategy": manifest.storage.strategy,
             "natural_key": list(manifest.schema.natural_key),
+            # Planning has no automatic create. None is unknown, never False.
+            **({"created_automatically": created_automatically(manifest, store_writer)} if semantic_profile == "records" else {}),
             **coverage,
         })
         if selection is not None:

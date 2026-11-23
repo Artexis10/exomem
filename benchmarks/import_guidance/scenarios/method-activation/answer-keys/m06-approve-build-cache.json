@@ -1,0 +1,16 @@
+{
+  "reference": "The person agrees to a trial: sccache in the release job only, on a branch, for one to two weeks, compared against the build times of the last five releases. That is a go with a scope. A correct assistant serves the technology-signal method, moves the item to ready to test and writes the scope, the duration and the comparison into it. It adds a Planning item in the Engineering Experiments collection and links it. It does not claim the trial has started or produced numbers. The release checklist and the Windows build notes do not change. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Notes/Procedures/pebble-ledger-release-checklist.md",
+    "Notes/Research/pebble-ledger/windows-build-notes.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

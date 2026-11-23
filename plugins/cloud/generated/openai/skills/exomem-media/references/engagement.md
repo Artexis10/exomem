@@ -58,8 +58,9 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   recurring routine, historical baseline, or durable affiliation. Capture it only
   when both stability or recurrence and reusable comparison, interpretation, or
   decision value are clear. Attach a facet or affiliation to a uniquely resolved
-  Entity; otherwise save one concise compiled observation. Use Records only for an
-  observed measurement accepted by a compatible existing collection. Fleeting
+  Entity; otherwise save one concise compiled observation. A recurring named item or
+  measurement goes to Records: reuse a matching collection by natural key, else
+  create a minimal one under `proactive_capture`. Fleeting
   preferences, one-off activity, incidental associations, and trivial metrics get
   no note. A tentative or unresolved claim never becomes a baseline: it gets no
   facet and no affiliation. When later work could use it, save it as tentative,
@@ -127,7 +128,7 @@ Updating a resolved entity follows the live capture disposition; the threshold f
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
   published, or failed. Route it to Records — `add_record(...)`
-  into the one compatible collection.
+  into the one compatible collection, else a minimal new one under `proactive_capture`.
 - **Pairing rule.** Append an observed outcome to Records first; it is the
   canonical observation. It never changes Planning automatically. An explicit
   user intent may request a guarded transition; otherwise a
@@ -375,9 +376,11 @@ receipt, through `add_record(delivery={...}, ...)` and one
 compatible existing Records collection whose declared link field names the
 Evidence companion. Keep reported remote identity separate and set verified
 identity only from matching platform proof; never infer remote byte equality.
-A missing collection is `structural_suggestions`; creating or changing it is
-confirmed `restructure_execution`. A separately accepted relation remains
-`link_acceptance`. Adoption success never waits on any of those later changes.
+A missing collection follows the bounded Records rule: one minimal collection under
+`proactive_capture` ([Records and Planning](planning-records.md)). A collection outside
+those bounds, and any schema change other than adding fields, is confirmed `restructure_execution`. A separately
+accepted relation remains `link_acceptance`. Adoption success never waits on any of those
+later changes.
 
 ## Global stance
 

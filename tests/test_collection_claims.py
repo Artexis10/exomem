@@ -1833,8 +1833,14 @@ def test_bootstrap_teaches_routing_candidates_and_collection_confirmation(
     assert "describe" in candidate and "validate" in candidate
     assert "one" in candidate and "confirmation" in candidate
     assert "exactly dated" in candidate and "sources" in candidate
-    assert "collection creation" in envelope.CONFIRM_REQUIRED
-    assert "Automatic collections stay refused" in envelope.FOUNDER_GATE
+    # Collection creation splits: out of bounds or in Planning stays confirm-required, a bounded one is capture.
+    # Added fields are capture as well; renaming, retyping or removing a field stays confirm-required.
+    confirm_required = " ".join(envelope.CONFIRM_REQUIRED.split())
+    assert "out-of-bounds or Planning collection creation" in confirm_required.split(". ")[0]
+    assert "bounded collection creation and added fields follow proactive_capture" in confirm_required
+    assert "refused" not in envelope.FOUNDER_GATE
+    with pytest.raises(ValueError, match="STANDING_DELEGATION_REFUSED"):
+        envelope.set_disposition("restructure_execution", "silent")
 
 
 def test_mcp_facing_collection_claims_journey(

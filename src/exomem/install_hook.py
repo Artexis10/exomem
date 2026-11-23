@@ -542,6 +542,11 @@ def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
     return any(marker in haystack for marker in markers)
 
 
+# The checkpoint core requires --client. The plugin generator imports this so both
+# Claude command builders pass the same argument.
+CLAUDE_CONTINUATION_CLIENT_ARG = "--client claude"
+
+
 def _continuation_command(
     hook_dir: Path,
     client: str,
@@ -570,7 +575,7 @@ def _continuation_command(
         windows = _command_windows_for(_CONTINUATION_SCRIPT, hook_dir, client=client)
         return f"{command} --client codex", f"{windows} --client codex"
     command = _command_for(_CONTINUATION_WRAPPER, hook_dir, client=client)
-    return f"{command} --client claude", None
+    return f"{command} {CLAUDE_CONTINUATION_CLIENT_ARG}", None
 
 
 def _continuation_items(

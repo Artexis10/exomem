@@ -308,6 +308,18 @@ On macOS the JSON also reports Activity Monitor's physical-footprint metric via
 limit. That limit is evaluated only when every server PID has a native sample,
 while `--max-rss-mb` keeps its existing RSS meaning.
 
+### Linux service with a one-core quota
+
+Under `CPUQuota=100%`, serving and media threads can use up the same period's
+CPU budget in parallel when they run across several cores. Place the whole
+service on one assigned logical CPU. The media child inherits the service's
+affinity and runs at lower priority. It continues existing speech jobs as
+foreground demand falls. [systemd scheduling options](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#CPUAffinity=)
+
+1. Assign one logical CPU from the service's allowed CPU set. Use the host's CPU placement for other services.
+2. Set `CPUAffinity=` to that CPU in the service's systemd drop-in, then apply it through the normal service deployment.
+3. Verify the serving worker and media child share the CPU and cgroup. The media child has the higher nice value.
+
 **macOS (launchd) — does not work today:**
 
 Kept for the darwin held-filesystem backend that does not exist yet. The
@@ -964,7 +976,13 @@ collections:
   Start the service once to migrate the store. `exomem collections create` holds
   the writer lease itself, so it migrates the store before it creates.
 
-File collections and knowledge writes are not affected.
+File collections are not affected, and neither are knowledge writes in file mode.
+
+In store mode the store also holds the vault's pages. The service still starts
+when its writer has not migrated the store yet, and it serves page reads from
+that store. This needs a store at schema 16 or later. Page writes go through the
+writer, so they refuse until the writer holds the lease and has migrated the
+store.
 
 If the migration fails, it rolls back and leaves the store at its earlier
 schema. The service status then reports the store as `schema_pending`, with the
@@ -1860,6 +1878,14 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
+- For direct audio or video preservation, `exomem attach --diarize` requests
+  speaker labels and `--no-diarize` skips them. The choice also applies to
+  resumable uploads. Set `diarize` on the file handle when you redeem a held
+  upload. Use `kb process-media --operation reprocess` with `--path` and
+  the same flags to change an existing recording's choice. When labels are requested
+  and the optional diarizer is unavailable, Exomem keeps the timed transcript
+  and reports that speaker labels are unavailable. Bulk backfill honors each
+  saved choice and leaves explicitly queued work to the media worker.
 - A remote client with a shell or a networked sandbox imports a folder by
   sending it as one plain or gzip tar or zip: `upload_files(lane="import")`
   returns a one-use upload, and `manage_memory` `imports.file` with its
@@ -1898,18 +1924,39 @@ on that listener. The credential fixes the lane; metadata cannot change it.
 Evidence requires `filename`, `sha256` (of the whole file), `scope` and
 `category`. Source requires `filename` and `sha256`; its optional fields are
 `title`, `source_kind`, `domain`, `url`, `content_type` and `raw_protection`.
+Both lanes accept `diarize` as `true` or `false` for audio and video.
 Source uses the canonical Source writer and stores its original beside the
 Source page. It does not accept `archive=members`. Evidence also accepts
 `raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
+For a large original on the personal HTTP listener, call `upload_files` with
+`lane="source"`, the file's `expected_sha256` and its exact `size_bytes`.
+Above the one-shot limit, the reply describes a resumable Source upload.
+Save that reply privately as a handoff file and run `exomem attach --handoff-file handoff.json original.bin`.
+The same command resumes from the server's offset after a dropped request.
+It returns a Source receipt after the full hash matches and the Source commits.
+It can retrieve the same receipt for 24 hours after settlement. The account
+must retain its owner binding and the issuing MCP login must remain active.
+Refreshing the access token keeps that login active.
+Each receipt read applies the current release policy to the Source and its
+original. If the policy withholds either path, the upload keeps its receipt
+and reports that it cannot release it.
+
+If creation reports a spent handoff without returning a session, request a
+new handoff. If a known session becomes unavailable, check Source custody
+before starting another upload.
+
+Requests within the one-shot limit still produce a held file for `save_source`.
+An explicit hold or import identity keeps that limit. Cloud's gateway also uses
+the one-shot limit. The tool reports the applicable limit for an oversized request.
+
 A Source capability does not grant read access to its destination. If governance
 withholds the custody receipt, the session retains the bytes and reports
 `SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.
-Use an authorized reader to inspect
-custody, and reuse this session for a retry. A different caller's credential
-does not change this session's transfer principal.
+Use an authorized reader to inspect custody and use the same command to check
+the session's receipt.
 
 The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
@@ -1975,6 +2022,12 @@ session; do not create a new identity for an uncertain Source commit.
 `SOURCE_OUTCOME_UNKNOWN` also retains the bytes when recovery proves a commit
 without recovering its complete receipt. That state needs reconciliation and
 does not authorize another Source publication.
+
+Receipt reads use current release policy and a bounded comparison against the
+validated lifecycle snapshot. When the marker namespace changes, the server
+validates it in the background. The client keeps polling the same session while
+the receipt check is pending. The server may withhold identifiers when current
+metadata cannot establish release.
 
 A Source receipt preserves the original and its Source page. Its
 `semantic_compilation` field remains `unassessed` until an agent compiles the

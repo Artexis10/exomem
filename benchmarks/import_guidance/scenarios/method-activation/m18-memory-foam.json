@@ -1,0 +1,11 @@
+{
+  "id": "m18-memory-foam",
+  "title": "A memory foam mattress is compared with a hybrid",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I'm still deciding on a mattress. Is memory foam really better for a bad back than a hybrid?",
+    "I slept on a memory foam one at a hotel and woke up fine, but it was far too warm. Anything that sleeps cooler?"
+  ]
+}

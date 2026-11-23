@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from exomem import deferred_index, embedding_index, index_paths, semantic_index
 
 
@@ -246,6 +248,58 @@ def test_revisioned_receipt_conditional_clear_preserves_newer_work(vault: Path) 
     assert deferred_index.snapshot(vault) == [second]
     assert deferred_index.clear_receipts(vault, [second]) == 1
     assert deferred_index.snapshot(vault) == []
+
+
+@pytest.mark.parametrize("generation", [None, 22])
+def test_graph_settlement_cannot_touch_a_new_receipt_for_the_same_path(
+    vault: Path, generation: int | None,
+) -> None:
+    old, peer = deferred_index.add_graph_receipts(
+        vault, ["Knowledge Base/Notes/a.md", "Knowledge Base/Notes/b.md"], generation=generation,
+    )
+    assert deferred_index.clear_graph_receipts(vault, [old]) == 1
+    (current,) = deferred_index.add_graph_receipts(vault, [old.rel_path], generation=generation)
+    assert current.graph_generation == old.graph_generation
+    assert current.revision > old.revision
+    assert deferred_index.note_graph_failure(vault, old, cause="unreadable") is None
+    assert not deferred_index.quarantine_graph_receipt(vault, old, signature=None)
+    assert deferred_index.rotate_graph_receipts(vault, [old]) == 0
+    current_failure = deferred_index.note_graph_failure(vault, current, cause="unreadable")
+    assert current_failure is not None and current_failure[0] == 1
+    peer_failure = deferred_index.note_graph_failure(vault, peer, cause="unreadable")
+    assert peer_failure is not None and peer_failure[0] == 1
+
+    assert deferred_index.clear_graph_receipts(vault, [old, peer]) == 1
+    assert deferred_index.snapshot_graph(vault) == [current]
+    assert deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
+    (requeued,) = deferred_index.add_graph_receipts(vault, [current.rel_path], generation=generation)
+    assert not deferred_index.graph_receipts_in_read_grace(vault, seconds=600)
+    requeued_failure = deferred_index.note_graph_failure(vault, requeued, cause="unreadable")
+    assert requeued_failure == (2, current_failure[1])
+    (peer_again,) = deferred_index.add_graph_receipts(vault, [peer.rel_path], generation=generation)
+    retried_failure = deferred_index.note_graph_failure(vault, peer_again, cause="unreadable")
+    assert retried_failure is not None and retried_failure[0] == 1
+
+
+def test_graph_receipt_migration_reserves_legacy_receipt_and_failure_revisions(vault: Path) -> None:
+    live, held = deferred_index.add_graph_receipts(
+        vault, ["Knowledge Base/Notes/a.md", "Knowledge Base/Notes/b.md"], generation=4,
+    )
+    assert deferred_index.quarantine_graph_receipt(vault, held, signature="retained")
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        conn.execute("DROP INDEX IF EXISTS graph_upserts_queue_order")
+        conn.execute("UPDATE graph_upserts SET revision = 100 WHERE rel_path = ?", (live.rel_path,))
+        conn.execute(
+            "UPDATE graph_failures SET failure_revision = 200 WHERE rel_path = ?", (held.rel_path,),
+        )
+
+    (new,) = deferred_index.add_graph_receipts(vault, ["Knowledge Base/Notes/c.md"])
+    assert new.revision > 200
+    assert deferred_index.snapshot_graph(vault)[0] == deferred_index.DeferredReceipt(live.rel_path, 100, 4)
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        assert conn.execute(
+            "SELECT failure_revision FROM graph_failures WHERE rel_path = ?", (held.rel_path,),
+        ).fetchone() == (200,)
 
 
 def test_receipt_schema_migrates_and_vaults_are_isolated(tmp_path: Path) -> None:

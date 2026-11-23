@@ -1121,20 +1121,48 @@ def _readiness_refusal(error: BaseException) -> str | None:
     another writer holds, and a SQLite store another connection holds. The
     label is a code or class name, so it carries no content.
     """
-    from . import graph_sync
+    from . import deferred_index, graph_sync, reserved_paths
     from .cli_ops import OpError
     from .vault import VaultLockTimeout
 
+    if isinstance(error, reserved_paths.SqliteIdentityBusyError):
+        return _BUSY_BOUNDARY_CODE
     if isinstance(error, OpError):
         return error.code if error.details.get("status") == "retryable" else None
     if isinstance(error, (VaultLockTimeout, graph_sync.GraphEpochUnreadable)):
         return error.code
+    if isinstance(error, deferred_index.GraphFullRebuildStateUnavailable):
+        return type(error).__name__
     if isinstance(error, sqlite3.OperationalError):
         code = getattr(error, "sqlite_errorcode", None)
         # An extended result code keeps its primary code in its low 8 bits.
         if isinstance(code, int) and (code & 0xFF) in _SQLITE_HELD_CODES:
             return error.sqlite_errorname
     return None
+
+
+def publish_graph_observations(
+    vault_root: Path, *, changed: list[str], deleted: list[str], guards: tuple,
+) -> bool:
+    """Advance the existing file-mode publishers for one exact observed batch."""
+    from . import find, lexstore, semantic_contract, vault
+
+    written = [vault_root / rel for rel in changed]
+    failure = semantic_contract.publish_corpus_files_changed_classified(
+        vault_root, changed=written, deleted=deleted, populate_on_miss=False, observed=guards,
+    )
+    if failure is not None:
+        return False
+    try:
+        vault.on_inbound_files_changed(vault_root, changed, deleted)
+        find.on_resolver_files_changed(vault_root, changed, deleted)
+        result = lexstore.apply_watcher_batch(vault_root, written, deleted)
+        vault.recheck_path_guards(vault_root, guards)
+        return result
+    except (OSError, ValueError, vault.PathGuardError):
+        find.evict_resolver_caches(vault_root)
+        vault.evict_inbound_index(vault_root)
+        return False
 
 
 def _drain_graph_work(
@@ -1170,9 +1198,8 @@ def _drain_graph_work(
     from . import epistemic_graph, graph_drain
 
     pending_generation = deferred_index.graph_full_rebuild_pending(vault_root)
-    receipts = deferred_index.snapshot_graph(
-        vault_root, limit=limit, paths=requested
-    )
+    selection_limit = graph_drain.DRAIN_LIMIT if limit is None else min(limit, graph_drain.DRAIN_LIMIT)
+    receipts = deferred_index.snapshot_graph(vault_root, limit=selection_limit, paths=requested)
     index = epistemic_graph.EpistemicGraphIndex(vault_root)
     if pending_generation is None and not receipts:
         graph_drain.note_per_path_race(vault_root, raced=False)
@@ -1205,20 +1232,21 @@ def _drain_graph_work(
 
 def _drain_graph_receipts(
     vault_root: Path, index, receipts: list
-) -> tuple[int, bool]:
-    """Repair these receipts per path; return what cleared and whether commits won the pass.
+) -> tuple[int, bool | None]:
+    """Return the number cleared and whether contention blocked covered repair.
 
-    The second value is True only when the pass cleared nothing and every
-    failure was a live commit, or a busy mutation boundary, beating it to the
-    lock. That says nothing about the receipts, and a whole-vault pass would
-    lose to the same commits at far greater cost. Any other failure makes it False.
+    True requires a wholly busy pass and durable coverage of its observations.
+    None records the same contention when checking coverage would exceed the
+    drain's cap. Other outcomes return False.
     """
     from . import epistemic_graph, graph_drain
 
-    if not index.epoch_admits_incremental_repair():
-        # Not a warning: under a live writer the ordinary cause is a batch
-        # mid-flight, which the next tick clears. The work stays queued.
-        log.info("deferred graph drain skipped; graph epoch is not settled")
+    if epistemic_graph.startup_source_proof_pending(vault_root):
+        return 0, False
+    admission = index.drain_epoch_admission()
+    if admission is None:
+        return 0, graph_drain.note_covered_contention(vault_root)
+    if not admission:
         graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0, False
     processed = 0
@@ -1240,9 +1268,13 @@ def _drain_graph_receipts(
             # any other refusal that persists releases it through the oldest
             # receipt's age.
             log.info("deferred graph batch refused (%s); work remains queued", refusal)
-            return 0, refusal == _BUSY_BOUNDARY_CODE
+            if refusal == _BUSY_BOUNDARY_CODE:
+                return 0, graph_drain.note_covered_contention(vault_root)
+            return 0, False
         log.warning("deferred graph batch failed; isolating receipts", exc_info=True)
         report = {}
+    if report.get("startup_pending"):
+        return 0, False
     if report.get("requires_rebuild"):
         # Deliberately not escalated to a rebuild marker. Every condition that
         # produces this is transient -- no sidecar yet, no live recall registry,
@@ -1254,18 +1286,18 @@ def _drain_graph_receipts(
         log.info("deferred graph drain deferred; vault not ready for incremental repair")
         graph_drain.note_per_path_repair(vault_root, admissible=False)
         return 0, False
+    if report.get("commit_race"):
+        # A source or commit moved during the batch: no page's fault, so there
+        # is nothing to isolate. A replay per receipt would hold the boundary once
+        # per page and, with its siblings still queued, withhold its publication
+        # after rewriting the catalogue rows -- minutes of lock for nothing. The
+        # receipts stay queued and the next tick runs one batch again.
+        log.info("deferred graph batch proof moved; work remains queued")
+        return 0, graph_drain.note_covered_contention(vault_root)
     if report:
         # The pass ran per path. A failed batch, isolated below, says nothing
         # about readiness either way.
         graph_drain.note_per_path_repair(vault_root, admissible=True)
-    if report.get("commit_race"):
-        # A live commit beat the batch to the lock: no page's fault, so there is
-        # nothing to isolate. A replay per receipt would hold the boundary once
-        # per page and, with its siblings still queued, withhold its publication
-        # after rewriting the catalogue rows -- minutes of lock for nothing. The
-        # receipts stay queued and the next tick runs one batch again.
-        log.info("deferred graph batch lost to a commit; work remains queued")
-        return 0, True
     covered = set(report.get("indexed", ()))
     if covered:
         done = [receipt for receipt in receipts if receipt.rel_path in covered]
@@ -1317,6 +1349,8 @@ def _drain_graph_receipts(
         if receipt.rel_path in set(single.get("indexed", ())):
             processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
             continue
+        if single.get("startup_pending"):
+            return processed, False
         if single.get("moved") or single.get("requires_rebuild") or single.get("disabled"):
             # A race or a vault not ready: the page is not the problem, and
             # counting it would quarantine a page for being written to.
@@ -1329,21 +1363,17 @@ def _drain_graph_receipts(
         # Whatever follows is the page's own outcome, or progress.
         failed_on_its_own = True
         cause = index._underivable_cause(receipt.rel_path)
-        if cause == "no_rows":
-            # Deleted, or no longer recall Markdown: the pass removed its rows,
-            # which is the whole repair, so the receipt retires with them
-            # rather than rotating behind the queue forever.
-            processed += deferred_index.clear_graph_receipts(vault_root, [receipt])
-            continue
-        if cause is None:
+        if cause is None or cause == "no_rows":
+            # A later inspection cannot prove that this pass deleted anything.
             # The page reads and decodes now: whatever stopped the pass was not
             # its bytes.
             log.warning("deferred graph receipt incomplete; work remains queued")
             deferred_index.rotate_graph_receipts(vault_root, [receipt])
             continue
-        attempts, first_failed_at = deferred_index.note_graph_failure(
-            vault_root, receipt.rel_path
-        )
+        failure = deferred_index.note_graph_failure(vault_root, receipt, cause=cause)
+        if failure is None:
+            continue
+        attempts, first_failed_at = failure
         if attempts < epistemic_graph.GRAPH_POISON_ATTEMPTS or (
             cause == "unreadable"
             and time.time() - first_failed_at < epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS
@@ -1355,9 +1385,7 @@ def _drain_graph_receipts(
         # is set aside so the queue can empty around it; its rows stay, because
         # the page still exists. A change to it, or the slow retry timer,
         # queues it again (`requeue_quarantined_graph_paths`).
-        if deferred_index.quarantine_graph_receipt(
-            vault_root, receipt, signature=_graph_stat_token(path)
-        ):
+        if index.quarantine_graph_failure(receipt):
             log.warning(
                 "deferred graph receipt quarantined after %d failed attempts cause=%s",
                 attempts,
@@ -1369,8 +1397,11 @@ def _drain_graph_receipts(
     if not deferred_index.snapshot_graph(vault_root, limit=1):
         # This tick cleared the last receipt, so the same stranding applies to
         # whatever withdrew while it ran.
+        index.drain_paths([])
         _republish_graph_availability(index)
-    return processed, lost_to_commits and not failed_on_its_own and processed == 0
+    if lost_to_commits and not failed_on_its_own and processed == 0:
+        return 0, graph_drain.note_covered_contention(vault_root)
+    return processed, False
 
 
 def _graph_stat_token(path: Path) -> str:
@@ -1381,7 +1412,7 @@ def _graph_stat_token(path: Path) -> str:
         return "absent"
     except OSError:
         return "unstatable"
-    return f"{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_size}"
+    return f"{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_size}"
 
 
 def requeue_quarantined_graph_paths(vault_root: Path) -> int:

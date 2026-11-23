@@ -697,10 +697,11 @@ class ReleaseCache:
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
         self.decisions = OrderedDict()
-        #: (view path, sha256 of its bytes) -> the store stamp at which those bytes were proven equal to the
-        #: render of the committed rows. A render is a function of the store alone, so the proof holds only
-        #: at that exact stamp: this connection's writes, another connection's commit and a schema change
-        #: each move it.
+        #: (view path, sha256 of its bytes) -> (store stamp, release inputs) at which those bytes were proven
+        #: equal to the render of the committed rows. A render is a function of the store, and a history
+        #: page's also of its release's file-held inputs (`history.release_inputs`; None for other kinds), so
+        #: the proof holds only at that exact pair: this connection's writes, another connection's commit, a
+        #: schema change and a changed policy, access file or tombstone each move it.
         self.render_proofs = OrderedDict()
         self.pending = None
         self.replacements = {}
@@ -1992,15 +1993,20 @@ class OperationAuthorization:
             decision = egress._meet_decisions(decisions)
             if decision.level == 0:
                 return decision
+            history_page = None
             if projection_kind == ("history",):
                 from . import history
 
                 if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
                     return Decision(0)
+                # Read before the context reads the store, so a commit that lands meanwhile can only make a later
+                # proof lookup miss.
+                stamp = self.cache._stamp()
                 context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
                 if not context.exists(path):
                     # A retired page must not disclose a raw-history boundary through an empty matching header.
                     return Decision(0)
+                history_page = context, stamp
             if content is not None:
                 cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
                 row = cursor.fetchone()
@@ -2016,7 +2022,8 @@ class OperationAuthorization:
                     return Decision(0)
                 manifest = manifest_for(projection["collection_id"])
                 digest = hashlib.sha256(content)
-                if not self._bytes_are_current_render(projection, manifest, content, digest.digest()):
+                if not self._bytes_are_current_render(projection, manifest, content, digest.digest(),
+                                                      history_page=history_page):
                     return Decision(0)
                 parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
                 if parsed is None:
@@ -2033,35 +2040,64 @@ class OperationAuthorization:
         except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
 
-    def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:
+    def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes, *,
+                                  history_page=None) -> bool:
         """Whether ``content`` is the current render of ``projection``, or a migrated original.
 
-        This proof is a function of the store and the bytes alone, never of the caller or the policy,
-        so a repeat at the same store stamp keeps it. The verdict built on it is decided again each time.
+        An adoption or a takeover starts a new store instance and rewrites no view, so the current
+        render may name an earlier instance of the store's lineage: the one whose stamp ``content``
+        carries. Every other byte, the version and the hash included, must still match exactly.
+
+        This proof is a function of the store and the bytes, never of the caller, so a repeat at the
+        same store stamp keeps it. A history page also renders from its release's file-held inputs
+        (the policy, the access file and the tombstones), so its proof names their digest as well. The
+        verdict built on a proof is decided again each time.
+
+        ``history_page`` is the decision's own ``(PageContext, stamp)`` for a history page: the render
+        reuses that context, and the stamp read before it.
         """
-        from . import legacy_originals, views
+        from . import edit_back, legacy_originals, views
 
         cache, key = self.cache, (projection["path"], digest)
-        # Read before the render, so a commit that lands in between can only make a later lookup miss.
-        stamp = cache._stamp()
-        # A relationship label reads vault files through this operation; a history page is not proved
-        # to depend on the store alone. Neither is kept. Nor is any proof made mid-write or past an
-        # unseen write of this connection.
+        context = None
+        if history_page is not None and projection["kind"] == "history":
+            context, stamp = history_page
+            # A context reads only these two from its manifest; a page they no longer name renders afresh.
+            if (context.manifest.collection_id, context.manifest.path) != (manifest.collection_id, manifest.path):
+                context = None
+        if context is None:
+            # Read before the render, so a commit that lands in between can only make a later lookup miss.
+            stamp = cache._stamp()
+        # The release inputs that the context read once stand for the files a history page renders from.
+        proof = (stamp, None if context is None else context.inputs)
+        # A relationship label reads vault files through this operation, and a history page rendered
+        # without its decision's context names no release inputs. Neither is kept. Nor is any proof made
+        # mid-write or past an unseen write of this connection.
         presentation = manifest.item_presentation
-        keepable = (projection["kind"] != "history"
+        keepable = ((projection["kind"] != "history" or context is not None)
                     and (presentation is None or not presentation.relationships)
                     and cache.pending is None and not cache.unmanaged
                     and stamp[0] == cache.observed[0])
-        if keepable and cache.render_proofs.get(key) == stamp:
+        if keepable and cache.render_proofs.get(key) == proof:
             cache.render_proofs.move_to_end(key)
             return True
-        _version, rendered = views.render_view(
-            self.conn, views.store_identity(self.conn), projection, manifest,
-            root=self.root, cache=cache, operation=self,
-        )
+        if context is not None:
+            rendered = context.render_many((projection["path"],))[projection["path"]][1]
+        else:
+            _version, rendered = views.render_view(
+                self.conn, views.store_identity(self.conn), projection, manifest,
+                root=self.root, cache=cache, operation=self,
+            )
+            # Only a kind that renders the store identity can name an earlier instance; a history page renders none.
+            if content != rendered.encode("utf-8"):
+                earlier = edit_back.earlier_identity(self.conn, projection, manifest, content)
+                if earlier is not None:
+                    _version, rendered = views.render_view(
+                        self.conn, earlier, projection, manifest, root=self.root, cache=cache, operation=self,
+                    )
         if content == rendered.encode("utf-8"):
             if keepable:
-                cache._remember(cache.render_proofs, key, stamp, _MAX_CACHED_SUBJECTS)
+                cache._remember(cache.render_proofs, key, proof, _MAX_CACHED_SUBJECTS)
             return True
         # Migration preserves initial source bytes before asynchronous stamping.
         return legacy_originals.current_view_matches(self.conn, projection, content)

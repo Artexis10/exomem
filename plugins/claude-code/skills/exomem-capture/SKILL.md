@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 8fe7d420e5443cd2d7fa79d55c2c102232843831b1dbc5d0b3a6189eb961ed7f
+  skill_contract: 59fdb824d9926e5a261e638c2329b886f2cd2e2898803e547b97aaedfe07198b
   version: "0.1.0"
 ---
 
@@ -76,9 +76,9 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 A stable preference, recurring routine, historical baseline, or durable affiliation
 is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise write one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, and trivial
+uniquely resolved Entity; otherwise write one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
 metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
 work could use it, save it as tentative, attributed, with its uncertainty. Durable
 interpretations retain explicit attribution and uncertainty rather than becoming
@@ -87,6 +87,26 @@ collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
 confirmed `restructure_execution`.
+
+## Recurring structured work and agreed decisions
+A **decision or standing rule agreed in conversation** is durable. Under `proactive_capture`,
+save it when it is agreed: `silent` saves it and reports one line, `advisory` offers the
+save, and `off` waits for an explicit request.
+
+**Recurring structured work** goes to Records: stable identities that recur, repeated
+observations or evaluations of the same items, comparisons, changing state, or a need to
+query exactly. Judge it from meaning. A passing mention gets no collection, and narrative
+stays in Notes. Follow `references/planning-records.md`: list the collections, reuse a
+compatible one and update rows by natural key, else `add_record` with `new_collection`
+creates a minimal collection and adds the first row, under the served disposition. A later
+fact that has no field is added with `new_fields`, never put into another field. Backfill
+what the conversation established with dates and attribution, and report the collection and
+the rows in the reply.
+
+When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
+the same payload, or read the collection and the row by natural key before submitting that write again.
+Never retry with a new identity. A `bulk_upsert` needs `source`, once for the batch or on
+each row.
 
 ## Workflow
 Before choosing a destination, partition the exchange into independently reusable
@@ -136,7 +156,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    `references/writing.md` § Names in another script.
 
 ## Lifecycle
-Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
+Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits and the identity, type and scope are clear, create a minimal one under the served capture disposition. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
 
 ## Artifact role and current state
 Read the supporting units for `artifact_role_promotion` and

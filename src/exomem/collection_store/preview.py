@@ -384,6 +384,9 @@ class Batch:
     expects_hash: str | None = None
     #: A call that no other page may share: it records an effect, or carries a value of one page.
     alone: Callable[[Mapping[str, Any]], bool] | None = None
+    #: Keywords that hold the calling page's own callback. They never split a shared request: the
+    #: calling page is decided with its callback, and every other page in the request without one.
+    effects: frozenset[str] = frozenset()
 
 
 #: The content hash each page of the store request being served was checked against, or None outside one.
@@ -478,10 +481,11 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
         if shared.get(keyword) is None:
             shared[keyword] = decisions.once(("pinned", keyword, vault_root), lambda pin=pin: pin(vault_root))
     expected = shared.pop(batch.expects_hash, None) if batch.expects_hash is not None else None
+    effects = {keyword: shared.pop(keyword) for keyword in batch.effects if keyword in shared}
     # The ambient principal is an input of the answer wherever a call leaves its own out.
     answers = decisions.answers((read, vault_root, effective_principal(), shared))
     if path not in answers:
-        calls = {path: ((path,), shared)}
+        calls = {path: ((path,), {**shared, **effects})}
         for other in decisions.pending():
             request_budget.checkpoint()
             if other == path or other in answers:
@@ -746,6 +750,9 @@ def dispatch(
             _validate_create(writer, profile, args)
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
+    if action == "manifest_text":
+        current, text = writer.manifest_text(args["collection"])
+        return True, (current, text, writer.created_automatically(current.collection_id))
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
     if action == "inspect" and profile == "records":

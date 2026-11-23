@@ -25,6 +25,7 @@ from exomem import (
     commands,
     embeddings,
     find,
+    find_candidates,
     find_corpus,
     freshness,
     lexstore,
@@ -80,9 +81,11 @@ def passage_tools(vault, monkeypatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
     mcp = server.build_server(require_auth=False)
 
-    def call(name, arguments):
+    def call(name, arguments, *, before_request=None):
         async def invoke():
             async with Client(mcp) as client:
+                if before_request is not None:
+                    before_request()
                 return await client.call_tool(name, arguments, raise_on_error=False)
 
         result = asyncio.run(invoke())
@@ -586,7 +589,8 @@ def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     )["source"]["path"]
     embeddings.index_incremental(vault)
     publish_reference(vault)
-    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
     reads = []
     original = reserved_paths.read_generic_bytes
 
@@ -608,16 +612,20 @@ def test_relation_scope_uses_its_index_without_reading_the_source_anchor(
     tombstoned = lifecycle.is_tombstoned
     before = len(encoder.texts)
     with monkeypatch.context() as patch:
-        patch.setattr(reserved_paths, "read_generic_bytes", counted)
-        if anchor_state == "revoked":
-            patch.setattr(source_capture, "require_authority", revoke_before_anchor)
-        elif anchor_state == "tombstoned":
-            patch.setattr(lifecycle, "is_tombstoned", lambda root, path: path == anchor or tombstoned(root, path))
+        def observe_search():
+            assert graph.validate_startup_snapshot() is True
+            patch.setattr(reserved_paths, "read_generic_bytes", counted)
+            if anchor_state == "revoked":
+                patch.setattr(source_capture, "require_authority", revoke_before_anchor)
+            elif anchor_state == "tombstoned":
+                patch.setattr(lifecycle, "is_tombstoned", lambda root, path: path == anchor or tombstoned(root, path))
+
         reply = call(
             "search_memory",
             {"query": "lantern", "limit": 1, "options": {
                 "result_level": "passage", "relations": ["supports"], "relation_of": anchor,
             }},
+            before_request=observe_search,
         )
     if anchor_state == "revoked":
         assert "PASSAGE_AUTHORITY_REQUIRED" in str(reply), reply
@@ -1515,6 +1523,52 @@ def test_a_capture_encode_does_not_hold_up_a_passage_query_on_a_concurrent_encod
     assert shared.admitted_count() == 0
 
 
+def test_a_capture_encode_does_not_hold_up_a_page_query_on_a_concurrent_encoder(
+    vault, passage_tools, monkeypatch
+):
+    """Page search encodes its query on the query lane too, not behind a capture's turn on the shared slot."""
+    call, encoder = passage_tools
+    saved = call("save_source", {"title": "Survey", "source_kind": "session", "tags": ["readers"],
+                                 "content": "The lantern burns oil."})
+    assert "error" not in saved, saved
+    embeddings.index_incremental(vault)
+    concurrent = SimpleNamespace(
+        texts_fit=lambda _texts: True,
+        concurrent_encodes=True,
+        encode=lambda texts, **_options: encoder(texts),
+    )
+    monkeypatch.setattr(embeddings, "_MODEL", concurrent)
+    monkeypatch.setattr(embeddings, "get_model", lambda: concurrent)
+    monkeypatch.setattr(embeddings, "embed_texts", REAL_EMBED_TEXTS)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    shared = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
+    inferring, release = threading.Event(), threading.Event()
+
+    def capture_inference():
+        with shared.admission(), shared.execution():
+            inferring.set()
+            assert release.wait(10)
+
+    before = len(encoder.texts)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        capture = pool.submit(capture_inference)
+        assert inferring.wait(5)
+        try:
+            reply = pool.submit(call, "search_memory", {"query": "lantern", "tags": ["readers"]}).result(timeout=5)
+            # The managed service prepares its query encode before it retains catalogue rows.
+            prepared = pool.submit(
+                find_candidates.prepare_query_inputs, vault, "lantern", unit=False, page=True
+            ).result(timeout=5)
+        finally:
+            release.set()
+        capture.result()
+    assert any("lantern" in text for text in encoder.texts[before:]), "the page query never reached the encoder"
+    assert [hit["title"] for hit in reply["hits"]] == ["Survey"], reply
+    assert prepared.page is not None and prepared.page.error is None and prepared.page.vector is not None, prepared
+    assert shared.admitted_count() == 0
+
+
 def test_abandoned_passage_search_leaves_its_model_turn_queue_at_once(vault, passage_tools, monkeypatch):
     """A search queued behind another encode must free its admission when its caller leaves, not after that encode."""
     call, encoder = passage_tools
@@ -1530,6 +1584,11 @@ def test_abandoned_passage_search_leaves_its_model_turn_queue_at_once(vault, pas
     assert "error" not in saved, saved
     embeddings.index_incremental(vault)
     publish_reference(vault)
+    # The query waits for its turn inside the real encode, one turn per batch.
+    plain = SimpleNamespace(texts_fit=lambda _texts: True, encode=lambda texts, **_options: encoder(texts))
+    monkeypatch.setattr(embeddings, "_MODEL", plain)
+    monkeypatch.setattr(embeddings, "get_model", lambda: plain)
+    monkeypatch.setattr(embeddings, "embed_texts", REAL_EMBED_TEXTS)
     with monkeypatch.context() as service:
         # Cells run the service profile, whose turn queue is the one a waiter can leave.
         service.setenv("EXOMEM_CLOUD_CELL", "1")

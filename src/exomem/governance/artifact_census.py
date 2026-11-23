@@ -116,16 +116,36 @@ class LiteralAliases:
         return cls(frozenset(keys), frozenset(prefixes), longest)
 
 
+def _span_ends(text: str, breaks: list[int]) -> tuple[list[int], list[bool]]:
+    """Every position where a literal span may end, ascending, and whether each one ends a run.
+
+    A run ends at a non-path character or at the end of the text. Each position inside a run's
+    trailing full stops may end a span too, because those stops are sentence punctuation, as
+    `with_path_spans` reads them. Built in one pass over the run ends, so the list is sorted as built.
+    """
+    ends: list[int] = []
+    run_end: list[bool] = []
+    for end in [*breaks, len(text)]:
+        stop = end
+        while stop and text[stop - 1] == ".":
+            stop -= 1
+        ends.extend(range(stop, end))
+        run_end.extend([False] * (end - stop))
+        ends.append(end)
+        run_end.append(True)
+    return ends, run_end
+
+
 def literal_alias_spans(
     text: str, aliases: Sequence[LiteralAliases]
 ) -> list[tuple[int, int]]:
     r"""The spans of `text` that name a literal alias, leftmost and longest first.
 
-    This is the match set of the former pattern
-    `(?<![\w./-])(?:alias|...)(?![\w./-])` under `re.IGNORECASE`, with its
-    alternatives ordered longest first: a span starts where no path character
-    precedes it and ends where none follows, the longest alias wins at each
-    start, and the scan resumes after a match.
+    This is the match set of the pattern
+    `(?<![\w./-])(?:alias|...)(?=\.*(?![\w./-]))` under `re.IGNORECASE`, with
+    its alternatives ordered longest first: a span starts where no path
+    character precedes it and ends where none follows but full stops, the
+    longest alias wins at each start, and the scan resumes after a match.
     """
     longest = max((index.longest for index in aliases), default=0)
     if not longest:
@@ -133,20 +153,23 @@ def literal_alias_spans(
     key = _case_key(text)
     breaks = [match.start() for match in _NOT_PATH_CHARACTER.finditer(text)]
     starts = [0, *(position + 1 for position in breaks)]
-    ends = [*breaks, len(text)]
+    ends, run_end = _span_ends(text, breaks)
     spans: list[tuple[int, int]] = []
     resume = 0
     for start in starts:
         if start < resume or start >= len(text):
             continue
         best = None
-        for end in ends[bisect.bisect_right(ends, start) :]:
+        # Indexing, not a slice: a slice copies the list's tail for every start.
+        for at in range(bisect.bisect_right(ends, start), len(ends)):
+            end = ends[at]
             if end - start > longest:
                 break
             candidate = key[start:end]
             if any(candidate in index.keys for index in aliases):
                 best = end
-            if not any(candidate in index.prefixes for index in aliases):
+            # Only a run end stops the scan: inside trailing full stops a longer alias may still match.
+            if run_end[at] and not any(candidate in index.prefixes for index in aliases):
                 break
         if best is not None:
             spans.append((start, best))

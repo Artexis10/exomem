@@ -93,6 +93,7 @@ def commit_batch(
     lifecycle: Lifecycle | None = None,
     retained_original: vault.PathGuard | None = None,
     publish_originals: Callable[[], None] | None = None,
+    file_commit_witness: vault._BatchFileWitness | None = None,
 ) -> list[Path]:
     """Commit one batch to the store of ``vault_root`` in place of the file-mode flip.
 
@@ -156,6 +157,7 @@ def commit_batch(
             vault._owner_writes(publish_originals, curation_witness.publication_hook(witness)),
             lifecycle,
             retained_original,
+            file_commit_witness,
         )
     except BaseException:
         working_set_heat.abandon_commit(heat)
@@ -379,6 +381,7 @@ def _commit(
     before_publication: Callable[[], None] | None,
     lifecycle: Lifecycle | None = None,
     retained_original: vault.PathGuard | None = None,
+    file_commit_witness: vault._BatchFileWitness | None = None,
 ) -> _Plan:
     from ..writer_lease import (
         log_active_mutation_phase,
@@ -419,7 +422,7 @@ def _commit(
         validate_prepared_bindings()
     validate_active_write_fence()
     log_active_mutation_phase("canonical_commit_started", affected_count=len(writes))
-    if before_publication is not None:
+    if file_commit_witness is None and before_publication is not None:
         # The owner's own durable write; the commit does not undo it.
         before_publication()
 
@@ -432,7 +435,8 @@ def _commit(
         change = StoreChange(
             origin=Origin.GOVERNED,
             reason=_reason(),
-            puts=tuple(PagePut(rel, _page_bytes(write)) for rel, write in plan.pages),
+            puts=tuple(PagePut(rel, _page_bytes(write), media_allocation=write.media_allocation)
+                       for rel, write in plan.pages),
             deletes=plan.lifecycle.deletes,
             moves=plan.lifecycle.moves,
             binaries=tuple(_record(rel, write) for rel, write in plan.binaries),
@@ -467,12 +471,24 @@ def _commit(
                 # A store commit derives its graph rows itself; the epoch is file-mode graph sync.
                 _graph_epoch=False,
                 _before_commit_point=commit_to_store,
+                _before_first_install=before_publication if file_commit_witness is not None else None,
+                _file_commit_witness=file_commit_witness,
             )
     else:
         vault.recheck_path_guards(root, (*plan.disk_guards, *plan.disk_completion))
         for census in plan.disk_censuses:
             census.recheck(root)
-        commit_to_store()
+        if file_commit_witness is None or before_publication is None:
+            commit_to_store()
+        else:
+            try:
+                file_commit_witness.begin()
+                before_publication()
+                commit_to_store()
+            except Exception:
+                file_commit_witness.retire_rolled_back()
+                raise
+            file_commit_witness.seal()
     log_active_mutation_phase("canonical_files_committed", affected_count=len(writes))
     call_spans.mark("canonical_files_committed")
     if commit_point:

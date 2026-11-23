@@ -20,6 +20,8 @@ Phase 1 makes the drain safe and reversible:
 
 Phase 2 adds history-aware resolution. `add-curation-relocation-protocol` delivers it for every page with lineage. After that change ships, reclassification repoints a path link in an append-only page through the governed pointer write, and its revert restores the page from the write's record.
 
+A remote preview can exceed one response when many pages cite one Source. Keep small previews interactive and run large previews as governed background work. Page through the complete report and approve its exact digest before applying it.
+
 ## Capabilities
 
 ### New Capabilities

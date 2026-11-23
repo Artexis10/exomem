@@ -21,7 +21,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -48,12 +48,15 @@ SCHEMA = "receipt/v1"
 GENESIS_HASH = "0" * 64
 MAX_RECORD_BYTES = 64 * 1024
 _TAIL_READ_BYTES = MAX_RECORD_BYTES
+# Keep a foreground lifecycle recheck to the active part, at most sixteen maximum-size records in bytes.
+_RECEIPT_PART_BYTES = 16 * MAX_RECORD_BYTES
 MAX_OUTCOMES = 128
 _MAX_IDENTIFIER_LENGTH = 256
 _MAX_COUNT = 2**31 - 1
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
-_MONTH_FILE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
+# Receipt evidence names encode a UTC month and optionally the first sequence in a numbered part.
+_MONTH_FILE = re.compile(r"^([0-9]{4}-[0-9]{2})(?:\.([0-9]{19}))?\.jsonl$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$")
 _EVENT_PAYLOAD_FIELDS = {
     ("disclosure", "recorded"): frozenset({"outcomes"}),
@@ -393,7 +396,7 @@ def _durable_locator_matches(
             and record["seq"] == durable_seq
             and record["hash"] == durable_hash
             and _record_hash(record) == durable_hash
-            and _month_path(vault_root, instance_id, record["timestamp"]) == path
+            and _month_path(vault_root, instance_id, record["timestamp"]).stem == path.name[:7]
         )
     except (OSError, ValueError, json.JSONDecodeError, ReceiptError):
         return False
@@ -429,14 +432,27 @@ def _validated_month_path(instance_dir: Path, candidate: Path) -> Path:
 
 
 def _valid_month_name(name: str) -> bool:
-    if _MONTH_FILE.fullmatch(name) is None:
-        return False
-    year, month = name.removesuffix(".jsonl").split("-", 1)
+    return _evidence_name_key(name) is not None
+
+
+# A receipt month leaf name or its numbered continuation part, for other modules.
+is_receipt_evidence_name = _valid_month_name
+
+
+def _evidence_name_key(name: str) -> tuple[str, int] | None:
+    match = _MONTH_FILE.fullmatch(name)
+    if match is None:
+        return None
+    calendar, part = match.groups()
+    year, month = calendar.split("-", 1)
     try:
-        parsed = datetime(int(year), int(month), 1)
+        datetime(int(year), int(month), 1)
     except ValueError:
-        return False
-    return parsed.strftime("%Y-%m") == name.removesuffix(".jsonl")
+        return None
+    if part is None:
+        return calendar, 0
+    sequence = int(part)
+    return (calendar, sequence) if 0 < sequence <= (1 << 63) - 1 else None
 
 
 def _after_month_enumeration(_instance_dir: Path, _name: str) -> None:
@@ -517,32 +533,26 @@ def _open_windows_month_fd(
 
 
 def _monthly_evidence_names(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[str], list[dict[str, str]]]:
-    names: list[str] = []
+    named: list[tuple[tuple[str, int], str]] = []
     issues: list[dict[str, str]] = []
-    # Monthly file names are the fixed JSONL evidence protocol.
-    pattern = "????-??.jsonl"
-    candidates = instance_dir.glob(pattern)
-    if checkpoint is not None:
-        candidates = []
-        try:
-            with os.scandir(instance_dir) as entries:
-                for entry in entries:
+    try:
+        with os.scandir(instance_dir) as entries:
+            for entry in entries:
+                if checkpoint is not None:
                     checkpoint()
-                    candidate = Path(entry.path)
-                    if candidate.match(pattern):
-                        candidates.append(candidate)
-        except FileNotFoundError:
-            return names, issues
-    for candidate in sorted(candidates):
-        if checkpoint is not None:
-            checkpoint()
-        if not _valid_month_name(candidate.name):
-            issues.append({"code": "invalid_month_filename", "path": str(candidate), "detail": "month is not calendar-real"})
-            continue
-        names.append(candidate.name)
-    return names, issues
+                candidate = Path(entry.name)
+                if not (candidate.match("????-??.jsonl") or candidate.match("????-??.???????????????????.jsonl")):
+                    continue
+                key = _evidence_name_key(entry.name)
+                if key is None:
+                    issues.append({"code": "invalid_month_filename", "path": entry.path, "detail": "invalid receipt month or part"})
+                else:
+                    named.append((key, entry.name))
+    except FileNotFoundError:
+        return [], []
+    return [name for _, name in sorted(named)], sorted(issues, key=lambda issue: issue["path"])
 
 
 @contextmanager
@@ -639,8 +649,77 @@ def _open_month_fd(instance_dir: Path, name: str, *, write: bool = False, create
         os.close(directory_fd)
 
 
+def _read_evidence_file(
+    instance_dir: Path, name: str, *, checkpoint: Callable[[], None] | None = None,
+    max_bytes: int | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    records: list[dict[str, Any]] = []
+    issues: list[dict[str, str]] = []
+    path = instance_dir / name
+    try:
+        with _open_month_fd(instance_dir, name) as fd:
+            source = os.fdopen(fd, "rb", closefd=False)
+            try:
+                offset = 0
+                line_no = 0
+                saw_data = False
+                final_newline = True
+                while True:
+                    if checkpoint is not None:
+                        checkpoint()
+                    raw_line = source.readline(MAX_RECORD_BYTES + 1)
+                    if not raw_line:
+                        break
+                    saw_data = True
+                    line_no += 1
+                    line_offset = offset
+                    offset += len(raw_line)
+                    if max_bytes is not None and offset > max_bytes:
+                        raise ReceiptError("receipt part grew while reading")
+                    oversized = len(raw_line) > MAX_RECORD_BYTES
+                    while oversized and not raw_line.endswith(b"\n"):
+                        if checkpoint is not None:
+                            checkpoint()
+                        chunk = source.readline(8192)
+                        if not chunk:
+                            break
+                        offset += len(chunk)
+                        if max_bytes is not None and offset > max_bytes:
+                            raise ReceiptError("receipt part grew while reading")
+                        raw_line = chunk
+                    if oversized:
+                        issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
+                        final_newline = raw_line.endswith(b"\n")
+                        continue
+                    final_newline = raw_line.endswith(b"\n")
+                    line = raw_line[:-1] if final_newline else raw_line
+                    if line.endswith(b"\r"):
+                        line = line[:-1]
+                    try:
+                        value = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
+                        continue
+                    if not isinstance(value, dict):
+                        issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
+                        continue
+                    value["_path"] = str(path)
+                    value["_offset"] = line_offset
+                    records.append(value)
+                if saw_data and not final_newline:
+                    issues.append({"code": "truncated_evidence", "path": str(path), "detail": "nonempty JSONL file is missing its final newline"})
+            finally:
+                source.close()
+    except ReceiptError as exc:
+        code = "evidence_path_escape" if "evidence path" in str(exc) else "read_error"
+        issues.append({"code": code, "path": str(path), "detail": str(exc)})
+    except OSError as exc:
+        issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
+    return records, issues
+
+
 def _read_records(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records: list[dict[str, Any]] = []
     issues: list[dict[str, str]] = []
@@ -651,81 +730,31 @@ def _read_records(
     for name in names:
         if checkpoint is not None:
             checkpoint()
-        path = instance_dir / name
-        try:
-            with _open_month_fd(instance_dir, name) as fd:
-                source = os.fdopen(fd, "rb", closefd=False)
-                try:
-                    offset = 0
-                    line_no = 0
-                    saw_data = False
-                    final_newline = True
-                    while True:
-                        if checkpoint is not None:
-                            checkpoint()
-                        raw_line = source.readline(MAX_RECORD_BYTES + 1)
-                        if not raw_line:
-                            break
-                        saw_data = True
-                        line_no += 1
-                        line_offset = offset
-                        offset += len(raw_line)
-                        oversized = len(raw_line) > MAX_RECORD_BYTES
-                        while oversized and not raw_line.endswith(b"\n"):
-                            if checkpoint is not None:
-                                checkpoint()
-                            chunk = source.readline(8192)
-                            if not chunk:
-                                break
-                            offset += len(chunk)
-                            raw_line = chunk
-                        if oversized:
-                            issues.append({"code": "record_too_large", "path": str(path), "detail": f"line {line_no}"})
-                            final_newline = raw_line.endswith(b"\n")
-                            continue
-                        final_newline = raw_line.endswith(b"\n")
-                        line = raw_line[:-1] if final_newline else raw_line
-                        if line.endswith(b"\r"):
-                            line = line[:-1]
-                        try:
-                            value = json.loads(line)
-                        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                            issues.append({"code": "invalid_json", "path": str(path), "detail": f"line {line_no}: {exc}"})
-                            continue
-                        if not isinstance(value, dict):
-                            issues.append({"code": "invalid_record", "path": str(path), "detail": f"line {line_no}"})
-                            continue
-                        value["_path"] = str(path)
-                        value["_offset"] = line_offset
-                        records.append(value)
-                    if saw_data and not final_newline:
-                        issues.append({"code": "truncated_evidence", "path": str(path), "detail": "nonempty JSONL file is missing its final newline"})
-                finally:
-                    source.close()
-        except ReceiptError as exc:
-            code = "evidence_path_escape" if "evidence path" in str(exc) else "read_error"
-            issues.append({"code": code, "path": str(path), "detail": str(exc)})
-            continue
-        except OSError as exc:
-            issues.append({"code": "read_error", "path": str(path), "detail": str(exc)})
-            continue
+        found, errors = _read_evidence_file(instance_dir, name, checkpoint=checkpoint)
+        records.extend(found)
+        issues.extend(errors)
     return records, issues
 
 
 def _chain_state(
-    instance_dir: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None,
+    instance_dir: Path, *, checkpoint: Callable[[], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     records, issues = _read_records(instance_dir, checkpoint=checkpoint)
+    return _verify_records(records, issues, checkpoint=checkpoint)
+
+
+def _verify_records(
+    records: list[dict[str, Any]], issues: list[dict[str, str]], *,
+    expected_hash: str = GENESIS_HASH, expected_seq: int = 1,
+    previous_month: str | None = None, checkpoint: Callable[[], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     valid_records: list[dict[str, Any]] = []
-    expected_hash = GENESIS_HASH
-    expected_seq = 1
-    previous_month: str | None = None
     for record in records:
         if checkpoint is not None:
             checkpoint()
         path = str(record.pop("_path"))
         offset = int(record.pop("_offset"))
-        month = Path(path).stem
+        month = Path(path).name[:7]
         try:
             _normalized, parsed = _timestamp(record.get("timestamp"))
             if f"{parsed:%Y-%m}" != month:
@@ -736,6 +765,10 @@ def _chain_state(
         if envelope_error is not None:
             issues.append({"code": "invalid_envelope", "path": path, "detail": envelope_error})
             continue
+        if offset == 0:
+            part = _evidence_name_key(Path(path).name)
+            if part is not None and part[1] and record.get("seq") != part[1]:
+                issues.append({"code": "invalid_part_start", "path": path, "detail": "part starts at a different sequence"})
         if previous_month is not None and month != previous_month and record.get("prev") != expected_hash:
             issues.append({"code": "broken_month_link", "path": path, "detail": "first record does not link to prior month"})
         if record.get("seq") != expected_seq:
@@ -756,6 +789,112 @@ def _chain_state(
         record["_offset"] = offset
         valid_records.append(record)
     return valid_records, issues
+
+
+@dataclass(frozen=True)
+class _LifecycleReceiptSegment:
+    last_seq: int
+    last_hash: str
+    last_month: str | None
+    intents: tuple[dict[str, Any], ...]
+
+
+_LIFECYCLE_SEGMENTS: OrderedDict[tuple, _LifecycleReceiptSegment] = OrderedDict()
+_LIFECYCLE_SEGMENTS_LOCK = threading.Lock()
+_LIFECYCLE_SEGMENTS_CAPACITY = 256
+
+
+def _receipt_file_signature(path: Path) -> tuple[int, int, int, int, int, int]:
+    entry = path.lstat()
+    if not stat.S_ISREG(entry.st_mode) or getattr(entry, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise ReceiptError("receipt evidence path is unsafe")
+    return entry.st_dev, entry.st_ino, entry.st_mode, entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns
+
+
+def _lifecycle_instance_intents(
+    vault_root: Path, instance_dir: Path, *, checkpoint: Callable[[], None] | None,
+) -> list[dict[str, Any]]:
+    def scan(*, store_cache: bool, caller_holds_lock: bool) -> list[dict[str, Any]]:
+        names, issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+        if issues:
+            raise ReceiptError("receipt chain requires reconciliation")
+        anchor = _LifecycleReceiptSegment(0, GENESIS_HASH, None, ())
+        signatures: list[tuple[Path, tuple]] = []
+        intents: list[dict[str, Any]] = []
+
+        def verify_segment(name: str, *, closed: bool, max_bytes: int | None = None) -> None:
+            nonlocal anchor
+            if checkpoint is not None:
+                checkpoint()
+            path = instance_dir / name
+            signature = _receipt_file_signature(path)
+            if max_bytes is not None and signature[3] > max_bytes:
+                raise ReceiptError("receipt part grew before verification")
+            signatures.append((path, signature))
+            key = path, signature, anchor.last_seq, anchor.last_hash, anchor.last_month
+            # POSIX ctime changes on edits that restore mtime. The Windows stat ctime is creation time.
+            reusable = os.name != "nt" and closed
+            with _LIFECYCLE_SEGMENTS_LOCK:
+                cached = _LIFECYCLE_SEGMENTS.get(key) if reusable else None
+                if cached is not None:
+                    _LIFECYCLE_SEGMENTS.move_to_end(key)
+            if cached is None:
+                records, faults = _read_evidence_file(instance_dir, name, checkpoint=checkpoint, max_bytes=max_bytes)
+                valid, faults = _verify_records(
+                    records, faults, expected_hash=anchor.last_hash, expected_seq=anchor.last_seq + 1,
+                    previous_month=anchor.last_month, checkpoint=checkpoint,
+                )
+                if faults or _receipt_file_signature(path) != signature:
+                    raise ReceiptError("receipt chain requires reconciliation")
+                tail = valid[-1] if valid else None
+                cached = _LifecycleReceiptSegment(
+                    int(tail["seq"]) if tail is not None else anchor.last_seq,
+                    str(tail["hash"]) if tail is not None else anchor.last_hash,
+                    name[:7] if tail is not None else anchor.last_month,
+                    tuple(record for record in valid if record["event_type"] == "critical" and record["phase"] == "intent"),
+                )
+                if reusable and store_cache:
+                    with _LIFECYCLE_SEGMENTS_LOCK:
+                        _LIFECYCLE_SEGMENTS[key] = cached
+                        if len(_LIFECYCLE_SEGMENTS) > _LIFECYCLE_SEGMENTS_CAPACITY:
+                            _LIFECYCLE_SEGMENTS.popitem(last=False)
+            intents.extend(cached.intents)
+            anchor = cached
+
+        for name in names[:-1]:
+            verify_segment(name, closed=True)
+        bounded_tail = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
+        # Never hold the writer lock while replaying an oversized legacy file or a closed archive.
+        # On the retry pass the caller already holds the lock, so the tail stays byte-bounded:
+        # a grown active part fails the max_bytes signature check before any long read.
+        tail_bound = _RECEIPT_PART_BYTES if bounded_tail or caller_holds_lock else None
+        with _receipt_lock(vault_root) if bounded_tail and not caller_holds_lock else nullcontext():
+            if names:
+                verify_segment(names[-1], closed=False, max_bytes=tail_bound)
+            for path, signature in signatures:
+                if checkpoint is not None:
+                    checkpoint()
+                if _receipt_file_signature(path) != signature:
+                    raise ReceiptError("receipt evidence changed while reading")
+            latest, faults = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+            if faults or latest != names:
+                raise ReceiptError("receipt evidence changed while reading")
+        return intents
+
+    try:
+        return scan(store_cache=True, caller_holds_lock=False)
+    except ReceiptError:
+        try:
+            names, _issues = _monthly_evidence_names(instance_dir, checkpoint=checkpoint)
+            retry = bool(names) and _receipt_file_signature(instance_dir / names[-1])[3] <= _RECEIPT_PART_BYTES
+        except (ReceiptError, OSError):
+            retry = False
+        if not retry:
+            raise
+    # A transient race with an in-flight append fails the optimistic pass outside the lock.
+    # Retry once with every step under the writer lock; a second failure is genuine evidence.
+    with _receipt_lock(vault_root):
+        return scan(store_cache=False, caller_holds_lock=True)
 
 
 def _validate_event(event_type: str, phase: str, payload: Mapping[str, Any]) -> None:
@@ -989,6 +1128,11 @@ def _tail(records: list[dict[str, Any]]) -> tuple[int, str]:
     return record["seq"], record["hash"]
 
 
+def _disclosure_checkpoint() -> request_budget.ReadCheckpoint | None:
+    check = request_budget.current_checkpoint()
+    return check if check is not None and check.bound_disclosure else None
+
+
 @contextmanager
 def _receipt_lock(vault_root: Path):
     """Lean process/thread append lock acquired before sidecar bootstrap.
@@ -999,6 +1143,9 @@ def _receipt_lock(vault_root: Path):
     machine writer-state root and keeps the same canonical identity/path as the
     former ``VaultMutationCoordinator.hold`` implementation.
     """
+    check = _disclosure_checkpoint()
+    if check is not None:
+        check()
     root = Path(vault_root).resolve()
     state_root = LeaseConfig.from_env().state_dir
     try:
@@ -1010,11 +1157,19 @@ def _receipt_lock(vault_root: Path):
         f"receipt:{root}",
     )
     lock_path = coordinator.lock_path
-    with _RECEIPT_LOCAL_LOCKS_GUARD:
+    with request_budget.checking(check), request_budget.locked(_RECEIPT_LOCAL_LOCKS_GUARD):
         local_lock = _RECEIPT_LOCAL_LOCKS.setdefault(lock_path, threading.RLock())
     deadline = time.monotonic() + _RECEIPT_LOCK_TIMEOUT_SECONDS
-    if not local_lock.acquire(timeout=_RECEIPT_LOCK_TIMEOUT_SECONDS):
+    if check is not None:
+        deadline = min(deadline, check.budget.deadline)
+
+    def timed_out():
+        if check is not None:
+            check()
         raise ReceiptError("receipt append lock timed out")
+
+    if not local_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        timed_out()
     depths = getattr(_RECEIPT_LOCK_DEPTH, "depths", None)
     if depths is None:
         depths = {}
@@ -1022,6 +1177,8 @@ def _receipt_lock(vault_root: Path):
     if depths.get(lock_path, 0):
         depths[lock_path] += 1
         try:
+            if check is not None:
+                check()
             yield
         finally:
             depths[lock_path] -= 1
@@ -1038,12 +1195,12 @@ def _receipt_lock(vault_root: Path):
                 handle.write(b"\0")
                 handle.flush()
             handle.seek(0)
-            with _RECEIPT_LOCAL_LOCKS_GUARD:
+            with request_budget.checking(check), request_budget.locked(_RECEIPT_LOCAL_LOCKS_GUARD):
                 _RECEIPT_LOCK_HANDLES.add(handle)
             while not _try_os_lock(handle):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise ReceiptError("receipt append lock timed out")
+                    timed_out()
                 time.sleep(min(0.01, remaining))
             locked = True
         except OSError as exc:
@@ -1059,6 +1216,8 @@ def _receipt_lock(vault_root: Path):
                 f"{exc.__class__.__name__}: {exc}"
             ) from exc
         depths[lock_path] = 1
+        if check is not None:
+            check()
         yield
     finally:
         if handle is not None:
@@ -1078,11 +1237,31 @@ def _receipt_lock(vault_root: Path):
 
 
 @contextmanager
-def _receipt_connection(vault_root: Path, *, durable: bool = True):
+def _receipt_sqlite_timeout(
+    connection: sqlite3.Connection, check: request_budget.ReadCheckpoint | None,
+):
+    if check is None:
+        yield
+        return
+    (timeout_ms,) = connection.execute("PRAGMA busy_timeout").fetchone()
+    connection.execute("PRAGMA busy_timeout=0")
+    try:
+        yield
+    finally:
+        connection.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
+
+
+@contextmanager
+def _receipt_connection(
+    vault_root: Path, *, durable: bool = True, check: request_budget.ReadCheckpoint | None = None,
+):
     """Yield a validated process-local writer while the receipt lock is held."""
     global _RECEIPT_ACTIVE_CONNECTIONS
     path = store.sidecar_path(Path(vault_root)).resolve()
-    with _RECEIPT_CONNECTIONS_CONDITION:
+    with request_budget.checking(check), request_budget.locked(_RECEIPT_CONNECTIONS_CONDITION):
+        if check is not None and _RECEIPT_CONNECTIONS_FORKING:
+            # Condition.wait reacquires the lock even after a timed wait.
+            raise request_budget.ReadBudgetExhausted()
         while _RECEIPT_CONNECTIONS_FORKING:
             _RECEIPT_CONNECTIONS_CONDITION.wait()
         entry = _RECEIPT_CONNECTIONS.get(path)
@@ -1097,8 +1276,11 @@ def _receipt_connection(vault_root: Path, *, durable: bool = True):
                     "receipt sidecar changed while active; quiesce before replacement"
                 )
             try:
-                current_state = store._connection_state(entry.connection, path)
-            except (OSError, sqlite3.Error):
+                with _receipt_sqlite_timeout(entry.connection, check):
+                    current_state = store._connection_state(entry.connection, path)
+            except (OSError, sqlite3.Error) as exc:
+                if check is not None:
+                    store._stop_contended_read(exc, check.budget.deadline)
                 _RECEIPT_CONNECTIONS.pop(path, None)
                 try:
                     entry.connection.close()
@@ -1115,24 +1297,36 @@ def _receipt_connection(vault_root: Path, *, durable: bool = True):
                     entry = None
         if entry is None:
             connection = store.open_connection(
-                Path(vault_root), check_same_thread=False
+                Path(vault_root), check_same_thread=False, check=check,
             )
             try:
-                state = store._connection_state(connection, path)
-            except BaseException:
+                with _receipt_sqlite_timeout(connection, check):
+                    state = store._connection_state(connection, path)
+            except BaseException as exc:
                 connection.close()
+                if check is not None and isinstance(exc, Exception):
+                    store._stop_contended_read(exc, check.budget.deadline)
                 raise
             entry = _ReceiptConnectionEntry(connection=connection, state=state)
             _RECEIPT_CONNECTIONS[path] = entry
-        entry.connection.execute(
-            "PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=NORMAL"
-        )
+        try:
+            with _receipt_sqlite_timeout(entry.connection, check):
+                entry.connection.execute(
+                    "PRAGMA synchronous=FULL" if durable else "PRAGMA synchronous=NORMAL"
+                )
+        except sqlite3.Error as exc:
+            if check is not None:
+                store._stop_contended_read(exc, check.budget.deadline)
+            raise
         entry.users += 1
         _RECEIPT_ACTIVE_CONNECTIONS += 1
         _RECEIPT_CONNECTIONS.move_to_end(path)
         _evict_idle_receipt_connections_locked()
     try:
-        yield entry.connection
+        with _receipt_sqlite_timeout(entry.connection, check):
+            yield entry.connection
+            if check is not None and entry.connection.in_transaction:
+                entry.connection.rollback()
     except BaseException:
         with _RECEIPT_CONNECTIONS_CONDITION:
             if _RECEIPT_CONNECTIONS.get(path) is entry:
@@ -1170,9 +1364,14 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     names, issues = _monthly_evidence_names(instance_dir)
     if issues:
         raise ReceiptError(issues[0]["detail"])
-    if not names:
-        return None
-    name = names[-1]
+    for name in reversed(names):
+        tail = _read_tail_at(instance_dir, name)
+        if tail is not None:
+            return tail
+    return None
+
+
+def _read_tail_at(instance_dir: Path, name: str) -> dict[str, Any] | None:
     path = instance_dir / name
     with _open_month_fd(instance_dir, name) as fd:
         source = os.fdopen(fd, "rb", closefd=False)
@@ -1198,13 +1397,23 @@ def _read_tail_record(instance_dir: Path) -> dict[str, Any] | None:
     if not isinstance(record, dict) or _envelope_error(record) is not None:
         raise ReceiptError("receipt tail has an invalid envelope")
     _normalized, parsed = _timestamp(record["timestamp"])
-    if f"{parsed:%Y-%m}" != Path(name).stem:
+    if f"{parsed:%Y-%m}" != name[:7]:
         raise ReceiptError("receipt tail timestamp does not match its evidence month")
     if _record_hash(record) != record["hash"]:
         raise ReceiptError("receipt tail hash is invalid")
     record["_path"] = str(path)
     record["_offset"] = max(0, size - _TAIL_READ_BYTES) + chunk.rfind(lines[-1])
     return record
+
+
+def _receipt_append_target(path: Path, *, sequence: int, bytes_to_append: int) -> Path:
+    try:
+        size = path.lstat().st_size
+    except FileNotFoundError:
+        return path
+    if size + bytes_to_append <= _RECEIPT_PART_BYTES:
+        return path
+    return path.with_name(f"{path.name[:7]}.{sequence:019}.jsonl")
 
 
 def _fsync_path(path: Path) -> None:
@@ -1218,8 +1427,10 @@ def _fsync_durable_prefix(instance_dir: Path, target: Path) -> None:
     if issues:
         raise ReceiptError(issues[0]["detail"])
     for name in names:
-        if name <= target.name:
-            _fsync_path(instance_dir / name)
+        _fsync_path(instance_dir / name)
+        if name == target.name:
+            return
+    raise ReceiptError("receipt evidence path is missing")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1303,6 +1514,19 @@ def _matching_existing_event(
     raise ReceiptError("event id already has a different receipt")
 
 
+def _admit_disclosure_write(conn: sqlite3.Connection, check: request_budget.ReadCheckpoint) -> None:
+    check()
+    if not conn.in_transaction:
+        try:
+            # EXCLUSIVE is equivalent to IMMEDIATE in WAL and also secures
+            # commit admission if the database uses a rollback journal.
+            conn.execute("BEGIN EXCLUSIVE")
+        except sqlite3.Error as exc:
+            store._stop_contended_read(exc, check.budget.deadline)
+            raise
+    check()
+
+
 def append_event(
     vault_root: Path,
     *,
@@ -1320,9 +1544,19 @@ def append_event(
     if event_type == "critical" and event_id is None:
         raise ReceiptError("critical receipts require a deterministic event id")
     timestamp, _parsed = _timestamp(timestamp or _now())
+    # These two event types are the final disclosure boundary.
+    check = (
+        _disclosure_checkpoint()
+        if not critical and event_type in ("disclosure", "credential_block")
+        else None
+    )
     with _receipt_lock(vault_root):
-        with _receipt_connection(vault_root, durable=critical) as conn:
+        with _receipt_connection(vault_root, durable=critical, check=check) as conn:
+            if check is not None:
+                _admit_disclosure_write(conn, check)
             instance_id = _instance_id(conn)
+            if check is not None:
+                _admit_disclosure_write(conn, check)
             instance_dir = _instance_dir(vault_root, instance_id)
             _ensure_receipt_instance_directory(instance_dir)
             instance_dir = _instance_dir(vault_root, instance_id)
@@ -1336,6 +1570,10 @@ def append_event(
                 locator,
                 durable_offset,
             ) = _head(conn, instance_id)
+            if check is not None:
+                # Bootstrap commits keep the instance recoverable if an
+                # append crashes. Reacquire if bootstrap released the lock.
+                _admit_disclosure_write(conn, check)
             eid = event_id or uuid.uuid4().hex
             tail = _read_tail_record(instance_dir)
             actual_seq, actual_hash = (0, GENESIS_HASH) if tail is None else (tail["seq"], tail["hash"])
@@ -1387,8 +1625,12 @@ def append_event(
                 if existing is not None:
                     return existing
             path = _month_path(vault_root, instance_id, timestamp)
-            if tail is not None and path.name < Path(tail["_path"]).name:
-                raise ReceiptError("backdated receipt month rotation is refused")
+            if tail is not None:
+                previous = Path(tail["_path"])
+                if path.stem < previous.name[:7]:
+                    raise ReceiptError("backdated receipt month rotation is refused")
+                if path.stem == previous.name[:7]:
+                    path = previous
             record: dict[str, Any] = {
                 "schema": SCHEMA,
                 "event_id": eid,
@@ -1405,10 +1647,15 @@ def append_event(
             encoded = _canonical_json(record)
             if len(encoded) + 1 > MAX_RECORD_BYTES:
                 raise ReceiptError("receipt record exceeds the bounded tail window")
+            path = _receipt_append_target(path, sequence=actual_seq + 1, bytes_to_append=len(encoded) + 1)
+            if check is not None:
+                check()
             with _open_month_fd(instance_dir, path.name, write=True, create=True) as fd:
                 output = os.fdopen(fd, "ab", closefd=False)
                 try:
                     offset = output.tell()
+                    if offset + len(encoded) + 1 > _RECEIPT_PART_BYTES:
+                        raise ReceiptError("receipt part grew before the append")
                     output.write(encoded + b"\n")
                     _crash_point("after_jsonl_write")
                     output.flush()
@@ -1443,21 +1690,29 @@ def critical_event_id(operation_identity: Any) -> str:
 
 def label_digest(vault_root: Path, label: str) -> str:
     """Digest a human label with a machine-local secret, never the raw label."""
+    check = _disclosure_checkpoint()
     with _receipt_lock(vault_root):
-        with _receipt_connection(vault_root) as conn:
-            row = conn.execute(
-                "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
-            ).fetchone()
-            if row is None:
-                conn.execute(
-                    "INSERT INTO receipt_secrets (name, value) VALUES ('label_hmac', ?) "
-                    "ON CONFLICT(name) DO NOTHING",
-                    (os.urandom(32),),
-                )
-                conn.commit()
+        with _receipt_connection(vault_root, check=check) as conn:
+            try:
                 row = conn.execute(
                     "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
                 ).fetchone()
+                if row is None:
+                    if check is not None:
+                        _admit_disclosure_write(conn, check)
+                    conn.execute(
+                        "INSERT INTO receipt_secrets (name, value) VALUES ('label_hmac', ?) "
+                        "ON CONFLICT(name) DO NOTHING",
+                        (os.urandom(32),),
+                    )
+                    conn.commit()
+                    row = conn.execute(
+                        "SELECT value FROM receipt_secrets WHERE name = 'label_hmac'"
+                    ).fetchone()
+            except sqlite3.Error as exc:
+                if check is not None:
+                    store._stop_contended_read(exc, check.budget.deadline)
+                raise
             if row is None:
                 raise ReceiptError("label digest secret initialization failed")
             secret = bytes(row[0])
@@ -2000,25 +2255,39 @@ def unregister_state_resolver(operation: str) -> None:
     _STATE_RESOLVERS.pop(operation, None)
 
 
-def event_records(vault_root: Path) -> list[dict[str, Any]]:
-    """Return verified content-free records without mutating chain or sidecar."""
+def event_records(
+    vault_root: Path, *, checkpoint: Callable[[], None] | None = None, lifecycle_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Return verified records or just the critical intents that bind lifecycle markers."""
     root = _events_root(Path(vault_root))
     if not root.exists():
         return []
     records: list[dict[str, Any]] = []
-    for candidate in sorted(path for path in root.iterdir() if path.is_dir()):
+    candidates = []
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if checkpoint is not None:
+                checkpoint()
+            if entry.is_dir():
+                candidates.append(Path(entry.path))
+    for candidate in sorted(candidates):
+        if checkpoint is not None:
+            checkpoint()
         instance_dir = _instance_dir(vault_root, candidate.name)
-        instance_records, issues = _chain_state(instance_dir)
-        if issues:
-            raise ReceiptError("receipt chain requires reconciliation")
-        records.extend(
-            {
+        if lifecycle_only:
+            instance_records = _lifecycle_instance_intents(vault_root, instance_dir, checkpoint=checkpoint)
+        else:
+            instance_records, issues = _chain_state(instance_dir, checkpoint=checkpoint)
+            if issues:
+                raise ReceiptError("receipt chain requires reconciliation")
+        for record in instance_records:
+            if checkpoint is not None:
+                checkpoint()
+            records.append({
                 key: value
                 for key, value in record.items()
                 if key not in {"_path", "_offset"}
-            }
-            for record in instance_records
-        )
+            })
     return sorted(records, key=lambda item: (str(item.get("instance_id")), int(item.get("seq", 0))))
 
 

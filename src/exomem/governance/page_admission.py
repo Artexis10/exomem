@@ -38,29 +38,48 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 def simple_page(path: str, raw: bytes, page: ParsedPage | None) -> bool:
     """Whether one page's scopes determine its content floor and release selection."""
+    return scope_parents(path, raw, page) == () and not raw_protection.marked(path)
+
+
+def scope_parents(path: str, raw: bytes, page: ParsedPage | None) -> tuple[str, ...] | None:
+    """The other pages whose bytes this page's scopes and content floors read.
+
+    `()` for none, and the one inheritance parent (`membership.inheritance_edge`) of an extraction
+    part or a scene frame. None when they read anything else: a container binding, a bridge's
+    sources, collection state, or a frontmatter that the normalized parse reads differently. A RAW
+    marking is not judged here: its floor reads the caller's authority, not another page.
+    """
     from ..collection_store import ownership as collections
     from ..vault_store import ownership
 
     if page is None:
-        return False
+        return None
     try:
         frontmatter, _, _ = vault.parse_frontmatter(raw.decode("utf-8"))
     except (UnicodeDecodeError, vault.FrontmatterError):
-        return False
+        return None
     # Custody reads raw bytes; normalized Markdown must agree before it can prove any claim absent.
     if frontmatter != page.frontmatter:
-        return False
-    return (
+        return None
+    if not (
         ownership.classify(path) is ownership.Ownership.PAGE
-        and path.lower().endswith(".md")
-        # These closed custody, extraction and frame fields require the scalar dependency chain.
+        and ownership.is_markdown(path)
+        # A container claim names its parent through a stored binding, which no path names.
         and "container_member" not in frontmatter
-        and "part_of" not in frontmatter and "parent_media" not in frontmatter
         # Only the parsed bridge grammar proves absence; the byte probe is a positive cache guard.
         and bridges.parse_bridge_frontmatter(frontmatter) == (None, None)
-        and not raw_protection.marked(path)
         and not document_containers.in_payload_tree(path) and not collections.relevant(path)
-    )
+    ):
+        return None
+    part, frame = "part_of" in frontmatter, "parent_media" in frontmatter
+    if not (part or frame):
+        return ()
+    edge = membership.inheritance_edge(path, part_of=part, parent_media=page.parent_media)
+    # Exactly one of these closed extraction and frame claims, with the edge membership reads for it.
+    # A claim without its edge, or both claims, stays on the scalar dependency chain.
+    if edge is None or part == frame or edge.kind != (membership.PART_EDGE if part else membership.FRAME_EDGE):
+        return None
+    return (edge.parent,)
 
 
 def replace_row(
@@ -235,6 +254,37 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
     if memo is None:
         return {}
     unique_paths = dict.fromkeys(paths)
+    facts = _facts(root, memo, unique_paths)
+    scopes = memo.setdefault((__name__, "scopes", policy.fingerprint), {})
+    pending = {
+        path: fact for path in unique_paths
+        if (fact := facts.get(path)) is not None and (path, fact[0]) not in scopes
+    }
+    if pending:
+        _resolve(root, policy, memo, facts, scopes, pending)
+    return {
+        path: found for path in unique_paths
+        if (fact := facts.get(path)) is not None
+        and (found := scopes.get((path, fact[0]))) is not None
+    }
+
+
+def proven_simple(root: Path, paths: list[str]) -> dict[str, str]:
+    """The paths whose current facts prove a simple page (`simple_page`), with the hash of the bytes
+    that the facts describe, in the request's pinned snapshot. Empty outside a store request."""
+    from ..vault_store import read
+
+    memo = read.request_memo(root)
+    if memo is None:
+        return {}
+    facts = _facts(root, memo, dict.fromkeys(paths))
+    return {path: fact[0] for path in paths if (fact := facts.get(path)) is not None}
+
+
+def _facts(root: Path, memo: dict, unique_paths: dict[str, None]) -> dict:
+    """The request's facts by path: `(sha256, subject text, size)` for a proven simple page, else None."""
+    from ..vault_store import read
+
     facts = memo.setdefault((__name__, "facts"), {})
     wanted = [path for path in unique_paths if path not in facts]
     if wanted:
@@ -255,18 +305,7 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
                     ):
                         if version == FACTS_VERSION and simple and pages[path]:
                             facts[path] = (sha256, raw, size)  # decoded only on a miss of the scope-set memo
-    scopes = memo.setdefault((__name__, "scopes", policy.fingerprint), {})
-    pending = {
-        path: fact for path in unique_paths
-        if (fact := facts.get(path)) is not None and (path, fact[0]) not in scopes
-    }
-    if pending:
-        _resolve(root, policy, memo, facts, scopes, pending)
-    return {
-        path: found for path in unique_paths
-        if (fact := facts.get(path)) is not None
-        and (found := scopes.get((path, fact[0]))) is not None
-    }
+    return facts
 
 
 def evidence(root: Path, path: str) -> tuple[str, int]:

@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from . import foreground_priority, reserved_paths, state_paths
+from . import foreground_priority, request_budget, reserved_paths, state_paths
 from .cli_ops import OpError
 
 #: A job's state is one of these; a job is terminal once it leaves ``RUNNING``.
@@ -77,6 +77,30 @@ JOB_MODES = frozenset(JOB_FLAGS)
 _PREVIEW_FLAG = "preview"
 MODE_STATUS = "maintenance-job"
 MODE_CANCEL = "maintenance-job-cancel"
+# Internal job mode. Access is bound to the Source preview admission proof.
+_SOURCE_PREVIEW = "source-preview"
+# Closed read-only Source preview error codes that may cross the job boundary.
+_SOURCE_PREVIEW_PUBLIC_ERRORS = frozenset({
+    "RECLASSIFICATION_PREVIEW_WARMING", "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+})
+_SOURCE_PREVIEW_FAILED = "RECLASSIFICATION_PREVIEW_FAILED"
+_SOURCE_PREVIEW_PAGE_ROWS = 128
+_ENTRY_INSERT = "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)"
+_HELD_INSERT = "INSERT OR REPLACE INTO held_evidence (run_id, path, record) VALUES (?, ?, ?)"
+
+
+@dataclass(frozen=True)
+class HeldEvidence:
+    """A simple governed row's release proof, held privately beside its preview job."""
+
+    path: str
+    sha256: str
+    size: int
+    #: (st_dev, st_ino, st_size, st_mtime_ns, st_ctime_ns) of the file when the job read it.
+    witness: tuple[int, int, int, int, int]
+    scopes: tuple[frozenset[str], ...]
+    #: Canonical serialization of the release-admission identity the row was decided under.
+    identity: str
 
 #: Terminal rows older than this are pruned, beyond the newest ``RETAIN_NEWEST``.
 RETAIN_SECONDS = 30 * 24 * 3600
@@ -121,6 +145,7 @@ class _Live:
 
     run_id: str
     vault_root: Path
+    mode: str
     stop: threading.Event = field(default_factory=foreground_priority.StopEvent)
     #: Why ``stop`` was set: ``CANCEL_CODE`` or ``SHUTDOWN_CODE``.
     reason: str | None = None
@@ -147,20 +172,42 @@ def store_path(vault_root: Path) -> Path:
 
 
 @contextmanager
-def _store(vault_root: Path, *, create: bool) -> Iterator[sqlite3.Connection]:
+def _store(vault_root: Path, *, create: bool, bounded: bool = False) -> Iterator[sqlite3.Connection]:
     """Open the job store under the private-state ceremony; raise ``FileNotFoundError`` for a read of none."""
     root = Path(vault_root).resolve()
     path = store_path(root)
-    with reserved_paths._subsystem_authority_scope("maintenance_jobs"):
-        with reserved_paths._identity_coordination_scope(
-            root, descriptor_ids=(_STORE_ID,), identity_may_change=create
-        ):
-            with reserved_paths._sqlite_owner_target_scope(root, path, _STORE_ID, create=create) as retained:
-                conn = _open(root, path, retained, create)
+    check = request_budget.current_checkpoint() if bounded else None
+    if check is not None:
+        check()
+    conn = None
     try:
+        with (
+            reserved_paths._subsystem_authority_scope("maintenance_jobs"),
+            reserved_paths._identity_coordination_scope(
+                root, descriptor_ids=(_STORE_ID,), identity_may_change=create,
+                deadline=check.budget.deadline if check is not None else None,
+            ),
+            reserved_paths._sqlite_owner_target_scope(root, path, _STORE_ID, create=create) as retained,
+        ):
+            conn = _open(root, path, retained, create, check=check)
         yield conn
+        if check is not None:
+            check()
+    except sqlite3.Error as error:
+        if check is not None:
+            check()
+            if getattr(error, "sqlite_errorcode", 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise request_budget.ReadBudgetExhausted() from None
+        raise
+    except (OpError, reserved_paths.SqliteIdentityBusyError) as error:
+        if check is not None and (
+            isinstance(error, reserved_paths.SqliteIdentityBusyError) or error.code == "MUTATION_BUSY"
+        ):
+            raise request_budget.ReadBudgetExhausted() from None
+        raise
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 @contextmanager
@@ -176,15 +223,19 @@ def _write(vault_root: Path) -> Iterator[sqlite3.Connection]:
             raise
 
 
-def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Connection:
+def _open(
+    root: Path, path: Path, retained: Path, create: bool, *, check: request_budget.ReadCheckpoint | None,
+) -> sqlite3.Connection:
+    timeout = 0 if check is not None else 5.0
     if create:
         retained.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(retained, timeout=5.0)
+        conn = sqlite3.connect(retained, timeout=timeout)
     else:
-        conn = sqlite3.connect(f"{retained.as_uri()}?mode=ro", uri=True, timeout=5.0)
+        conn = sqlite3.connect(f"{retained.as_uri()}?mode=ro", uri=True, timeout=timeout)
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        if check is not None:
+            conn.set_progress_handler(lambda: int(check.remaining() <= 0), 1_000)
         if create:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -199,6 +250,10 @@ def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Conne
                 "cancel_why TEXT, started_at REAL NOT NULL, ended_at REAL, error_code TEXT, notes TEXT, outcome TEXT)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, started_at)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_source_preview_snapshot ON jobs(flags, plan_id, seq DESC) "
+                f"WHERE mode = '{_SOURCE_PREVIEW}' AND state = '{COMPLETED}'"
+            )
             # One row per page a job wrote or tried to write, in the order the job reached it.
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS entries ("
@@ -206,6 +261,13 @@ def _open(root: Path, path: Path, retained: Path, create: bool) -> sqlite3.Conne
                 "kind TEXT NOT NULL, path TEXT NOT NULL, value TEXT)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS entries_run ON entries(run_id, seq)")
+            # One private record per simple preview row: hash, witness, scopes and the release
+            # identity they were computed under. Never a byte of the page, never a response field.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS held_evidence ("
+                "run_id TEXT NOT NULL, path TEXT NOT NULL, record TEXT NOT NULL, "
+                "PRIMARY KEY (run_id, path))"
+            )
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, _STORE_ID, conn)
     except BaseException:
@@ -383,9 +445,10 @@ def _totals(conn: sqlite3.Connection, run_id: str | None = None) -> dict[str, di
     """Entry counts per job and kind, in one query."""
     rows = conn.execute(
         "SELECT run_id, kind, COUNT(*) AS n FROM entries "
-        + ("WHERE run_id = ? " if run_id is not None else "")
+        + ("WHERE run_id = ? " if run_id is not None
+           else "WHERE run_id IN (SELECT run_id FROM jobs WHERE mode != ?) ")
         + "GROUP BY run_id, kind",
-        (run_id,) if run_id is not None else (),
+        (run_id,) if run_id is not None else (_SOURCE_PREVIEW,),
     ).fetchall()
     totals: dict[str, dict[str, int]] = {}
     for row in rows:
@@ -460,7 +523,7 @@ def job_status(vault_root: Path, run_id: str, cursor: str | None = None) -> dict
     try:
         with _LIVE_LOCK, _store(vault_root, create=False) as conn:
             row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
-            if row is None:
+            if row is None or row["mode"] == _SOURCE_PREVIEW:
                 raise _not_found()
             view = _job_view(conn, row, full=cursor is None)
             return view if cursor is None else _page(conn, view, cursor)
@@ -468,7 +531,18 @@ def job_status(vault_root: Path, run_id: str, cursor: str | None = None) -> dict
         raise _not_found() from None
 
 
-def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dict[str, Any]:
+def _entry_payload(kind: str, path: str, value: str | None, *, chunk: int | None = None) -> dict[str, Any]:
+    entry = {"kind": kind, "path": path}
+    if chunk is not None:
+        entry = {"chunk": chunk, **entry}
+    if value is not None:
+        entry["value"] = value
+    return entry
+
+
+def _page(
+    conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str, *, source_preview: bool = False,
+) -> dict[str, Any]:
     """The entries of a finished job after `cursor`, as many as fit in half the response bound."""
     from . import query_data
 
@@ -482,7 +556,8 @@ def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dic
         after = int(cursor)
     except ValueError:
         after = -1
-    if after < 0:
+    sqlite_max_rowid = (1 << 63) - 1
+    if after < 0 or (source_preview and after > sqlite_max_rowid):
         raise OpError(
             "INVALID_ARGUMENTS",
             "cursor is not a next_cursor of this job's receipt",
@@ -493,18 +568,33 @@ def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dic
     size = 0
     last = after
     more = False
-    for row in conn.execute(
-        "SELECT seq, chunk, kind, path, value FROM entries WHERE run_id = ? AND seq > ? ORDER BY seq",
-        (view["run_id"], after),
-    ):
-        entry = {
-            "chunk": row["chunk"],
-            "kind": _UNKNOWN if row["kind"] == _PENDING else row["kind"],
-            "path": row["path"],
-        }
-        if row["value"] is not None:
-            entry["value"] = row["value"]
-        cost = len(_canonical(entry)) + 1
+    statement = "SELECT seq, chunk, kind, path, value FROM entries WHERE run_id = ? AND seq > ? ORDER BY seq"
+    run_id = view["run_id"]
+    ordinal_base = 0
+    params = (run_id, after)
+    if source_preview:
+        # Private entries occupy one contiguous range. Keep its global allocation out of the cursor.
+        first = conn.execute(
+            "SELECT seq FROM entries WHERE run_id = ? ORDER BY seq LIMIT 1", (run_id,),
+        ).fetchone()
+        if first is not None:
+            ordinal_base = int(first["seq"]) - 1
+        statement += " LIMIT ?"
+        params = (run_id, min(after + ordinal_base, sqlite_max_rowid), _SOURCE_PREVIEW_PAGE_ROWS + 1)
+    for row in conn.execute(statement, params):
+        if source_preview:
+            request_budget.checkpoint()
+            if len(entries) == _SOURCE_PREVIEW_PAGE_ROWS:
+                more = True
+                break
+        entry = _entry_payload(
+            _UNKNOWN if not source_preview and row["kind"] == _PENDING else row["kind"],
+            row["path"], row["value"], chunk=None if source_preview else row["chunk"],
+        )
+        text = _canonical(entry)
+        cost = (len(text.encode("utf-8")) if source_preview else len(text)) + 1
+        if source_preview and cost > limit:
+            raise OpError("RECLASSIFICATION_PREVIEW_UNAVAILABLE", "The stored preview page is unavailable.")
         if entries and size + cost > limit:
             more = True
             break
@@ -515,7 +605,7 @@ def _page(conn: sqlite3.Connection, view: Mapping[str, Any], cursor: str) -> dic
         "run_id": view["run_id"],
         "state": view["state"],
         "entries": entries,
-        "next_cursor": str(last) if more else None,
+        "next_cursor": str(last - ordinal_base) if more else None,
     }
 
 
@@ -523,7 +613,9 @@ def job_list(vault_root: Path) -> dict[str, Any]:
     require_owner(vault_root)
     try:
         with _LIVE_LOCK, _store(vault_root, create=False) as conn:
-            rows = conn.execute("SELECT * FROM jobs ORDER BY started_at DESC, seq DESC").fetchall()
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE mode != ? ORDER BY started_at DESC, seq DESC", (_SOURCE_PREVIEW,),
+            ).fetchall()
             totals = _totals(conn)
             return {"jobs": [_view(conn, row, totals.get(row["run_id"], {}), full=False) for row in rows]}
     except FileNotFoundError:
@@ -544,7 +636,7 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
                 try:
                     _record_orphans(conn)
                     row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
-                    if row is None:
+                    if row is None or row["mode"] == _SOURCE_PREVIEW:
                         raise _not_found()
                     if row["state"] == RUNNING:
                         conn.execute(
@@ -566,6 +658,104 @@ def request_cancel(vault_root: Path, run_id: str, why: str) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- start
+
+
+def start_source_preview(
+    vault_root: Path,
+    *,
+    binding: str,
+    request_key: str,
+    snapshot_key: str,
+    build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]], ...]],
+) -> dict[str, Any]:
+    """Start or join a private read job after the caller proves Source preview access.
+
+    ``build`` returns ``(summary, entries)`` or ``(summary, entries, held)`` where ``held`` maps a
+    report row's path to its private release evidence record — one row each, never page bytes and
+    never response fields."""
+    job, _ = _claim(
+        vault_root,
+        mode=_SOURCE_PREVIEW,
+        flags={"binding": binding, "request": request_key},
+        # The plan identity is the snapshot this private preview records. It grants no read access.
+        plan_id=snapshot_key,
+        why="",
+        surface=SURFACE,
+        audience="",
+        launch=lambda live: _launch_thread(live, _run_source_preview, build),
+    )
+    return job
+
+
+def source_preview_status(
+    vault_root: Path,
+    *,
+    binding: str,
+    request_key: str,
+    snapshot_key: str | None,
+    run_id: str,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Read the private job under the caller's current admission and request proof."""
+    try:
+        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE run_id = ? AND mode = ? AND flags = ?",
+                (run_id, _SOURCE_PREVIEW, _canonical({"binding": binding, "request": request_key})),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError
+            state = _effective_state(row, *_owner())
+            view = {"run_id": run_id, "state": state}
+            if state == FAILED:
+                return {**view, "error_code": _source_preview_error_code(row["error_code"])}
+            if state != COMPLETED:
+                return view
+            snapshot_current = None if snapshot_key is None else row["plan_id"] == snapshot_key
+            if cursor is not None:
+                return {**_page(conn, view, cursor, source_preview=True), "snapshot_current": snapshot_current}
+            outcome = json.loads(row["outcome"])
+            return {
+                **view, "snapshot_current": snapshot_current, "result": outcome["result"],
+                "next_cursor": "0" if outcome["has_entries"] else None,
+            }
+    except FileNotFoundError:
+        raise OpError("NOT_FOUND", "No Source preview matches this request.") from None
+
+
+def source_preview_held_evidence(
+    vault_root: Path, run_id: str, paths: Iterable[str],
+) -> dict[str, HeldEvidence]:
+    """The private release evidence a completed preview job held for ``paths``, if it held any."""
+    wanted = list(dict.fromkeys(paths))
+    if not wanted:
+        return {}
+    try:
+        with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            conn.execute("BEGIN")
+            rows = conn.execute(
+                f"SELECT path, record FROM held_evidence WHERE run_id = ? "
+                f"AND path IN ({','.join('?' * len(wanted))})",
+                (run_id, *wanted),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    held: dict[str, HeldEvidence] = {}
+    for row in rows:
+        try:
+            record = json.loads(row["record"])
+            held[row["path"]] = HeldEvidence(
+                path=record["path"],
+                sha256=record["sha256"],
+                size=record["size"],
+                witness=tuple(record["witness"]),
+                scopes=tuple(frozenset(scope) for scope in record["scopes"]),
+                identity=record["identity"],
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return held
 
 
 def start_leaf(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Callable[..., Any]:
@@ -654,16 +844,38 @@ def _claim(
         )
     flags_json = _canonical(flags)
     run_id = uuid.uuid4().hex
-    with _LIVE_LOCK, _store(vault_root, create=True) as conn:
+    source_preview = mode == _SOURCE_PREVIEW
+    lock = request_budget.locked(_LIVE_LOCK) if source_preview else _LIVE_LOCK
+    with lock, _store(vault_root, create=True, bounded=source_preview) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             _record_orphans(conn)
+            if source_preview:
+                previous = conn.execute(
+                    "SELECT run_id, state FROM jobs "
+                    f"WHERE mode = '{_SOURCE_PREVIEW}' AND state = '{COMPLETED}' AND flags = ? AND plan_id = ? "
+                    "ORDER BY seq DESC LIMIT 1", (flags_json, plan_id),
+                ).fetchone()
+                if previous is not None:
+                    conn.commit()
+                    return dict(previous), False
             running = conn.execute("SELECT * FROM jobs WHERE state = ? ORDER BY seq", (RUNNING,)).fetchall()
             for row in running:
                 if row["mode"] == mode and row["flags"] == flags_json and row["plan_id"] == plan_id:
                     conn.commit()
+                    if source_preview:
+                        return {"run_id": row["run_id"], "state": RUNNING}, False
                     return _job_view(conn, row, full=False), False
             if running:
+                if source_preview:
+                    from .reclassify_source import preview_warming
+
+                    raise preview_warming()
+                if running[0]["mode"] == _SOURCE_PREVIEW:
+                    raise OpError(
+                        "MAINTENANCE_JOB_ACTIVE", "another background job is running", "Wait, then start again.",
+                        details={"status": "terminal", "committed": False},
+                    )
                 raise OpError(
                     "MAINTENANCE_JOB_ACTIVE",
                     "another maintenance job is running",
@@ -676,13 +888,14 @@ def _claim(
                         "retry_call": {"mode": MODE_STATUS, "run_id": running[0]["run_id"]},
                     },
                 )
-            _prune(conn)
+            if not source_preview:
+                _prune(conn)
             conn.execute(
                 "INSERT INTO jobs (run_id, mode, flags, plan_id, why, surface, audience, owner, state, started_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (run_id, mode, flags_json, plan_id, why, surface, audience, mine, RUNNING, time.time()),
             )
-            live = _Live(run_id=run_id, vault_root=Path(vault_root).resolve())
+            live = _Live(run_id=run_id, vault_root=Path(vault_root).resolve(), mode=mode)
             _LIVE[run_id] = live
             conn.commit()
         except BaseException:
@@ -699,6 +912,8 @@ def _claim(
             )
             conn.commit()
             raise
+        if source_preview:
+            return {"run_id": run_id, "state": RUNNING}, True
         row = conn.execute("SELECT * FROM jobs WHERE run_id = ?", (run_id,)).fetchone()
         return _job_view(conn, row, full=False), True
 
@@ -709,6 +924,7 @@ def _prune(conn: sqlite3.Connection) -> None:
     stale = "state != ? AND ended_at < ? AND run_id NOT IN (SELECT run_id FROM jobs ORDER BY started_at DESC, seq DESC LIMIT ?)"
     params = (RUNNING, cutoff, RETAIN_NEWEST)
     conn.execute(f"DELETE FROM entries WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
+    conn.execute(f"DELETE FROM held_evidence WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
     conn.execute(f"DELETE FROM jobs WHERE {stale}", params)
 
 
@@ -723,17 +939,72 @@ def _launch(
     principal: Any,
     admitted_surface: Any,
 ) -> threading.Thread:
+    return _launch_thread(live, _run, command, injected, kwargs, principal, admitted_surface)
+
+
+def _launch_thread(live: _Live, run: Callable[..., None], *args: Any) -> threading.Thread:
     # A fresh context: the request's write fence, mutation trace, post-terminal lists and
     # time budget belong to a request that has ended by the time most of the job runs.
     context = contextvars.Context()
     thread = threading.Thread(
         target=context.run,
-        args=(_run, live, command, injected, kwargs, principal, admitted_surface),
+        args=(run, live, *args),
         name=f"maintenance-job-{live.run_id[:8]}",
         daemon=True,
     )
     thread.start()
     return thread
+
+
+def _run_source_preview(
+    live: _Live,
+    build: Callable[[threading.Event], tuple[Mapping[str, Any], Iterable[tuple[str, str, str | None]]]],
+) -> None:
+    from . import query_data
+
+    state, error_code, outcome = FAILED, _SOURCE_PREVIEW_FAILED, {}
+    published = None
+    held: list[tuple[str, str]] | None = None
+    try:
+        with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
+            _JOB.set(live)
+            built = build(live.stop)
+            summary, entries = built[0], built[1]
+            if len(built) > 2 and built[2]:
+                held = sorted((path, _canonical(record)) for path, record in built[2].items())
+            buffer = []
+            limit = query_data.MAX_RESPONSE_BYTES // 2
+            for kind, path, value in entries:
+                raise_if_stopped()
+                payload = _entry_payload(kind, path, value)
+                if len(_canonical(payload).encode("utf-8")) + 1 > limit:
+                    raise ValueError("Source preview entry exceeds its receipt limit")
+                buffer.append((kind, path, value))
+            result = dict(summary)
+            if len(_canonical(result).encode("utf-8")) > limit:
+                raise ValueError("Source preview summary exceeds its receipt limit")
+            raise_if_stopped()
+        published = buffer
+        state, error_code, outcome = COMPLETED, None, {"result": result, "has_entries": bool(published)}
+    except JobStop as stop:
+        state, error_code = stop.state, stop.code
+    except foreground_priority.BulkCancelled:
+        state, error_code = _stopped(live)
+    except (Exception, request_budget.ReadBudgetExhausted) as error:  # noqa: BLE001 - worker terminal
+        state = FAILED
+        error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
+    finally:
+        _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held)
+
+
+def _stopped(live: _Live) -> tuple[str, str]:
+    if live.reason == SHUTDOWN_CODE:
+        return INTERRUPTED, SHUTDOWN_CODE
+    return CANCELLED, CANCEL_CODE
+
+
+def _source_preview_error_code(code: str | None) -> str:
+    return code if code is not None and code in _SOURCE_PREVIEW_PUBLIC_ERRORS else _SOURCE_PREVIEW_FAILED
 
 
 def _run(
@@ -783,9 +1054,7 @@ def _run(
     except JobStop as stop:
         state, error_code, outcome = stop.state, stop.code, {}
     except foreground_priority.BulkCancelled:
-        shutting_down = live.reason == SHUTDOWN_CODE
-        state = INTERRUPTED if shutting_down else CANCELLED
-        error_code = SHUTDOWN_CODE if shutting_down else CANCEL_CODE
+        state, error_code = _stopped(live)
         outcome = {}
     except Exception as error:  # noqa: BLE001 - every leaf failure becomes the job's recorded terminal
         state, error_code, outcome = FAILED, _error_code(error), {"error": _error_record(error)}
@@ -822,16 +1091,39 @@ def _bounded(report: Any) -> Any:
     }
 
 
-def _finish(live: _Live, state: str, error_code: str | None, outcome: dict[str, Any]) -> None:
+def _finish(
+    live: _Live, state: str, error_code: str | None, outcome: dict[str, Any],
+    *, preview_entries: list[tuple[str, str, str | None]] | None = None,
+    preview_held: list[tuple[str, str]] | None = None,
+) -> None:
     """Record the terminal, then leave the live registry, so a sweep never sees a finished job as an orphan."""
     try:
-        with _store(live.vault_root, create=True) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
+        with _write(live.vault_root) as conn:
+            if live.mode == _SOURCE_PREVIEW:
+                _prune(conn)
+            if preview_entries is not None and live.stop.is_set():
+                state, error_code = _stopped(live)
+                outcome, preview_entries, preview_held = {}, None, None
+            saved = conn.execute(
                 "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
                 (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),
             )
-            conn.commit()
+            if preview_entries and saved.rowcount:
+                conn.executemany(_ENTRY_INSERT, (
+                    (live.run_id, 0, kind, path, value) for kind, path, value in preview_entries
+                ))
+                if preview_held:
+                    conn.executemany(_HELD_INSERT, (
+                        (live.run_id, path, record) for path, record in preview_held
+                    ))
+                if live.stop.is_set():
+                    conn.execute("DELETE FROM entries WHERE run_id = ?", (live.run_id,))
+                    conn.execute("DELETE FROM held_evidence WHERE run_id = ?", (live.run_id,))
+                    state, error_code = _stopped(live)
+                    conn.execute(
+                        "UPDATE jobs SET state = ?, error_code = ?, outcome = ? WHERE run_id = ?",
+                        (state, error_code, "{}", live.run_id),
+                    )
     finally:
         with _LIVE_LOCK:
             _LIVE.pop(live.run_id, None)
@@ -961,7 +1253,7 @@ def _insert(live: _Live, chunk: int, kind: str, items: Sequence[tuple[str, str |
     with _write(live.vault_root) as conn:
         return {
             path: conn.execute(
-                "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)",
+                _ENTRY_INSERT,
                 (live.run_id, chunk, kind, path, value),
             ).lastrowid
             for path, value in items

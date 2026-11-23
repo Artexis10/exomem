@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ValidationError
 
 from . import duplicates, memory_refs, private_state, reserved_paths, source_capture, vault
 from .governance.principal import effective_principal, owner_local_producer
 
+if TYPE_CHECKING:
+    from .governance.lifecycle import ReceiptLifecycle
+
 OWNER = "source_imports"
 _MAX_ID_CHARS = 256
 _MAX_RECEIPT_BYTES = 8192
+# A receipt needs one generated Source companion. An oversized edit stays available through ordinary reads.
+_MAX_RECEIPT_PAGE_BYTES = 1 << 20
+# Bound request work on a large audit history. An incomplete gate cannot expose custody identifiers.
+_RECEIPT_READ_SECONDS = 0.25
 _PREPARED_STORE = "source-import-intents"
 _UNAVAILABLE = "The imported Source could not be verified. Keep the same import ID when retrying."
 
@@ -286,6 +295,224 @@ class ImportCapture:
             vault.batch_atomic_write(
                 [write], vault_root=root, required_guards=(page_guard,), post_commit_fanout=False,
             )
+
+
+@dataclass(frozen=True, slots=True)
+class ResumableCapture(ImportCapture):
+    """A delegated upload's receipt proves one publication, without repair or deduplication."""
+
+    file_witness: Path
+    store_root: Path | None
+
+    def prepare(self, root: Path, receipt: Receipt) -> None:
+        # The upload cannot retry an ambiguous writer claim. Only this batch's commit can prove the receipt.
+        return None
+
+    def file_commit_witness(self, receipt: Receipt) -> vault._BatchFileWitness:
+        from .upload_sessions import pending_file_commit_witness
+        from .writer_lease import _PostCommitOutcomeUncertain
+
+        path = self.file_witness
+        pending = pending_file_commit_witness(path)
+        receipt_hash = vault.content_hash(receipt.model_dump_json() + "\n")
+        pending_created = False
+        proof_linked = False
+
+        def begin() -> None:
+            # The session lock covers every file install. Persist the intent before the first one.
+            nonlocal pending_created
+            with private_state.stage_record(path.parent, path.stem, {"receipt_sha256": receipt_hash},
+                                            temp_suffix=".tmp", durable=True) as temporary:
+                try:
+                    os.link(temporary, pending)
+                except OSError as error:
+                    if _publication_path_possible(pending):
+                        raise _PostCommitOutcomeUncertain() from error
+                    raise
+                pending_created = True
+            private_state.sync_directory(path.parent)
+
+        def seal() -> None:
+            nonlocal proof_linked
+            if self.store_root is not None:
+                # SQLite committed the receipt with the Source. It needs no file proof.
+                if pending_created:
+                    private_state.remove(pending)
+                return
+            os.link(pending, path)
+            proof_linked = True
+            private_state.sync_directory(path.parent)
+            # The commit link is durable. A failed retirement leaves the latch blocking recovery
+            # until terminal cleanup. It cannot make the writer roll back those proven bytes.
+            private_state.remove(pending)
+
+        def retire_rolled_back() -> None:
+            if not pending_created:
+                return
+            if self.store_root is not None and self._store_receipt_possible(self.store_root):
+                raise _PostCommitOutcomeUncertain()
+            try:
+                if proof_linked:
+                    path.unlink()
+                    private_state.sync_directory(path.parent)
+                elif _publication_path_possible(path):
+                    raise _PostCommitOutcomeUncertain()
+                pending.unlink()
+                private_state.sync_directory(path.parent)
+            except OSError as error:
+                raise _PostCommitOutcomeUncertain() from error
+
+        return vault._BatchFileWitness(begin, seal, retire_rolled_back)
+
+    def _store_receipt_possible(self, root: Path) -> bool:
+        from .collection_store.connection import CollectionStoreError
+        from .vault_store import read as store_read
+
+        rel = self._path(root).relative_to(root).as_posix()
+        try:
+            with store_read.snapshot(root, join_request=False) as current:
+                return current.page_meta(rel) is not None
+        except (OSError, ValueError, sqlite3.Error, CollectionStoreError):
+            return True
+
+    def publication_may_have_started(self, root: Path) -> bool:
+        """Retain the upload if its exact publication left any evidence or cannot be checked."""
+        from .upload_sessions import pending_file_commit_witness
+
+        return any(_publication_path_possible(item) for item in (
+            self._path(root), self.file_witness, pending_file_commit_witness(self.file_witness),
+        )) or (self.store_root is not None and self._store_receipt_possible(root))
+
+    def committed_upload_receipt(self, root: Path, *, size: int) -> dict | None:
+        """Read the exact sealed Source and original under the upload's current principal."""
+        from .collection_store.connection import CollectionStoreError
+        from .upload_sessions import pending_file_commit_witness
+
+        try:
+            if self.store_root is None:
+                if _publication_path_possible(pending_file_commit_witness(self.file_witness)):
+                    return None
+                with self.file_witness.open("rb") as source:
+                    witness = json.loads(source.read(_MAX_RECEIPT_BYTES + 1))
+            relative = self._path(root).relative_to(root).as_posix()
+            with reserved_paths._subsystem_authority_scope(OWNER):
+                raw, _ = vault.read_bounded_guarded_bytes(root, relative, limit=_MAX_RECEIPT_BYTES)
+            if self.store_root is None and witness != {"receipt_sha256": hashlib.sha256(raw).hexdigest()}:
+                return None
+            receipt = self._read_receipt(raw)
+            self._require_same_input(receipt)
+            payload = _released_upload_payload(root, page=receipt.page, ref=receipt.ref,
+                                               artifact=receipt.artifact, sha256=self.original_sha256)
+            if (
+                payload is None or payload.protected != self.protected
+                or vault.content_hash(payload.text) != receipt.source_hash
+                or duplicates.original_size(root, receipt.page, payload, bound=True) != size
+            ):
+                return None
+        except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+            return None
+        return {
+            "path": receipt.page, "ref": receipt.ref, "artifact_path": receipt.artifact,
+            "hash": self.original_sha256, "hash_algorithm": "sha256", "size": size,
+        }
+
+
+def _publication_path_possible(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def _released_upload_payload(
+    root: Path, *, page: str, ref: str, artifact: str, sha256: str,
+) -> duplicates.PagePayload | None:
+    from .collection_store.connection import CollectionStoreError
+    from .governance.egress import _release_level_for_path_only_snapshot, release_level_for
+    from .governance.policy import DISCLOSURE_MAX
+
+    try:
+        if release_level_for(root, page) != DISCLOSURE_MAX:
+            return None
+        payload = duplicates.stored_payload(root, page)
+        if (
+            payload is not None and payload.lane == duplicates.SOURCES and payload.ref == ref
+            and payload.artifact_path == artifact and payload.sha256 == sha256
+            and not duplicates.binding_unproven(root, page, payload)
+            # A historical receipt cannot stand in for a live content-bound artifact grant.
+            and _release_level_for_path_only_snapshot(root, artifact, content_fingerprint=None) == DISCLOSURE_MAX
+        ):
+            return payload
+    except (OSError, ValueError, CollectionStoreError, reserved_paths.ReservedPathLeafError):
+        return None
+    return None
+
+
+def upload_receipt_releasable(
+    root: Path, *, page: object, ref: object, artifact: object, sha256: object, lifecycle_view: ReceiptLifecycle,
+) -> bool | None:
+    """Decide current receipt release. None means a lifecycle snapshot is pending."""
+    from . import document_containers, request_budget
+    from .collection_store.connection import CollectionStoreError
+    from .governance import egress, lifecycle, policy
+
+    if not (isinstance(page, str) and isinstance(ref, str) and isinstance(artifact, str) and isinstance(sha256, str)):
+        return False
+    if any(reserved_paths.classify_logical(path).blocked or document_containers.in_payload_tree(path)
+           for path in (page, artifact)):
+        return False  # Container members need their separate parent proof.
+    checkpoint = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=_RECEIPT_READ_SECONDS))
+    try:
+        with request_budget.checking(checkpoint), policy.request_policy_snapshot():
+            checkpoint()
+            proof = lifecycle_view.snapshot(checkpoint)
+            if proof is None:
+                return None
+            tombstones = proof.tombstones
+            if any(lifecycle.is_tombstoned_in(tombstones, value) for value in (page, ref, artifact)):
+                return False
+            compiled = policy.load(root)
+            raw, guard = vault.read_bounded_guarded_bytes(root, page, limit=_MAX_RECEIPT_PAGE_BYTES)
+            payload = duplicates.derive_page_payload(page, raw)
+            if (payload is None or payload.lane != duplicates.SOURCES or payload.ref != ref
+                    or payload.artifact_path != artifact or payload.sha256 != sha256
+                    or duplicates.binding_unproven(root, page, payload, page_snapshot=raw)):
+                return False
+            checkpoint()
+            if egress.release_level_for(root, page, record=False, policy=compiled, tombstones=tombstones,
+                                        page_snapshot=raw) != policy.DISCLOSURE_MAX:
+                return False
+            if egress._release_level_for_path_only_snapshot(
+                root, artifact, policy=compiled, tombstones=tombstones, resolve_bytes=False,
+            ) != policy.DISCLOSURE_MAX:
+                return False
+            if not lifecycle_view.current(proof, checkpoint):
+                return None
+            guard.recheck(root)
+            checkpoint()
+            return True if lifecycle_view.current(proof, checkpoint) else None
+    except (request_budget.ReadBudgetExhausted, OSError, ValueError, CollectionStoreError,
+            reserved_paths.ReservedPathLeafError, lifecycle.LifecycleError):
+        return False
+
+
+def resumable_capture(root: Path, record: dict) -> ResumableCapture:
+    """Bind the exact session, issuing login binding, original and admitted capture fields."""
+    from .upload_sessions import file_commit_witness_path
+    from .vault_store.mode import store_mode_active
+
+    origin = record["source_handoff"]
+    target = record["target"]
+    store_root = root if store_mode_active(root) else None
+    file_witness = file_commit_witness_path(root, record["id"])
+    key = _digest(["source-upload-commit/v1", record["id"], origin["binding"],
+                   origin["deployment"], origin["ticket_sha256"]])
+    # A file receipt copied into SQLite during a mode transition cannot stand for a store commit.
+    fingerprint = _digest([1, key, store_root is None, target, record["length"], record["sha256"]])
+    return ResumableCapture(key, fingerprint, record["sha256"], target["raw_protection"], file_witness, store_root)
 
 
 def receipt_root(root: Path) -> Path:

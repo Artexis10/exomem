@@ -36,7 +36,7 @@ Run from the repo root:
 uv sync
 uv run python -m pytest -q
 uvx ruff check .
-npm exec --yes @fission-ai/openspec -- validate --specs --strict
+source infra/tool-versions.env && node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --
 uv run exomem demo --json
 uv run python scripts/generate-capabilities.py --check
 uv build
@@ -251,8 +251,17 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-Pull requests, draft or ready, run the partial tier on Python 3.11, the
-supported floor. Docs-only pull requests narrow it to the tests that read docs.
+Pull requests, draft or ready, run the partial tier without its core and harness
+shards. A pull request runs the test modules that it adds or changes instead,
+and the repository-wide guard modules that `tests/pr_guard_modules.txt` lists:
+core modules on Python 3.11, the supported floor, and on 3.13, and harness
+modules on 3.11. A module belongs in that list when it guards an invariant that
+a change elsewhere can break, and it stays cheap. Docs-only pull requests narrow
+the tier to the tests that read docs. Every push to main runs all core and
+harness shards on Python 3.11. A failure that only those shards or the Full
+tier catch is fixed forward on main. When the required gate fails on a push to
+main, one open issue labelled `ci-main-failing` names the run and the commit,
+and a later green push run closes it.
 Full coverage runs only on schedule or dispatch, on main or on a source branch
 on request. It covers Python 3.11 and 3.13, every specialized Full job, and the
 latency gate. Paired recall uses four

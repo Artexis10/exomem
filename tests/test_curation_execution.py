@@ -1141,7 +1141,8 @@ def test_a_repeat_census_reads_only_the_pages_that_changed(
     read_text = Path.read_text
 
     def recording(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
-        read.append(self.relative_to(vault).as_posix() if self.is_relative_to(vault) else str(self))
+        if self.is_relative_to(vault) and self.suffix.lower() == ".md":
+            read.append(self.relative_to(vault).as_posix())
         return read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", recording)
