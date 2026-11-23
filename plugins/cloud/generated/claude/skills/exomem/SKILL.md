@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: 6c099c7d170542b077b773367ca4e98cf890aeff9c63628e1fe068ba089ce4e8
+  skill_contract: c511c1ace4ef671206572b7fc8d0e32b55eefe8d4a1d0a61c85d3ad9a19ae399
   version: "0.32.0"
 ---
 
@@ -332,7 +332,7 @@ commits only a plan that was previewed. Supersession has no
 server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
-Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, execute at most one step per request, let resume continue that approval, and confirm compensation separately.
+Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `relocate` maps to `structural_suggestions` too: it derives and seals the plan that moves or renames a set of pages, and answers with the grouped summary you preview. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, let each request run the steps its time allows, let resume continue that approval until the run ends, and confirm compensation separately.
 
 An explicit undo request authorizes curation `revert` as `restructure_execution`.
 Pass the item's `revert_fingerprint` as `expected_plan_fingerprint`.

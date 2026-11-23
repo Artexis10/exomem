@@ -904,12 +904,13 @@ def _maintenance_rows():
         "propose-compensation": ("run_id",),
         "apply-compensation": ("run_id", "plan_id", "expected_plan_fingerprint", "why"),
         "revert": ("review_ref", "expected_plan_fingerprint", "why"),
+        "relocate": ("pages", "review_ref", "to_project", "folder", "from_project"),
     }
     if set(fields_by_action) != set(CURATION_ACTIONS):
         raise RuntimeError("curation operation fields drifted from CURATION_ACTIONS")
     for action in CURATION_ACTIONS:
         read = action in READ_ONLY_ACTIONS
-        destructive = not read and action not in {"propose", "propose-compensation"}  # nosemgrep: ep-word-membership -- closed CURATION_ACTIONS names.
+        destructive = not read and action not in {"propose", "propose-compensation", "relocate"}  # nosemgrep: ep-word-membership -- closed CURATION_ACTIONS names.
         rows.append(_row("curation", "check_memory" if read else "repair_memory",
                          ("curation_action", *fields_by_action[action]),
                          kind=f"curation-{action}", constraints=(_literal("curation_action", action, implied=True),),

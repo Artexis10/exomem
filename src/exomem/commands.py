@@ -11785,6 +11785,9 @@ def _with_ownership_question(vault_root: Path, previewed: dict[str, Any]) -> dic
     """
     from . import ownership_review
 
+    if "actions" not in previewed:
+        # A derived plan previews as its summary: the person named the project it places pages in.
+        return previewed
     asked = ownership_review.preview_question(vault_root, previewed["actions"])
     return {**previewed, "ownership_question": asked} if asked else previewed
 
@@ -12528,12 +12531,17 @@ def op_maintain_memory(
         "propose-compensation",
         "apply-compensation",
         "revert",
+        "relocate",
     ]
     | None = None,
     run_id: str | None = None,
     plan: dict[str, Any] | None = None,
     refs: list[str] | None = None,
     paths: list[str] | None = None,
+    pages: list[str] | None = None,
+    to_project: str | None = None,
+    folder: str | None = None,
+    from_project: str | None = None,
     review_ref: str | None = None,
     hydration_recheck: int | None = None,
     expected_plan_fingerprint: str | None = None,
@@ -12588,6 +12596,10 @@ def op_maintain_memory(
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
+        pages: Page refs or vault paths for curation relocate.
+        to_project: Relocate: the project key the pages move to; omit to rename them to their titles.
+        folder: Relocate: the folder of a project key that the relocation registers.
+        from_project: Relocate: the project key the pages leave, when a page carries several.
         review_ref: Review ref for a work-item: a recurring-identity candidate, or an item on one page.
         hydration_recheck: Continuation ordinal 1-8; the eighth is closure-only.
         expected_plan_fingerprint: Reviewed plan fingerprint for approval.
@@ -12649,6 +12661,10 @@ def op_maintain_memory(
             "hydration_recheck": hydration_recheck,
             "expected_plan_fingerprint": expected_plan_fingerprint,
             "why": why,
+            "pages": pages,
+            "to_project": to_project,
+            "folder": folder,
+            "from_project": from_project,
         }
         allowed_by_action = {
             "work-item": {"refs", "paths", "review_ref", "hydration_recheck"},
@@ -12665,6 +12681,7 @@ def op_maintain_memory(
                 "why",
             },
             "revert": {"review_ref", "expected_plan_fingerprint", "why"},
+            "relocate": {"pages", "review_ref", "to_project", "folder", "from_project"},
         }
         allowed = allowed_by_action[curation_action]
         if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -12686,6 +12703,8 @@ def op_maintain_memory(
                 "why",
             },
             "revert": {"review_ref", "expected_plan_fingerprint", "why"},
+            # Pages or one review_ref; the relocation refuses neither or both.
+            "relocate": set(),
         }
         if any(supplied[name] is None for name in required_by_action[curation_action]):
             raise ValueError(
@@ -12726,6 +12745,17 @@ def op_maintain_memory(
             if curation_action == "propose-compensation":
                 assert run_id is not None
                 return curation_module.propose_compensation(vault_root, run_id=run_id)
+            if curation_action == "relocate":
+                from . import relocate as relocate_module
+
+                return relocate_module.propose(
+                    vault_root,
+                    pages=pages,
+                    review_ref=review_ref,
+                    to_project=to_project,
+                    folder=folder,
+                    from_project=from_project,
+                )
             if curation_action == "revert":
                 assert None not in (review_ref, expected_plan_fingerprint, why)
                 from . import promotion_revert as promotion_revert_module

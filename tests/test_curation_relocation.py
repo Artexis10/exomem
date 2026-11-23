@@ -198,13 +198,15 @@ def test_two_moved_pages_that_link_to_each_other_propose_and_land_both_rewrites(
 
 
 def test_a_referrer_changed_after_approval_stops_the_rewrite_and_writes_nothing(
-    vault: Path,
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rewrite computed from the live page instead of the reviewed bytes, which would land a
     change nobody approved, or a partial rewrite that leaves some referrers changed."""
     referrer = _append(vault, NOTES[1], f"Rolled out with {_link(NOTES[0])}.")
     other = _append(vault, NOTES[2], f"Fused with {_link(NOTES[0])}.")
     proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
+    # A budget too short for a second step, so the referrer changes between the move and the rewrite.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     curation.apply(
         vault,
         run_id=proposed["run_id"],
@@ -238,9 +240,11 @@ def test_a_source_repoint_the_approved_preview_did_not_list_refuses_and_changes_
         preview.setattr(pointer_write, "preview_digest", lambda moves, _writes: listed(moves, []))
         proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
 
-    with pytest.raises(curation.CurationError, match="POINTER_PREVIEW_REQUIRED"):
-        _run(vault, proposed)
+    stopped = _run(vault, proposed)
 
+    # The move committed in the same call, so the refusal is reported beside it, not raised.
+    assert stopped["stopped"]["code"] == "POINTER_PREVIEW_REQUIRED"
+    assert stopped["phase"] != "completed"
     assert source.read_text(encoding="utf-8") == captured
 
 
