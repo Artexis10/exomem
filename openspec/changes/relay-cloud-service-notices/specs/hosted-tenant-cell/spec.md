@@ -2,7 +2,7 @@
 
 ### Requirement: A cloud cell relays the gateway's service notice
 
-In cloud mode, the cell SHALL read the `x-exomem-service-notice` request header that the authenticated gateway sets. When the header decodes to a valid notice, the cell SHALL add a `service_notice` field, as the result's first field, with its `kind`, `state`, `starts_at`, `ends_at` and `say` values to every MCP tool result that is a JSON object, including JSON-object refusals. The field MUST carry only the header's values and no vault content.
+In cloud mode, the cell SHALL read the `x-exomem-service-notice` request header that the authenticated gateway sets. When the header decodes to a valid notice, the cell SHALL add a `service_notice` field with its `kind`, `state`, `starts_at`, `ends_at` and `say` values to every MCP tool result that is a JSON object, including JSON-object refusals. The field MUST carry only the header's values and no vault content.
 
 #### Scenario: Recall during scheduled maintenance
 
@@ -13,11 +13,6 @@ In cloud mode, the cell SHALL read the `x-exomem-service-notice` request header 
 
 - **WHEN** a save is refused with a JSON-object refusal while the request carries a valid incident notice
 - **THEN** the refusal also carries `service_notice`
-
-#### Scenario: The notice leads the result
-
-- **WHEN** a valid notice reaches a call whose result is a JSON object
-- **THEN** `service_notice` is the first field of that object
 
 #### Scenario: A text error carries no notice
 

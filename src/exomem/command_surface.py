@@ -1412,12 +1412,12 @@ def gateway_service_notice() -> dict[str, typing.Any] | None:
 
 
 def with_service_notice(result: typing.Any) -> typing.Any:
-    """`result` with this request's service notice added as its first field, when it is a JSON object.
+    """`result` with this request's service notice added as its last field, when it is a JSON object.
 
-    The connected assistant reads the result and tells the person, and a block late in a result is
-    passed over (see the `positions` block in `governance.egress`), so the notice leads. A result
-    that is not an object has no place for the field and is returned as it is. The result is
-    copied, never changed in place: a replayed write may hand back an object that the dispatcher
+    The connected assistant reads the whole result and tells the person. The notice goes last so
+    that the `positions` block keeps leading an `activate_context` packet (see `governance.egress`).
+    A result that is not an object has no place for the field and is returned as it is. The result
+    is copied, never changed in place: a replayed write may hand back an object that the dispatcher
     keeps. The size reports that a leaf computed do not count the notice.
     """
     if not isinstance(result, dict):
@@ -1425,7 +1425,7 @@ def with_service_notice(result: typing.Any) -> typing.Any:
     notice = gateway_service_notice()
     if notice is None:
         return result
-    return {"service_notice": notice} | {key: item for key, item in result.items() if key != "service_notice"}
+    return {key: item for key, item in result.items() if key != "service_notice"} | {"service_notice": notice}
 
 
 def peek_request_id() -> str | None:

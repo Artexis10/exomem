@@ -138,11 +138,8 @@ def test_a_cloud_cell_relays_a_valid_notice_in_every_object_result(run_cell):
     objects |= {name: results[name]["structuredContent"]["result"] for name in ("search", "padded")}
     for name, body in objects.items():
         assert body["service_notice"] == relayed(MAINTENANCE), name
-        # A block late in a result is passed over, so the notice leads the result.
-        assert next(iter(body)) == "service_notice", name
     # A host that reads only the text content must see the notice too.
     text = json.loads(results["save"]["content"][0]["text"])
-    assert next(iter(text)) == "service_notice"
     assert text["service_notice"] == relayed(MAINTENANCE)
     assert "service_notice" not in json.dumps(results["none"])
 

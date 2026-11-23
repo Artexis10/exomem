@@ -5,7 +5,7 @@ Exomem Cloud users hear nothing from their assistant about planned maintenance o
 ## What Changes
 
 - In cloud mode only, the cell reads the gateway's `x-exomem-service-notice` header on each request. The value is base64url-encoded UTF-8 JSON with `v`, `kind`, `state`, `starts_at`, `ends_at` and `say`.
-- When the header is valid, every MCP tool result that is a JSON object gains a `service_notice` field with those values, as its first field. This covers recall, search, read and save results, and JSON-object refusals. An error that the service returns as text, such as an unknown tool, a rejected edit or lost authorization, carries no notice.
+- When the header is valid, every MCP tool result that is a JSON object gains a `service_notice` field with those values. This covers recall, search, read and save results, and JSON-object refusals. An error that the service returns as text, such as an unknown tool, a rejected edit or lost authorization, carries no notice.
 - The cell ignores a missing or malformed header, and a personal (non-cloud) service never reads it.
 - The server instructions do not change. They are fixed text that clients read once, so they cannot carry a notice that starts later.
 
