@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import threading
 import time
 from contextlib import closing, contextmanager
 from functools import partial
@@ -434,12 +435,55 @@ def test_an_expired_parked_commit_releases_space_without_another_upload(vault, s
 
     upload_sessions.start_commit(session, busy)
     record = session.store / f"{session.id}.json"
-    # A bound, not a latency: the release takes under 2 s locally, but a shared CI runner can stall the timers.
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 8
     while record.exists():
         assert time.monotonic() < deadline
         time.sleep(0.025)
     assert not session.part.exists()
+    with media_capacity.upload_room(vault) as room:
+        assert room.reserved == 0
+
+
+def test_a_reattempt_that_meets_expiry_between_its_clock_reads_still_releases_the_park(vault, selected_store, monkeypatch):
+    from exomem import media_capacity
+
+    _configure(selected_store, vault, upload_floor_bytes=1_000)
+    unit = media_capacity._allocation_unit(vault)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(free=1_000 + 8 * unit))
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_INITIAL_SECONDS", 0.02)
+    monkeypatch.setattr(upload_sessions, "REATTEMPT_MAX_SECONDS", 0.12)
+    data = b"A reattempt reads the clock twice."
+    target = {"lane": "evidence", "scope": "field", "category": "samples", "filename": "recording.bin"}
+    session, _secret = upload_sessions.create(
+        vault, binding="owner", length=len(data), sha256=hashlib.sha256(data).hexdigest(), target=target, max_bytes=1024,
+    )
+    part = upload_sessions.Patch(session, 0, len(data))
+    part.write(data)
+    monkeypatch.setattr(upload_sessions, "TTL_SECONDS", 1.5)
+    assert part.close() == (len(data), True)
+    expires = float(upload_sessions._read_record(session.store, session.id)["expires"])
+    real_now, straddled = upload_sessions._now, []
+
+    def expiry_lands_between_the_reads():
+        # The timer's read still sees the park live; the commit's own read is the first to see it expired.
+        now = real_now()
+        if threading.current_thread().name.startswith("upload-session-reattempt") and now >= expires and not straddled:
+            straddled.append(True)
+            return expires - 0.001
+        return now
+
+    monkeypatch.setattr(upload_sessions, "_now", expiry_lands_between_the_reads)
+
+    def busy(_part, _record):
+        raise upload_sessions.CommitFailed("MEDIA_SPACE_BUSY", "the original remains held", retryable=True)
+
+    upload_sessions.start_commit(session, busy)
+    record = session.store / f"{session.id}.json"
+    deadline = time.monotonic() + 8
+    while record.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.025)
+    assert straddled and not session.part.exists()
     with media_capacity.upload_room(vault) as room:
         assert room.reserved == 0
 
