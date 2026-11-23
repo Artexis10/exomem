@@ -35,20 +35,16 @@ Older pages lacking the relation/category contract SHALL stay readable and edita
 ## ADDED Requirements
 
 ### Requirement: The Activation Manifest Records The Pre-Existing Corpus
-On first capability activation, the system SHALL create one portable vault-managed activation manifest that records the contract version and the identities and source hashes of pre-existing governed compiled pages, without rewriting them. A page with a stable memory ID SHALL match by that ID; a legacy page SHALL match by path and source hash, through the governed moves its lineage records. Pages first seen after the boundary SHALL be new pages and SHALL receive current-contract posthoc findings.
-
-#### Scenario: Existing-vault activation is portable and nonrewriting
-- **WHEN** the capability first opens a non-empty vault
-- **THEN** it records existing-page baselines in one governed activation manifest, does not edit the pages, and consistently distinguishes later creations after rebuild/transfer
-
-#### Scenario: Empty vault has no grandfathered page
-- **WHEN** activation occurs with no governed compiled pages
-- **THEN** the manifest records an empty baseline and the first later page uses the narrow bootstrap disposition
+On first activation, the system SHALL create one portable vault-managed manifest of the contract version and the identities and source hashes of pre-existing governed compiled pages, without rewriting them. A page with a stable memory ID SHALL match by that ID; a legacy page by path and source hash, or through governed moves in its lineage if it alone left that path. Pages first seen after the boundary, including out-of-band creations, SHALL be new pages with current-contract posthoc findings.
 
 #### Scenario: A legacy page keeps its baseline through governed moves
 - **WHEN** a pre-existing page without a stable memory ID is moved twice by governed moves and then edited without worsening
 - **THEN** the edit and a posthoc audit treat it as grandfathered
 - **AND** after that edit commits, a further edit is judged against the full current contract
+
+#### Scenario: A copy inherits no baseline
+- **WHEN** a page created after activation names a legacy page's path in its lineage, and the legacy page still stands at that path or another page also claims it
+- **THEN** the edit and a posthoc audit judge the copy as a new page
 
 ### Requirement: Only A Real Commit Installs The Activation Manifest
 Validate-only and preliminary blockers SHALL NOT create the activation manifest. When the manifest is missing, a real first commit SHALL atomically install or observe the immutable activation-boundary winner after preliminary validation and SHALL then repeat evaluation before any other mutation. If the installed race winner changes membership and repeated evaluation blocks, that immutable manifest SHALL be the sole side effect.
@@ -58,15 +54,14 @@ Validate-only and preliminary blockers SHALL NOT create the activation manifest.
 - **THEN** no activation manifest exists after it
 
 ### Requirement: A Relocation Refuses Only The Debt It Adds
-A move and its undo SHALL judge each page they reach, the moved page and each page whose links or link standing they change, by the set-based non-worsening rule, whether or not the page is grandfathered. They SHALL refuse only an error key that the move adds, or the invalidation of a satisfied relation disposition.
-
+A move and its undo SHALL judge each page they reach, the moved page and each page whose links or link standing they change, by the set-based non-worsening rule, whether or not the page is grandfathered. They SHALL refuse only an error key that the move adds, or the invalidation of a satisfied relation disposition. A relation error key holds the link as written and, on a page without a stable memory ID, the page's path; a move that changes either gives a new key, which SHALL still block.
 
 #### Scenario: A legacy page is renamed
 - **WHEN** a relocation renames a pre-existing page that has no stable memory ID and no semantic units
 - **THEN** the move commits and reports the missing unit as retained debt
 
 #### Scenario: A dependent's old debt does not block
-- **WHEN** a page that links the moved page already carries error-level debt that is not grandfathered
+- **WHEN** a page that links the moved page already lacks semantic units and is not grandfathered
 - **THEN** the relocation commits, and its undo is judged by the same rule
 
 #### Scenario: A new error key still blocks

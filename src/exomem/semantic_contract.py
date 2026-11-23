@@ -14,6 +14,7 @@ import re
 import stat
 import threading
 import time
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -5165,12 +5166,11 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     """Every key under which a wikilink can reach one page.
 
     Read from the resolver's own maps, so the keys are the ones resolution
-    uses. Casefolded to meet `_dependency_key`, which is a superset of the
-    case-sensitive match.
+    uses, in the spelling `_dependency_fold` gives every link key.
     """
     resolver = vault.WikilinkResolver.from_entries(root, ((path, title),))
     return {
-        key.casefold()
+        _dependency_fold(key)
         for keys in (resolver.full_paths, resolver.kb_stripped, resolver.stems, resolver.titles)
         for key in keys
     }
@@ -5777,9 +5777,18 @@ def _derive_relation_facts(
     return tuple(sorted(facts, key=lambda item: item.identity))
 
 
+def _dependency_fold(key: str) -> str:
+    """The spelling in which a link key meets the keys that can reach a page: NFC, casefolded.
+
+    A superset of each resolver match: a title matches NFC and lower-cased (`vault.title_key`),
+    a path or a stem as written, so a link typed decomposed reaches the title it resolves to.
+    """
+    return unicodedata.normalize("NFC", key).casefold()
+
+
 def _dependency_key(raw_target: str) -> str:
     path, _, _ = _target_parts(raw_target)
-    return vault.wikilink_page_key(path).casefold()
+    return _dependency_fold(vault.wikilink_page_key(path))
 
 
 def require_page_status(page: SemanticPageState | None) -> None:
@@ -5810,7 +5819,7 @@ def _structural_relation_reasons(
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
-    expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
+    expected_successor = _dependency_fold(fact.logical_source_path.removesuffix(".md"))
     mutual_supersession = bool(
         definition is not None
         and registry.has(definition.key, "replaces")

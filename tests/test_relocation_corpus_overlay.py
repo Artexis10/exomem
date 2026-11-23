@@ -56,6 +56,9 @@ def seed(root: Path) -> None:
     # An earlier move took spare.md to spare-kept.md; its lineage claims the path it left.
     write(root, "spare-kept.md", page_lineage.append_entry(page("Spare"), f"{NOTES}/spare.md"))
     write(root, "spare-linker.md", page("Spare Linker", relations("spare")))
+    # A page without a title takes its stem's; the link to it is typed decomposed (NFD).
+    write(root, "untitled.md", "---\ntype: insight\nstatus: active\nproject: atlas\n---\n\nBody.\n")
+    write(root, "nfd-linker.md", page("NFD Linker", relations("Cafe\u0301")))
 
 
 def move(root: Path, corpus, old: str, new: str):
@@ -103,6 +106,10 @@ MOVES = {
     "a new stem that captures a bare-title link": ("drifter.md", "lantern.md", "bare-linker.md"),
     "a move of one of two pages sharing an id": ("copy-a.md", "wharf/copy-a.md", "copy-b.md"),
     "a path an earlier move vacated, filled again": ("drifter.md", "spare.md", "spare-linker.md"),
+    "a new title that a decomposed link names": ("untitled.md", "Caf\u00e9.md", "nfd-linker.md"),
+    "a decomposed new stem that a decomposed link names": (
+        "drifter.md", "Cafe\u0301.md", "nfd-linker.md"
+    ),
 }
 
 

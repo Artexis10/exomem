@@ -17,7 +17,9 @@ import pytest
 from exomem import (
     activation_manifest,
     commands,
+    memory_refs,
     move_file,
+    page_lineage,
     semantic_contract,
     semantic_writes,
     writer_lease,
@@ -154,3 +156,43 @@ def test_an_older_page_keeps_its_baseline_through_its_moves_until_its_bytes_chan
         after_source=edited.replace("Field notes", "Dive notes"),
     )
     assert again.grandfathered is False and again.contract_result.should_block is True
+
+
+def _assert_refused_as_new(vault: Path, rel: str) -> None:
+    text = (vault / rel).read_text(encoding="utf-8")
+    edit = semantic_writes.preflight_existing(
+        vault, path=rel, operation="edit", after_source=text.replace("Notes from", "Field notes from"),
+    )
+    audit = semantic_writes.evaluate_posthoc_batch(vault, paths=[rel], operation="audit")
+    assert edit.grandfathered is False and edit.contract_result.should_block is True
+    assert [item.grandfathered for item in audit.evaluations] == [False]
+
+
+def test_a_copy_that_names_its_standing_original_in_its_lineage_inherits_no_baseline(
+    tmp_path: Path,
+) -> None:
+    """A page created after activation is new, even when its lineage names an older page's path.
+    It catches a copy, written beside the original that still stands there, that takes the
+    original's baseline and so skips the current contract."""
+    original = _older_page(tmp_path, f"{INSIGHTS}/note-01.md", "Kelp survey")
+    activation_manifest.ensure_manifest(tmp_path)
+    text = (tmp_path / original).read_text(encoding="utf-8")
+    copy = _write(tmp_path, f"{INSIGHTS}/kelp-survey.md", page_lineage.append_entry(text, original))
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()  # the copy alone claims the old path
+
+    _assert_refused_as_new(tmp_path, copy)
+
+
+def test_a_duplicate_of_a_moved_page_inherits_no_baseline(tmp_path: Path) -> None:
+    """A sync conflict or a hand copy duplicates a moved page, lineage and all, after activation.
+    It catches the duplicate taking the baseline that only the page which left the old path holds."""
+    first, moved, duplicate = (
+        f"{INSIGHTS}/{name}.md" for name in ("note-01", "kelp-survey", "kelp-survey (conflict)")
+    )
+    _older_page(tmp_path, first, "Kelp survey")
+    activation_manifest.ensure_manifest(tmp_path)
+    move_file.move_file(tmp_path, old_path=first, new_path=moved, update_wikilinks=False)
+    _write(tmp_path, duplicate, (tmp_path / moved).read_text(encoding="utf-8"))
+    memory_refs.ReferenceIndex(tmp_path).rebuild_all()  # the old path is vacant
+
+    _assert_refused_as_new(tmp_path, duplicate)

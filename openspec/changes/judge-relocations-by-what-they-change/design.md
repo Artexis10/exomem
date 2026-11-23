@@ -14,11 +14,15 @@ A governed move runs one preflight for each step. The preflight builds the corpu
 
 The activation manifest matches a page without an exomem_id by its path and its source hash. A governed move changes the path and appends a `moved_from` entry, so the hash changes too. `page_lineage.remove_latest` gives back the exact bytes that the move found. The grandfathering check removes the page's lineage entries one at a time, newest first, and asks the manifest about each earlier path with the hash of the bytes at that point. It reads the page only when the page has no exomem_id, records lineage, and fails the direct check.
 
+A match at an earlier path counts only when no page stands at that path and the path's prior claims name this page alone. This is the rule by which a link to the path resolves. A copy that names its standing original in its lineage, or a duplicate of a moved page, then gets no baseline. Every caller judges the vault as it is, so the check reads the index's current claims.
+
 The edit preflight, its re-evaluation at commit and the posthoc audit use this check. The relocation does not need it, because its flag already keeps old debt. Recovery keeps the direct check.
 
 ### A move patches the corpus
 
 `SemanticCorpusContext.with_pages` already patches a corpus by a delta. It derives again only the pages that the delta reaches: by resolver dependency keys, by changed prior claims, by facts that resolve into the delta, and by the holders of a shared exomem_id. Above 64 changed pages, or when more than half the vault is reached, it falls back to a full derivation. The move path now uses it instead of `from_states`. `_move_evaluation_pairs` still compares every page, so the set of judged pages is unchanged.
+
+A link key and the keys that reach a page meet in one spelling, NFC and casefolded (`_dependency_fold`). The resolver matches a title in NFC, so a link typed in decomposed Unicode reaches the page that a full derivation resolves it to.
 
 ## Measurements
 
@@ -36,4 +40,6 @@ With the patch, `_move_evaluation_pairs` takes most of what remains: 87% of thre
 
 ## Risks
 
+- Old debt: a relation error key (`inactive_relation`, `scope_violation`) holds the fact identity, which holds the link as written and, on a page without an exomem_id, the page's path. A move that changes either gives the same debt a new key, so the relocation still refuses it. Keying those findings by something that a move keeps is a separate change.
+- While a duplicate of a moved page exists, two pages claim the old path, and the original loses its baseline too, as a link to that path resolves to neither. Removing the duplicate restores it.
 - A rename can take a page out of a name that exempts it from the semantic minimum, such as a breadth suffix. The page then gains a `missing_semantic_unit` error, and the relocation refuses it. These were the only refusals left on the vault copy. A relocation that should keep such pages needs the name rule, not this judgement, to change.

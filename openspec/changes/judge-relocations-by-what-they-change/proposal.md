@@ -9,9 +9,9 @@ Two more defects sit on the move path:
 
 ## What Changes
 
-- A relocation judges each page it reaches, the moved page and every dependent, by the set-based non-worsening rule. It refuses only an error key that the relocation adds, or a satisfied relation disposition that it breaks. This holds for a page outside the activation baseline too. The undo of a relocation uses the same rule.
-- An older page without an exomem_id keeps its baseline through the governed moves that its lineage records. When the page's own path and bytes do not match, its lineage entries are removed one at a time. If the bytes then match the entry for an earlier path, the page is still grandfathered. Any other change to the page's bytes still ends the baseline. The edit path, its re-evaluation at commit and the posthoc audit read it this way.
-- A move step patches the before corpus by the pages that the move changes (`SemanticCorpusContext.with_pages`). It no longer derives the whole vault again. The patched corpus equals a full derivation.
+- A relocation judges each page it reaches, the moved page and every dependent, by the set-based non-worsening rule. It refuses only an error key that the relocation adds, or a satisfied relation disposition that it breaks. This holds for a page outside the activation baseline too. A relation error key holds the link as written and, on a page without an exomem_id, the page's path, so a move that changes either still refuses that debt. The undo of a relocation uses the same rule.
+- An older page without an exomem_id keeps its baseline through the governed moves that its lineage records. When the page's own path and bytes do not match, its lineage entries are removed one at a time. If the bytes then match the entry for an earlier path, the page is still grandfathered, but only while no page stands at that path and no other page claims it. A copy of an older page, or a duplicate of a moved one, gets no baseline. Any other change to the page's bytes still ends the baseline. The edit path, its re-evaluation at commit and the posthoc audit read it this way.
+- A move step patches the before corpus by the pages that the move changes (`SemanticCorpusContext.with_pages`). It no longer derives the whole vault again. The patched corpus equals a full derivation, also for a link typed in decomposed Unicode.
 
 ## Capabilities
 
@@ -22,5 +22,5 @@ Two more defects sit on the move path:
 ## Impact
 
 - Code: `src/exomem/semantic_writes.py` and `src/exomem/semantic_contract.py`.
-- Behaviour: a relocation that was refused only for pre-existing debt now commits. Such a refusal reported that debt as blocking, and the commit now reports it as a warning.
+- Behaviour: a relocation that was refused only for pre-existing debt now commits, unless that debt is a relation error key that the move changes. Such a refusal reported that debt as blocking, and the commit now reports it as a warning.
 - Data: none. The activation manifest and page lineage keep their format.
