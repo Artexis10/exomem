@@ -2,8 +2,8 @@
 
 ## 1. Relay
 
-- [ ] 1.1 Parse and validate the notice header in cloud mode; verify valid, oversized, malformed, wrong-version and non-cloud cases.
-- [ ] 1.2 Add `service_notice` to object results in the `bind_vault` wrapper after the egress filter and on the refusal path; verify recall, save and refusal results through the cloud MCP surface.
+- [x] 1.1 Parse and validate the notice header in cloud mode; verify valid, oversized, malformed, wrong-version and non-cloud cases.
+- [x] 1.2 Add `service_notice` to object results in the `bind_vault` wrapper after the egress filter and on the refusal path; verify recall, save and refusal results through the cloud MCP surface.
 
 ## 2. Delivery
 
