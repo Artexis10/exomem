@@ -25,9 +25,10 @@ infringes a patent, the patent licences you granted end on the date you start it
 
 ## 3. Open-source promise
 
-The Maintainer will keep every released version that includes your Contribution
-available to the public under an OSI-approved open-source licence. A licence change
-under section 1 never removes that availability.
+Every released version that includes your Contribution becomes available to the
+public under an OSI-approved open-source licence no later than the second anniversary
+of its release. A licence change under section 1 never delays or removes that
+availability.
 
 ## 4. What you confirm
 
