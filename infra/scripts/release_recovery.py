@@ -889,7 +889,7 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
                 )
             complete = all(existing == digest for existing in aliases.values())
             if (
-                entry.get("floating_tags")
+                entry.get("floating_tag")
                 and run(
                     "gh",
                     "api",
@@ -899,10 +899,7 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
                 )
                 == tag
             ):
-                complete = complete and all(
-                    image_digest(reference) == digest
-                    for reference in entry["floating_tags"]
-                )
+                complete = complete and image_digest(entry["floating_tag"]) == digest
             assets = {a["name"] for a in release_assets(tag)}
             entry["state"] = (
                 "present" if complete and all(p.name in assets for p in files) else "missing"
@@ -954,7 +951,7 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
             if image_digest(reference) != digest:
                 raise ValueError(f"discovery tag digest differs: {reference}")
         if (
-            entry.get("floating_tags")
+            entry.get("floating_tag")
             and run(
                 "gh",
                 "api",
@@ -964,19 +961,19 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
             )
             == tag
         ):
-            for reference in entry["floating_tags"]:
-                run(
-                    "docker",
-                    "buildx",
-                    "imagetools",
-                    "create",
-                    "--prefer-index=false",
-                    "--tag",
-                    reference,
-                    f"{repository}@{digest}",
-                )
-                if image_digest(reference) != digest:
-                    raise ValueError(f"floating tag digest differs: {reference}")
+            reference = entry["floating_tag"]
+            run(
+                "docker",
+                "buildx",
+                "imagetools",
+                "create",
+                "--prefer-index=false",
+                "--tag",
+                reference,
+                f"{repository}@{digest}",
+            )
+            if image_digest(reference) != digest:
+                raise ValueError(f"floating tag digest differs: {reference}")
     if incomplete:
         raise ValueError(
             f"release incomplete; original producer evidence unavailable: {', '.join(incomplete)}"

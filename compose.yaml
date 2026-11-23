@@ -17,7 +17,7 @@
 
 services:
   exomem:
-    image: ghcr.io/artexis10/evermatter:latest
+    image: ghcr.io/substrate-systems/evermatter:latest
     # Uncomment to build locally instead of pulling the published image:
     # build: {context: ., target: lean}
     env_file: .env
