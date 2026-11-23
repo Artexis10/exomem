@@ -17,9 +17,9 @@ def templates(activate: str, read: str, search: str) -> dict[str, str]:
     return {
         activation_result.INDEX_WARMING: f"Recall is still warming; this is not an empty search. Use {search} for relevant stored material.",
         "ambiguous": f"These candidates need a choice. Call {activate} again with the original turn and `anchor` set to the ref you mean.",
-        "method_reset": "Discard held methods before reuse. Read a current method source for its scope and exclusions before applying it within existing authority.",
-        "method_selected": f"A saved method fits this turn: follow the contract in task_context.methods where it fits, within existing authority. Use {read} on its read_ref first when the contract is cut.",
-        "task_read": f"Use {read} to open a task_context read_ref before relying on it. Read method scope and exclusions before applying it within existing authority.",
+        "method_reset": "Discard the skills, collections and approaches you hold before reuse. Read the current page for its scope and exclusions before applying it within existing authority.",
+        "method_selected": f"A saved skill or collection fits this turn: follow the contract in task_context.methods where it fits, within existing authority. Use {read} on its read_ref first when the contract is cut.",
+        "task_read": f"Use {read} to open a task_context read_ref before relying on it. Read its scope and exclusions before applying it within existing authority.",
         "review_due": "Apply the served stance with its review caveat; its check date has passed, so verify it before relying on it.",
         "slice_empty": f"Map and slice cover compiled material only. Use {search} for captured Sources; an empty slice is not proof of absence.",
         "related": f"Related pages (not loaded). Use {read} to read a relevant ref before relying on it.",

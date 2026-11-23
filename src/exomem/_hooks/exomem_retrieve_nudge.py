@@ -228,11 +228,12 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
               'and `anchor` set to the ref you mean.',
  'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
                   'relevant stored material.',
- 'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
-                 'and exclusions before applying it within existing authority.',
- 'method_selected': 'A saved method fits this turn: follow the contract in task_context.methods '
-                    'where it fits, within existing authority. Use `read_page` on its read_ref '
-                    'first when the contract is cut.',
+ 'method_reset': 'Discard the skills, collections and approaches you hold before reuse. Read the '
+                 'current page for its scope and exclusions before applying it within existing '
+                 'authority.',
+ 'method_selected': 'A saved skill or collection fits this turn: follow the contract in '
+                    'task_context.methods where it fits, within existing authority. Use '
+                    '`read_page` on its read_ref first when the contract is cut.',
  'related': 'Related pages (not loaded). Use `read_page` to read a relevant ref before relying on '
             'it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
@@ -241,7 +242,7 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
                 "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
  'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
                 'Sources; an empty slice is not proof of absence.',
- 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read method '
+ 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read its '
               'scope and exclusions before applying it within existing authority.'}
 # END GENERATED NEXT ACTION COMPATIBILITY
 _WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
@@ -2379,7 +2380,7 @@ def _format_slice_block(block: object, max_chars: int) -> str:
 
 
 # Fixed protocol advice, separate from retrieved source text.
-_METHOD_RESET_LINE = "- methods: discard held methods before reuse."
+_METHOD_RESET_LINE = "- reset: discard the skills, collections and approaches you hold before reuse."
 
 
 def _slice_refs(block: object) -> frozenset[str]:
@@ -2486,7 +2487,7 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         if item.get("approval") == "approved":
             entries.append((_packet_line("approved procedure", f"{title}. Read it, then follow it where it fits.", read_ref), ""))
             continue
-        entries.append((_packet_line("method", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
+        entries.append((_packet_line("approach", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
     entries = [entry for entry in entries if any(entry)]
     if entries:
         entries.insert(0, (header, ""))

@@ -7229,7 +7229,7 @@ def op_activate_context(
     Reuse held context; conversation gives excerpts. Agent focus is not human intent.
     Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
     Read map/task_context refs and method scope/exclusions with a page read.
-    Discard held methods on methods.reset. Follow next_action.
+    Discard held skills, collections and approaches on methods.reset. Follow next_action.
     epistemic_status: counts/completeness; a page read: provenance.
 
     Args:
