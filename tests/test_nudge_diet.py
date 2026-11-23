@@ -44,10 +44,11 @@ CEILINGS = {
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
     "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
-    # 1150 -> 1210 (1198 in use at balanced); sent on every substantive MCP-mode turn, so growth costs every
-    # turn. The added scope (the user's work or life; general questions need no recall) stopped agents recalling
-    # on general-knowledge turns, where each needless recall cost a tool call and its packet.
-    "mcp activation": (retrieve._MCP_ACTIVATION, 1210),
+    # 1210 -> 1400 (1385 in use at balanced): the activation head gains the
+    # disconnect sentence, so a session whose Exomem tools vanished is told to say
+    # so rather than stay silent (2026-11-23 Cloud disconnect went unnoticed for
+    # hours). Sent on every substantive MCP-mode turn, so growth costs every turn.
+    "mcp activation": (retrieve._MCP_ACTIVATION, 1400),
 }
 
 
@@ -71,16 +72,18 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
     """The client prints the whole reason in its block box, so the sum is the budget."""
     key = capture.episode_key("claude", "s-size")
     fires = {
-        # 370 -> 405 with the short capture check's 285 -> 320 above.
-        "capture": (_mcp_fire(capture.REMINDER_SHORT), 405),
-        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 385),
+        # 405 -> 455: the preamble grows from "skip silently" to "tell the user".
+        "capture": (_mcp_fire(capture.REMINDER_SHORT), 455),
+        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 450),
     }
     for name, (reason, ceiling) in fires.items():
         assert len(reason.encode("utf-8")) <= ceiling, (name, len(reason.encode("utf-8")))
     preamble = _mcp_fire("").strip()
-    assert len(preamble.encode("utf-8")) <= 90
-    for word in ("Skip", "not connected", "cannot capture", "read_instructions first"):
+    assert len(preamble.encode("utf-8")) <= 175
+    for word in ("tell the user", "not connected", "cannot capture", "read_instructions first"):
         assert word in preamble
+    # A disconnect is never skipped silently: the user hears nothing is saved.
+    assert "Skip" not in preamble
 
 
 def test_the_short_capture_check_uses_rules_available_without_a_vault_copy():
