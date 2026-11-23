@@ -15,7 +15,7 @@
 - [x] 2.6 Replace pillow-heif with pi-heif.
 - [x] 2.7 Build a decode-only LGPL FFmpeg with dav1d, and PyAV against it, in the image builder; keep the PyAV version bound; prove decoder parity with the old wheel and the audio, video-frame, preview and metadata paths in the built image; record the FFmpeg source and configure flags in the notices.
 - [x] 2.8 Add a per-release check of the published images' Python distribution licences with an off-the-shelf tool against SPDX identifiers.
-- [ ] 2.9 List the shared libraries in every published image (lean, ml, cuda, cloud, cellctl) with their licences, with the operating-system layer in its own section; record the result.
+- [x] 2.9 List the shared libraries in every published image (lean, ml, cuda, cloud, cellctl) with their licences, with the operating-system layer in its own section; record the result.
 
 ## 3. Licence cut (at the rename, or at the first commercial release if earlier)
 
