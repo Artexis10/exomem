@@ -140,6 +140,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: core-py${{ matrix.python-version }}-serial-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/junit-core-${{ matrix.python-version }}-serial.xml
           if-no-files-found: warn
       # Clean snapshots contain only measured cases, so cached values cannot overwrite another job's evidence.
@@ -289,6 +291,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}*.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
@@ -342,6 +346,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: recall-structural-reference
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/recall-structural-reference.xml
           if-no-files-found: warn
 
@@ -429,6 +435,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
@@ -652,6 +660,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: product-e2e-server-logs
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/e2e-logs
           if-no-files-found: ignore
 
