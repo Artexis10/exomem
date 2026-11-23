@@ -625,7 +625,7 @@ def test_a_write_to_another_page_makes_the_next_search_read_no_dataset_card(vaul
     from exomem import vault as vault_module
 
     first = _preserve(vault, "supplier-profile.json", PROFILE)
-    second = _preserve(vault, "carrier-profile.json", PROFILE.replace(b"Brightwater", b"Northgate"))
+    _preserve(vault, "carrier-profile.json", PROFILE.replace(b"Brightwater", b"Northgate"))  # a card no write touches
     for scope, paths in (
         ("vault", vault_module.walk_vault_md(vault)),
         ("kb", find._walk_md(vault / "Knowledge Base")),
