@@ -1,3 +1,4 @@
+<!-- authority:non-specification -->
 # Licence change at the Evermatter release
 
 From release v0.202.0 onward, Evermatter's server, CLI and images are licensed under the [Functional Source License, Version 1.1, ALv2 Future License](../../LICENSE) (`FSL-1.1-ALv2`). Earlier releases keep the GNU Affero General Public License, version 3 or later.
