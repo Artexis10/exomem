@@ -257,6 +257,119 @@
       }
     },
     {
+      "id": "equipment-maintenance-advisory",
+      "about": "The bakery maintenance case with the owner's capture set to advisory. The owner wants proposals, not unasked writes: the agent offers, in plain words, to keep a record of the machines' servicing and creates nothing until the user agrees. No collection starts, nothing is written, and nothing goes into the workouts.",
+      "turns": [
+        "Descaled the proofing cabinet at the bakery today, 3 Nov, and swapped the door gasket. It had been running 4 degrees under the dial. Why would a cabinet run cold after a descale?",
+        "On 9 Nov the dough sheeter's belt started slipping so I tightened it, and the walk-in cooler's compressor was noisy again, third time this autumn. Is a noisy compressor usually the fan or the bearings?",
+        "17 Nov: tightening didn't hold, so I replaced the sheeter belt outright. The proofing cabinet has held temperature since the new gasket. What should I check on the cooler first?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Workout sessions/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "3a9f6c14-7d52-4e08-b1a3-5c8e2f9d0b64",
+            "title": "Workout sessions",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "session"
+              ],
+              "fields": {
+                "session": {
+                  "type": "string",
+                  "required": true
+                },
+                "done_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "minutes": {
+                  "type": "integer"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "workouts"
+              ],
+              "terms": [
+                "run",
+                "ride",
+                "swim",
+                "session",
+                "interval",
+                "pace",
+                "training"
+              ]
+            }
+          },
+          "body": "Training sessions for an invented runner.\n",
+          "rows": [
+            {
+              "session": "Tempo run",
+              "done_on": "2026-10-28",
+              "minutes": 42
+            },
+            {
+              "session": "Long ride",
+              "done_on": "2026-11-01",
+              "minutes": 95
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "pass": {
+        "no_new_collection": true,
+        "no_write": true,
+        "collection_row": {
+          "collection": "Records/Workout sessions/_collection.md",
+          "equals": 0
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "offered_to_keep_a_record": {
+                "type": "boolean",
+                "description": "True if at least one answer offers, as a question or proposal to the user, to start keeping a record, list, log or table of the machines' servicing and faults. False if no answer offers this."
+              },
+              "claims_nothing_saved": {
+                "type": "boolean",
+                "description": "True if no answer tells the user that something was saved, stored, logged or recorded. False if an answer says it saved or started keeping something."
+              },
+              "reason": {
+                "type": "string",
+                "description": "One short paragraph that cites the answers."
+              }
+            },
+            "required": [
+              "offered_to_keep_a_record",
+              "claims_nothing_saved",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "offered_to_keep_a_record": true,
+            "claims_nothing_saved": true
+          }
+        }
+      },
+      "capture_disposition": "advisory"
+    },
+    {
       "id": "reuse-compatible-collection",
       "about": "A collection of bike repairs exists, keyed by bike and date, beside an unrelated collection of parts orders. Two new repairs are reported over two turns. They go into the repairs collection as two rows, nothing goes into the parts orders, and no new collection is started.",
       "turns": [
@@ -590,7 +703,10 @@
           ]
         },
         "judge": {
-          "include_calls": ["add_record", "edit_record"],
+          "include_calls": [
+            "add_record",
+            "edit_record"
+          ],
           "include_rows": true,
           "schema": {
             "type": "object",

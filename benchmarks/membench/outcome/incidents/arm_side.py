@@ -301,6 +301,17 @@ def prominence(level: str) -> dict:
     return {"level": level, "capture_level": arm_prominence.effective_capture_level()}
 
 
+def capture_disposition(disposition: str) -> dict:
+    """Set the owner's `proactive_capture` through the arm's own envelope setter, and read back what is in force.
+
+    The server of the unit reads the same pinned config file, so an `advisory` case measures the advisory route.
+    """
+    from exomem import envelope
+
+    envelope.set_disposition("proactive_capture", disposition)
+    return {"set": disposition, "in_force": envelope.active()["proactive_capture"]}
+
+
 def has_store() -> bool:
     """Whether the unit has a lease coordinator, which is what a store vault is served under."""
     return bool(os.environ.get("EXOMEM_WRITER_LEASE_URL"))
@@ -634,6 +645,8 @@ if __name__ == "__main__":
         result = build_indexes(Path(args[0]))
     elif command == "prominence":
         result = prominence(args[0])
+    elif command == "capture_disposition":
+        result = capture_disposition(args[0])
     elif command == "records":
         result = records(Path(args[0]), args[1:])
     elif command == "collections":

@@ -125,6 +125,7 @@ from epistemic.journeys.f27_replay import (
 )
 from epistemic.journeys.f33_referent_replay import tool_calls
 
+from exomem import envelope as product_envelope
 from exomem import prominence as product_prominence
 from membench.trackc.witness_join import parse_stream_json_transcript
 
@@ -347,6 +348,9 @@ def validate_collections(case: dict) -> None:
     # An unknown level would reach the arm's own preference writer and fail every unit the same way.
     if "prominence" in case and case["prominence"] not in product_prominence.CANON:
         raise SystemExit(f"case {case['id']}: prominence must be one of {product_prominence.CANON}")
+    # The envelope's own range: a value outside it would fail every unit in the arm's setter.
+    if "capture_disposition" in case and case["capture_disposition"] not in product_envelope.RANGES["proactive_capture"]:
+        raise SystemExit(f"case {case['id']}: capture_disposition must be one of {product_envelope.RANGES['proactive_capture']}")
     for collection in seeded:
         page = collection.get("method_page")
         if not {"manifest_path", "manifest"} <= set(collection) or (
@@ -1026,6 +1030,9 @@ def seed_unit(
     if "prominence" in case:
         # The arm's own preference path: its server and its hooks read the same pinned config file.
         record["capture_prominence"] = arm_side("prominence", case["prominence"])
+    if "capture_disposition" in case:
+        # After the prominence, so the owner's explicit capture setting is the one in force.
+        record["capture_disposition"] = arm_side("capture_disposition", case["capture_disposition"])
     seeded = arm_side("seed", str(vault), str(work), stdin=json.dumps(case.get("seed")))
     if case.get("seed_sources"):
         arm_side("seed_sources", str(vault), str(work), stdin=json.dumps(case["seed_sources"]))
