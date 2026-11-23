@@ -906,11 +906,13 @@ def agent_refusal_result(
     """The MCP error result for a refusal: what happened, and the exact retry.
 
     `default_detail` is the command's own `response_detail` default, which an omitted argument means.
+    Every refusal that reaches the MCP surface passes here, so this is where it gains the
+    request's service notice.
     """
     from . import agent_refusal, cli_ops
 
     detail = arguments.get("response_detail") or default_detail
-    return agent_refusal.reply(
+    return with_service_notice(agent_refusal.reply(
         refusal,
         error if error is not None else ValueError(refusal.get("message")),
         command=command_name,
@@ -919,7 +921,7 @@ def agent_refusal_result(
         write=write,
         full=detail == "full",
         envelope=cli_ops.envelope(False, error=dict(refusal)),
-    )
+    ))
 
 
 def bind_vault(
@@ -1093,6 +1095,8 @@ def bind_vault(
                     result = page_names.name_released_reply(
                         injected[0], result, keep_paths=kwargs.get("detail") == "full"
                     )
+                # Last, after the egress filter: the notice is the gateway's own text, never vault content.
+                result = with_service_notice(result)
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
@@ -1362,6 +1366,45 @@ def gateway_client_context() -> str | None:
     except (LookupError, RuntimeError):
         return None
     return value if value in prominence.CONTEXTS else None
+
+
+def gateway_service_notice() -> dict[str, typing.Any] | None:
+    """The service notice the Cloud gateway forwarded with this request, or None.
+
+    Cloud mode only, for the reason `cloud_cell.GATEWAY_SERVICE_NOTICE_HEADER` gives. A header
+    that is not a valid notice is ignored and never fails the call; one debug line says so
+    without quoting it.
+    """
+    from . import cloud_cell
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    dependencies = _request_dependencies()
+    if dependencies is None:
+        return None
+    try:
+        value = dependencies.get_http_headers().get(cloud_cell.GATEWAY_SERVICE_NOTICE_HEADER)
+    except (LookupError, RuntimeError):
+        return None
+    if value is None:
+        return None
+    notice = cloud_cell.parse_service_notice(value)
+    if notice is None:
+        _log.debug("service notice header ignored: not a valid notice")
+    return notice
+
+
+def with_service_notice(result: typing.Any) -> typing.Any:
+    """`result` with this request's service notice added as `service_notice`, when it is a JSON object.
+
+    The connected assistant reads the result and tells the person; a result that is not an object
+    has no place for the field and is returned as it is. The result is copied, never changed in
+    place: a replayed write may hand back an object that the dispatcher keeps.
+    """
+    if not isinstance(result, dict):
+        return result
+    notice = gateway_service_notice()
+    return result if notice is None else {**result, "service_notice": notice}
 
 
 def peek_request_id() -> str | None:
