@@ -114,20 +114,40 @@ def test_the_replica_worker_adds_and_reports_one_verified_policy_copy(vault, sel
     assert report["transfer_allowance"]["confirmed_bytes"] == stored.stat().st_size
 
 
-def test_a_policy_budget_refusal_does_not_hold_the_owner_copy_queue(vault, selected_store, tmp_path, monkeypatch):
+_OWNER_COPY = b"An owner copy remains independent."
+
+
+# The plaintext size passes the cheap check, but its larger ciphertext is refused at the send.
+@pytest.mark.parametrize(("allowance", "attempts"), [(0, 0), (len(_OWNER_COPY), 1)], ids=["no-room", "ciphertext-over"])
+def test_a_policy_budget_refusal_does_not_hold_the_owner_copy_queue(
+    vault, selected_store, tmp_path, monkeypatch, allowance, attempts,
+):
     destination = tmp_path / "owner-mirror"
     _declare(vault, selected_store, destination)
-    _policy(vault, selected_store, 0)
-    _stored(vault, "a locally recorded item", b"An owner copy remains independent.")
+    _policy(vault, selected_store, allowance)
+    _stored(vault, "a locally recorded item", _OWNER_COPY)
     media_replicas.confirm_key_export(vault)
     monkeypatch.setattr(media_protection_work, "_SWEEP_INTERVAL", 0)
+    monkeypatch.setattr(media_protection_work, "_RETRY_SECONDS", 0)
+    replicate, policy_sends = media_store.replicate, []
+
+    def counted(*args, **kwargs):
+        if kwargs.get("policy") is not None:
+            policy_sends.append(args)
+        return replicate(*args, **kwargs)
+
+    monkeypatch.setattr(media_store, "replicate", counted)
 
     for _ in range(6):
         media_replicas.work(vault)
     assert not _versions(destination)
+    assert len(policy_sends) == attempts
     report = media_replicas.status(vault)["protection"]
     assert report["last_sweep"]["unmet"] == 1 and report["transfer_allowance"]["confirmed_bytes"] == 0
     assert report["copy_waiting"] == {MIRROR: "MEDIA_POLICY_BUDGET_EXCEEDED"}
+    with closing(media_jobs.MediaJobStore(vault)._connect(readonly=True)) as conn:
+        [due] = conn.execute("SELECT due FROM media_policy_demand").fetchone()
+    assert due >= media_protection_work._next_month(time.time())
     media_replicas.request(vault, MIRROR)
     for _ in range(6):
         media_replicas.work(vault)
@@ -210,3 +230,17 @@ def test_managed_eviction_requires_recovery_for_each_filing_of_a_shared_original
         restored = io.BytesIO()
         media_store.write_stored_original(vault, copy, restored, store=MIRROR, prove=True)
         assert restored.getvalue() == data
+
+
+def test_a_persistent_census_failure_costs_one_walk_across_planner_passes(vault, selected_store, tmp_path, monkeypatch):
+    _declare(vault, selected_store, tmp_path / "policy-mirror")
+    _policy(vault, selected_store, 100_000)
+    _stored(vault, "a locally recorded item", b"A census that keeps failing.")
+    monkeypatch.setattr(media_protection_work, "_SWEEP_INTERVAL", 0)
+    monkeypatch.setattr(media_protection_work, "_RETRY_SECONDS", 0)  # No timer paces the census.
+    walks = []
+    monkeypatch.setattr(media_bindings, "rebuild", lambda root: walks.append(root) or False)
+
+    for _ in range(3):
+        assert not media_protection_work.plan(vault, originals.configuration(vault), deadline=None)
+    assert len(walks) == 1

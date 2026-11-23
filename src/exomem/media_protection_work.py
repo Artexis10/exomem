@@ -8,6 +8,7 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import (
@@ -108,7 +109,6 @@ def _examine(
         observation.unmet += 1
 
 
-_projection_retry: dict[Path, float] = {}
 
 
 def plan(vault: Path, config: dict[str, object], *, deadline: float | None) -> bool:
@@ -151,11 +151,8 @@ def plan(vault: Path, config: dict[str, object], *, deadline: float | None) -> b
                 conn, config, (reference for filing in filings for reference in filing.references),
             )
     if keys is None:
-        if time.monotonic() >= _projection_retry.get(vault, 0):
-            _projection_retry[vault] = time.monotonic() + _RETRY_SECONDS
-            # The existing background rebuild owns cold binding discovery. The
-            # warm placement slice never performs a corpus walk.
-            media_bindings.rebuild(vault)
+        # The shared census holds its lock and runs once per failure, not once per planner pass.
+        media_bindings.recover(vault)
         return False
     local = (original_fixity.verified_local_files(
         vault, ((filing.binary_rel, filing.sha256, filing.companion_rel) for filing in filings), deadline=limit,
@@ -278,17 +275,26 @@ def copy_one(vault: Path, store: str) -> int:
             (_policy_id(config), store, time.time(), _PAGE, media_replicas.PENDING),
         ).fetchone()
         needed = _still_needed(vault, conn, config, policy, row) if row is not None else False
+        # A ciphertext is never smaller than its plaintext. When even that cannot fit,
+        # skip the hash, encryption or source download that the send would refuse.
+        fits = needed and _plaintext_fits(conn, policy, row["binary_rel"])
     if row is None:
         return 0
     path = row["binary_rel"]
     reason = "binding_proof_pending" if needed is None else None
-    if needed:
+    due = time.time() + _RETRY_SECONDS
+    if needed and not fits:
+        reason = media_protection_budget.BUDGET_EXCEEDED
+    elif needed:
         try:
             media_store.replicate(vault, vault / path, store, policy=policy,
                                   expected_companion_hash=row["companion_hash"])
         except media_store.MediaStoreError as error:
             if error.code != "MEDIA_ORIGINAL_CHANGED":
                 reason = error.code
+    if reason == media_protection_budget.BUDGET_EXCEEDED:
+        # The allowance gains room only in a new UTC month; a changed policy plans fresh demand.
+        due = _next_month(time.time())
     parameters = (store, path, row["policy"], row["companion_hash"])
     with closing(ledger._connect()) as conn, conn:
         if reason is None:
@@ -297,8 +303,20 @@ def copy_one(vault: Path, store: str) -> int:
         else:
             conn.execute("UPDATE media_policy_demand SET reason=?, due=? "
                          "WHERE store=? AND binary_rel=? AND policy=? AND companion_hash=?",
-                         (reason, time.time() + _RETRY_SECONDS, *parameters))
+                         (reason, due, *parameters))
     return int(reason is None)
+
+
+def _plaintext_fits(conn: sqlite3.Connection, policy: media_protection.ProtectionPolicy, path: str) -> bool:
+    row = conn.execute("SELECT size FROM media_bindings WHERE binary_rel=?", (path,)).fetchone()
+    month = media_replicas._month(time.time())
+    return row is None or row[0] <= media_protection_budget.room(conn, policy, month)
+
+
+def _next_month(moment: float) -> float:
+    stamp = datetime.fromtimestamp(moment, timezone.utc)
+    year, month = divmod(stamp.year * 12 + stamp.month, 12)
+    return datetime(year, month + 1, 1, tzinfo=timezone.utc).timestamp()
 
 
 def status(conn: sqlite3.Connection, config: dict[str, object]) -> dict[str, object]:

@@ -109,7 +109,10 @@ def permits_unlink(vault: Path, conn: Connection, object_key: str, *, config: di
     """Check each current filing's verified remote coverage before a local unlink."""
     from . import media_bindings, media_replicas
 
-    current = originals.configuration(vault)
+    try:
+        current = originals.configuration(vault)
+    except (OSError, ValueError):
+        return False  # An unreadable configuration keeps the local original.
     if current != config:
         return False  # Owner policy or its store declarations changed during preflight.
     try:

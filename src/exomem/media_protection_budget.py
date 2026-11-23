@@ -16,10 +16,18 @@ from . import media_replicas, media_store, originals
 from .media_jobs import MediaJobStore, holder_alive
 from .media_protection import ProtectionPolicy
 
+BUDGET_EXCEEDED = "MEDIA_POLICY_BUDGET_EXCEEDED"
+
 
 class PolicyBudgetExceeded(media_store.MediaStoreError):
     def __init__(self):
-        super().__init__("MEDIA_POLICY_BUDGET_EXCEEDED", "the monthly automatic replica allowance is exhausted")
+        super().__init__(BUDGET_EXCEEDED, "the monthly automatic replica allowance is exhausted")
+
+
+def room(conn: sqlite3.Connection, policy: ProtectionPolicy, month: int) -> int:
+    """The bytes of `month`'s allowance that no confirmed or uncertain policy copy holds."""
+    row = conn.execute("SELECT confirmed + uncertain FROM media_policy_budget WHERE month = ?", (month,)).fetchone()
+    return policy.copy_bytes_per_month - (0 if row is None else row[0])
 
 
 class PolicyTransferUnsupported(media_store.MediaStoreError):
@@ -189,9 +197,7 @@ class Transfer:
                 raise media_store.MediaStoreError(media_store.STORE_BUSY_CODE, "an exact policy attempt changed")
             month = media_replicas._month(time.time())
             conn.execute("INSERT OR IGNORE INTO media_policy_budget VALUES (?, 0, 0)", (month,))
-            room = conn.execute("SELECT ? - confirmed - uncertain FROM media_policy_budget WHERE month = ?",
-                                (self.policy.copy_bytes_per_month, month)).fetchone()[0]
-            if replica.ciphertext_size > room:
+            if replica.ciphertext_size > room(conn, self.policy, month):
                 raise PolicyBudgetExceeded()
             conn.execute("UPDATE media_policy_budget SET uncertain = uncertain + ? WHERE month = ?",
                          (replica.ciphertext_size, month))
