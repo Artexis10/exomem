@@ -131,7 +131,7 @@ A queued save whose application ends in a refusal other than contention SHALL be
 
 ### Requirement: The next save names failed queued saves
 
-When queued saves have failed since an owner reply last named failures, the next successful reply to the owner's eligible save SHALL keep its own outcome first and then add one sentence that names how many failed and the `review_memory` `queued-write` route, with a `queued_writes_failed` count. Each failure SHALL be named once per process; after a restart, failures still on record SHALL be named once again. A reply to any other caller SHALL carry no notice.
+When queued saves have failed and no reply has named them, the next successful reply to an owner's eligible save SHALL keep its own outcome first, then add one sentence with how many failed and the queued-write route as the serving surface spells it, plus a `queued_writes_failed` count. Each failure SHALL be named once, across restarts. A replay, a read, or any other caller's reply SHALL carry no notice and SHALL NOT use one up.
 
 #### Scenario: A failure is named on the next save, once
 
@@ -139,6 +139,7 @@ When queued saves have failed since an owner reply last named failures, the next
 - **AND** the owner then saves a note
 - **THEN** the reply starts with the save's own outcome and adds "1 queued save sent earlier failed and was not saved"
 - **AND** the owner's following save carries no notice
+- **AND** a save queued behind the failed edit, a read, or a restart does not take or repeat the notice
 
 ### Requirement: Callers can read a queued save's outcome
 

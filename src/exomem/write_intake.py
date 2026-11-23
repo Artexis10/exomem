@@ -210,7 +210,7 @@ def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Co
                 "state TEXT NOT NULL, owner TEXT, attempts INTEGER NOT NULL DEFAULT 0, "
                 "accepted_at REAL NOT NULL, updated_at REAL NOT NULL, next_attempt_at REAL NOT NULL, "
                 "error_code TEXT, error TEXT, outcome TEXT, finished_at REAL, "
-                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0)"
+                "generation INTEGER NOT NULL DEFAULT 0, commit_reached INTEGER NOT NULL DEFAULT 0, named_at REAL)"
             )
             conn.execute("CREATE INDEX IF NOT EXISTS intake_state ON intake(state, seq)")
             # One open save per original identity: a resend while it is open gets its receipt.
@@ -532,11 +532,9 @@ class Drainer:
         self._inserting = 0
         #: Acceptances so far; a store read that an acceptance overlapped is read again.
         self._accepts = 0
-        #: A save failed since an owner reply last named failures. True at start, so the first owner
-        #: reply after a restart names the failures still on record (`failure_notice`).
+        #: A save may have failed since an owner reply last looked for unnamed failures. True at
+        #: start, so the first eligible save after a restart looks once (`failure_notice`).
         self._failure_unannounced = True
-        #: The newest `finished_at` of a failure that a reply has named.
-        self._announced_through = 0.0
 
     @property
     def running(self) -> bool:
@@ -567,6 +565,12 @@ class Drainer:
     def note_failed(self) -> None:
         with self._condition:
             self._failure_unannounced = True
+
+    def take_failure_flag(self) -> bool:
+        """Whether a failure may be unnamed, clearing the flag: a failure during the look raises it again."""
+        with self._condition:
+            flagged, self._failure_unannounced = self._failure_unannounced, False
+            return flagged
 
     def backlog(self) -> int | None:
         """Open saves, or None while the store has not been read."""
@@ -1323,65 +1327,61 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
 # --------------------------------------------------------------------------- failure notice
 
 
-def failure_notice(vault_root: Path) -> int | None:
-    """How many queued saves failed since an owner reply last named failures, or ``None``.
+def failure_notice(drainer: Drainer) -> int | None:
+    """How many failed queued saves no reply has named yet, marking them named, or ``None``.
 
-    The drainer flags each failure in memory, so a reply reads the store only after one. A
-    store that cannot be read leaves the flag set for the next reply.
+    The drainer flags each failure in memory, so a reply reads the store only after one, and
+    once after a restart. Each failed row is named once: `named_at` is set in the same
+    transaction that counts it. A store that cannot be read leaves the flag set.
     """
-    drainer = drainer_for(vault_root)
-    if drainer is None:
+    if not drainer.take_failure_flag():
         return None
-    with drainer._condition:  # noqa: SLF001 - the module owns its drainer's state
-        if not drainer._failure_unannounced:  # noqa: SLF001
-            return None
-        # Cleared before the read: a failure that lands during it raises the flag again.
-        drainer._failure_unannounced = False  # noqa: SLF001
-        since = drainer._announced_through  # noqa: SLF001
     try:
-        with _store(vault_root, mode="read") as conn:
-            count, latest = conn.execute(
-                "SELECT COUNT(*), MAX(finished_at) FROM intake WHERE state = ? AND finished_at > ?",
-                (FAILED, since),
-            ).fetchone()
+        with _write(drainer.vault_root) as conn:
+            # A store made before `named_at` existed gains the column here.
+            if "named_at" not in {row[1] for row in conn.execute("PRAGMA table_info(intake)")}:
+                conn.execute("ALTER TABLE intake ADD COLUMN named_at REAL")
+            named = conn.execute(
+                "UPDATE intake SET named_at = ? WHERE state = ? AND named_at IS NULL", (time.time(), FAILED)
+            ).rowcount
     except FileNotFoundError:
         return None
     except Exception:  # noqa: BLE001 - the notice must never fail the save it rides on
         log.warning("write intake could not read its failed saves for a reply", exc_info=True)
         drainer.note_failed()
         return None
-    if not count:
-        return None
-    with drainer._condition:  # noqa: SLF001
-        drainer._announced_through = max(drainer._announced_through, float(latest))  # noqa: SLF001
-    return int(count)
+    return named or None
 
 
-def with_failure_notice(command: Any, injected: tuple[Any, ...], result: Any) -> Any:
-    """`result` of an owner's save, telling them about queued saves that failed since the last notice."""
-    if not getattr(command, "busy_intake", False) or not injected or not isinstance(result, Mapping):
-        return result
-    if result.get("success") is False or isinstance(result.get("error"), Mapping):
-        return result
-    from .governance import principal as principal_module
+def with_failure_notice(admission: Admission, result: Any) -> Any:
+    """`result` of an owner's eligible save, naming queued saves that failed and no reply has named yet.
 
-    if principal_record(principal_module.current_principal()) is None:
+    Only an admitted save carries the notice: a replay, a read, a delegated caller or an unkeyed
+    save has no admission, so none of them uses a failure up where the owner would not see it.
+    """
+    if not isinstance(result, Mapping) or result.get("success") is False or isinstance(result.get("error"), Mapping):
         return result
-    count = failure_notice(injected[0])
-    if not count:
-        return result
-    sentence = (
-        f"{count} queued saves sent earlier failed and were not saved; review_memory mode=queued-write "
-        "lists them with their text to correct and send again."
-        if count > 1 else
-        "1 queued save sent earlier failed and was not saved; review_memory mode=queued-write shows it "
-        "with its text to correct and send again."
-    )
-    noticed = {**result, "queued_writes_failed": count}
     summary = result.get("user_summary")
-    if isinstance(summary, str) and summary:
-        noticed["user_summary"] = f"{summary} {sentence}" if summary.endswith(".") else f"{summary}. {sentence}"
-    return noticed
+    if not isinstance(summary, str) or not summary:
+        return result
+    count = failure_notice(admission.drainer)
+    if not count:
+        return result
+    from . import capabilities
+
+    route = capabilities.active_call_text("review_memory", {"mode": MODE})
+    sentence = (
+        f"{count} queued saves sent earlier failed and were not saved; {route} lists them with their "
+        "text to correct and send again."
+        if count > 1 else
+        f"1 queued save sent earlier failed and was not saved; {route} shows it with its text to "
+        "correct and send again."
+    )
+    return {
+        **result,
+        "queued_writes_failed": count,
+        "user_summary": f"{summary} {sentence}" if summary.endswith(".") else f"{summary}. {sentence}",
+    }
 
 
 # --------------------------------------------------------------------------- reads and owner operations
