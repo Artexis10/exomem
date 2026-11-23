@@ -49,6 +49,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from exomem._hooks.exomem_retrieve_nudge import REMINDER
 from membench.trackc.hook_home import (
     SRC_DIR,
     HookHome,
@@ -59,8 +60,8 @@ from membench.trackc.nudge_driver import HOOK_TIMEOUT_SECONDS, parse_fired
 
 #: Inject-block header, mirrored from exomem_retrieve_nudge.py ``_STUB_HEADER``.
 STUB_HEADER = "KB routing stubs"
-#: Reminder prefix, mirrored from ``REMINDER``.
-REMINDER_PREFIX = "[Exomem retrieval check]"
+#: Reminder prefix: the bracketed header the hook's ``REMINDER`` opens with.
+REMINDER_PREFIX = REMINDER[: REMINDER.index("]") + 1]
 
 T00_TEMPLATE = "t00_mini_smoke"
 

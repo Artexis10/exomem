@@ -74,7 +74,9 @@ def test_corpora_are_deterministic_and_have_discriminating_twins() -> None:
     assert "trial a still has no taste result" in different_turns
 
 
-@pytest.mark.parametrize("phrase", ["save this one", "put it in Evermatter", "track this"])
+@pytest.mark.parametrize(
+    "phrase", ["save this one", "put it in Evermatter", "put it in Exomem", "track this"]
+)
 def test_corpus_construction_refuses_storage_commands(phrase: str) -> None:
     from epistemic.journeys.role_state_replay import StoreBearingUtterance, build_corpus, corpus_for
 
