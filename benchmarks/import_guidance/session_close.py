@@ -180,7 +180,7 @@ def pinned_env(arm: Arm, work: Path, case: Case, activation_packet: str | None =
         "EXOMEM_DISABLE_EMBEDDINGS": "1",
         "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
         "EXOMEM_DISABLE_QUERY_LOG": "1",
-    }
+    } | ({"EXOMEM_METHOD_FIT_CONFIG": str(arm.placement)} if arm.placement else {})
 
 
 def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str], ready_graph: bool = False) -> dict | None:
