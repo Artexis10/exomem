@@ -2286,7 +2286,8 @@ _PINNED_TOMBSTONES = {"tombstones": lambda vault_root: lifecycle.tombstoned_path
 _DECIDE_PATH_BATCH = Batch(
     pinned=_PINNED_TOMBSTONES,
     expects_hash="expected_content_hash",
-    alone=lambda kwargs: kwargs.get("artifact_copy") is not None,
+    alone=lambda kwargs: kwargs.get("artifact_copy") is not None or kwargs.get("page_snapshot") is not None,
+    effects=frozenset({"on_unavailable"}),
 )
 
 
@@ -8298,8 +8299,8 @@ def release_walk_filter(
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
             tombstones=tombstones,
-            page_snapshot=raw,
             on_unavailable=note_unavailable,
+            **({"page_snapshot": raw} if raw is not None else {}),
         )
         if decision is None:
             note_unavailable()
