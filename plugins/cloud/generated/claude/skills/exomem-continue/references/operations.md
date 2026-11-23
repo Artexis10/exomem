@@ -277,7 +277,8 @@ to another page. It has the same advisory limits, and a response carries at most
 delegation class and the `ownership_review` family disposition both withhold it.
 
 `detail="full"` adds the existing leaf result under
-`diagnostics`. The detail choice
+`diagnostics`, or under `diagnostics.leaf_result` when the reply also lists
+`diagnostics.derived_components`. The detail choice
 is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 

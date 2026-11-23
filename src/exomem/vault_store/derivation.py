@@ -8,8 +8,8 @@ drain before any other work, so every later write and check sees the rows of eve
 
 A batch takes whole revisions of intents in ``(revision, path)`` order, derives them with the code that
 file mode uses, re-derives the pages whose links they move, deletes the intents and advances the store
-revision. A failed intent keeps its row and its reason code and retries with a growing backoff, so it
-holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
+revision. A failed intent keeps its row and its reason code and retries alone, with a growing backoff, so
+it holds back neither the other intents nor any reader; after ``ATTEMPTS`` status counts it as failed.
 """
 
 from __future__ import annotations
@@ -125,11 +125,12 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
     and no request (a test, an offline route) derives them here.
     """
     root = Path(writer.root)
+    # First, so that nothing below can strand the intents: should the request end before its follow
+    # runs, the store thread drains before its next work.
+    owe(root)
     resident_catalogue.advance(root, before, after)
     with _UNADVANCED_LOCK:
         _UNADVANCED.setdefault(root, []).append((before, after, tuple(paths)))
-    # Should the request end before its follow runs, the store thread drains before its next work.
-    owe(root)
     # An upload's derived rows draw on the room that its session reserved, as its page did.
     credit = media_capacity.held_commit_credit()
 
@@ -162,6 +163,16 @@ def owe(root: Path, at: float | None = None) -> None:
     key = Path(root)
     with _UNADVANCED_LOCK:
         _OWED[key] = min(_OWED.get(key, when), when)
+
+
+def owe_after_failure(root: Path, at: float) -> None:
+    """Owe the next drain of ``root`` from ``at`` and no sooner, after a drain step that raised.
+
+    It replaces the owed time where ``owe`` keeps the earlier one: the time that the failed step was
+    owed from has passed, so keeping it would retry at once, in a loop.
+    """
+    with _UNADVANCED_LOCK:
+        _OWED[Path(root)] = at
 
 
 def settled(root: Path) -> None:
@@ -406,9 +417,20 @@ class _Intent:
 
 
 def _next_batch(writer: CollectionWriter) -> list[_Intent]:
+    """The next due intents: one that failed before runs alone, so that it never splits a batch of new
+    intents; new ones run in whole revisions of up to ``BATCH_PAGES`` pages."""
+    first = writer.connection.execute(
+        f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
+        "ORDER BY revision, path LIMIT 1",
+        (_stamp(_now()),),
+    ).fetchone()
+    if first is None:
+        return []
+    if first[3] > 0:
+        return [_Intent(*first)]
     rows = writer.connection.execute(
         f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "ORDER BY revision, path LIMIT ?",
+        "AND attempts = 0 ORDER BY revision, path LIMIT ?",
         (_stamp(_now()), BATCH_PAGES + 1),
     ).fetchall()
     intents = [_Intent(*row) for row in rows]
@@ -422,7 +444,7 @@ def _next_batch(writer: CollectionWriter) -> list[_Intent]:
         return whole
     rows = writer.connection.execute(
         f"SELECT path, revision, operation, attempts, metered FROM store_derivation_queue WHERE {_DUE} "
-        "AND revision = ? ORDER BY path",
+        "AND attempts = 0 AND revision = ? ORDER BY path",
         (_stamp(_now()), last),
     ).fetchall()
     return [_Intent(*row) for row in rows]

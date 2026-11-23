@@ -87,7 +87,9 @@ Use this loop whenever a durable conclusion should enter Exomem:
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
    `links.body_wikilinks`, and `relations.relation_debt` — lives under
-   `diagnostics` and needs `detail="full"`. Ask for it when provenance
+   `diagnostics` and needs `detail="full"`. When the reply also lists
+   `diagnostics.derived_components`, it lives under `diagnostics.leaf_result`
+   instead. Ask for it when provenance
    or connectivity is in doubt; if all three counts are zero and that is not
    honest, fix it before reporting. Corpus-aware `suggestions` are **off by
    default** because they cost a whole retrieval pass on the write path; pass

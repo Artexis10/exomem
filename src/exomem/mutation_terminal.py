@@ -2149,6 +2149,41 @@ def with_fast_acknowledgement(
     return frozen
 
 
+def with_leaf_index_observed(
+    terminal: Mapping[str, Any], observed: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    """The terminal whose leaf ``index`` names each component that it deferred as ``observed`` does.
+
+    A leaf reports its index while it holds its boundary, before the work that its request runs
+    after the terminal; the reply also carries that work's observation (``derived_components``).
+    Each ``deferred`` component of the leaf's report, or of each report under its index (a move's),
+    takes the later observation, so that one reply says one thing.
+    """
+    from . import index_sync
+
+    leaf = terminal.get("leaf_result")
+    index = leaf.get("index") if isinstance(leaf, Mapping) else None
+    if not observed or not isinstance(index, Mapping):
+        return terminal
+
+    def refreshed(value: Any) -> Any:
+        if isinstance(value, list):
+            return [refreshed(item) for item in value]
+        if isinstance(value, Mapping):
+            return index_sync.with_observed_components(value, observed)
+        return value
+
+    current = (
+        refreshed(index)
+        if "components" in index
+        else {key: refreshed(value) for key, value in index.items()}
+    )
+    if current == index:
+        return terminal
+    current_leaf = source_result_attribution.carry(leaf, {**leaf, "index": current})
+    return source_result_attribution.carry(terminal, {**terminal, "leaf_result": current_leaf})
+
+
 def as_replay(terminal: Any) -> Any:
     """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
 

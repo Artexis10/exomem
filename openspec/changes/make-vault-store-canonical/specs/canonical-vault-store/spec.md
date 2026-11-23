@@ -71,7 +71,12 @@ A governed write in store mode SHALL commit every file it changes, one audit row
 - **AND** a publication that fails after the transaction reports the catalog publication as uncertain
 
 ### Requirement: Derived rows follow their page's derivation intent
-In store mode, the store thread SHALL derive the rows of each path that a derivation intent names, from its stored bytes or its unowned file, with the code that file mode uses. Each transaction SHALL take a bounded number of pages in revision order, delete their intents, re-derive the graph rows of pages whose links they re-resolve, and advance the store revision. The store thread SHALL derive due intents before other work, without the vault mutation boundary.
+In store mode, the store thread SHALL derive the rows of each path that a derivation intent names, from its stored bytes or its unowned file, with the code that file mode uses. Each transaction SHALL take whole revisions in order, up to 32 pages unless one revision holds more, delete their intents, re-derive the graph rows of pages whose links they re-resolve, and advance the store revision. The store thread SHALL derive due intents before other work, without the vault mutation boundary.
+
+#### Scenario: An intent that failed before runs apart from a later write
+- **WHEN** an intent whose derivation failed before falls due beside the intents of a later write
+- **THEN** it derives in a transaction of its own
+- **AND** the later write's pages derive together in one transaction
 
 #### Scenario: A write can cite the page that the write before it created
 - **WHEN** a governed write creates a Source and the next governed write cites it by its reference
@@ -99,7 +104,7 @@ While a page's derivation intent is pending or failed, every store-mode read of 
 - **THEN** a memory reference to the page resolves to its new path
 
 ### Requirement: Derivation lag is visible and bounded
-One intent SHALL stand for each path, keeping its oldest queue time. A failed derivation SHALL keep its intent and retry with backoff, then be marked failed with a reason code, and SHALL NOT hold back other intents. Status SHALL report the derived state as `current`, `behind`, `failed` or `unknown`, with counts and the oldest age. A reader whose snapshot holds unfinished intents SHALL say so, naming no path. A clean stop SHALL derive pending intents within its bound.
+One intent SHALL stand for each path, keeping its oldest queue time. A failed derivation SHALL keep its intent and retry with backoff, then be marked failed with a reason code, and SHALL NOT hold back other intents. Status SHALL report the derived state as `current`, `behind`, `failed` or `unknown`, with counts and the oldest age. A reader whose snapshot holds unfinished intents SHALL say so, naming no path. A clean stop or handoff SHALL derive due intents within its bound.
 
 #### Scenario: A failed derivation keeps the page and says so
 - **WHEN** the derivation of a committed page fails
@@ -117,6 +122,21 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 - **WHEN** a search runs while a committed page's derivation intent is pending
 - **THEN** the search answers from its snapshot's rows with the derived-behind notice and the pending count
 - **AND** the notice names no path
+
+#### Scenario: A clean stop leaves no due intent
+- **WHEN** the service stops cleanly with committed pages whose intents are due
+- **THEN** the stop derives them within its bound before it publishes the replica
+- **AND** the next start finds none of them due
+
+#### Scenario: A drain that keeps failing does not spin
+- **WHEN** a drain step raises on each attempt
+- **THEN** the store thread retries it no sooner than its retry delay
+- **AND** it warns once until a drain succeeds
+
+#### Scenario: A governed trash settles in its request
+- **WHEN** a governed page is trashed or recovered in store mode
+- **THEN** the request derives the transition's intents before it settles the receipt
+- **AND** the receipt settles without a reconcile
 
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.

@@ -31,7 +31,8 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
-from test_vault_store_bypass_writers import RAW_SOURCE
+from test_vault_store_bypass_writers import RAW_SOURCE, govern
+from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_write_path import store_rows
@@ -57,7 +58,7 @@ from exomem import (
 )
 from exomem.collection_store import runtime
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import importer, projector, read, rederive, write
+from exomem.vault_store import derivation, importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -196,6 +197,97 @@ def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, se
     assert recovered["path"] == path
     assert read.owned_bytes(stored, path) == body
     assert not read.page_exists(stored, trash_path)
+
+
+def test_a_governed_trash_through_the_served_door_settles_its_receipt_in_the_request(stored, service):
+    """A governed page trashed as an agent trashes it. Settled before its request derived the rows,
+    the trash found them deferred, warned that its state was not exact and left its receipt and
+    tombstone pending until a reconcile; a recovery in that state keeps the page hidden."""
+    govern(stored, BETA)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)] == ["committed"]
+
+
+def test_a_full_reply_names_each_derived_component_as_its_acknowledgement_does(stored, service):
+    """A move's and a delete's full replies, as an agent reads them: the writer's index report, made
+    before the request derived the rows, named them deferred beside an acknowledgement that names
+    them completed."""
+    moved = f"{NOTES}/Beta Moved.md"
+    replies = [
+        call(stored, "manage_memory_file", operation="move", old_path=BETA, new_path=moved,
+             response_detail="full"),
+        call(stored, "manage_memory_file", operation="delete", path=moved, confirm=True,
+             force_orphan=True, response_detail="full"),
+    ]
+
+    for reply in replies:
+        acknowledged = {(item["component"], item["state"])
+                        for item in reply["diagnostics"]["derived_components"]}
+        index = reply["diagnostics"]["leaf_result"]["index"]
+        # A delete's index is one report; a move's holds one per side of the move.
+        reports = [index] if "components" in index else [*index["upsert_reports"], index["delete_report"]]
+        reported = {(item["component"], item["outcome"]) for report in reports
+                    for item in report["components"]
+                    if item["component"] in {component for component, _state in acknowledged}}
+        assert reported and reported <= acknowledged, (reported, acknowledged)
+
+
+def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(
+    stored, monkeypatch, caplog
+):
+    """A store whose derivation step raises each time, as a diverged store refuses it: the store
+    thread retries once per retry delay and warns once. Kept at its first owed time, the drain ran
+    again at once, hundreds of times a second, with a traceback each time."""
+    monkeypatch.setattr(runtime, "DERIVED_RETRY_SECONDS", 0.5)
+    attempts = []
+
+    def failing(*_arguments, **_keywords):
+        attempts.append(time.monotonic())
+        raise RuntimeError("the derivation step failed")
+
+    caplog.set_level(logging.DEBUG, logger=runtime.logger.name)
+    with store_thread(stored):
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", failing)
+            derivation.owe(stored.resolve())
+            deadline = time.monotonic() + 30
+            while len(attempts) < 3:
+                assert time.monotonic() < deadline, "the store thread retried the failed drain"
+                time.sleep(0.05)
+    warned = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING and "the vault store could not advance" in record.getMessage()
+    ]
+
+    gaps = [later - earlier for earlier, later in zip(attempts[:2], attempts[1:3], strict=True)]
+    assert min(gaps) >= 0.45, gaps
+    assert len(warned) == 1
+
+
+def test_a_clean_stop_derives_the_rows_that_committed_pages_still_owe(stored, monkeypatch):
+    """A clean stop with committed pages whose rows neither their own drain nor the store thread
+    derived: the stop derives them within its bound, so none is due at the next start. The store
+    thread's own stop drain ran after the lease's handoff began, which refused it."""
+    created = [f"{NOTES}/Owed {number}.md" for number in range(3)]
+    with store_thread(stored):
+        # The thread first drains what the vault's earlier commits owe; it must be idle before these.
+        deadline = time.monotonic() + 30
+        while derivation.owed_in(stored.resolve()) is not None:
+            assert time.monotonic() < deadline, "the store thread drained what its start owed"
+            time.sleep(0.05)
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+            commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+        assert sorted(store_rows(stored, "SELECT path FROM store_derivation_queue")) == [
+            (rel,) for rel in sorted(created)
+        ]
+
+    assert store_rows(stored, "SELECT path FROM store_derivation_queue") == []
 
 
 def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(

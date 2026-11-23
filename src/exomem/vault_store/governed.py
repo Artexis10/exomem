@@ -23,6 +23,7 @@ The crash windows are file mode's, with the commit where the rename was:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -83,18 +84,25 @@ def committing(operation: Any) -> Iterator[None]:
         lifecycle.placed_in_store(operation)
 
 
-def settle(root: Path, operation: Any, report: Any, warnings: list[str]) -> dict:
-    """The writer's index report once the governed transition is settled, after its commit and its
-    own cleanup of what lives outside the store.
+def settle(root: Path, operation: Any, kind: str, paths: list[str], warnings: list[str]) -> dict:
+    """The writer's index report of ``paths`` once the governed transition is settled, after its
+    commit and its own cleanup of what lives outside the store.
 
-    A deletion first drops the vectors of every trashed path, which the drain would drop later,
-    and the report says how that went. The settling then commits the receipt only when no derived
-    row of a trashed path is left, or when every restored page's derivatives are exact; otherwise
-    the content stays tombstoned and the writer warns, as file mode does.
+    A governed transition first derives the rows that its commit queued, under the boundary that it
+    still holds: the settling proves them exact, and the request would derive them only after the
+    release (``derivation``). A deletion then drops the vectors of every trashed path, which the drain
+    would drop later, and the report says how that went. The settling commits the receipt only when
+    no derived row of a trashed path is left, or when every restored page's derivatives are exact;
+    otherwise the content stays tombstoned and the writer warns, as file mode does. A write that no
+    policy governs reports its rows as its commit left them, and its request derives them.
     """
     from .. import index_sync
     from ..governance import lifecycle
+    from . import batch
 
+    if operation is not None:
+        _derive_queued(root)
+    report = batch.row_report(kind, paths, root=root)
     if operation is None:
         return report.as_dict()
     if operation.operation == "recovery":
@@ -106,6 +114,26 @@ def settle(root: Path, operation: Any, report: Any, warnings: list[str]) -> dict
     if not lifecycle.finish_deletion(operation, index_report=index):
         warnings.append(lifecycle.TRASH_NOT_EXACT)
     return index
+
+
+def _derive_queued(root: Path) -> None:
+    """Derive the due intents of ``root``, this transition's own among them, within the request's
+    own derivation bound. One that is left reads as deferred, and the settling leaves the transition
+    to reconcile."""
+    from ..collection_store.preview import bound_writer
+    from . import derivation
+
+    writer = bound_writer(Path(root).resolve())
+    if writer is None:
+        return
+    try:
+        derivation.drain(
+            Path(writer.root), writer, deadline=time.monotonic() + derivation.OWN_DERIVATION_SECONDS
+        )
+    except Exception:  # noqa: BLE001 - the report then names the rows deferred, and reconcile settles it
+        log.warning(
+            "the rows of a governed transition were not derived before its settling", exc_info=True
+        )
 
 
 def _purge_vectors(root: Path, operation: Any) -> Any:

@@ -73,6 +73,7 @@ from .mutation_terminal import (
     valid_collection_receipt,
     valid_structured_files_receipt,
     with_fast_acknowledgement,
+    with_leaf_index_observed,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -566,12 +567,48 @@ def _with_post_terminal_fanout_acknowledgement(
 
     derived_sync, unfinished, diagnostics = _derived_sync_of(reports, drain_failed=drain_failed)
     return with_fast_acknowledgement(
-        result,
+        with_leaf_index_observed(result, _observed_components(reports)),
         derived_sync=derived_sync,
         derived_sync_components=unfinished,
         component_diagnostics=diagnostics,
         advisory_sync="not_required",
     )
+
+
+#: The order of the derived acknowledgement's states (``DERIVED_SYNC_OUTCOMES``), the least finished last.
+# nosemgrep: ep-word-dict -- the closed `derived_sync` states that `_derived_state` returns, least to most severe.
+_SEVERITY = {"completed": 0, "pending": 1, "failed": 2}
+
+
+def _derived_state(component: Any) -> str:
+    """``completed``, ``pending`` or ``failed``: what one fan-out component says of its work.
+
+    The outcomes and the accepted codes are the closed sets that ``index_sync.IndexComponentOutcome``
+    fixes.
+    """
+    if component.outcome in {"failed", "degraded"}:  # nosemgrep: ep-word-membership -- closed outcome set
+        return "failed"
+    if component.outcome in {"registered", "deferred"}:  # nosemgrep: ep-word-membership -- closed outcome set
+        return "pending"
+    # nosemgrep: ep-word-membership -- the closed codes of work that was not required.
+    if component.outcome == "accepted" and component.code not in {"embeddings_disabled", "no_eligible_paths"}:
+        return "pending"
+    return "completed"
+
+
+def _observed_components(reports: list[Any]) -> dict[str, Any]:
+    """Each component that the fan-out observed, the least finished observation when several do."""
+    from . import index_sync
+
+    observed: dict[str, Any] = {}
+    for report in reports:
+        if not isinstance(report, index_sync.IndexSyncReport):
+            continue
+        for component in report.components:
+            kept = observed.get(component.component)
+            if kept is None or _SEVERITY[_derived_state(component)] > _SEVERITY[_derived_state(kept)]:
+                observed[component.component] = component
+    return observed
 
 
 def _derived_sync_of(
@@ -596,21 +633,9 @@ def _derived_sync_of(
             )
             if component.component not in _DERIVED_COMPONENT_NAMES:
                 continue
-            if component.outcome in {"failed", "degraded"}:
-                outcome = "failed"
-            elif component.outcome in {"registered", "deferred"}:
-                outcome = "pending"
-            elif component.outcome == "accepted" and component.code not in {
-                "embeddings_disabled",
-                "no_eligible_paths",
-            }:
-                outcome = "pending"
-            else:
-                outcome = "completed"
+            outcome = _derived_state(component)
             previous = component_outcomes.get(component.component)
-            if previous is None or {"completed": 0, "pending": 1, "failed": 2}[
-                outcome
-            ] > {"completed": 0, "pending": 1, "failed": 2}[previous[0]]:
+            if previous is None or _SEVERITY[outcome] > _SEVERITY[previous[0]]:
                 component_outcomes[component.component] = (outcome, component.code)
 
     states = {outcome for outcome, _code in component_outcomes.values()}

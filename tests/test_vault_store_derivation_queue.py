@@ -12,6 +12,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
+from datetime import timedelta
 from itertools import zip_longest
 
 import pytest
@@ -310,3 +311,45 @@ def test_a_reference_names_where_a_moved_page_is_when_its_rows_failed_to_follow(
     assert store_rows(served, "SELECT path FROM identities WHERE exomem_id = ?", identifier) == [(before,)]
 
     assert memory_refs.resolve_identifier_read_only(served, memory_refs.memory_ref(identifier)) == after
+
+
+def test_a_page_whose_derivation_failed_runs_apart_from_the_pages_of_a_later_save(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A page whose rows failed once and fall due again beside a later save of two pages: the save's
+    pages derive together, in one transaction. Taken into their batch, the failing page rolled the
+    batch back, and the save's pages then ran one transaction each."""
+    failing = "Knowledge Base/Notes/Failing.md"
+    real = derive.derive_paths
+    batches = []
+
+    def derive_paths(tx, root, *, written, **keywords):
+        batches.append(sorted(written))
+        if failing in written:
+            raise RuntimeError("the derivation broke")
+        return real(tx, root, written=written, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        save(served, failing, SMALL_TEXT.replace("Small", "Failing"))
+    derivation.drain(served.resolve(), writer)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        with writer_lease.get_manager().mutation_guard(served, operation="note_save"):
+            vault_module.batch_atomic_write(
+                [
+                    planned(served, SMALL, SMALL_TEXT, create_only=True),
+                    planned(served, LARGE, SMALL_TEXT.replace("Small", "Large"), create_only=True),
+                ],
+                vault_root=served,
+                post_commit_fanout=False,
+            )
+    batches.clear()
+    # Later than the first retry falls due.
+    later = derivation._now() + timedelta(seconds=derivation.RETRY_SECONDS * 4)
+    monkeypatch.setattr(derivation, "_now", lambda: later)
+
+    derivation.drain(served.resolve(), writer)
+
+    assert batches == [[failing], sorted([LARGE, SMALL])]

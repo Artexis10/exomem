@@ -495,6 +495,35 @@ def with_component(report: IndexSyncReport, outcome: IndexComponentOutcome) -> I
     )
 
 
+def with_observed_components(
+    report: Mapping[str, Any], observed: Mapping[str, IndexComponentOutcome]
+) -> Mapping[str, Any]:
+    """``report``, an ``as_dict`` form, with each ``deferred`` component that ``observed`` names
+    replaced by that later observation of it; anything that is not such a report comes back as is."""
+    components = report.get("components")
+    if not isinstance(components, list) or not any(
+        isinstance(item, Mapping) and item.get("outcome") == "deferred" and item.get("component") in observed
+        for item in components
+    ):
+        return report
+    try:
+        rebuilt = IndexSyncReport(
+            report["operation"],
+            tuple(report["requested_paths"]),
+            tuple(report["eligible_paths"]),
+            tuple(
+                observed[item["component"]]
+                if item["outcome"] == "deferred" and item["component"] in observed
+                else IndexComponentOutcome(item["component"], item["outcome"], item["code"])
+                for item in components
+            ),
+            report["paths_truncated"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return report
+    return {**report, **rebuilt.as_dict()}
+
+
 def failed_upsert_report(
     vault_root: Path,
     written_paths: list[Path],
