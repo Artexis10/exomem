@@ -913,6 +913,37 @@ def test_a_refused_guarded_read_names_the_condition_and_logs_the_file(
     assert "linked.md" not in oversized.value.reason
 
 
+def test_a_guarded_read_rereads_a_file_another_writer_grew_after_it_was_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A capture plans its index and log updates before the boundary, beside another write's
+    # commit. A file that grew between its measurement and its open was refused, so one of
+    # several concurrent captures failed with LOG_PLAN_CONFLICT.
+    target = tmp_path / "index.md"
+    target.write_text("# Index\n", encoding="utf-8")
+    real_read = vault.read_bounded_guarded_bytes
+    grown: list[int] = []
+
+    def another_write_commits_once(root, rel, *, limit, **kwargs):
+        if not grown:
+            grown.append(limit)
+            target.write_text("# Index\n- a newer entry\n", encoding="utf-8")
+        return real_read(root, rel, limit=limit, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", another_write_commits_once)
+    text, _guard = vault.read_guarded_text(tmp_path, target)
+    assert text == "# Index\n- a newer entry\n"
+
+    def a_writer_never_stops(root, rel, *, limit, **kwargs):
+        target.write_text(target.read_text(encoding="utf-8") + "- one more\n", encoding="utf-8")
+        return real_read(root, rel, limit=limit, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", a_writer_never_stops)
+    with pytest.raises(vault.PathGuardError) as refused:
+        vault.read_guarded_text(tmp_path, target)
+    assert refused.value.code == "PATH_GUARD_UNSAFE"
+
+
 def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

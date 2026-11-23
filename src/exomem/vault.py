@@ -1551,6 +1551,14 @@ class PathGuardError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
+class GuardedContentGrew(PathGuardError):
+    """A bounded read found a regular file larger than the size its caller measured.
+
+    A writer grew the file between the measurement and the open; `_read_guarded_path`
+    measures again and retries. Every other unsafe leaf stays a plain `PathGuardError`.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PathIdentity:
     relative_path: str
@@ -4948,14 +4956,21 @@ def _over_limit_reason(size: int, limit: int) -> str:
     return f"is {size} bytes, over the {limit}-byte read limit"
 
 
-def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
+def _refuse_unbounded_leaf(target: str, reason: str, *, grew: bool = False) -> PathGuardError:
     """The refusal for a guarded leaf that is not a bounded regular file.
 
     The error text names the failed condition and not the path: this read also covers pages
     that are withheld from a restricted caller, so the path would name one. The server log has it.
+    `grew` marks a regular single-link file that is only larger than the read limit.
     """
     log.warning("guarded read refused: %s %s", target, reason)
-    return PathGuardError("PATH_GUARD_UNSAFE", f"guarded content {reason}")
+    error = GuardedContentGrew if grew else PathGuardError
+    return error("PATH_GUARD_UNSAFE", f"guarded content {reason}")
+
+
+def _only_grew(info: os.stat_result, limit: int) -> bool:
+    """Whether a leaf fails the bounded-regular-file conditions only by its size."""
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size > limit
 
 
 def _read_bounded_guarded_snapshot(
@@ -4999,7 +5014,7 @@ def _read_bounded_guarded_snapshot(
         before = os.fstat(leaf)
         unbounded = _unbounded_leaf_reason(before, limit)
         if unbounded is not None:
-            raise _refuse_unbounded_leaf(target, unbounded)
+            raise _refuse_unbounded_leaf(target, unbounded, grew=_only_grew(before, limit))
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
@@ -5115,7 +5130,9 @@ def _read_bounded_windows_snapshot(
             else _unbounded_leaf_reason(before, limit)
         )
         if unbounded is not None:
-            raise _refuse_unbounded_leaf(target, unbounded)
+            raise _refuse_unbounded_leaf(
+                target, unbounded, grew=not _is_reparse(before) and _only_grew(before, limit)
+            )
         leaf = _open_windows_path_descriptor(
             leaf_path,
             desired_access=0x80000000,
@@ -5302,6 +5319,11 @@ def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, Path
     return data.decode("utf-8"), guard
 
 
+#: Reads of one file that a concurrent writer may grow between its measurement and its open.
+#: A bound, not a tuning value: a file that keeps growing is refused rather than chased.
+_GROWN_READ_ATTEMPTS = 3
+
+
 def _read_guarded_path(
     vault_root: Path, path: Path, *, with_generation: bool
 ) -> tuple[bytes, PathGuard, PathGuard | None]:
@@ -5329,18 +5351,26 @@ def _read_guarded_path(
         _require_read_limit(stored.meta.size)
         guard = _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
         return stored.body, guard, None
-    try:
-        limit = absolute.lstat().st_size
-    except FileNotFoundError:
-        raise
-    except OSError as error:
-        raise PathGuardError(
-            "PATH_GUARD_IO", "guarded content could not be opened"
-        ) from error
-    if with_generation:
-        return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
-    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
-    return data, guard, None
+    for attempt in range(_GROWN_READ_ATTEMPTS):
+        try:
+            limit = absolute.lstat().st_size
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise PathGuardError(
+                "PATH_GUARD_IO", "guarded content could not be opened"
+            ) from error
+        try:
+            if with_generation:
+                return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+            data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+            return data, guard, None
+        except GuardedContentGrew:
+            # A writer grew the file after it was measured (a pre-boundary plan reading an
+            # index or log while another write commits): measure it again.
+            if attempt + 1 == _GROWN_READ_ATTEMPTS:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 @dataclass
