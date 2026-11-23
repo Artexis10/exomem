@@ -414,11 +414,11 @@ def test_a_commit_marker_that_cannot_be_written_commits_nothing_and_the_save_lan
     real_mark = write_intake._mark_commit_reached
     pages_when_refused: list[int] = []
 
-    def fail_once(root, claim):
+    def fail_once(replay):
         if not pages_when_refused:
             pages_when_refused.append(len(_pages_titled(vault, "Queued save 13")))
             raise OSError("disk full while marking the commit")
-        return real_mark(root, claim)
+        return real_mark(replay)
 
     monkeypatch.setattr(write_intake, "_mark_commit_reached", fail_once)
     (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 13)))
