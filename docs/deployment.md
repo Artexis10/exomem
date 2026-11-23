@@ -107,7 +107,7 @@ cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
-#   --extra media pulls faster-whisper + Pillow + pymupdf + markitdown for
+#   --extra media pulls faster-whisper + Pillow + pypdfium2 + markitdown for
 #   SERVER-SIDE media extraction (auto transcribe/OCR/parse uploaded binaries →
 #   searchable). On Windows the [media] extra also pins the CUDA-12 runtime
 #   (cublas/cudnn/cudart) that ctranslate2 needs alongside torch's cu132 build.

@@ -29,7 +29,7 @@ CLAIM = "https://doi.org/10.5555/aaa"
         ("cited as \u201c10.5555/aaa\u201d in the text", ("10.5555/aaa",)),
         ("DOI 10.5555/aaa\u20101 set with a Unicode hyphen", ("10.5555/aaa-1",)),
         ("DOI 10.5555/j.\u200baaa with a zero-width break", ("10.5555/j.aaa",)),
-        ("10.5555/abc\udced\udca0\udc80 as PyMuPDF decodes a lone surrogate", ("10.5555/abc",)),
+        ("10.5555/abc\udced\udca0\udc80 with a lone surrogate in the text", ("10.5555/abc",)),
     ],
 )
 def test_the_doi_syntax_is_read_from_running_text(text: str, expected: tuple[str, ...]) -> None:
@@ -198,7 +198,7 @@ def test_a_reply_block_that_does_not_read_as_one_is_refused_not_shown_as_a_state
 
 @pytest.fixture
 def pdfs(tmp_path: Path) -> Path:
-    pytest.importorskip("fitz")
+    pytest.importorskip("pypdfium2")
     return tmp_path
 
 

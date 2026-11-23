@@ -36,9 +36,9 @@ def open_image(path: Path | BinaryIO, *, suffix: str | None = None, max_pixels: 
     # HEIC is the image registry's supported HEIF extension; other formats need only Pillow.
     if extension == ".heic":
         try:
-            from pillow_heif import register_heif_opener
+            from pi_heif import register_heif_opener
         except ImportError as error:
-            raise ImportError("HEIC decoding requires pillow-heif; install exomem[image-codecs]") from error
+            raise ImportError("HEIC decoding requires pi-heif; install exomem[image-codecs]") from error
         register_heif_opener(decode_threads=1)
     # Pillow chooses a decoder by sniffing content, and some (EPS) run external programs. Only
     # the decoders of the registry's image extensions may run, whatever the file claims to be.
