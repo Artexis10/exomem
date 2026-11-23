@@ -3080,9 +3080,9 @@ def _built_on_a_thread_of_its_own(root, stamp):
     return {row.path for row in working_set_index.WorkingSetIndex(root).anchors() if row.kind == "collection"}
 
 
-def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_and_stays_stale(service, monkeypatch):
-    """A build that drops the store's anchors when the store refuses its read, and records itself fresh anyway,
-    keeps the store's lists out of recall until the vault next changes."""
+def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_and_goes_on(service, monkeypatch):
+    """A store with no writer to read beside (opening, released when idle, held by a peer) must neither drop its
+    lists from recall nor stop the build: a build that failed instead would leave every new page out as well."""
     from exomem import working_set_index
 
     assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "first")
@@ -3091,8 +3091,8 @@ def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_
         raise connection.busy("the store is held")
 
     monkeypatch.setattr(runtime.StoreServer, "read_beside", refused)
-    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "second")
-    assert working_set_index.WorkingSetIndex(service.root).freshness_stamp() == "first"
+    assert {manifest_path(), A_PATH} <= _built_on_a_thread_of_its_own(service.root, "second")
+    assert working_set_index.WorkingSetIndex(service.root).freshness_stamp() == "second"
 
 
 def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(service):

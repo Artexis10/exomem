@@ -36,7 +36,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1645,7 +1645,9 @@ def _page_anchor_kind(
 
 
 @canonical_read(receipt_boundary=QUERY_RECEIPT_BOUNDARY)
-def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
+def _collection_candidates(
+    vault_root: Path, *, carried: Callable[[Collection[str]], list[_Candidate]] | None = None
+) -> tuple[list[_Candidate], list[_Candidate]]:
     """Records manifests (+ their claims) and active Planning items.
 
     This is the ONE place activation enumerates the vault for collection
@@ -1657,16 +1659,26 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
     The service runs that pass on a thread that no request binds to its
     collection store, so the store collections are read through the store
     the service serves (`runtime.read_served`): the manifests in one short
-    read, and each store Planning collection's items in a read of its own. A
-    store that cannot answer now fails the build, which keeps the previous
-    index and its freshness stamp, so the next request builds again; dropping
-    the store's anchors would mark the index fresh without them.
+    read, and each store Planning collection's items in a read of its own.
+    Where the store cannot be read now (no admitted writer while it opens,
+    after an idle release, or while a peer holds it), the files are read as
+    they are, and each store collection keeps the anchors this index last
+    built for it (`carried`). The build goes on and drops nothing; the set it
+    discovered is then incomplete, so it publishes none.
     """
+    from .cli_ops import OpError
     from .collection_store import runtime as store_runtime
+    from .collection_store.connection import CollectionStoreError
 
+    try:
+        discovered, unreachable = store_runtime.read_served(vault_root, lambda: _discovered_manifests(vault_root))
+    except (CollectionStoreError, OpError):
+        log.debug("activation index: the collection store could not be read now", exc_info=True)
+        discovered, unreachable = _discovered_manifests(vault_root)
+    unreachable = list(unreachable)
     records: list[_Candidate] = []
     plans: list[_Candidate] = []
-    for manifest, rel, stored in store_runtime.read_served(vault_root, lambda: _discovered_manifests(vault_root)):
+    for manifest, rel, stored in discovered:
         absolute = Path(vault_root) / rel
         fields = tuple(getattr(getattr(manifest, "schema", None), "fields", {}) or ())
         claims = tuple(
@@ -1695,31 +1707,44 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
                 )
             )
         elif profile == "planning":
-            plans.extend(
-                _planning_candidates(vault_root, manifest, rel) if stored is None
-                else store_runtime.read_served(
-                    vault_root, functools.partial(_planning_candidates, vault_root, manifest, rel)
-                )
-            )
+            if stored is None:
+                plans.extend(_planning_candidates(vault_root, manifest, rel))
+                continue
+            try:
+                plans.extend(store_runtime.read_served(
+                    vault_root, functools.partial(_planning_candidates, vault_root, manifest, rel)))
+            except (CollectionStoreError, OpError):
+                log.debug("activation index: a store Planning collection could not be read now", exc_info=True)
+                unreachable.append(rel)
+    for candidate in carried(unreachable) if carried is not None and unreachable else ():
+        (records if candidate.kind == "collection" else plans).append(candidate)
     return records, plans
 
 
-def _discovered_manifests(vault_root: Path) -> list[tuple[Any, str, str | None]]:
-    """Each discovered manifest with its path, and its store manifest version where the store owns it (else None)."""
+def _discovered_manifests(vault_root: Path) -> tuple[list[tuple[Any, str, str | None]], list[str]]:
+    """Each discovered manifest with its path and, where the store owns it, its store manifest version (else None);
+    and the store collections that discovery could not reach in this call, by manifest path."""
     from . import structured_collections
+    from .cli_ops import OpError
+    from .collection_store.connection import CollectionStoreError
 
     try:
-        manifests = structured_collections.discover_collections(Path(vault_root))
+        manifests, unreadable = structured_collections.discover_collections_with_errors(Path(vault_root))
+    except (CollectionStoreError, OpError):
+        raise  # the store refused this read: the caller reads the files and carries the store's anchors
     except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
         log.debug("activation index: collection discovery failed", exc_info=True)
         _note_discovered_manifests(None)
-        return []
-    _note_discovered_manifests(manifests)
-    return [
+        return [], []
+    unreachable = [row.path for row in unreadable if row.code == structured_collections.STORE_UNAVAILABLE]
+    # A set without the store's collections would keep them out of the registry until the next update.
+    _note_discovered_manifests(None if unreachable else manifests)
+    discovered = [
         (manifest, rel, manifest.manifest_version.hash if selected_writer(vault_root, manifest) is not None else None)
         for manifest in manifests
         if (rel := str(getattr(manifest, "path", "") or ""))
     ]
+    return discovered, unreachable
 
 
 def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Candidate]:
@@ -3022,6 +3047,49 @@ class WorkingSetIndex:
         _publish_pending_manifests(self.vault_root, generation, token=written_token)
         return {"anchors": len(candidates), "generation": generation}
 
+    def _carried_candidates(self, manifest_paths: Collection[str]) -> list[_Candidate]:
+        """The collection and Planning item anchors this index last built for `manifest_paths`, unchanged.
+
+        For store collections that a build cannot read now: they keep what recall offered for them instead of
+        leaving it, and the next build that reads the store replaces them.
+        """
+        conn = self._connect()
+        if conn is None or not manifest_paths:
+            return []
+        wanted = set(manifest_paths)
+        prefixes = tuple(f"plan:{path}#" for path in wanted)
+        rows = [
+            row for row in conn.execute(
+                "SELECT anchor_id, path, ref, title, kind, lifecycle, signature, source_signature FROM anchors "
+                "WHERE kind IN ('collection', 'plan')"
+            )
+            if row[0] in wanted or row[0].startswith(prefixes)
+        ]
+        if not rows:
+            return []
+        ids = [row[0] for row in rows]
+        marks = ", ".join("?" * len(ids))
+
+        def grouped(table: str, column: str) -> dict[str, tuple[str, ...]]:
+            out: dict[str, list[str]] = {}
+            for anchor_id, value in conn.execute(
+                f"SELECT anchor_id, {column} FROM {table} WHERE anchor_id IN ({marks})", ids
+            ):
+                out.setdefault(anchor_id, []).append(value)
+            return {key: tuple(values) for key, values in out.items()}
+
+        aliases = grouped("anchor_aliases", "alias")
+        categories = grouped("anchor_categories", "category")
+        terms = grouped("anchor_term_rows", "term")
+        return [
+            _Candidate(
+                anchor_id=anchor_id, path=path, ref=ref, title=title, kind=kind, lifecycle=lifecycle,
+                signature=signature, aliases=aliases.get(anchor_id, ()), terms=terms.get(anchor_id, ()),
+                categories=categories.get(anchor_id, ()), source_signature=source_signature,
+            )
+            for anchor_id, path, ref, title, kind, lifecycle, signature, source_signature in rows
+        ]
+
     def _stored_catalogue(self, conn: sqlite3.Connection) -> _StoredCatalogue:
         """Every catalogue row as stored, and the token they were stored under,
         read in one snapshot (inside the caller's transaction when it has one)."""
@@ -3226,7 +3294,7 @@ class WorkingSetIndex:
         raw_pages, outbound, names, project_members = _walk_page_entries(
             self.vault_root, conventions=conventions, reuse=reuse
         )
-        records, plans = _collection_candidates(self.vault_root)
+        records, plans = _collection_candidates(self.vault_root, carried=self._carried_candidates)
         projects, project_edges = _project_candidates(
             self.vault_root, project_members, registry=project_registry
         )

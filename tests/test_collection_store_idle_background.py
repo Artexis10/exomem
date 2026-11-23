@@ -252,27 +252,22 @@ def test_a_view_deleted_again_after_the_store_restored_it_is_restored_again(idle
         _until(view.exists)
 
 
-def test_an_index_build_on_a_released_store_neither_takes_the_lease_nor_runs_on_the_store_thread(
-        idle_service, monkeypatch):
-    """Recall's index build reads the store's collections from a thread of its own. Queued on the store thread
-    instead, it would open a released store and take the lease back, so a holder that is not preferred would keep
-    taking writer authority from the one that is, on every build."""
-    from exomem import working_set_runtime
+def test_an_index_build_on_a_released_store_keeps_its_lists_and_takes_no_lease(idle_service, monkeypatch):
+    """Recall's index build reads the store's collections from a thread of its own. Queued on the store thread,
+    it would open a released store and take the lease back, so a holder that is not preferred would keep taking
+    writer authority from the one that is. Failing instead would stop the whole index until a writer opened."""
+    from test_collection_store_service import _built_on_a_thread_of_its_own
+
+    from exomem import working_set_index
 
     root, manager = idle_service.root, idle_service.manager
+    assert manifest_path() in _built_on_a_thread_of_its_own(root, "while-admitted")
     grants, _ticks = watching(monkeypatch, manager)
     release_on_idle(manager)
     granted = len(grants)
 
-    def build():
-        try:
-            working_set_runtime._warm_index(root, "", None)
-        except OpError:
-            pass  # refused as busy: the service logs it and builds again on the next request
+    anchored = _built_on_a_thread_of_its_own(root, "after-idle")
 
-    thread = threading.Thread(target=build)
-    thread.start()
-    thread.join(60)
-
-    assert not thread.is_alive()
+    assert manifest_path() in anchored
+    assert working_set_index.WorkingSetIndex(root).freshness_stamp() == "after-idle"
     assert manager._fencing_token is None and len(grants) == granted
