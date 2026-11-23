@@ -406,6 +406,19 @@ def mark_replay_reached_commit() -> None:
         replay.commit_reached = True
 
 
+def _mark_uncertain(replay: _Replay) -> None:
+    """Mark an identity whose work may still commit; the requeue marks it again if this fails."""
+    with replay.lock:
+        if replay.commit_reached:
+            return
+        try:
+            _mark_commit_reached(replay)
+        except Exception:  # noqa: BLE001 - the requeue's own mark is the fallback
+            log.warning("write intake could not mark %s before its requeue", replay.claim.id, exc_info=True)
+            return
+        replay.commit_reached = True
+
+
 def _mark_commit_reached(replay: _Replay) -> None:
     conn, claim = replay.conn, replay.claim
     if conn is None:
@@ -912,6 +925,9 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
         refusal = cli_ops.public_refusal(error)
         code = str(refusal.get("code")) if refusal else "INTERNAL"
         if code in RETRY_REFUSALS:
+            if code in UNCERTAIN_REFUSALS:
+                # Before the replay closes: its work may still commit late, and must find the mark.
+                _mark_uncertain(replay)
             return (QUEUED, code)
         if refusal is None:
             log.warning("write intake replay of %s failed", claim.command, exc_info=True)
