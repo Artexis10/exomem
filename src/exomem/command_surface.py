@@ -390,7 +390,8 @@ class Command:
     names_pages: bool = False
     #: A save the serving process queues durably instead of refusing while the mutation boundary
     #: stays busy (`write_intake`). Only knowledge saves declare it: a job, an upload, a protocol
-    #: step or a credential must not run later than its caller expects.
+    #: step or a credential must not run later than its caller expects. Within a declaring command,
+    #: `commands.busy_intake_applies` decides per operation (`OperationEntry.queues_when_busy`).
     busy_intake: bool = False
     #: Resolve read-only handles before writer admission; the leaf revalidates the bound guards.
     prepare_arguments: Callable[..., dict[str, typing.Any]] | None = field(

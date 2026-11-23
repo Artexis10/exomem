@@ -1255,7 +1255,7 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if drainer is None:
         return None
     from . import writer_lease
-    from .commands import invocation_is_read_only
+    from .commands import busy_intake_applies, invocation_is_read_only
     from .governance import principal as principal_module
     from .governance.egress import SelectorCoverageError
 
@@ -1276,6 +1276,8 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     except (TypeError, ValueError):
         return None
     if len(encoded.encode("utf-8")) > MAX_ARGUMENT_BYTES:
+        return None
+    if not busy_intake_applies(command, jsonable):
         return None
     control = {key: kwargs[key] for key in control_names if key in kwargs}
     try:

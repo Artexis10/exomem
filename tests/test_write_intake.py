@@ -268,6 +268,41 @@ def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(
     assert write_intake.read(vault)["items"] == []
 
 
+def test_a_protocol_step_keeps_the_busy_refusal_while_a_save_of_the_same_command_queues(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A step whose reply the caller needs for its next step (an episode prepare), or a capture under a
+    # short reservation, would run against moved state if it were applied later.
+    _writer, holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "1")
+    episode = _command("episode_memory")
+    schema = (schema_module.load_source_schema(vault),)
+    with _Hold(holder, vault):
+        recap = _send(episode, vault, {"action": "record", "subject": "Queued recap",
+                                       "summary": "A recap sent while the vault was busy.",
+                                       "decided": ["Keep the recap"]}, injected=schema)
+        assert recap["state"] == "queued"
+        with pytest.raises(OpError) as prepare:
+            _send(episode, vault, {"action": "prepare", "episode": "ep-0123456789abcdef0123456789abcdef",
+                                   "candidate": "c1", "proposal": {"route": "no_capture", "alternatives": [], "evidence": [],
+                                                                  "reason": "Covered by an existing note.", "leaves": []}},
+                  injected=schema)
+        assert prepare.value.code == "MUTATION_BUSY"
+        with pytest.raises(OpError) as reserved:
+            identity = {"system": "notes-app", "record_id": "r-1", "revision": "1"}
+            _send(_command("capture_source"), vault, {
+                "title": "Reserved capture", "content": "Text held under a reservation.",
+                "source_identity": identity,
+                "capture_reservation": {
+                    "protocol_version": 1, "ticket": "t" * 32, "source_identity": identity,
+                    "request_sha256": "0" * 64, "admission_expires_at": time.time() + 600,
+                    "scope": {"cell_id": None, "replica_id": "r", "ledger_id": "l", "boundary_id": "b"},
+                },
+            }, injected=schema)
+        assert reserved.value.code == "MUTATION_BUSY"
+    assert all(item["command"] == "episode_memory" for item in write_intake.read(vault)["items"])
+
+
 def test_coordination_status_reports_the_intake_and_unknown_when_unreadable(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

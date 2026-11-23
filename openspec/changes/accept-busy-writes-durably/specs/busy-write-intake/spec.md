@@ -14,12 +14,18 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 
 ### Requirement: Only eligible saves are accepted
 
-A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command declares `busy_intake` in the command registry, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, the call is keyed, and its arguments fit within 4 MiB. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
+A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command registry marks the command and the operation it selects as queueable, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, the call is keyed, and its arguments fit within 4 MiB. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
 
 #### Scenario: An ineligible write keeps the busy refusal
 
 - **WHEN** a `maintain_memory` write meets the same busy boundary
 - **THEN** it returns `MUTATION_BUSY` with `committed: false` as before
+
+#### Scenario: A protocol step keeps the busy refusal
+
+- **WHEN** the owner sends an `episode_memory` `prepare` step, or a `capture_source` call that carries a capture reservation, while the boundary is busy
+- **THEN** it returns `MUTATION_BUSY` with `committed: false` as before
+- **AND** an `episode_memory` `record` sent in the same conditions is queued
 
 #### Scenario: A delegated caller keeps the busy refusal
 
