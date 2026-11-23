@@ -8,7 +8,7 @@
 - [x] 1.4 Change the MCP server title and instructions, CLI help and banners, and doctor and setup output to say Evermatter; keep the server key `exomem`.
 - [x] 1.5 Rewrite the README, QUICKSTART, `docs/` and `TRADEMARK.md` for the new name; keep `EXOMEM_*` documented as the settings prefix.
 - [x] 1.6 Change plugin and skill display names and descriptions, the scaffold's prose and `server.json`; keep their identifiers; regenerate the plugin trees and `docs/capabilities.md`.
-- [ ] 1.7 Publish images as `ghcr.io/substrate-systems/evermatter*`; make the Cloud deploy verify each image against the repository its name identifies.
+- [x] 1.7 Publish images as `ghcr.io/substrate-systems/evermatter*`; make the Cloud deploy verify each image against the repository its name identifies.
 
 ## 2. Repository and registries (operator steps marked)
 
