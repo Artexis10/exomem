@@ -31,9 +31,15 @@ The licence of each version made available after the cut SHALL grant Apache-2.0,
 
 #### Scenario: Reading the public licence statement
 
-- **WHEN** a reader opens the README licence section or the hosted service's source offer after the cut
+- **WHEN** a reader opens the README licence section after the cut
 - **THEN** it states that self-hosting is free, that competing hosted use is not permitted, and that each version becomes Apache-2.0 two years after it is first made available
 - **AND** it does not call versions after the cut "open source"
+
+#### Scenario: Reading the hosted service's source offer
+
+- **WHEN** a reader opens the hosted service's source offer after the cut
+- **THEN** it names the licence of the release the reader's cell runs, or both licences when that release is unknown
+- **AND** for a release that may be under FSL, it states the terms above or links to the public licence statement by a link named as the licence terms
 
 ### Requirement: The contributor promise matches the licence
 
