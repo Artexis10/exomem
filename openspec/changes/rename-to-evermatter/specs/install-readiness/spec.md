@@ -3,13 +3,12 @@
 ### Requirement: Uv-First Local Setup
 
 The system SHALL document `uv sync` as the canonical local setup path and
-`uv run python -m exomem ...` as the canonical source-checkout execution path.
-It SHALL keep `pip install -e .` documented only as a fallback for users who
-manage Python environments manually. The zero-install packaged proof
-(`uvx evermatter demo`) SHALL be documented ahead of the Install section as a
-pre-install trial step that requires no checkout; it SHALL NOT replace
-`uv sync` / `uv run python -m exomem` as the documented path for ongoing local
-development.
+`uv run python -m exomem ...` as the canonical source-checkout execution path,
+with `pip install -e .` only as a fallback for users who manage Python
+environments manually. It SHALL document the zero-install packaged proof,
+`uvx evermatter demo`, before the Install section as a trial step that needs
+no checkout; that proof SHALL NOT replace the `uv sync` path for ongoing
+local development.
 
 #### Scenario: New user follows the quickstart
 
