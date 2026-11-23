@@ -186,6 +186,7 @@ SAMPLES = {
     "review_memory:write-advisory-result": {
         "mode": "write-advisory-result", "ref": "$advisory",
     },
+    "review_memory:queued-write": {"mode": "queued-write"},
     "review_memory:procedure_approvals": {"mode": "procedure_approvals"},
     "review_memory:held": {"mode": "held"},
     "review_memory:vocabulary": {"mode": "vocabulary"},

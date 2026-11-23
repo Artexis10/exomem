@@ -676,6 +676,7 @@ _REMAINING = {
         _row("upkeep", "read_review", ("categories", "limit")),
         _row("plan-progress", "read_review", ("path", "limit")),
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
+        _row("queued-write", "read_review", ("ref", "limit")),
         _row("procedure_approvals", "read_review", ("limit",)),
         _row(held_operation.LIST_MODE, held_operation.REVIEW_TOOL, ("limit",)),
         _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family"),

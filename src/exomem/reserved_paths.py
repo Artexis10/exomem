@@ -652,6 +652,14 @@ _REGISTRY = (
         exact=_sqlite_family(".maintenance-jobs.sqlite"),
     ),
     InternalStateDescriptor(
+        "write-intake-store",
+        "write_intake",
+        StatePlacement.EXTERNAL_STATE,
+        # Queued saves are not derived: losing the store loses saves the caller was told are held.
+        rebuildable=False,
+        exact=_sqlite_family(".write-intake.sqlite"),
+    ),
+    InternalStateDescriptor(
         "idempotency-store",
         "idempotency",
         StatePlacement.EXTERNAL_STATE,

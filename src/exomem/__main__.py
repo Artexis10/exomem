@@ -2777,6 +2777,44 @@ def _store_mode_main(argv: list[str]) -> int:
     return 0
 
 
+def _intake_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem intake",
+        description=(
+            "Owner inspection of saves the service queued because the vault was busy, and "
+            "dismissal of a failed one. The service applies queued saves by itself."
+        ),
+    )
+    parser.add_argument("--vault", help="vault root; defaults to the configured vault")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    list_parser = subcommands.add_parser("list", help="list queued, applying and failed saves")
+    list_parser.add_argument("--limit", type=int, default=50, help="most saves to list, at most 50")
+    show_parser = subcommands.add_parser("show", help="show one save, with its arguments")
+    show_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")
+    dismiss_parser = subcommands.add_parser("dismiss", help="remove one failed save")
+    dismiss_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")
+    args = parser.parse_args(argv)
+
+    from . import write_intake
+    from .cli_ops import OpError
+    from .vault import resolve_vault
+
+    root = Path(args.vault).expanduser().resolve() if args.vault else resolve_vault()
+    try:
+        if args.command == "list":
+            result = write_intake.read(root, limit=args.limit)
+        elif args.command == "show":
+            ref = args.ref if args.ref.startswith(write_intake.REF_PREFIX) else write_intake.ref_for(args.ref)
+            result = write_intake.read(root, ref=ref)
+        else:
+            result = write_intake.dismiss(root, args.ref)
+    except OpError as error:
+        print(json.dumps(error.as_public_dict(), indent=2, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    return 0
+
+
 def _lease_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem lease",
@@ -5436,6 +5474,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "trace": _trace_main,
     "logs": _logs_main,
     "lease": _lease_main,
+    "intake": _intake_main,
     "governance-schema": _governance_schema_main,
     "relations": _relations_main,
     "collections": _collections_main,

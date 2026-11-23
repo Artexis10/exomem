@@ -6984,7 +6984,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
                 "attention", "activation", "item", "audit", "dispositions",
                 "provenance", "evolution", "compilation", "stale", "contradiction",
                 "unprocessed-sources", "relation-debt", "relation-queue", "adoption",
-                "upkeep", "plan-progress", "write-advisory-result",
+                "upkeep", "plan-progress", "write-advisory-result", "queued-write",
                 "procedure_approvals", "held",
             ),
             "structure",
