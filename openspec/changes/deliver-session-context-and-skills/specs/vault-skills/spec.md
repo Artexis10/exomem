@@ -28,7 +28,7 @@ Other files in a skill's directory SHALL remain ordinary pages.
 
 ### Requirement: Maps responses carry a catalogue of skills and collections
 
-Unless `EXOMEM_ACTIVATION_SKILLS=off`, each maps response SHALL carry `skills` with `state`, `generation`, `items`, `omitted` and `advice`.
+Unless `EXOMEM_ACTIVATION_SKILLS=off`, each maps response SHALL carry `skills` with `state`, `generation`, `items` and `omitted`.
 Each item SHALL carry `kind` (`skill` or `collection`), `name`, a `summary` and a `ref` that opens its page.
 Skill items SHALL list visible skill pages; collection items SHALL list visible Records collections by manifest title.
 A summary SHALL be the first sentence of the description or manifest body, cut at a whole word to `skill_summary_max_chars`.
@@ -74,21 +74,30 @@ State SHALL be `ready` for at least one item, `empty` for none, `unchanged` when
 - **WHEN** a skill's description changes after the caller received the catalogue
 - **THEN** the next response carries a new generation and the full current catalogue
 
-### Requirement: An overflowing catalogue lists the turn's domains first
+### Requirement: The catalogue's listing does not depend on the turn
 
 Whole items SHALL fit within `skills_max_chars`: skills before collections, each in name order.
-When not every item fits, items whose topics resolve through the domain registry to a domain the turn touches, or its ancestor, SHALL come first, then items the turn's task context reached, then the rest in fit order.
-`omitted` SHALL count the visible items left out. Without touched domains the first tier is empty.
+The listing, `omitted` and `generation` SHALL NOT depend on the turn.
 
 #### Scenario: A catalogue that fits ignores the turn
 
 - **WHEN** every visible item fits within `skills_max_chars`
 - **THEN** the catalogue lists them all in fit order, whatever the turn touches
 
-#### Scenario: An overflowing catalogue leads with the touched domain
+### Requirement: An overflowing catalogue names the turn's unlisted items beside it
 
-- **WHEN** the items do not all fit and the turn touches one registered domain
-- **THEN** the items of that domain are listed first, and `omitted` counts the items that did not fit
+When not every item fits, `turn_items` SHALL name unlisted items that fit within `skills_turn_max_chars`: first those whose topics resolve through the domain registry to a domain the turn touches or its ancestor, then those the turn's task context reached.
+`turn_items` SHALL stay outside `generation` and SHALL be sent on every turn that has them, also when the listing is `unchanged`.
+
+#### Scenario: An overflowing catalogue names the touched domain's unlisted item
+
+- **WHEN** the items do not all fit and an unlisted item belongs to the one registered domain the turn touches
+- **THEN** the listing stays in fit order, `omitted` counts the items that did not fit, and `turn_items` names that item
+
+#### Scenario: A held overflowing catalogue stays unchanged as the turn's domains change
+
+- **WHEN** a caller holding an overflowing catalogue sends turns that touch different domains
+- **THEN** the listing comes back `unchanged`, `next_action` does not point at it again, and only `turn_items` follow the turn
 
 ### Requirement: The catalogue tells the agent how to use it
 

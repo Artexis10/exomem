@@ -3,7 +3,8 @@
 The block is the template stance set: compiled from the catalogue's narrowed read, admitted
 before it is served, pinned for the invocation and decided again at terminal egress on the
 same unit shape. It is sent once per conversation and again only when it changes. A catalogue that
-fits lists every visible item whatever the turn is; only an overflowing one reads the turn.
+fits lists every visible item whatever the turn is; an overflowing one keeps the same listing and names the turn's
+unlisted items beside it, outside the generation.
 """
 
 from __future__ import annotations
@@ -88,12 +89,14 @@ def _visible(caller: Any, entries: Collection[Any], pending: Collection[str]) ->
     return [entry for entry in entries if entry.path and entry.path not in pending and caller.sees(entry.path)]
 
 
-def _led_by_turn(root: Path, candidates: list[_Candidate], domains: Collection[str], reached: Collection[str]) -> list[_Candidate]:
-    """The candidates of the touched domains first, then those the turn reached, then the rest; each tier keeps its order.
+def _of_the_turn(root: Path, candidates: list[_Candidate], domains: Collection[str], reached: Collection[str]) -> list[_Candidate]:
+    """The candidates of the touched domains, then those the turn reached; each tier keeps its order, and the rest are left out.
 
     An item's domains are what its own `topics` resolve to in the domain registry, as a profile page's are.
     """
-    domains = set(domains)
+    domains, reached = set(domains), set(reached)
+    if not domains and not reached:
+        return []
     taxonomy = source_taxonomy.load_taxonomy(root) if domains else None
 
     def tier(candidate: _Candidate) -> int:
@@ -103,7 +106,8 @@ def _led_by_turn(root: Path, candidates: list[_Candidate], domains: Collection[s
                 return 0
         return 1 if candidate.path in reached else 2
 
-    return sorted(candidates, key=tier)
+    tiers = [tier(candidate) for candidate in candidates]
+    return [candidates[at] for at in sorted(range(len(candidates)), key=tiers.__getitem__) if tiers[at] < 2]
 
 
 def compile_block(
@@ -114,13 +118,16 @@ def compile_block(
 
     The block's size and each summary's length are the vault's `budgets` in its activation conventions. Skills come
     first, then collections, each by name; whole items fit in that order, and `omitted` counts the visible items left out.
-    A catalogue that fits whole ignores the turn. One that overflows lists first the items whose topics resolve to
-    one of `domains` (the registered domains the turn touches, with their ancestors), then the items on a page of
-    `reached` (the paths the turn's task context reached), then the rest in fit order.
+    The listing and its generation never read the turn, so a held catalogue stays `unchanged` on every later turn.
+    When the catalogue overflows, `turn_items` names the unlisted items of the turn within `skills_turn_max_chars`:
+    first those whose topics resolve to one of `domains` (the registered domains the turn touches, with their
+    ancestors), then those on a page of `reached` (the paths the turn's task context reached). They sit outside the
+    generation and are sent on every turn that has them, held catalogue or not.
     """
     conventions = activation_conventions.load_conventions(root).conventions
     max_chars = conventions.budget("skills_max_chars")
     summary_chars = conventions.budget("skill_summary_max_chars")
+    turn_chars = conventions.budget("skills_turn_max_chars")
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
     try:
@@ -147,15 +154,15 @@ def compile_block(
     ]
     verdicts = egress.classify_units(root, [_unit(c.item, c.path) for c in candidates], purpose=caller.purpose)
     admitted = [candidate for candidate, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT]
-    if sum(len(vault_skills.item_line(c.item)) + 1 for c in admitted) > max_chars:
-        admitted = _led_by_turn(root, admitted, domains, reached)
     block = _empty()
     served: list[dict[str, Any]] = []
+    unlisted: list[_Candidate] = []
     used = 0
     for candidate in admitted:
         cost = len(vault_skills.item_line(candidate.item)) + 1
         if used + cost > max_chars:
             block["omitted"] += 1
+            unlisted.append(candidate)
             continue
         block["items"].append(candidate.item)
         served.append(_unit(candidate.item, candidate.path))
@@ -168,6 +175,16 @@ def compile_block(
         served = []
     elif block["items"]:
         block["advice"] = _advice()
+    turn_items, turn_used = [], 0
+    for candidate in _of_the_turn(root, unlisted, domains, reached) if unlisted and turn_chars else ():
+        cost = len(vault_skills.item_line(candidate.item)) + 1
+        if turn_used + cost > turn_chars:
+            continue
+        turn_items.append(candidate.item)
+        served.append(_unit(candidate.item, candidate.path))
+        turn_used += cost
+    if turn_items:
+        block["turn_items"] = turn_items
     _pin(root, caller, block, served)
     return block
 

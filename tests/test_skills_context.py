@@ -321,19 +321,11 @@ def test_a_records_collection_is_listed_after_the_skills_with_its_kind_name_summ
     ]
     collection = block["items"][-1]
     assert collection["summary"] == "Observations of depot stock."
-    assert _read(skills_vault, collection["ref"])["path"] == manifest
+    opened = _read(skills_vault, collection["ref"])
+    assert opened["path"] == manifest and "A closed row needs evidence." in opened["body"]
 
 
-def test_reading_an_items_ref_returns_the_whole_skill_page_or_collection_manifest(skills_vault):
-    _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
-    _refresh(skills_vault)
-    items = {item["name"]: item for item in _activate(skills_vault)["skills"]["items"]}
-
-    assert "A closed row needs evidence." in _read(skills_vault, items["Depot stock"]["ref"])["body"]
-    assert "Steps for the zeta engine tuning." in _read(skills_vault, items["zeta"]["ref"])["body"]
-
-
-def test_a_planning_collection_is_not_listed_because_only_records_collections_are_methods(skills_vault):
+def test_a_planning_collection_is_not_listed_because_only_records_collections_are(skills_vault):
     _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
     _write(skills_vault, f"{KB}/log.md", "# Log\n")  # Planning writes need the activity log.
     _seed_planning(skills_vault)
@@ -395,7 +387,7 @@ def test_the_turn_that_receives_the_catalogue_is_pointed_at_it_first(skills_vaul
 
 
 # --------------------------------------------------------------------------- #
-# A catalogue that overflows its bound reads the turn
+# A catalogue that overflows its bound keeps its listing and names the turn's items beside it
 # --------------------------------------------------------------------------- #
 
 
@@ -425,6 +417,10 @@ def domain_vault(tmp_path, monkeypatch):
         yield tmp_path
 
 
+def _turn(block: dict) -> list[str]:
+    return [item["name"] for item in block.get("turn_items") or ()]
+
+
 def _listed(root: Path, turn: str, items: list[tuple[str, str]], touched: list[str]) -> dict:
     """The catalogue for `turn` when only one of `items` (kind, name) fits.
 
@@ -441,40 +437,44 @@ def _listed(root: Path, turn: str, items: list[tuple[str, str]], touched: list[s
 
 
 # The names share no word with the turns, so a lexical match of the turn never reaches a skill page on its own.
-def test_an_overflowing_catalogue_lists_the_item_of_the_touched_domain_first(domain_vault):
+def test_an_overflowing_catalogue_names_the_unlisted_item_of_the_touched_domain_for_the_turn(domain_vault):
     _topic_skill(domain_vault, "alpha-pantry", "cooking")
     _topic_skill(domain_vault, "zulu-lantern", "games")
 
     block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-lantern")], ["games", "media"])
 
-    assert _names(block) == ["zulu-lantern"] and block["omitted"] == 1
+    assert _names(block) == ["alpha-pantry"] and block["omitted"] == 1
+    assert _turn(block) == ["zulu-lantern"]
 
 
-def test_an_overflowing_catalogue_lists_a_collection_of_the_touched_domain_before_skills_of_others(domain_vault):
+def test_an_overflowing_catalogue_names_an_unlisted_collection_of_the_touched_domain(domain_vault):
     _topic_skill(domain_vault, "alpha-pantry", "cooking")
     _collection(domain_vault, "Game Nights", "Zulu evenings", "Tabletop evenings and who won.", topics=("games",))
 
     block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("collection", "Zulu evenings")], ["games", "media"])
 
-    assert _names(block) == ["Zulu evenings"] and block["omitted"] == 1
+    assert _names(block) == ["alpha-pantry"] and block["omitted"] == 1
+    assert _turn(block) == ["Zulu evenings"]
 
 
-def test_an_overflowing_catalogue_lists_an_item_of_the_ancestor_domain_of_the_touched_one(domain_vault):
+def test_an_overflowing_catalogue_names_an_item_of_the_ancestor_domain_of_the_touched_one(domain_vault):
     _topic_skill(domain_vault, "alpha-pantry", "cooking")
     _topic_skill(domain_vault, "zulu-shelves", "media")
 
     block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-shelves")], ["games", "media"])
 
-    assert _names(block) == ["zulu-shelves"] and block["omitted"] == 1
+    assert _names(block) == ["alpha-pantry"] and block["omitted"] == 1
+    assert _turn(block) == ["zulu-shelves"]
 
 
-def test_an_overflowing_catalogue_with_no_touched_domain_lists_in_fit_order(domain_vault):
+def test_an_overflowing_catalogue_with_no_touched_domain_names_no_turn_items(domain_vault):
     _topic_skill(domain_vault, "alpha-pantry", "cooking")
     _topic_skill(domain_vault, "zulu-lantern", "games")
 
     block = _listed(domain_vault, GENERAL_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-lantern")], [])
 
     assert _names(block) == ["alpha-pantry"] and block["omitted"] == 1
+    assert "turn_items" not in block
 
 
 def test_a_catalogue_that_fits_ignores_the_turn_and_stays_unchanged_across_turns(domain_vault):
@@ -491,14 +491,15 @@ def test_a_catalogue_that_fits_ignores_the_turn_and_stays_unchanged_across_turns
     assert next_turn["skills"]["state"] == "unchanged"
 
 
-def test_an_overflowing_catalogue_lists_the_page_the_task_context_reached_when_no_domain_is_touched(skills_vault):
+def test_an_overflowing_catalogue_names_the_page_the_task_context_reached_when_no_domain_is_touched(skills_vault):
     whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
     _one_item_bound(skills_vault, whole["items"])
 
     block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
 
     assert _names(whole) == ["alpha", "mid", "zeta"]
-    assert _names(block) == ["zeta"] and block["omitted"] == 2
+    assert _names(block) == ["alpha"] and block["omitted"] == 2
+    assert _turn(block) == ["zeta"]
 
 
 def test_an_item_of_the_touched_domain_outranks_an_item_the_task_context_reached(skills_vault):
@@ -510,4 +511,22 @@ def test_an_item_of_the_touched_domain_outranks_an_item_the_task_context_reached
 
     block = skills_context.compile_block(skills_vault, caller, domains=["fleet"], reached=[MID])
 
-    assert _names(block) == ["zeta"] and block["omitted"] == 2
+    assert _names(block) == ["alpha"] and block["omitted"] == 2
+    assert _turn(block) == ["zeta", "mid"]
+
+
+def test_an_overflowing_catalogue_is_held_once_while_the_turns_domains_change(domain_vault):
+    """The listing reads no turn, so a held catalogue stays unchanged and is not pointed at again; the turn's items still move."""
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _topic_skill(domain_vault, "zulu-lantern", "games")
+    _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-lantern")], ["games", "media"])
+
+    first = _activate_profiles(domain_vault, GAMES_TURN)
+    second = _activate_profiles(domain_vault, GENERAL_TURN, continuity=first["continuity"])
+    third = _activate_profiles(domain_vault, GAMES_TURN, continuity=second["continuity"])
+
+    assert first["skills"]["state"] == "ready" and first["next_action"]["state"] == "skill_check"
+    for later in (second, third):
+        assert later["skills"]["state"] == "unchanged" and later["skills"]["items"] == []
+        assert (later.get("next_action") or {}).get("state") != "skill_check"
+    assert _turn(second["skills"]) == [] and _turn(third["skills"]) == ["zulu-lantern"]

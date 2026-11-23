@@ -42,7 +42,7 @@ from epistemic.journeys.f33_referent_replay import _lines as stream_events
 from epistemic.journeys.f33_referent_replay import tool_calls
 from membench.trackc.witness_join import parse_stream_json_transcript
 
-from exomem import memory_refs, note_types, prominence, source_closure
+from exomem import activation_result, context_fit, memory_refs, note_types, prominence, source_closure
 
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
@@ -67,8 +67,8 @@ RECAP_FOLDER = "Sources/Episodes/"
 #: Files the server maintains itself; a change to them is not a page the agent wrote.
 GENERATED_PAGES = ("index.md", "log.md")
 WARMING_MARK = "RETRIEVAL_INDEX_WARMING"
-#: The abstention reason `recall_context` gives while its catalogue warms (`activation_result.INDEX_WARMING`).
-WARMING_REASON = "index_warming"
+#: The abstention reason `recall_context` gives while its catalogue warms.
+WARMING_REASON = activation_result.INDEX_WARMING
 HOOK_EVENTS = ("Stop", "UserPromptSubmit")
 #: The retrieve hook's inject modes a run may pin: the hook's own documented values, one for every arm of a run.
 HOOK_INJECTS = ("mcp", "working_set")
@@ -183,7 +183,7 @@ def pinned_env(arm: Arm, work: Path, case: Case, activation_packet: str | None =
         "EXOMEM_DISABLE_EMBEDDINGS": "1",
         "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
         "EXOMEM_DISABLE_QUERY_LOG": "1",
-    } | ({"EXOMEM_METHOD_FIT_CONFIG": str(arm.placement)} if arm.placement else {})
+    } | ({context_fit.METHOD_FIT_ENV: str(arm.placement)} if arm.placement else {})
 
 
 def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str], ready_graph: bool = False) -> dict | None:
