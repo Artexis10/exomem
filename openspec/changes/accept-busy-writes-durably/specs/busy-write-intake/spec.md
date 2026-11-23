@@ -129,6 +129,18 @@ A queued save whose application ends in a refusal other than contention SHALL be
 - **THEN** the save is recorded `failed` with the guard's refusal
 - **AND** reading it returns the refusal and the original arguments
 
+### Requirement: The next save names failed queued saves
+
+When queued saves have failed and no reply has named them, the next successful reply to an owner's eligible save SHALL keep its own outcome first, then add one sentence with how many failed and the queued-write route as the serving surface spells it, plus a `queued_writes_failed` count. Each failure SHALL be named once, across restarts. A replay, a read, or any other caller's reply SHALL carry no notice and SHALL NOT use one up.
+
+#### Scenario: A failure is named on the next save, once
+
+- **WHEN** a queued edit fails because its page changed
+- **AND** the owner then saves a note
+- **THEN** the reply starts with the save's own outcome and adds "1 queued save sent earlier failed and was not saved"
+- **AND** the owner's following save carries no notice
+- **AND** a save queued behind the failed edit, a read, or a restart does not take or repeat the notice
+
 ### Requirement: Callers can read a queued save's outcome
 
 `review_memory(mode="queued-write")` SHALL list open and failed saves, oldest first and bounded by `limit`. With `ref` it SHALL return that save's state (`queued`, `applying`, `applied` or `failed`), its attempts, its compact outcome when applied, its refusal when failed, and its arguments while queued or failed. `coordination_status` SHALL report the queued, applying and failed counts and the age of the oldest queued save, and SHALL report `unknown` when the store cannot be read.

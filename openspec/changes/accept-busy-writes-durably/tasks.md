@@ -17,6 +17,7 @@
 - [x] 3.2 Add `write_intake` to `coordination_status`, `unknown` when unreadable.
 - [x] 3.3 Add `exomem intake list`, `exomem intake show <ref>` and `exomem intake dismiss <id>`.
 - [x] 3.4 Describe the queued receipt in the shipped `mutation-results` reference and regenerate the derived client artifacts.
+- [x] 3.5 Name failed queued saves once in the next successful reply to the owner's eligible save (`write_intake.with_failure_notice`).
 
 ## 4. Proof
 

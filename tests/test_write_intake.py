@@ -225,6 +225,43 @@ def test_a_queued_edit_whose_page_changed_fails_visibly_with_its_arguments(
     assert write_intake.read(vault)["items"] == []
 
 
+def test_the_next_save_after_a_queued_save_failed_says_so_once(vault: Path, managers, drainer) -> None:
+    # Without the notice, a queued save that fails later is seen only by a caller who asks. The
+    # replay queued behind it, a read and a restart must not use the notice up or repeat it.
+    _writer, holder = managers
+    page = "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout.md"
+    kwargs = {
+        "path": page,
+        "why": "A source corrected the cohort steps.",
+        "operation": {"kind": "replace_string", "old_string": "1%, 5%, 25%, 100%", "new_string": "1%, 10%, 50%, 100%"},
+    }
+    remember = _command("remember")
+    assert "queued_writes_failed" not in _send(remember, vault, _remember_kwargs(vault, 40))
+    with _Hold(holder, vault):
+        ref = _send(_command("edit_memory"), vault, kwargs)["queued_write"]["ref"]
+        behind = _send(remember, vault, _remember_kwargs(vault, 43), scope="principal:session-c")
+        target = vault / page
+        target.write_text(target.read_text(encoding="utf-8").replace("1%, 5%, 25%, 100%", "2%, 20%, 100%"),
+                          encoding="utf-8")
+    _wait_for_state(vault, ref, "failed")
+    _wait_for_state(vault, behind["queued_write"]["ref"], "applied")
+    read = _send(_command("record_memory"), vault, {"action": "describe"})
+    assert "queued_writes_failed" not in read
+
+    noticed = _send(remember, vault, _remember_kwargs(vault, 41), scope="principal:session-b")
+    assert noticed["user_summary"].startswith("Saved")
+    assert "1 queued save sent earlier failed and was not saved" in noticed["user_summary"]
+    assert "queued-write" in noticed["user_summary"]
+    assert noticed["queued_writes_failed"] == 1
+    later = _send(remember, vault, _remember_kwargs(vault, 42), scope="principal:session-b")
+    assert "queued_writes_failed" not in later and "failed" not in later["user_summary"]
+
+    write_intake.stop(vault)
+    write_intake.start(vault)
+    restarted = _send(remember, vault, _remember_kwargs(vault, 44), scope="principal:session-b")
+    assert "queued_writes_failed" not in restarted
+
+
 def test_a_save_sent_after_a_queued_one_runs_after_it(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:

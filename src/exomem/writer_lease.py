@@ -8915,7 +8915,12 @@ def _busy_write_intake(
             admission = None
         if admission is None:
             return function(command, *injected, **kwargs)
-        return admission.run(lambda: function(command, *injected, **kwargs))
+        result = admission.run(lambda: function(command, *injected, **kwargs))
+        try:
+            return write_intake.with_failure_notice(admission, result)
+        except Exception:  # noqa: BLE001 - the notice never fails the save it rides on
+            logger.warning("write intake failure notice failed for %s", getattr(command, "name", command), exc_info=True)
+            return result
 
     return wrapped
 
