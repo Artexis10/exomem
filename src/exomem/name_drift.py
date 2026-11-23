@@ -404,13 +404,23 @@ def _refused_codes(drift: Scan) -> dict[str, int]:
 
 
 def _summary(drifted: int, untitled: int, refused: int, codes: Mapping[str, int]) -> str:
-    noun = "page has a file name" if drifted == 1 else "pages have file names"
-    sentence = f"{drifted} {noun} that no longer follow their titles."
+    if drifted == 1:
+        sentence = "1 page has a file name that no longer follows its title."
+    else:
+        sentence = f"{drifted} pages have file names that no longer follow their titles."
     if untitled:
-        sentence += f" {untitled} more have no usable title and are left as they are."
+        sentence += (
+            " 1 more has no usable title and is left as it is."
+            if untitled == 1
+            else f" {untitled} more have no usable title and are left as they are."
+        )
     if refused:
         by_code = ", ".join(f"{code} {count}" for code, count in codes.items())
-        sentence += f" {refused} more cannot be renamed now and are left as they are ({by_code})."
+        sentence += (
+            f" 1 more cannot be renamed now and is left as it is ({by_code})."
+            if refused == 1
+            else f" {refused} more cannot be renamed now and are left as they are ({by_code})."
+        )
     return sentence
 
 
