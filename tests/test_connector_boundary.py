@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -646,6 +648,82 @@ def test_mcp_content_is_withheld_when_origin_session_ends_during_read(configured
     revoke = True
     with pytest.raises(error_type, match="authority changed"):
         asyncio.run(invoke())
+
+
+def test_mcp_preview_deadline_reaches_final_connector_policy(configured_boundary, vault, source_schema, monkeypatch):
+    from _public_call import public_call
+    from fastmcp import Client
+    from test_agent_tool_surface import _call
+    from test_reclassify_source import _capture
+
+    from exomem import (
+        file_watcher,
+        freshness,
+        lexstore,
+        request_budget,
+        server,
+        state_migration,
+        writer_lease,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance import store
+
+    _, authenticate = configured_boundary
+    with principal.request_scope(authenticate("full")):
+        source = _capture(vault, source_schema, title="Field measurements").path
+    authority = state_migration.assert_offline_migration_authority(source="isolated preview test")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    store.open_connection(vault).close()
+    for scope, directory in (("vault", vault), ("kb", vault / "Knowledge Base")):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    observer = threading.Event()
+    held, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: observer)
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
+    mcp = server.build_server(require_auth=False)
+
+    def hold_policy():
+        with writer_lease.active_manager().reserved_identity_guard(
+            vault, domains=("governance-store",), exclusive=False, advance_generation=False,
+        ):
+            held.set()
+            assert release.wait(10)
+
+    holder = threading.Thread(target=hold_policy, daemon=True)
+    trace = server.CallTraceMiddleware.on_call_tool
+
+    async def hold_before_terminal_recheck(middleware, context, call_next):
+        result = await trace(middleware, context, call_next)
+        if holder.ident is None:
+            holder.start()
+            assert await asyncio.to_thread(held.wait, 3)
+        return result
+
+    monkeypatch.setattr(server.CallTraceMiddleware, "on_call_tool", hold_before_terminal_recheck)
+
+    async def invoke():
+        async with Client(mcp, timeout=5) as client:
+            call = public_call("manage_memory_file", {
+                "operation": "propose-reclassification", "path": source, "source_kind": "dataset-export",
+            })
+            started = time.monotonic()
+            try:
+                terminal = await _call(client, *call)
+                assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
+                assert "preview_digest" not in terminal and "references" not in terminal
+                assert held.is_set() and holder.is_alive() and time.monotonic() - started < 3.5
+            finally:
+                release.set()
+                if holder.ident is not None:
+                    await asyncio.to_thread(holder.join, 3)
+            assert (await _call(client, *call))["preview_digest"]
+
+    asyncio.run(invoke())
 
 
 def test_private_registries_cannot_change_resolution_bootstrap_or_save_outcomes(configured_boundary, vault):

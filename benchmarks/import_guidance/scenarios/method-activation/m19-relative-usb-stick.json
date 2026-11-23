@@ -1,0 +1,12 @@
+{
+  "id": "m19-relative-usb-stick",
+  "title": "A relative's old USB stick is to be archived under her own folder",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "My aunt Ottilie's old USB stick turned up at the back of a drawer. It's mostly scanned photos and a folder of her letters, a few hundred files in all.",
+    "I'd like those archived properly. It's all Ottilie's stuff, so make her a dedicated folder for it.",
+    "That's all for now, thanks."
+  ]
+}

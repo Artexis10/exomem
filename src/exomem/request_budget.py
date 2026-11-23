@@ -366,8 +366,9 @@ _READ_CHECKPOINT: ContextVar[ReadCheckpoint | None] = ContextVar(
 class ReadCheckpoint:
     """The same allowance on the caller and its accepted read batches."""
 
-    def __init__(self, budget: RequestBudget) -> None:
+    def __init__(self, budget: RequestBudget, *, bound_disclosure: bool = False) -> None:
         self.budget = budget
+        self.bound_disclosure = bound_disclosure
 
     def remaining(self) -> float:
         return self.budget.remaining()

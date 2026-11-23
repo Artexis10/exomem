@@ -43,6 +43,32 @@ The constraints first written for this phase follow. The delivered design supers
 
 The delivered design had its own review in `add-curation-relocation-protocol`.
 
+### 6. A large managed preview produces a paged approval report
+
+Bound candidate collection and response size in the interactive request. A positive overflow starts or rejoins a read-only preview through the maintenance job runner. A current publication must still prove the candidate set. Contention or incomplete evidence yields the existing warming response.
+
+Use the existing job receipt and a report-local cursor to report one bounded page at a time. Publish the summary and approval digest after the job proves the complete report. Admit the managed report only while the owner's authority covers every contributor. An owner-scoped rule or Access exclusion can withhold a contributor even if it does not appear in the report. Refuse managed previews under those conditions before counting references.
+
+Bind page delivery to live owner credentials, the governing policy, the connector ceiling, and the erasure set. Preview and paged apply decide the same candidate paths before counting or planning effects. Each completed report needs a current membership snapshot, since a file can change its container binding. A changed or unknown snapshot needs a fresh preview. The release filter checks guarded report and continuation paths without enumerating their directories. The lifecycle verifier reuses its validated set until physical evidence changes and checks the request deadline during a refresh. Refuse the whole response if the filter changes any value. A failed or interrupted job cannot expose staged rows.
+
+The paged approval digest binds the Source, destination, full referrer report, and pointer-write proof. The writer checks it against the current plan and rechecks the proof before saving pointer records and renaming the Source. The existing inline approval digest stays readable.
+
+The product load target is 20,000 pages, about 100,000 units, and 120,000 edges, with a hub of 10,000 links. Use the existing request deadline and maintenance receipt response bound. Prove that a large preview leaves Records responsive and can report all 10,000 referrers over bounded pages.
+
+### 7. Governed pages reuse exact evidence
+
+Receipt verification must survive ordinary concurrent appends. A current tail or an unchanged erasure marker does not prove the integrity of older receipt bytes. Verify the historical evidence on bounded physical segments and carry the verified chain endpoint to the next segment. Reuse proof while the held segment identity is current. Reverify changed segments before releasing a report. Keep legacy evidence readable and preserve the ordinary full audit across storage formats.
+
+Bound the size of any segment that an ordinary append can change. Use the existing receipt writer, chain checks, and recovery worker. Verify old oversized evidence off the request path. Keep the final report gate after disclosure recording so an edit to a prior receipt can still withhold the whole response. Keep the verification state separate from the retained report body.
+
+For page-local release, retain the page evidence that the background job already checked. Use the existing guarded generation and simple-page proof. The terminal gate must still check current policy, the connector ceiling, RAW authority, custody, and erasure evidence. Referrers with external dependencies need current evidence for those dependencies too. Feed the already proved byte hash and size to the disclosure receipt rather than reopening the referrer to calculate them.
+
+The release check covers a production-sized reference report, existing governed erasures, a long receipt history, and independent disclosure appends. Compare the same route with and without the change. Require every bounded page to finish within its deadline. Edit historical evidence between disclosure recording and release, and verify that no report facts reach the caller.
+
+### Known limit: large governed previews
+
+A governed vault does not yet meet the load target. On 10,001 governed referrers in one flat folder, each referrer costs about 20 ms of admission work. Most of that time goes to re-listing the folder to resolve one physical name. The background build needs about 209 s, so it stops at the 50 s request budget with no saved progress. Without that cap, it fails its final snapshot check, because index and governance generations move during a long build. These costs predate this change. Ungoverned vaults meet the target. A follow-up change takes governed preview scale and bounded release for referrers with dependencies.
+
 ## Controls and costs
 
 - The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.

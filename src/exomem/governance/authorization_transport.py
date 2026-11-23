@@ -7,12 +7,13 @@ import logging
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from io import TextIOWrapper
 from pathlib import Path
+from time import monotonic
 from typing import Any, Final
 from urllib.parse import quote_plus, unquote_plus
 
@@ -23,8 +24,8 @@ from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from mcp.shared.message import ServerMessageMetadata, SessionMessage
 from mcp.types import jsonrpc_message_adapter
 
-from .. import auth_sessions
-from ..command_surface import mcp_request_correlation
+from .. import auth_sessions, request_budget
+from ..command_surface import mcp_preview_warming, mcp_request_correlation
 from ..log_events import log_event
 from . import authorization_sessions, connector_boundary
 from . import principal as principal_module
@@ -641,8 +642,9 @@ def _observe_authorization(request_id: str, phase: str, entry_ms: float, post_ms
 class AuthorizationSessionMiddleware(Middleware):
     """Verify MCP capability context before tracing and FunctionTool validation."""
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(self, vault_root: Path, *, surface_descriptor=None) -> None:
         self.vault_root = Path(vault_root)
+        self.surface_descriptor = surface_descriptor
 
     async def on_call_tool(
         self,
@@ -652,9 +654,12 @@ class AuthorizationSessionMiddleware(Middleware):
         entry_started = time.perf_counter()
         entry_ms = None
         post_started = None
+        entered = monotonic()
+        check = None
+        retained_identity = None
         # These phases name fixed middleware stages, not authorization policy states.
         phase = "entry"
-        with mcp_request_correlation() as request_id:
+        with mcp_request_correlation() as request_id, ExitStack() as scopes:
             try:
                 arguments = dict(context.message.arguments or {})
                 carrier = take_presented_carrier(context, arguments)
@@ -673,8 +678,44 @@ class AuthorizationSessionMiddleware(Middleware):
                     bound = enforce_credential_rule(admission, rule)
                     if not await auth_sessions.origin_session_active(bound):
                         raise AuthorizationContextUnavailable
-                    boundary_revision = connector_boundary.cache_identity(self.vault_root, bound)
-                    unrestricted = connector_boundary.unrestricted(self.vault_root, bound)
+                    if context.message.name == "manage_memory_file":
+                        from ..reclassify_source import is_preview_call, managed_preview_stop
+
+                        if is_preview_call(context.message.name, arguments):
+                            check = request_budget.ReadCheckpoint(request_budget.RequestBudget(
+                                seconds=request_budget.budget_seconds(), entry=entered,
+                            ), bound_disclosure=True)
+                            with request_budget.checking(check):
+                                stop = await anyio.to_thread.run_sync(managed_preview_stop, self.vault_root, bound)
+                            if stop is None:
+                                check = None
+                    scopes.enter_context(request_budget.checking(check))
+                    if check is not None and arguments.get("preview_run_id") is not None:
+                        from ..reclassification_preview import (
+                            retained_report_admission,
+                            retained_report_identity,
+                            retained_report_still_current,
+                        )
+
+                        retained_identity = await anyio.to_thread.run_sync(
+                            retained_report_identity, self.vault_root, bound,
+                        )
+                        if retained_identity is None:
+                            raise AuthorizationContextUnavailable
+                        scopes.enter_context(retained_report_admission(retained_identity))
+
+                    def boundary_view() -> tuple[tuple, bool]:
+                        request_budget.checkpoint()
+                        view = (
+                            connector_boundary.cache_identity(self.vault_root, bound),
+                            connector_boundary.unrestricted(self.vault_root, bound),
+                        )
+                        request_budget.checkpoint()
+                        return view
+
+                    boundary_revision, unrestricted = (
+                        await anyio.to_thread.run_sync(boundary_view) if check is not None else boundary_view()
+                    )
                 except AuthorizationContextUnavailable as error:
                     raise ToolError(str(error)) from None
                 except AuthorizationRouteUnclassified as error:
@@ -694,14 +735,30 @@ class AuthorizationSessionMiddleware(Middleware):
                 try:
                     # A result computed under changed admission cannot expose its old
                     # contributors. The caller retries under the current host revision.
-                    changed = connector_boundary.cache_identity(self.vault_root, bound) != boundary_revision
-                    limited = not unrestricted or not connector_boundary.unrestricted(self.vault_root, bound)
+                    final_revision, final_unrestricted = (
+                        await anyio.to_thread.run_sync(boundary_view) if check is not None else boundary_view()
+                    )
+                    changed = final_revision != boundary_revision
+                    limited = not unrestricted or not final_unrestricted
                     if not await auth_sessions.origin_session_active(bound) or changed and limited:
                         raise AuthorizationContextUnavailable
+                    if check is not None and await anyio.to_thread.run_sync(
+                        managed_preview_stop, self.vault_root, bound,
+                    ) is None:
+                        raise AuthorizationContextUnavailable
+                    if retained_identity is not None and not await anyio.to_thread.run_sync(
+                        retained_report_still_current, self.vault_root, bound, retained_identity,
+                    ):
+                        raise AuthorizationContextUnavailable
+                    request_budget.checkpoint()
                 except (AuthorizationContextUnavailable, connector_boundary.BoundaryUnavailable):
                     raise ToolError("request authority changed before result consumption") from None
                 phase = "complete"
                 return result
+            except request_budget.ReadBudgetExhausted:
+                if check is None:
+                    raise
+                return await mcp_preview_warming(context, arguments, self.surface_descriptor)
             finally:
                 # CallTrace starts inside this middleware; exclude its entire downstream call.
                 finished = time.perf_counter()

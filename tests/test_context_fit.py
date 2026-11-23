@@ -400,3 +400,37 @@ def test_one_oversized_method_description_does_not_hide_the_ones_after_it(vault:
         )
     assert [item["label"] for item in sent[0]["methods"]] == ["first", "last"]
     assert status["considered"] == 2 and status["omitted"] == 1
+
+
+def test_a_method_whose_label_cannot_fit_is_not_read(vault: Path) -> None:
+    """Once the input allowance is spent, reading more pages costs the turn time and can change nothing."""
+    small = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=400,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    read = []
+
+    def description(source):
+        read.append(source.title)
+        return "Fire the kiln."
+
+    def handler(request):
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "fixture-runtime"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "fixture-model", "digest": "fixture-digest"}]})
+        return httpx.Response(200, json={"model": "fixture-model", "message": {"content": json.dumps({"methods": []})}})
+
+    carriers = [
+        {"name": "short", "path": small, "kind": "skill", "description_of": description, "max_chars": 200},
+        {"name": "x" * 500, "path": small, "kind": "skill", "description_of": description, "max_chars": 200},
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        _chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+            limit=1, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert len(read) == 1 and status["considered"] == 1 and status["omitted"] == 1

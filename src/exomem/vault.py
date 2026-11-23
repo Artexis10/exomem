@@ -8515,6 +8515,10 @@ class InboundLink:
         }
 
 
+class InboundCandidatesExceeded(Exception):
+    """The current inbound index holds more candidates than the caller can process."""
+
+
 # ---------------- inbound-link index ----------------
 # One full-vault read pass builds normalized-target -> entry buckets plus a
 # basename count map; `find_inbound_wikilinks` becomes a lookup with output
@@ -8934,22 +8938,30 @@ def _catch_up_inbound(
     return False
 
 
-def inbound_rebuild_needed(vault_root: Path) -> bool:
+def inbound_rebuild_needed(vault_root: Path, *, check_patch_chain: bool = False) -> bool:
     """Whether only an owner build can restore this vault's index.
 
-    True when nothing is resident, or the resident data has no proven checkpoint.
-    Data that is resident under a checkpoint merely behind the registry is
-    completed by the patch the watcher is about to run, so a rebuild would repeat
-    work the patch does for the cost of the change.
+    A managed preview checks without waiting for the index lock. A reseed or
+    expired history needs a build even when a prior checkpoint is resident.
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
-    with _INBOUND_INDEX_LOCK:
-        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
-    return cached is None or cached[1].checkpoint is None
+    root = str(vault_root.resolve())
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=not check_patch_chain):
+        return False
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        checkpoint = cached[1].checkpoint if cached is not None else None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return checkpoint is None or (
+        check_patch_chain and not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
+    )
 
 
-def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+def prime_inbound_index(
+    vault_root: Path, *, eager: bool = False, defer_to_patch: bool = False,
+) -> bool:
     """Rebuild requested link metadata on the existing background owner.
 
     At most one pass builds a vault's index at a time: a caller that finds
@@ -8969,6 +8981,8 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
     if not state.building.acquire(blocking=False):
         return False
     try:
+        if defer_to_patch and not inbound_rebuild_needed(vault_root, check_patch_chain=True):
+            return False
         data = _inbound_index(vault_root, require_current=True)
     finally:
         state.building.release()
@@ -9118,16 +9132,32 @@ def _inbound_target_forms(target_rel_path: str) -> tuple[str, str, str, str]:
     return target, full, managed_relative(full), target.rsplit("/", 1)[-1]
 
 
-def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _InboundIndexData:
+def _inbound_candidate_keys(
+    full: str, stripped: str, basename: str, *, basename_unique: bool,
+) -> tuple[str, ...]:
+    keys = (full,) if stripped == full else (full, stripped)
+    if basename_unique and basename not in keys:
+        return (*keys, basename)
+    return keys
+
+
+def _snapshot_inbound(
+    data: _InboundIndexData, target_rel_path: str, *,
+    candidate_keys: tuple[str, ...] | None = None, include_stems: bool = True,
+) -> _InboundIndexData:
     """Copy only this target's evidence. The caller holds `_INBOUND_INDEX_LOCK`.
 
     Visibility checks and ordering then run on the copy, outside the lock.
     """
     _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+    keys = (full, stripped, basename) if candidate_keys is None else candidate_keys
     return _InboundIndexData(
-        buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
+        buckets={key: list(data.buckets.get(key, ())) for key in keys},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
-        sources={rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())},
+        sources=(
+            {rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())}
+            if include_stems else {}
+        ),
     )
 
 
@@ -9525,6 +9555,8 @@ def cached_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    read_hashes: Mapping[str, str | None] | None = None,
+    candidate_limit: int | None = None,
 ) -> list[InboundLink] | None:
     """Borrow complete current evidence without a walk, build or cache wait.
 
@@ -9532,12 +9564,20 @@ def cached_inbound_wikilinks(
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
 
+    A file-mode planner can require the cache to have seen the same guarded bytes.
+
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
+
+    A candidate limit applies to file-mode reads with a current index. The
+    bound covers possible candidates before the caller's view reads them.
     """
-    stored = _store_inbound(vault_root, (target_rel_path,), visible)
-    if stored is not None:
-        return stored[target_rel_path]
+    if candidate_limit is None:
+        stored = _store_inbound(vault_root, (target_rel_path,), visible)
+        if stored is not None:
+            return stored[target_rel_path]
+    elif _store_inbound_mode(vault_root):
+        return None
     from .governance import egress
     from .published_admission import admission_of
 
@@ -9547,8 +9587,24 @@ def cached_inbound_wikilinks(
         return None
     # Owner registration makes this signal stable even while evidence is contended.
     state.demanded.set()
-    instance = freshness.consumer_checkpoint_instance()
-    generation = freshness.generation(vault_root, "vault")
+
+    def registry_state(*, pending: bool = False) -> tuple[str, int | None, int | None] | None:
+        if read_hashes is not None or candidate_limit is not None:
+            sample = freshness.preview_reference_generation(vault_root)
+            if sample is None:
+                return None
+            instance, generation, _, epoch = sample
+            return instance, generation, epoch
+        return (
+            freshness.consumer_checkpoint_instance(),
+            freshness.generation(vault_root, "vault"),
+            freshness.external_pending_epoch(vault_root) if pending else None,
+        )
+
+    before = registry_state()
+    if before is None:
+        return None
+    instance, generation, _ = before
     if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9559,12 +9615,27 @@ def cached_inbound_wikilinks(
         if generation is None or checkpoint is None:
             return None
         if (
-            visible is None
+            (visible is None or read_hashes is not None or candidate_limit is not None)
             and (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
         ):
             return None
         cache_generation = state.generation
-        snapshot = _snapshot_inbound(cached[1], target_rel_path)
+        data = cached[1]
+        candidate_keys = None
+        exceeded = False
+        if candidate_limit is not None:
+            _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+            stems = data.stem_counts.get(basename, 0)
+            candidate_keys = _inbound_candidate_keys(
+                full, stripped, basename, basename_unique=stems == 1 or (visible is not None and stems > 1),
+            )
+            checks = sum(len(data.buckets.get(key, ())) for key in candidate_keys)
+            if visible is not None and stems > 1:
+                checks += stems
+            exceeded = checks > max(0, candidate_limit)
+        snapshot = None if exceeded else _snapshot_inbound(
+            data, target_rel_path, candidate_keys=candidate_keys, include_stems=visible is not None,
+        )
     finally:
         _INBOUND_INDEX_LOCK.release()
 
@@ -9578,11 +9649,7 @@ def cached_inbound_wikilinks(
             return False
         target, pending_epoch = checked
         # Instance and generation identify this exact endpoint without rehashing the registry map.
-        return (
-            freshness.consumer_checkpoint_instance() == target.instance_id
-            and freshness.generation(vault_root, "vault") == target.generation
-            and freshness.external_pending_epoch(vault_root) == pending_epoch
-        )
+        return registry_state(pending=True) == (target.instance_id, target.generation, pending_epoch)
 
     def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
         if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
@@ -9607,16 +9674,17 @@ def cached_inbound_wikilinks(
             current_admission = admission_of(reader)
             if reader is None or current_admission is None or current_admission.identity() != authority:
                 return False
-        pending_epoch = freshness.external_pending_epoch(vault_root)
+        live = registry_state(pending=True)
+        if live is None:
+            return False
+        _, _, pending_epoch = live
         target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
-            and freshness.consumer_checkpoint_instance() == instance
-            and freshness.generation(vault_root, "vault") == generation
-            and not freshness.external_pending(vault_root)
+            and live == (instance, generation, None)
         ):
             held = frozenset()
-        elif visible is None:
+        elif visible is None or read_hashes is not None or candidate_limit is not None:
             return False
         else:
             try:
@@ -9642,7 +9710,7 @@ def cached_inbound_wikilinks(
 
     if not current():
         return None
-    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading)
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading) if snapshot is not None else None
     if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9650,10 +9718,15 @@ def cached_inbound_wikilinks(
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
             or not registry_current()
+            or (read_hashes is not None and any(
+                sha is None or cached[1].sources.get(path) != sha for path, sha in read_hashes.items()
+            ))
         ):
             return None
     finally:
         _INBOUND_INDEX_LOCK.release()
+    if exceeded:
+        raise InboundCandidatesExceeded()
     return result
 
 
@@ -9679,18 +9752,10 @@ def _select_inbound_wikilinks(
         stem_count += 1
     basename_unique = stem_count == 1
 
-    candidates: list[_InboundEntry] = []
-    candidates.extend(data.buckets.get(target_full, ()))
-    if target_stripped != target_full:
-        candidates.extend(data.buckets.get(target_stripped, ()))
-    # The basename bucket only contributes when it isn't already one of the
-    # path-form buckets (e.g. a KB-root file where stripped == basename).
-    if (
-        basename_unique
-        and "/" not in target_basename
-        and target_basename not in (target_full, target_stripped)
-    ):
-        candidates.extend(data.buckets.get(target_basename, ()))
+    keys = _inbound_candidate_keys(
+        target_full, target_stripped, target_basename, basename_unique=basename_unique,
+    )
+    candidates = [entry for key in keys for entry in data.buckets.get(key, ())]
 
     self_keys = (target_full, target_stripped)
     return [
