@@ -1594,8 +1594,9 @@ generation the map was built from. One background pass rebuilds the map, and the
 the new one. A restricted caller never gets the owner's map: its packet is built in the call.
 
 The `budget` block has two sizes. `used_chars` is the prose the packet charges against `max_chars`.
-`serialized_chars` is the length of the packet as sent, in compact JSON, without the
-`serialized_chars` field itself. A map item omits `topics` when it has none, and omits
+`serialized_chars` is the length of the packet as the cell builds it, in compact JSON, without the
+`serialized_chars` field itself. A Cloud cell adds its `service_notice` field to the reply after that
+count, so the count excludes it. A map item omits `topics` when it has none, and omits
 `lifecycle_class` and `state` when they are unset.
 
 A client that holds the current map can send its `continuity` token back. When the map that the
