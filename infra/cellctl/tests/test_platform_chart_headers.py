@@ -881,6 +881,10 @@ def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
     # Without this route, clients that show the server's site icon fall back to the parent domain's.
     assert any("Path(`/favicon.ico`)" in rule["match"] and "Method(`HEAD`)" in rule["match"]
                for rule in route["spec"]["routes"])
+    # Without this route a product's identity read never reaches the gateway, so no service
+    # credential holder can verify its cell.
+    assert any(rule["match"] == "Host(`mcp.example.test`) && Path(`/.well-known/exomem-cell`) && Method(`GET`)"
+               for rule in route["spec"]["routes"])
 
     # The edge namespace holds no Secret but the certificate cert-manager
     # writes there at runtime: the chart itself renders none, and no issuer.
