@@ -597,7 +597,7 @@ def test_a_store_with_history_upgrades_without_losing_a_row_or_a_proof(schema_18
 
     with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
         conn = handle.connection
-        assert schema.schema_version(conn) == 19
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert tables_of(conn, HISTORY_TABLES) == before

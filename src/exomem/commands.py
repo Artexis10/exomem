@@ -15398,12 +15398,15 @@ _BUSY_INTAKE_COMMANDS = frozenset({
     "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
     "episode_memory", "capture_source", "preserve_evidence", "record_memory", "plan_memory",
 })
+
+
 def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     """Whether the write these JSON `arguments` select may be queued when the boundary is busy.
 
     A grouped command decides per operation (`OperationEntry.queues_when_busy`); a call that
     matches no write operation keeps the busy refusal. A capture under a `capture_reservation`
-    never reaches this check: `writer_lease.replay_origin` gives it no replay identity.
+    passes this check and keeps the busy refusal after it: `writer_lease.replay_origin` gives it
+    no replay identity.
     """
     if not command.busy_intake:
         return False
@@ -15416,6 +15419,8 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     if operations.selector is not None:
         action = _resolved_invocation_selector(command, dict(arguments), operations.selector)
     return operations.queues_when_busy(action, arguments)
+
+
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —

@@ -68,6 +68,16 @@ The `decrypted` level is a sample, because it costs a download.
 It runs only where checks run (a store whose descriptor states `head_recomputes`), for a store with `retrieval_class` `immediate`, and for a key version whose identity this install can read.
 A store whose checks are not scheduled is never sampled and is never charged bytes.
 
+## Declare a Backblaze B2 replica store
+
+Add an adapter named `b2` to the vault's `stores` list. Supply the exact `bucket`, `bucket_id`, and nonempty `prefix` allowed by its application key. Set the store's `retrieval_class` to `immediate` and `head_recomputes` to `false`. Set `failure_domain` to the location's independent failure domain.
+
+Set `credential_file` to an absolute path on the serving host. Keep `key_id` and `application_key` in that private JSON file. Use a bucket-and-prefix restricted key with read and write access. The key must not hold a capability that can remove a version: `deleteFiles`, `deleteBuckets`, `deleteKeys`, `writeKeys`, `writeBuckets`, `writeBucketLifecycleRules`, `bypassGovernance` or `writeFileRetentions`.
+
+A recorded replica can stop being the newest version under its name, because a retried or repeated copy uploads a newer one. So the bucket must have no lifecycle rule that hides or deletes non-current versions under the prefix. The Cloud media edge's bucket condemns hidden versions on a schedule, so it cannot host this prefix. A rule that only cancels unfinished multipart uploads is safe and recommended, because a failed large copy leaves its parts behind until that rule removes them.
+
+Use the existing replica operation to request copies. A direct B2 store serves replica copies and exact-version restore. Keep the vault's primary eviction store configured separately.
+
 ## Protect originals with a storage policy
 
 Add a `protection` object to the vault's media store configuration to request verified copies.

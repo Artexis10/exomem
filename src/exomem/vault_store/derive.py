@@ -1,11 +1,11 @@
-"""The derived-row half of one store-mode commit (OpenSpec make-vault-store-canonical D2).
+"""The derived rows of store-mode pages (OpenSpec make-vault-store-canonical D2).
 
-``apply`` runs inside ``write.commit``'s transaction, after the page tables hold the commit's own
-bytes. It writes the lexical, graph and identity rows of every page that the commit gives bytes to,
-drops the rows of every page that it removes, and re-derives the graph rows of the pages whose
-links the commit re-resolves. It reads the transaction's own tables for pages (and the disk for a
-page that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves
-no row without its page.
+``derive_paths`` runs on the store thread, in a drain transaction of its own after the commit that
+queued the paths (``derivation.drain``). It writes the lexical, graph and identity rows of every page
+that the store holds at a path, drops the rows of every path that it no longer holds, and re-derives
+the graph rows of the pages whose links those paths re-resolve. It reads the transaction's own tables
+for pages (and the disk for a page that the store does not own), so the rows always follow the bytes
+that the store holds when the drain runs, and a kill leaves the intent to derive them again.
 
 The registries (traversal profiles, the type basis) and the access policy are the exception: the
 owners' builders read them from disk, while the schema overlay under ``_Schema`` is store-owned. A
@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 from .. import (
     epistemic_graph,
@@ -39,9 +39,6 @@ from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
 from . import read, resident_catalogue
-
-if TYPE_CHECKING:
-    from .write import StoreChange
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
@@ -112,33 +109,34 @@ class ResolverDelta:
     )
 
 
-def apply(
+def derive_paths(
     tx: Connection,
     root: Path,
-    change: StoreChange,
-    existing: frozenset[str],
     *,
+    written: list[str],
+    removed: list[str],
+    refreshed: list[str],
     before: tuple | None = None,
     prepared_lexical: Mapping[str, _LexicalPage] | None = None,
     reserve_graph: ReserveGraph | None = None,
 ) -> ResolverDelta:
-    """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
+    """Derive the rows of the paths that a drain batch names into ``tx``, and return its resolver delta.
 
-    ``existing`` is the set of the change's page paths that the store held before the commit, which
-    tells a new page from an edited one. ``before`` is the vault triple that the commit starts at; a
-    caller that gives it lets the commit derive from the catalogue resolver that the last commit left
-    and carry the new one out (``resident_catalogue.remember``).
+    ``written`` are the paths that the store holds a page at, ``removed`` the ones that it does not
+    any more, ``refreshed`` the files that it does not own. ``before`` is the vault triple that the
+    batch starts at; a caller that gives it derives from the catalogue resolver that the last batch
+    left and carries the new one out (``resident_catalogue.remember``).
+
+    The derived catalogue tells a new page from an edited one: no path counts as held before, so a
+    page that the catalogue does not hold re-resolves every link that may name it.
     """
     return _Derivation(
         tx,
         Path(root),
-        written=[*(put.rel for put in change.puts), *(move.dst for move in change.moves)],
-        removed=[
-            *(delete.rel for delete in change.deletes),
-            *(move.src for move in change.moves),
-        ],
-        refreshed=list(change.refresh),
-        existing=existing,
+        written=written,
+        removed=removed,
+        refreshed=refreshed,
+        existing=frozenset(),
         before=before,
         prepared_lexical=prepared_lexical,
         reserve_graph=reserve_graph,

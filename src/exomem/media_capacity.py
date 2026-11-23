@@ -237,6 +237,11 @@ def commit_credit(session: str) -> Iterator[None]:
         _COMMIT_CREDIT.reset(token)
 
 
+def held_commit_credit() -> str | None:
+    """The upload session whose reserved room this context's commit draws on, if any."""
+    return _COMMIT_CREDIT.get()
+
+
 def release_commit_credit(vault: Path, session: str) -> None:
     """Retire the reservation after the session's held bytes are gone."""
     from .state_paths import vault_state_dir

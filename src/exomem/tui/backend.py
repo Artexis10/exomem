@@ -431,7 +431,11 @@ class ExomemBackend:
         # Mutating specialized ops return the commit envelope; the human-facing
         # report lives under `diagnostics` when present (CLI renderer parity).
         diagnostics = result.get("diagnostics")
-        return diagnostics if isinstance(diagnostics, dict) else result
+        if not isinstance(diagnostics, dict):
+            return result
+        from ..mutation_terminal import reply_leaf
+
+        return dict(reply_leaf(diagnostics))
 
     @property
     def vault_root(self) -> Path | None:

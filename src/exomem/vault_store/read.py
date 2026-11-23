@@ -410,9 +410,11 @@ def require_link_rows(conn: Connection) -> None:
 class StoreReadiness:
     """How current the derived rows of one snapshot are: what a store reader serves and shows.
 
-    The snapshot's revision proves the rows current for the pages: every commit derives its pages'
-    rows in its own transaction. The registries are the one input that can lag them (``rederive``):
-    ``registry`` is that module's closed state, ``current``, ``rebuilding`` or ``unknown``.
+    A page's rows follow its derivation intent, which commits with the page (``derivation``): the
+    writing request derives its own before it returns, so only a reader that runs during that drain
+    meets ``derived_pending`` intents. ``derived_failed`` counts intents that failed their retries.
+    The registries are the other input that can lag the rows (``rederive``): ``registry`` is that
+    module's closed state, ``current``, ``rebuilding`` or ``unknown``.
     """
 
     revision: int
@@ -424,11 +426,13 @@ class StoreReadiness:
     #: When the importer last finished a sweep of the files that the store does not own, whose
     #: rows are as fresh as that sweep; None when no sweep is recorded.
     unowned_rows_as_of: str | None
+    derived_pending: int = 0
+    derived_failed: int = 0
 
 
 def readiness(vault_root: Path) -> StoreReadiness:
     """The readiness of the snapshot that this request reads, worked out once per snapshot."""
-    from . import rederive
+    from . import derivation, rederive
 
     root = _as_path(vault_root)
     with snapshot(root) as view:
@@ -438,6 +442,7 @@ def readiness(vault_root: Path) -> StoreReadiness:
             waiting = 0 if registry.state == rederive.CURRENT else rederive.waiting_on(
                 view.connection, root
             )
+            pending, failed = derivation.lag(view.connection)
             found = view.memo["readiness"] = StoreReadiness(
                 view.revision,
                 registry.state,
@@ -445,6 +450,8 @@ def readiness(vault_root: Path) -> StoreReadiness:
                 registry.target,
                 waiting,
                 unowned_sweep(view.connection).get("at"),
+                pending,
+                failed,
             )
         return found
 
@@ -480,6 +487,11 @@ _UNKNOWN_NOTICE = (
     "Exomem has not yet confirmed that the search, graph and link rows of every stored page "
     "follow the current schema and access policy; a background pass is checking them."
 )
+#: The sentence for a snapshot that holds pages whose rows the store thread has not derived yet.
+_DERIVED_BEHIND_NOTICE = (
+    "Some recently saved pages are not yet in the search, graph and link rows; their bytes are "
+    "stored and read by path, and the rows follow them shortly."
+)
 
 
 def registry_notice(state: StoreReadiness) -> dict | None:
@@ -491,15 +503,23 @@ def registry_notice(state: StoreReadiness) -> dict | None:
     """
     from . import rederive
 
-    if state.registry == rederive.CURRENT:
+    behind = state.derived_pending or state.derived_failed
+    if state.registry == rederive.CURRENT and not behind:
         return None
+    sentences = [] if state.registry == rederive.CURRENT else [
+        _REBUILDING_NOTICE if state.registry == rederive.REBUILDING else _UNKNOWN_NOTICE
+    ]
+    if behind:
+        sentences.append(_DERIVED_BEHIND_NOTICE)
     return {
-        "notice": _REBUILDING_NOTICE if state.registry == rederive.REBUILDING else _UNKNOWN_NOTICE,
+        "notice": " ".join(sentences),
         "lag": {
             "registry": state.registry,
             "revision": state.registry_revision,
             "target": state.registry_target,
             "waiting_on_paths": state.waiting_on_paths,
+            "derived_pending": state.derived_pending,
+            "derived_failed": state.derived_failed,
         },
     }
 
@@ -826,8 +846,9 @@ def lend(vault_root: Path) -> _Lend | None:
 
 
 def current_revision(vault_root: Path) -> int:
-    """The store revision now: it moves by one for each committed change and for each batch of the
-    registry pass (``rederive.settle``), which changes derived rows without a page commit."""
+    """The store revision now: it moves by one for each committed change, for each batch of the
+    derivation drain (``derivation``) and for each batch of the registry pass (``rederive.settle``),
+    which change derived rows without a page commit."""
     with snapshot(vault_root) as view:
         return view.revision
 

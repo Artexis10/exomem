@@ -22,13 +22,15 @@ from enum import StrEnum
 from sqlite3 import Connection
 from typing import TYPE_CHECKING, Any
 
-from .. import epistemic_graph, find, lexstore, vault
+from .. import epistemic_graph, lexstore, vault
 from ..cli_ops import OpError
 from ..collection_store import connection
-from . import derive, mode, ownership, read, rederive, resident_catalogue
+from . import derivation, derive, mode, ownership, read, rederive
 from .read import AFTER, NOT_ACTIVE
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from ..collection_store.writer import CollectionWriter
 
 CONFLICT = "VAULT_STORE_CONFLICT"
@@ -266,6 +268,15 @@ class StoreChange:
             *(path for move in self.binary_moves for path in (move.src, move.dst)),
         )
 
+    @property
+    def page_paths(self) -> tuple[str, ...]:
+        """The page paths whose derived rows the change moves: each put, delete and move side."""
+        return (
+            *(put.rel for put in self.puts),
+            *(delete.rel for delete in self.deletes),
+            *(path for move in self.moves for path in (move.src, move.dst)),
+        )
+
     def __post_init__(self) -> None:
         if not self.paths and not self.refresh:
             raise ValueError("a store change names no file")
@@ -321,7 +332,6 @@ def _text_keyed(value):
 class _PreparedOriginal:
     fields: str | None
     mtime_ns: int
-    lexical: derive._LexicalPage
 
 
 def _fts_posting_bytes(text: str, *, trigram: bool) -> int:
@@ -423,12 +433,11 @@ def _original_inputs(
 
 
 def _source_fts_delete_bytes(
-    tx: Connection, moves: dict[str, PageMove], *, scrub: bool,
+    tx: Connection, sources: tuple[str, ...], *, scrub: bool,
 ) -> tuple[int, int]:
     """Bound new delete entries from the source's actual stored index inputs."""
-    if not moves or not lexstore.fts5_available():
+    if not sources or not lexstore.fts5_available():
         return 0, 0
-    sources = tuple(moves)
     postings = 0
     scrub_bytes = 0
     for start in range(0, len(sources), read.KEYS_PER_QUERY):
@@ -725,12 +734,93 @@ def _incoming_graph_pages(
 @contextmanager
 def _reserve_payload_pages(
     writer: CollectionWriter, puts: tuple[PagePut, ...], moves: dict[str, PageMove],
-) -> Iterator[tuple[dict[str, _PreparedOriginal], derive.ReserveGraph | None, Callable[[], None]]]:
-    """Protect original payload allocation and its direct write metadata on the vault device."""
+) -> Iterator[dict[str, _PreparedOriginal]]:
+    """Protect original payload allocation and its direct write metadata on the vault device.
+
+    The commit writes the page, its audit row and its two queue rows. The search, identity and graph
+    rows that the original causes follow in the drain, which reserves their room (``derived_room``).
+    """
     from .. import media_capacity
 
     originals = tuple(put for put in puts if put.media_allocation)
     if not originals and not moves:
+        yield {}
+        return
+    database = writer.handle.path
+    with media_capacity.upload_room(writer.root, device=database.stat().st_dev, reserve=True) as room:
+        if room is None:
+            yield {}
+            return
+        conn = writer.connection
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        before = conn.execute("PRAGMA page_count").fetchone()[0]
+        # SQLite file format: an overflow page reserves four bytes for the next page and up
+        # to 255 reserved bytes. WAL stores a 32-byte header and 24 bytes per frame.
+        usable = page_size - 4 - 255
+        # The tables that write a direct record per path. Their indexes carry the path
+        # too. SQLite's balance_nonroot uses one parent and up to five result pages.
+        trees = _trees(conn, ("store_pages", "store_audit", "store_projection_queue", "store_derivation_queue"))
+        touched = len(originals) + 2 * len(moves)
+        # An interior page holds at least four cells, so a tree of these pages has at most this depth.
+        depth = 1 + max(1, math.ceil(math.log(before + touched + 1, 4)))
+        prepared = {}
+        overflow_pages = 0
+        upload_size = 0
+        scrub = bool(moves) and conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        scrub_bytes = 0
+        for rel, body, fields, mtime_ns, old_bytes in _original_inputs(conn, originals, moves, scrub=scrub):
+            prepared[rel] = _PreparedOriginal(fields, mtime_ns)
+            upload_size += len(body)
+            scrub_bytes += old_bytes
+            # Both the page table and the store_pages_meta covering index store frontmatter.
+            record_size = len(body) + 2 * len((fields or "").encode()) + trees * len(rel.encode())
+            overflow_pages += (record_size + usable - 1) // usable
+        btree_paths = touched * depth * trees
+        # A split can add two siblings. The WAL also rewrites the existing siblings and parent.
+        database_pages = overflow_pages + 2 * btree_paths
+        # Secure deletion can write the old overflow pages to WAL while freeing them in the DB.
+        scrub_pages = (scrub_bytes + usable - 1) // usable
+        wal_pages = overflow_pages + scrub_pages + 6 * btree_paths + 1  # Includes the revision row.
+        room.reserve_store_pages(
+            database,
+            target_bytes=(before + database_pages) * page_size,
+            wal_bytes=32 + wal_pages * (page_size + 24),
+            upload_size=upload_size,
+        )
+        try:
+            yield prepared
+        finally:
+            _record_page_count(room, database, conn, page_size)
+
+
+def _trees(conn: Connection, tables: tuple[str, ...]) -> int:
+    """How many b-trees hold ``tables``: each table and each of its indexes."""
+    return len(tables) + sum(
+        conn.execute("SELECT count(*) FROM pragma_index_list(?)", (table,)).fetchone()[0] for table in tables
+    )
+
+
+def _record_page_count(room: Any, database: Path, conn: Connection, page_size: int) -> None:
+    try:
+        room.set_store_pages(database, conn.execute("PRAGMA page_count").fetchone()[0] * page_size)
+    except (sqlite3.Error, OSError) as error:
+        # Keep the previous reservation through a failed refresh or process cut.
+        log.warning("could not refresh the store checkpoint allocation (%s)", type(error).__name__)
+
+
+@contextmanager
+def derived_room(
+    writer: CollectionWriter, tx: Connection, metered: list[str], sources: tuple[str, ...],
+) -> Iterator[tuple[dict[str, derive._LexicalPage], derive.ReserveGraph | None, Callable[[], None]]]:
+    """Protect the derived rows that an original causes on the vault device, for one drain batch.
+
+    The rows of an original's page, of the path that a move of it vacated, and of the pages that link
+    to it draw on the room that this reserves; a batch with no original reserves nothing. It yields
+    the original's prepared lexical rows, the graph reservation callback and the settle step.
+    """
+    from .. import media_capacity
+
+    if not metered and not sources:
         yield {}, None, lambda: None
         return
     database = writer.handle.path
@@ -741,45 +831,33 @@ def _reserve_payload_pages(
         conn = writer.connection
         page_size = conn.execute("PRAGMA page_size").fetchone()[0]
         before = conn.execute("PRAGMA page_count").fetchone()[0]
-        # SQLite file format: an overflow page reserves four bytes for the next page and up
-        # to 255 reserved bytes. WAL stores a 32-byte header and 24 bytes per frame.
         usable = page_size - 4 - 255
-        # The tables that write a direct record per path. Their indexes carry the path
-        # too. SQLite's balance_nonroot uses one parent and up to five result pages.
-        tables = ("store_pages", "store_audit", "store_projection_queue")
-        trees = len(tables) + sum(conn.execute("SELECT count(*) FROM pragma_index_list(?)", (table,)).fetchone()[0]
-                                  for table in tables)
-        touched = len(originals) + 2 * len(moves)
-        # An interior page holds at least four cells, so a tree of these pages has at most this depth.
+        # The drain deletes one queue row per path and moves the revision row.
+        trees = _trees(conn, ("store_derivation_queue",))
+        touched = len(metered) + len(sources)
         depth = 1 + max(1, math.ceil(math.log(before + touched + 1, 4)))
         basis = epistemic_graph.producer_type_basis(writer.root)
-        prepared = {}
+        prepared: dict[str, derive._LexicalPage] = {}
         overflow_pages = 0
         upload_size = 0
-        scrub = bool(moves) and conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
-        scrub_bytes = 0
-        for rel, body, fields, mtime_ns, old_bytes in _original_inputs(conn, originals, moves, scrub=scrub):
+        scrub = bool(sources) and conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
+        for rel in metered:
+            found = read.page_source(tx, writer.root, rel)
+            if found is None:
+                continue
+            body, mtime_ns = found
             lexical = derive.prepare_lexical_page(writer.root, rel, body, mtime_ns, basis)
-            prepared[rel] = _PreparedOriginal(fields, mtime_ns, lexical)
+            prepared[rel] = lexical
             upload_size += len(body)
-            scrub_bytes += old_bytes
-            # Both the page table and the store_pages_meta covering index store
-            # frontmatter. Lexical allocation follows the exact admitted index inputs.
-            record_size = (
-                len(body) + 2 * len((fields or "").encode()) + trees * len(rel.encode())
-                + _lexical_allocation_bytes(lexical.rows)
-            )
-            overflow_pages += (record_size + usable - 1) // usable
-        removed_postings, removed_content = _source_fts_delete_bytes(conn, moves, scrub=scrub)
+            overflow_pages += (_lexical_allocation_bytes(lexical.rows) + usable - 1) // usable
+        removed_postings, removed_content = _source_fts_delete_bytes(conn, sources, scrub=scrub)
         overflow_pages += (removed_postings + usable - 1) // usable
         btree_paths = touched * depth * trees
-        # A split can add two siblings. The WAL also rewrites the existing siblings and parent.
         database_pages = overflow_pages + 2 * btree_paths
-        # Secure deletion can write the old overflow pages to WAL while freeing them in the DB.
-        scrub_pages = (scrub_bytes + removed_content + usable - 1) // usable
+        scrub_pages = (removed_content + usable - 1) // usable
         # Deleting the source's derived records rewrites the leaves that hold them, with or
         # without secure delete, and can rebalance their trees.
-        source = _source_derived_pages(conn, tuple(moves), usable) if moves else _CellPages()
+        source = _source_derived_pages(conn, sources, usable) if sources else _CellPages()
         if scrub:
             scrub_pages += source.overflow
         wal_pages = (overflow_pages + scrub_pages + min(before, source.deleted_rewrites(usable, depth, before))
@@ -787,7 +865,7 @@ def _reserve_payload_pages(
         graph = _CellPages()
         replaced = _CellPages()  # the graph rows of re-derived pages, deleted before their records land
         replaced_layouts: dict[str, tuple[list[str], list[int], list[tuple[str, ...]]]] = {}
-        recorded = 0  # the checkpoint target this commit last recorded
+        recorded = 0  # the checkpoint target this batch last recorded
         estimated = 0  # the largest checkpoint target that its estimates reached
         graph_layouts: dict[str, list[tuple[tuple[int, ...], int]]] = {}
         encoding, = conn.execute("PRAGMA encoding").fetchone()
@@ -830,12 +908,7 @@ def _reserve_payload_pages(
         try:
             yield prepared, reserve_graph, settle
         finally:
-            try:
-                target = conn.execute("PRAGMA page_count").fetchone()[0] * page_size
-                room.set_store_pages(database, target)
-            except (sqlite3.Error, OSError) as error:
-                # Keep the previous reservation through a failed refresh or process cut.
-                log.warning("could not refresh the store checkpoint allocation (%s)", type(error).__name__)
+            _record_page_count(room, database, conn, page_size)
 
 
 def commit(
@@ -845,12 +918,21 @@ def commit(
 
     The statements run in this order, so that a kill at any point leaves the old state whole: the
     expectations, the pages, the binary records and the manifest, one audit row per file, the
-    projection intents, the held rows that the change resolves, the files that it saw and last the
-    revision. One intent stands for each path, and the oldest queue time stays. A move queues one
-    ``move`` intent under its destination path, with the old path in ``from_path``. A held row that
-    changed or went meanwhile rolls the whole commit back.
+    projection intents, the derivation intents, the held rows that the change resolves, the files that
+    it saw and last the revision. One intent stands for each path, and the oldest queue time stays. A
+    move queues one ``move`` intent under its destination path, with the old path in ``from_path``. A
+    held row that changed or went meanwhile rolls the whole commit back.
+
+    The commit derives no row: each page path and each refreshed file gets a derivation intent, and
+    the store thread derives the rows from it after this transaction (``derivation``). The writing
+    request derives its own intents once it has released the vault mutation boundary.
     """
     _require_owned(change)
+    if derivation.in_scope():
+        raise connection.CollectionStoreError(
+            "COLLECTION_STORE_BOUNDARY_REQUIRED",
+            "a store commit needs the vault mutation boundary, which derived-row work does not hold",
+        )
     # Close the transaction before releasing capacity, including on rollback. The
     # source lookup and admission run before the first canonical mutation.
     transaction = (writer.handle.transaction() if before_move_commit is None
@@ -862,17 +944,12 @@ def commit(
         revision = row[1] + 1
         before = read.vault_triple(tx, row[1])
         check(tx, change.expect)
-        for rel in change.refresh:
-            if tx.execute(
-                "SELECT 1 FROM store_pages WHERE path = ?", (rel,)
-            ).fetchone():
-                raise OpError(NOT_OWNED, f"the store holds {rel}: write it, do not refresh it")
+        _refuse_owned_refresh(tx, change.refresh)
         retained_moves = _marked_moves(tx, change)
-        prepared, reserve_graph, settle_reservation = allocations.enter_context(
+        prepared = allocations.enter_context(
             _reserve_payload_pages(writer, change.puts, retained_moves),
         )
         _degrade_moves(tx, change.paths)
-        existing = _held_pages(tx, change)
         now = timestamp()
         audit = _Trail(tx, revision, change, now)
         for put in change.puts:
@@ -888,38 +965,37 @@ def commit(
             _delete_binary(tx, binary, audit)
         for move in change.binary_moves:
             _move_binary(tx, move, revision, audit)
-        delta = derive.apply(
-            tx, writer.root, change, existing, before=before,
-            prepared_lexical={rel: original.lexical for rel, original in prepared.items()},
-            reserve_graph=reserve_graph,
-        )
-        settle_reservation()
-        # The pages above derived with the overlay that the disk still holds; the job settles them.
+        # The overlay job settles the rows that the registries under ``_Schema`` derive.
         rederive.record_overlay_change(tx, writer.root, change.paths, revision)
         _enqueue(tx, audit.intents, revision, now)
         _enqueue_folders(tx, change.vacated_folders, revision, now)
+        # An original's rows, and those of the path that a move of one vacates, draw on the floor.
+        metered = frozenset((
+            *(put.rel for put in change.puts if put.media_allocation),
+            *(path for move in change.moves if move.src in retained_moves for path in (move.src, move.dst)),
+        ))
+        derivation.enqueue(
+            tx, list(dict.fromkeys(change.page_paths)), list(change.refresh), revision, now, metered
+        )
         for held in change.resolves_held:
             _drop_held(tx, held)
         for seen in change.files_seen:
             _record_seen(tx, seen, revision)
         tx.execute("UPDATE store_mode SET revision = ? WHERE id = 1", (revision,))
         after = read.vault_triple(tx, revision)
-    # After the transaction: a reader that meets the advanced resolver must see this revision.
-    resident_catalogue.remember(writer.root, after, delta.catalogue)
     # A refreshed file is a page of the corpus too (the importer's non-owned Markdown).
-    find.on_store_commit(
-        writer.root, before, after, delta.entries, delta.deleted, (*change.paths, *change.refresh)
-    )
+    derivation.committed(writer, before, after, (*change.paths, *change.refresh))
     return CommitResult(revision, tuple(audit.written), tuple(audit.deleted))
 
 
-def _held_pages(tx: Connection, change: StoreChange) -> frozenset[str]:
-    """The paths of ``change``'s puts that the store held a page for before the commit."""
-    return frozenset(
-        put.rel
-        for put in change.puts
-        if tx.execute("SELECT 1 FROM store_pages WHERE path = ?", (put.rel,)).fetchone()
-    )
+def _refuse_owned_refresh(tx: Connection, refresh: tuple[str, ...]) -> None:
+    for start in range(0, len(refresh), read.KEYS_PER_QUERY):
+        batch = refresh[start : start + read.KEYS_PER_QUERY]
+        owned = tx.execute(
+            f"SELECT path FROM store_pages WHERE path IN ({', '.join('?' * len(batch))}) LIMIT 1", batch,
+        ).fetchone()
+        if owned is not None:
+            raise OpError(NOT_OWNED, f"the store holds {owned[0]}: write it, do not refresh it")
 
 
 def _require_owned(change: StoreChange) -> None:
@@ -1033,6 +1109,21 @@ def _stored(tx: Connection, rel: str) -> tuple[int, str] | None:
     ).fetchone()
 
 
+def _stored_many(tx: Connection, rels: list[str]) -> dict[str, tuple[int, str]]:
+    """``_stored`` for each of ``rels`` that the store holds, a keyed read per chunk."""
+    found: dict[str, tuple[int, str]] = {}
+    for start in range(0, len(rels), read.KEYS_PER_QUERY):
+        batch = rels[start : start + read.KEYS_PER_QUERY]
+        marks = ", ".join("?" * len(batch))
+        for path, revision, sha256 in tx.execute(
+            f"SELECT path, revision, sha256 FROM store_pages WHERE path IN ({marks}) "
+            f"UNION ALL SELECT path, revision, sha256 FROM store_binaries WHERE path IN ({marks})",
+            (*batch, *batch),
+        ):
+            found[path] = (revision, sha256)
+    return found
+
+
 def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     """Raise ``StoreConflict`` for the first path that does not hold what ``expect`` says."""
     # One read of the inbound rows binds the linking pages of every path: a folder's delete binds
@@ -1040,11 +1131,13 @@ def check(tx: Connection, expect: Mapping[str, Expect]) -> None:
     linked = vault.store_inbound_wikilinks(
         tx, [rel for rel, want in expect.items() if want.linked_from is not None]
     )
+    # One keyed read per chunk of paths binds what each holds, instead of a read per path.
+    held = _stored_many(tx, [rel for rel, want in expect.items() if want.binds_path])
     for rel, want in expect.items():
         _check_below(tx, rel, want)
         if not want.binds_path:
             continue
-        have = _stored(tx, rel)
+        have = held.get(rel)
         if want.absent:
             if have is not None:
                 raise StoreConflict(rel, "the store already holds it")

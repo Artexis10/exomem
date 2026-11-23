@@ -31,7 +31,9 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
-from test_vault_store_bypass_writers import RAW_SOURCE
+from test_vault_store_bypass_writers import RAW_SOURCE, govern
+from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVATION_SECONDS, holds
+from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_write_path import store_rows
@@ -56,8 +58,9 @@ from exomem import (
     writer_lease,
 )
 from exomem.collection_store import runtime
+from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import importer, projector, read, rederive, write
+from exomem.vault_store import derivation, derive, importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -188,13 +191,162 @@ def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, se
         stored, "manage_memory_file", operation="delete", path=path, confirm=True,
         response_detail="full",
     )
-    trash_path = trashed["diagnostics"]["trash_path"]
+    # The reply acknowledges the page's derived rows, so the delete's own result is its leaf.
+    trash_path = trashed["diagnostics"]["leaf_result"]["trash_path"]
 
     recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
 
     assert recovered["path"] == path
     assert read.owned_bytes(stored, path) == body
     assert not read.page_exists(stored, trash_path)
+
+
+def test_a_governed_trash_through_the_served_door_settles_its_receipt_in_the_request(stored, service):
+    """A governed page trashed as an agent trashes it. Settled before its request derived the rows,
+    the trash found them deferred, warned that its state was not exact and left its receipt and
+    tombstone pending until a reconcile; a recovery in that state keeps the page hidden."""
+    govern(stored, BETA)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)] == ["committed"]
+
+
+def test_a_governed_trash_holds_the_boundary_no_longer_when_its_derivation_is_slow(
+    stored, service, monkeypatch
+):
+    """A governed page trashed, recovered and trashed again through the served door, the second
+    time with rows that take seconds to derive. Settled under the boundary, the trash held it for
+    those seconds; it holds it no longer, and its request still settles its receipt."""
+    govern(stored, BETA)
+    held = holds(monkeypatch)
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True, force_orphan=True)
+    quick = max(held)
+    # A governed reply withholds the trashed path; its tombstone names it.
+    [trashed] = tombstones(stored)[0]["manifest"]
+    call(stored, "manage_memory_file", operation="recover", trash_path=trashed["trash_path"])
+    held.clear()
+    delay[0] = SLOW_DERIVATION_SECONDS
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    slow = max(held)
+    assert slow - quick < HOLD_GROWTH_LIMIT_MS, (
+        f"the trash held the boundary {slow:.0f} ms with a {SLOW_DERIVATION_SECONDS:.0f} s "
+        f"derivation, against {quick:.0f} ms with an instant one"
+    )
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)][-1:] == ["committed"]
+
+
+def test_a_governed_trash_whose_rows_cannot_be_derived_says_so_in_its_reply(
+    stored, service, monkeypatch
+):
+    """A governed page trashed while its rows fail to derive. The trash settles after its terminal,
+    so a warning that the settling adds then must still reach the reply, which otherwise says
+    nothing while the content stays tombstoned."""
+    govern(stored, BETA)
+
+    def derive_paths(*arguments, **keywords):
+        raise RuntimeError("the derivation fails")
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True, response_detail="full")
+
+    assert lifecycle.TRASH_NOT_EXACT in reply["warnings"]
+    assert reply["diagnostics"]["operational"]["warnings_count"] == len(reply["warnings"])
+    assert [marker["state"] for marker in tombstones(stored)] == ["pending"]
+
+
+def test_a_full_reply_names_each_derived_component_as_its_acknowledgement_does(stored, service):
+    """A move's and a delete's full replies, as an agent reads them: the writer's index report, made
+    before the request derived the rows, named them deferred beside an acknowledgement that names
+    them completed."""
+    moved = f"{NOTES}/Beta Moved.md"
+    replies = [
+        call(stored, "manage_memory_file", operation="move", old_path=BETA, new_path=moved,
+             response_detail="full"),
+        call(stored, "manage_memory_file", operation="delete", path=moved, confirm=True,
+             force_orphan=True, response_detail="full"),
+    ]
+
+    for reply in replies:
+        acknowledged = {(item["component"], item["state"])
+                        for item in reply["diagnostics"]["derived_components"]}
+        index = reply["diagnostics"]["leaf_result"]["index"]
+        # A delete's index is one report; a move's holds one per side of the move.
+        reports = [index] if "components" in index else [*index["upsert_reports"], index["delete_report"]]
+        reported = {(item["component"], item["outcome"]) for report in reports
+                    for item in report["components"]
+                    if item["component"] in {component for component, _state in acknowledged}}
+        assert reported and reported <= acknowledged, (reported, acknowledged)
+
+
+def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(
+    stored, monkeypatch, caplog
+):
+    """A store whose derivation step raises each time, as a diverged store refuses it: the store
+    thread retries once per retry delay and warns once. Kept at its first owed time, the drain ran
+    again at once, hundreds of times a second, with a traceback each time."""
+    monkeypatch.setattr(runtime, "DERIVED_RETRY_SECONDS", 0.5)
+    attempts = []
+
+    def failing(*_arguments, **_keywords):
+        attempts.append(time.monotonic())
+        raise RuntimeError("the derivation step failed")
+
+    caplog.set_level(logging.DEBUG, logger=runtime.logger.name)
+    with store_thread(stored):
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", failing)
+            derivation.owe(stored.resolve())
+            deadline = time.monotonic() + 30
+            while len(attempts) < 3:
+                assert time.monotonic() < deadline, "the store thread retried the failed drain"
+                time.sleep(0.05)
+    warned = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING and "the vault store could not advance" in record.getMessage()
+    ]
+
+    gaps = [later - earlier for earlier, later in zip(attempts[:2], attempts[1:3], strict=True)]
+    assert min(gaps) >= 0.45, gaps
+    assert len(warned) == 1
+
+
+def test_a_clean_stop_derives_the_rows_that_committed_pages_still_owe(stored, monkeypatch):
+    """A clean stop with committed pages whose rows neither their own drain nor the store thread
+    derived: the stop derives them within its bound, so none is due at the next start. The store
+    thread's own stop drain ran after the lease's handoff began, which refused it."""
+    created = [f"{NOTES}/Owed {number}.md" for number in range(3)]
+    with store_thread(stored):
+        # The thread first drains what the vault's earlier commits owe; it must be idle before these.
+        deadline = time.monotonic() + 30
+        while derivation.owed_in(stored.resolve()) is not None:
+            assert time.monotonic() < deadline, "the store thread drained what its start owed"
+            time.sleep(0.05)
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+            commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+        assert sorted(store_rows(stored, "SELECT path FROM store_derivation_queue")) == [
+            (rel,) for rel in sorted(created)
+        ]
+
+    assert store_rows(stored, "SELECT path FROM store_derivation_queue") == []
 
 
 def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(
@@ -307,13 +459,13 @@ def test_a_busy_boundary_leaves_bookkeeping_for_the_next_pass_and_logs_no_error(
     assert created not in queued(stored) and read.owned_bytes(stored, ALPHA) == edited
 
 
-def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tick(
+def test_the_media_writers_commit_in_a_served_process_beside_a_registry_tick(
     stored, service, monkeypatch
 ):
     """A media writer that a served process refuses, or whose hop waits out the mutation timeout
-    behind a registry tick that waits for a boundary another thread holds (tasks.md 2.5)."""
-    # The scheduler starts no tick while another thread holds the boundary, so a tick parks only
-    # when a holder takes it between the tick's start and its write. ``pending`` opens that gap.
+    behind a registry tick while another thread holds the boundary (tasks.md 2.5)."""
+    # A holder takes the boundary between the tick's start and its batch. ``pending`` opens that
+    # gap. The batch takes no boundary, so the writer waits only for the holder.
     started, go = threading.Event(), threading.Event()
     pending = rederive.pending
 
@@ -324,7 +476,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         return pending(*arguments)
 
     monkeypatch.setattr(rederive, "pending", gapped)
-    mutation = get_manager()._mutation_coordinator_for(stored)
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
@@ -347,10 +498,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         assert started.wait(30), "a registry tick started"
         with held_elsewhere(stored) as release:
             go.set()
-            deadline = time.monotonic() + 30
-            while not mutation.waiter_count():  # the tick waits for the boundary
-                assert time.monotonic() < deadline, "the registry tick waited for the boundary"
-                time.sleep(0.01)
             threading.Timer(hold_seconds, release.set).start()
             began = time.monotonic()
             outcome = writer_call()

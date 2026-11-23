@@ -60,6 +60,7 @@ from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
     _DERIVED_COMPONENT_NAMES,
+    LeafWarning,
     ResponseDetail,
     _CanonicalRequestReplay,
     as_replay,
@@ -74,6 +75,7 @@ from .mutation_terminal import (
     valid_collection_receipt,
     valid_structured_files_receipt,
     with_fast_acknowledgement,
+    with_leaf_index_observed,
 )
 from .privacy_log import content_private_logging_enabled
 
@@ -560,14 +562,20 @@ def _with_post_terminal_fanout_acknowledgement(
     performed. Only media's real fan-out ever returns a non-empty report list
     (review: merge fallout -- heat's registrant made this run unconditionally
     on every write once it started sharing the queue)."""
+    from . import index_sync
+
     if not isinstance(result, Mapping) or result.get("state") != "committed":
         return result
+    # A governed transition that settles after its request's derivation adds its warning to the leaf.
+    warnings = [item for item in reports if isinstance(item, LeafWarning)]
+    reports = [item for item in reports if not isinstance(item, LeafWarning)]
     if not reports and not drain_failed:
-        return result
+        return with_leaf_index_observed(result, (), warnings)
 
     derived_sync, unfinished, diagnostics = _derived_sync_of(reports, drain_failed=drain_failed)
+    observations = [report for report in reports if isinstance(report, index_sync.IndexSyncReport)]
     return with_fast_acknowledgement(
-        result,
+        with_leaf_index_observed(result, observations, warnings),
         derived_sync=derived_sync,
         derived_sync_components=unfinished,
         component_diagnostics=diagnostics,
@@ -581,6 +589,7 @@ def _derived_sync_of(
     """Classify drained fan-out reports: the outcome, its unfinished components and their diagnostics."""
     from . import index_sync
 
+    severity = index_sync.DERIVED_STATE_SEVERITY
     component_outcomes: dict[str, tuple[str, str | None]] = {}
     diagnostics: list[dict[str, str | None]] = []
     for report in reports:
@@ -597,21 +606,9 @@ def _derived_sync_of(
             )
             if component.component not in _DERIVED_COMPONENT_NAMES:
                 continue
-            if component.outcome in {"failed", "degraded"}:
-                outcome = "failed"
-            elif component.outcome in {"registered", "deferred"}:
-                outcome = "pending"
-            elif component.outcome == "accepted" and component.code not in {
-                "embeddings_disabled",
-                "no_eligible_paths",
-            }:
-                outcome = "pending"
-            else:
-                outcome = "completed"
+            outcome = index_sync.derived_state(component)
             previous = component_outcomes.get(component.component)
-            if previous is None or {"completed": 0, "pending": 1, "failed": 2}[
-                outcome
-            ] > {"completed": 0, "pending": 1, "failed": 2}[previous[0]]:
+            if previous is None or severity[outcome] > severity[previous[0]]:
                 component_outcomes[component.component] = (outcome, component.code)
 
     states = {outcome for outcome, _code in component_outcomes.values()}
@@ -8918,7 +8915,12 @@ def _busy_write_intake(
             admission = None
         if admission is None:
             return function(command, *injected, **kwargs)
-        return admission.run(lambda: function(command, *injected, **kwargs))
+        result = admission.run(lambda: function(command, *injected, **kwargs))
+        try:
+            return write_intake.with_failure_notice(admission, result)
+        except Exception:  # noqa: BLE001 - the notice never fails the save it rides on
+            logger.warning("write intake failure notice failed for %s", getattr(command, "name", command), exc_info=True)
+            return result
 
     return wrapped
 
@@ -9626,7 +9628,14 @@ def coordination_status(
     return get_manager().status(vault_or_cell)
 
 
-def start_server_lifecycle() -> LeaseManager:
+def start_server_lifecycle(*, serve_collection_store: bool = True) -> LeaseManager:
+    """Take the writer lease and, unless the caller starts it later, serve the collection store.
+
+    Standby promotion passes ``serve_collection_store=False`` and calls
+    ``serve_vault_collection_store`` once its graph proof is sealed: the store's
+    takeover holds the canonical boundary and its view reconciliation advances
+    the commit generation, either of which makes that proof decline.
+    """
     manager = get_manager()
     manager._serves_collection_store = True
     if manager.config.enabled and manager.config.preferred_writer:
@@ -9637,15 +9646,20 @@ def start_server_lifecycle() -> LeaseManager:
             pass
     manager.start_renewer()
     atexit.register(manager.close)
+    if serve_collection_store:
+        serve_vault_collection_store(manager)
+    return manager
+
+
+def serve_vault_collection_store(manager: LeaseManager) -> None:
+    """Serve the vault's collection store, if its marker routes any collection to one (S1)."""
     try:
         from .collection_store import runtime as store_runtime
         from .vault import resolve_vault
 
-        # The vault's collection store, if its marker routes any collection to one (S1).
         store_runtime.serve(resolve_vault(), manager)
     except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
         logger.warning("collection store serving did not start", exc_info=True)
-    return manager
 
 
 def stop_server_lifecycle() -> None:
