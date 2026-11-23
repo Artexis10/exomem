@@ -1043,6 +1043,10 @@ def start_commit(session: Session, committer: Committer) -> None:
         record = _read_record(session.store, session.id)
         if record is None or _expired(record, _now()) or not _can_start(session.store, record):
             lock.release()
+            if record is not None and record.get("state") == RETRYABLE and _expired(record, _now()):
+                # A reattempt that read the clock just before expiry hands the park back to its timer,
+                # which releases the bytes and reserved room. Nothing else would until the expiry sweep.
+                _schedule_reattempt(session.store, session.id, committer, session.vault_root)
             return
         if record["state"] == RECEIVING:
             # A stopped PATCH may leave the last bytes before it publishes the verifying record.

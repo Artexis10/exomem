@@ -536,6 +536,13 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
     _due_again(vault)
 
     started, release, copied, checked = (threading.Event() for _ in range(4))
+    # One deadline for every wait. The stall outlasts it, so a dispatcher that waits behind the stalled
+    # copy still fails. The copy runs an encryption process and syncs directories, which a busy runner delays.
+    deadline = time.monotonic() + 30
+
+    def within_deadline(event: threading.Event) -> bool:
+        return event.wait(max(0.0, deadline - time.monotonic()))
+
     upload = media_store.FilesystemStore.upload
     reconcile, check = media_replicas._reconcile_copy, media_replicas.check
     stalled_uploads = []
@@ -545,7 +552,7 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
             return upload(backend, *args, **kwargs)
         stalled_uploads.append(threading.current_thread())
         started.set()
-        assert release.wait(15)
+        assert release.wait(60)
         if upload_fails:
             raise OSError(errno.EIO, "the destination failed after the worker stopped")
         return upload(backend, *args, **kwargs)
@@ -556,7 +563,7 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
             copied.set()
 
     def verification_round(work_vault, **kwargs):
-        assert started.wait(5)
+        assert within_deadline(started)
         result = check(work_vault, **kwargs)
         if _replica_row(vault, store="test-store")["checked_at"] > 0:
             checked.set()
@@ -565,10 +572,12 @@ def test_a_stalled_copy_leaves_another_destination_and_due_verification_running(
     monkeypatch.setattr(media_store.FilesystemStore, "upload", held_upload)
     monkeypatch.setattr(media_replicas, "_reconcile_copy", copy_committed)
     monkeypatch.setattr(media_replicas, "check", verification_round)
+    # A copy that lost the store's read slot to the check round waits out the idle backoff before its retry.
+    monkeypatch.setattr(media_replicas, "_IDLE_SECONDS", 0.2)
     worker = media_replicas.start(vault)
     try:
-        assert started.wait(5)
-        assert copied.wait(5) and checked.wait(5)
+        assert within_deadline(started)
+        assert within_deadline(copied) and within_deadline(checked)
         assert len(stalled_uploads) == 1
         assert media_replicas.progress(vault, first_store)["remaining"] == 1
     finally:
