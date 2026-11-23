@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import Any
 
 from . import lifecycle_statuses
-from .collection_store.preview import QUERY_RECEIPT_BOUNDARY, bound_writer, canonical_read, selected_projection_writer
+from .collection_store.preview import (
+    QUERY_RECEIPT_BOUNDARY,
+    bound_writer,
+    canonical_read,
+    selected_projection_writer,
+)
 from .working_set_index import normalize, terms_of
 
 log = logging.getLogger(__name__)
@@ -393,6 +398,25 @@ def _records_manifests(
     )
 
 
+def _store_held_outside_a_bound_request(vault_root: Path, path: str) -> bool:
+    """Whether reading this collection's latest row would cost its own collection-store request.
+
+    A request that the store does not bind decides each store-held collection on the store thread, one
+    request per collection and several per query. Recall offers such a collection without its latest row,
+    as it offered none of them before the store's collections were anchored.
+    """
+    if bound_writer(vault_root) is not None:
+        return False
+    from .cli_ops import OpError
+    from .collection_store.connection import CollectionStoreError
+    from .collection_store.runtime import projection_route
+
+    try:
+        return projection_route(vault_root, path) is not None
+    except (CollectionStoreError, OpError):
+        return True  # an unreadable store is no cheaper to ask
+
+
 def _governing_manifest(vault_root: Path, routed: Any) -> Any | None:
     """Re-read the routed collection's own manifest, for the governed query.
 
@@ -481,6 +505,8 @@ def _from_records(
     # The routing decision above may be stale; what is governed below may not.
     manifest = _governing_manifest(vault_root, routed)
     if manifest is None:
+        return None
+    if _store_held_outside_a_bound_request(vault_root, str(manifest.path)):
         return None
     from . import record_governance
 

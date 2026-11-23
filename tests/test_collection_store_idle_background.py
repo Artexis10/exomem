@@ -261,6 +261,8 @@ def test_an_index_build_on_a_released_store_keeps_its_lists_and_takes_no_lease(i
     from exomem import working_set_index
 
     root, manager = idle_service.root, idle_service.manager
+    # The manager reports admission before the store thread has opened its writer, which a read beside needs.
+    _until(lambda: runtime.writer_admitted(root))
     assert manifest_path() in _built_on_a_thread_of_its_own(root, "while-admitted")
     grants, _ticks = watching(monkeypatch, manager)
     release_on_idle(manager)

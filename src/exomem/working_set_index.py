@@ -1682,7 +1682,12 @@ def _collection_candidates(
     except (CollectionStoreError, OpError):
         log.debug("activation index: the collection store could not be read now", exc_info=True)
         refused = True
-        discovered, unreachable, manifests = _discovered_manifests(vault_root)
+        try:
+            discovered, unreachable, manifests = _discovered_manifests(vault_root)
+        except (CollectionStoreError, OpError):
+            # Ownership itself is unreadable: no collection is anchored, as when discovery fails.
+            log.debug("activation index: collection discovery failed", exc_info=True)
+            discovered, unreachable, manifests = [], [], None
     if refused and unreachable and manifests is not None:
         held = _held_store_manifests(vault_root, unreachable)
         manifests = None if held is None else (*manifests, *held)
