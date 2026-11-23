@@ -129,7 +129,9 @@ def derive_paths(
     left and carries the new one out (``resident_catalogue.remember``).
 
     ``reserve_graph`` charges the graph rows of the ``metered`` paths (an original, and the source a
-    move of it vacates) and of the pages that link to them; other pages of the batch draw on no room.
+    move of it vacates) and of the pages outside the batch that re-derive because they link to them,
+    directly or through a prior path that the original's lineage claims. Other pages of the batch draw
+    on no room.
 
     The derived catalogue tells a new page from an edited one: no path counts as held before, so a
     page that the catalogue does not hold re-resolves every link that may name it.
@@ -197,6 +199,8 @@ class _Derivation:
         self._relayout: object | None = None
         #: The prior paths whose claimants this commit changes; links naming them re-resolve.
         self.prior_changed: set[str] = set()
+        # The prior paths that a metered page claims or gives up: links that name one re-resolve to it.
+        self.metered_prior_changed: set[str] = set()
         # One basis for the commit, so that the registry loads once and not once per page parse.
         self.type_basis = epistemic_graph.producer_type_basis(root)
 
@@ -222,7 +226,10 @@ class _Derivation:
             }
             rows = () if raw is None else memory_refs.prior_path_rows(rel, raw, self.relayout())
             memory_refs.replace_prior_rows(self.tx, rel, rows)
-            self.prior_changed |= before ^ {row[0] for row in rows}
+            changed = before ^ {row[0] for row in rows}
+            self.prior_changed |= changed
+            if rel in self.metered:
+                self.metered_prior_changed |= changed
 
     # ------------------------------------------------------------------ sources
 
@@ -438,7 +445,9 @@ class _Derivation:
         if self.metered:
             # Only the pages that link to an original re-derive on its account; the dependents of the
             # batch's other pages draw on no room, as in a batch that carries no original.
-            linking = epistemic_graph.dependent_paths(self.tx, moved & self.metered, resolvers)
+            linking = epistemic_graph.dependent_paths(
+                self.tx, (moved & self.metered) | self.metered_prior_changed, resolvers
+            )
             linking |= epistemic_graph.dependent_paths(
                 self.tx, edited & self.metered, resolvers, fragments_only=True
             )
