@@ -22,7 +22,10 @@ from pathlib import Path
 from .. import (
     __version__,
     cloud_cell,
+    deferred_index,
     epistemic_graph,
+    freshness,
+    index_sync,
     lexstore,
     memory_refs,
     state_migration,
@@ -33,12 +36,21 @@ from .. import (
 from ..cli_ops import OpError
 from ..collection_store import admission, authority, capability, connection
 from ..governance import page_admission
-from . import availability, marker, mode, ownership, rederive, verify
+from . import availability, graph_state, marker, mode, ownership, rederive, verify
 from .write import Origin, frontmatter_json
 
 #: A migration's private directory beside the live store; a run that died leaves one, and the next migrate or rollback removes it.
 STAGING_PREFIX = ".exomem-vault-store-migration-"
 _COPY_BATCH = 5000
+#: The longest that apply spends catching the graph up to the files, checked between passes. A pass clears at most
+#: `graph_drain.DRAIN_LIMIT` receipts and a whole-vault marker is one long pass, so a deep queue takes many.
+#: Past it, `exomem maintain --reconcile --rebuild-graph` (no ceiling) is the remedy.
+CATCH_UP_SECONDS = 600.0
+#: Consecutive passes that clear nothing end the catch-up. What is left is receipts the drain declines; each pass
+#: rotates declined ones behind the rest, so the stall rule steps past at most this many times `DRAIN_LIMIT` of them.
+#: A deeper residue ends the catch-up early, which refuses only if the graph is still behind (nothing is staged).
+CATCH_UP_STALLED_PASSES = 3
+CATCH_UP_RETRY_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,10 +302,90 @@ def preflight(vault_root: Path) -> dict:
     owned = Counter(
         file.ownership for file in ownership.iter_owned(vault_root, on_skip=skipped.append)
     )
-    return {
+    report = {
         "pages": owned[ownership.Ownership.PAGE],
         "binaries": owned[ownership.Ownership.BINARY],
         "skipped": _skipped_report(skipped),
+    }
+    if queued := queued_graph_work(vault_root):
+        # Not a refusal: apply drains this queue before it stages, so the dry run only says so.
+        report["queued_graph_work"] = {
+            **queued,
+            "apply": "catches the graph index up to the files before it stages",
+        }
+    return report
+
+
+def queued_graph_work(vault_root: Path) -> dict | None:
+    """The graph repair that a stopped file-mode service left queued, or None. Read-only.
+
+    A cold-started service holds graph repair in `.deferred-index.sqlite` until its startup proof
+    clears, so a service that stops early leaves the sidecar behind the files with the work still owed.
+    """
+    receipts, oldest = deferred_index.graph_queue_age(vault_root)
+    whole_vault = deferred_index.graph_full_rebuild_pending(vault_root) is not None
+    if not receipts and not whole_vault:
+        return None
+    return {
+        "receipts": receipts,
+        "oldest_age_seconds": None if oldest is None else round(oldest, 1),
+        "whole_vault_rebuild": whole_vault,
+    }
+
+
+def catch_up_graph_work(vault_root: Path) -> dict | None:
+    """Drain the queued graph repair into the sidecar before staging copies it; refuse if the graph stays behind.
+
+    The offline owner holds the writer lease and this process never set the service's startup gate,
+    so the drain publishes. Passes repeat while any clears a receipt. The queue need not empty: a page
+    that the graph holds no rows for keeps its receipt, so the verdict is the graph's own status.
+    The staged proof still compares every row, so a pass that this misses costs a refusal after staging.
+    """
+    queued = queued_graph_work(vault_root)
+    if queued is None:
+        return None
+    started = time.monotonic()
+    if not freshness.recall_is_live(vault_root, "vault"):
+        # A fresh process has no live recall projection, and the drain declines every receipt
+        # without one; a service's watcher is what makes it live, and this process runs none.
+        epistemic_graph.EpistemicGraphIndex(vault_root).publish_recall_projection()
+    passes = stalled = 0
+    stopped = "the queue drained"
+    while deferred_index.graph_queue_pending(vault_root):
+        if time.monotonic() - started >= CATCH_UP_SECONDS:
+            stopped = f"{CATCH_UP_SECONDS:.0f} seconds passed"
+            break
+        try:
+            cleared = index_sync.drain_graph_work(vault_root)
+        except Exception as error:  # noqa: BLE001 - a failed pass ends the catch-up; the result or the refusal names its cause, not a traceback
+            stopped = f"a pass failed with {type(error).__name__}: {error}"
+            break
+        passes += 1
+        stalled = 0 if cleared else stalled + 1
+        if stalled >= CATCH_UP_STALLED_PASSES:
+            stopped = f"{stalled} passes in a row cleared nothing"
+            break
+        if stalled:
+            time.sleep(CATCH_UP_RETRY_SECONDS)
+    left, _ = deferred_index.graph_queue_age(vault_root)
+    if not graph_state.is_current(vault_root):
+        raise OpError(
+            "VAULT_STORE_GRAPH_NOT_CAUGHT_UP",
+            f"the graph index is not current after {passes} catch-up pass(es), with {left} of "
+            f"{queued['receipts']} queued receipt(s) left ({stopped}), so nothing was staged",
+            "Run `exomem maintain --reconcile --rebuild-graph` to bring the graph index up to date, then run this command again.",
+            details={
+                "before": queued,
+                "left": left,
+                "recall_live": freshness.recall_is_live(vault_root, "vault"),
+            },
+        )
+    return {
+        **queued,
+        "passes": passes,
+        "left": left,
+        "stopped": stopped,
+        "seconds": round(time.monotonic() - started, 2),
     }
 
 
@@ -390,6 +482,8 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
             "a collection store operation is still pending; finish it before entering store mode",
         )
     _require_no_other_claim(root, writer)
+    # Staging copies the sidecars, so what the service left queued goes in first.
+    caught_up = catch_up_graph_work(root)
     revision = _next_revision(writer.connection)
     # An activation that died before its commit left the id and no mode row; this run records the id again and goes on.
     resumed = state_migration.VAULT_STORE_COMPATIBILITY_ID in (
@@ -441,6 +535,7 @@ def _cutover(root: Path, session, token, writer, *, why: str) -> dict:
         "binaries": staged.binaries,
         "skipped": _skipped_report(staged.skipped),
         "verified_tables": len(comparison.tables),
+        **({"graph_catch_up": caught_up} if caught_up else {}),
         "timings": {name: round(seconds, 2) for name, seconds in timings.items()},
     }
 

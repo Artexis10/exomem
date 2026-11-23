@@ -583,8 +583,9 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     publish, it left its marker and retried for the life of the process."""
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     caplog.set_level(logging.INFO)
-    # File mode's debt: the repair its writes queued before the migration, and the barrier that a
-    # stopped rebuild leaves on the sidecar.
+    # File mode's debt: graph repair queued in the deferred index, as a file-mode write leaves it
+    # when migration has not drained it, and the barrier that a stopped rebuild leaves on the sidecar.
+    deferred_index.add_graph(stored, [ALPHA])
     assert deferred_index.snapshot_graph(stored, limit=8)
     epistemic_graph.EpistemicGraphIndex(stored).withdraw_availability()
     activation = server_runtime.LocalRuntimeActivation(stored, fallback_seconds=600.0)
