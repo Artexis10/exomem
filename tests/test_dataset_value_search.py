@@ -632,15 +632,17 @@ def test_a_write_to_another_page_makes_the_next_search_read_no_dataset_card(vaul
     ):
         freshness.seed(vault, scope, ((str(path), freshness.stat_signature(path)) for path in paths))
     assert first.path in _paths(_find(vault, ACCOUNT))
-    original_resolve = find._resolve_page
+    # Count the lane's own card reads: recall admission can also read card pages while the
+    # lexical index is busy, which says nothing about the lane.
+    original_qualify = dataset_values._qualify
     card_reads = []
 
-    def counted_resolve(vault_root, rel, *args, **options):
-        if rel in (first.sidecar_path, second.sidecar_path):
-            card_reads.append(rel)
-        return original_resolve(vault_root, rel, *args, **options)
+    def counted_qualify(vault_root, paths):
+        paths = list(paths)
+        card_reads.extend(paths)
+        return original_qualify(vault_root, paths)
 
-    monkeypatch.setattr(find, "_resolve_page", counted_resolve)
+    monkeypatch.setattr(dataset_values, "_qualify", counted_qualify)
     _note(vault, "Notes/Insights/unrelated.md", "An unrelated insight.", updated="2026-11-23", number=7)
     freshness.on_files_changed(vault, changed=[vault / "Knowledge Base" / "Notes/Insights/unrelated.md"])
 
