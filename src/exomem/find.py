@@ -9784,10 +9784,11 @@ def unload_ram_caches(
         # correctness eviction cannot make either stale; only a caller handing
         # memory back drops them.
         from . import lexstore
-        from .governance import page_admission
+        from .governance import admission_memo, page_admission
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        admission_memo.forget()
         # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
         from .vault_store import resident_catalogue
 
