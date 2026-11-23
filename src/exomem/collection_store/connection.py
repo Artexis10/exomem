@@ -398,20 +398,23 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
 
-    def checkpoint(self) -> bool:
+    def checkpoint(self, *, passive: bool = False) -> bool:
         """Copy every WAL commit into the store file and empty the WAL (design §11).
 
         Closing the writer does this only as the last connection: another open reader,
         even an idle one, keeps the commits in the WAL beside a store file that lacks
         them. It never waits, so a release or shutdown keeps its deadline: a reader's
         open read transaction holds the copy back at once, and it returns False with
-        every commit still in the WAL.
+        every commit still in the WAL. ``passive`` copies the commits that no reader
+        still needs and keeps the WAL file, as SQLite's own autocheckpoint does.
         """
         self.require_write_authority()
         conn = self.connection
         conn.execute("PRAGMA busy_timeout=0")
         try:
-            blocked, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            blocked, _, _ = conn.execute(
+                "PRAGMA wal_checkpoint(PASSIVE)" if passive else "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
         finally:
             conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         return blocked == 0

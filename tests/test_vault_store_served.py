@@ -188,7 +188,8 @@ def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, se
         stored, "manage_memory_file", operation="delete", path=path, confirm=True,
         response_detail="full",
     )
-    trash_path = trashed["diagnostics"]["trash_path"]
+    # The reply acknowledges the page's derived rows, so the delete's own result is its leaf.
+    trash_path = trashed["diagnostics"]["leaf_result"]["trash_path"]
 
     recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
 
@@ -307,13 +308,13 @@ def test_a_busy_boundary_leaves_bookkeeping_for_the_next_pass_and_logs_no_error(
     assert created not in queued(stored) and read.owned_bytes(stored, ALPHA) == edited
 
 
-def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tick(
+def test_the_media_writers_commit_in_a_served_process_beside_a_registry_tick(
     stored, service, monkeypatch
 ):
     """A media writer that a served process refuses, or whose hop waits out the mutation timeout
-    behind a registry tick that waits for a boundary another thread holds (tasks.md 2.5)."""
-    # The scheduler starts no tick while another thread holds the boundary, so a tick parks only
-    # when a holder takes it between the tick's start and its write. ``pending`` opens that gap.
+    behind a registry tick while another thread holds the boundary (tasks.md 2.5)."""
+    # A holder takes the boundary between the tick's start and its batch. ``pending`` opens that
+    # gap. The batch takes no boundary, so the writer waits only for the holder.
     started, go = threading.Event(), threading.Event()
     pending = rederive.pending
 
@@ -324,7 +325,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         return pending(*arguments)
 
     monkeypatch.setattr(rederive, "pending", gapped)
-    mutation = get_manager()._mutation_coordinator_for(stored)
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
@@ -347,10 +347,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         assert started.wait(30), "a registry tick started"
         with held_elsewhere(stored) as release:
             go.set()
-            deadline = time.monotonic() + 30
-            while not mutation.waiter_count():  # the tick waits for the boundary
-                assert time.monotonic() < deadline, "the registry tick waited for the boundary"
-                time.sleep(0.01)
             threading.Timer(hold_seconds, release.set).start()
             began = time.monotonic()
             outcome = writer_call()

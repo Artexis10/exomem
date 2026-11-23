@@ -976,7 +976,7 @@ def _delete_in_store(
             continue
     due_state.refresh_after_writes(root, trashed_pages)
     index = governed.settle(
-        root, deletion, store_batch.row_report("delete", [*pages, *listing.files]), warnings
+        root, deletion, store_batch.row_report("delete", [*pages, *listing.files], root=root), warnings
     )
     store_targets.publish_catalog(
         catalog_target, error_class=DeleteDirectoryError, what="the directory was trashed"
