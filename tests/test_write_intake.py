@@ -359,13 +359,19 @@ def test_a_typed_mcp_edit_during_a_hold_is_queued_and_applied_after_it(
     edit = {"note": page, "action": "replace_text", "old_text": "1%, 5%, 25%, 100%",
             "new_text": "1%, 10%, 50%, 100%", "why": "A source corrected the cohort steps."}
 
+    # The hold covers only the call: the in-process client's teardown waits behind a held
+    # boundary, so the hold ends as soon as the receipt is back.
+    server = server_module.build_server(require_auth=False)
+    hold = _Hold(holder, vault)
+
     async def send() -> dict:
-        async with Client(server_module.build_server(require_auth=False)) as client:
+        async with Client(server) as client:
             result = await client.call_tool(*public_call("edit_note", edit), raise_on_error=False)
+            hold.release.set()
             assert result.structured_content is not None
             return result.structured_content
 
-    with _Hold(holder, vault):
+    with hold:
         receipt = asyncio.run(send())
     assert receipt["state"] == "queued", receipt
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
@@ -581,3 +587,31 @@ def test_a_save_without_an_idempotency_identity_keeps_the_busy_refusal(
         _send(_command("remember"), vault, _remember_kwargs(vault, 26), scope=None)
     assert refused.value.code == "MUTATION_BUSY"
     assert write_intake.read(vault)["items"] == []
+
+
+def test_a_resend_waits_for_an_in_flight_acceptance_of_the_same_save(drainer) -> None:
+    # Between the durable insert and the index entry, a resend that found nothing would run the
+    # save a second time; it waits for the acceptance instead.
+    drainer.begin_accept("origin-1")
+    found: list = []
+    resend = threading.Thread(target=lambda: found.append(drainer.lookup("origin-1")))
+    resend.start()
+    resend.join(0.3)
+    assert resend.is_alive(), "the resend did not wait for the in-flight acceptance"
+    drainer.note_accepted("origin-1", "intake-1")
+    drainer.end_accept("origin-1")
+    resend.join(5)
+    assert found == [("intake-1", "queued")]
+
+
+def test_a_stale_finish_never_overwrites_an_applied_save(vault: Path, managers, drainer) -> None:
+    _writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 27)))
+    ref = receipt["queued_write"]["ref"]
+    _wait_for_state(vault, ref, "applied")
+    stale = write_intake._Claim(
+        id=ref.removeprefix(write_intake.REF_PREFIX), command="remember", arguments={}, principal={},
+        surface=None, attempts=1, generation=0, origin=None, origin_ttl=None,
+    )
+    write_intake._finish_failed(vault, stale, "STALE_ANCHOR", {"code": "STALE_ANCHOR"})
+    assert write_intake.read(vault, ref=ref)["queued_write"]["state"] == "applied"

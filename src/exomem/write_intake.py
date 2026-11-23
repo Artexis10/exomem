@@ -92,6 +92,9 @@ _IDLE_RECHECK_SECONDS = 300.0
 _OUTCOME_LIMIT_BYTES = 16 * 1024
 _LIST_LIMIT = 50
 _STABLE_READ_ATTEMPTS = 3
+#: How long a resend waits for an in-flight acceptance of its own origin; the acceptance itself is
+#: bounded by the store retries, well inside this.
+_ACCEPT_WAIT_SECONDS = 60.0
 
 StoreMode = Literal["read", "write", "create"]
 
@@ -487,6 +490,9 @@ class Drainer:
         self._indexed = False
         self._open_origins: dict[str, str] = {}
         self._applied_origins: dict[str, tuple[str, float]] = {}
+        #: Origins whose acceptance is between its durable insert and its index entry, with a count
+        #: of acceptances in flight; a resend with one of them waits instead of running.
+        self._accepting: dict[str, int] = {}
         #: Acceptances so far; a store read that an acceptance overlapped is read again.
         self._accepts = 0
 
@@ -537,8 +543,18 @@ class Drainer:
 
     def lookup(self, origin: str) -> tuple[str, str] | None:
         """The intake id and state (open or applied) of the save with this origin, while it is open
-        or its applied answer is still in the original identity's retry window."""
+        or its applied answer is still in the original identity's retry window.
+
+        While an acceptance of the same origin is in flight, wait for it, so a resend never runs
+        in the gap between the durable insert and the index entry.
+        """
         with self._condition:
+            deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
+            while origin in self._accepting and not self._stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"an acceptance of origin {origin[:12]} did not finish")
+                self._condition.wait(min(remaining, 1.0))
             intake_id = self._open_origins.get(origin)
             if intake_id is not None:
                 return intake_id, QUEUED
@@ -549,6 +565,19 @@ class Drainer:
                 del self._applied_origins[origin]
                 return None
             return applied[0], APPLIED
+
+    def begin_accept(self, origin: str) -> None:
+        with self._condition:
+            self._accepting[origin] = self._accepting.get(origin, 0) + 1
+
+    def end_accept(self, origin: str) -> None:
+        with self._condition:
+            remaining = self._accepting.get(origin, 1) - 1
+            if remaining > 0:
+                self._accepting[origin] = remaining
+            else:
+                self._accepting.pop(origin, None)
+            self._condition.notify_all()
 
     def note_accepted(self, origin: str | None, intake_id: str) -> None:
         with self._condition:
@@ -878,15 +907,19 @@ def _bounded_outcome(result: Any) -> dict[str, Any]:
 def _finish_applied(vault_root: Path, claim: _Claim, result: Any) -> None:
     now = time.time()
     with _write(vault_root) as conn:
-        conn.execute(
+        # Like every other transition, only the claim that still holds the row may finish it.
+        finished = conn.execute(
             "UPDATE intake SET state = ?, owner = NULL, arguments = NULL, outcome = ?, error_code = NULL, "
-            "updated_at = ?, finished_at = ? WHERE id = ?",
-            (APPLIED, _report_json(_bounded_outcome(result)), now, now, claim.id),
-        )
+            "updated_at = ?, finished_at = ? WHERE id = ? AND state = ? AND generation = ?",
+            (APPLIED, _report_json(_bounded_outcome(result)), now, now, claim.id, APPLYING, claim.generation),
+        ).rowcount
         conn.execute(
             "DELETE FROM intake WHERE state = ? AND finished_at < ?",
             (APPLIED, now - APPLIED_RETENTION_SECONDS),
         )
+    if not finished:
+        log.warning("write intake dropped a stale finish of %s", claim.id)
+        return
     expires_at = now + claim.origin_ttl if claim.origin_ttl is not None else None
     _note_finished(vault_root, claim.origin, claim.id, expires_at)
     log.info("write intake applied %s", claim.id)
@@ -895,11 +928,14 @@ def _finish_applied(vault_root: Path, claim: _Claim, result: Any) -> None:
 def _finish_failed(vault_root: Path, claim: _Claim, code: str, refusal: Mapping[str, Any]) -> None:
     now = time.time()
     with _write(vault_root) as conn:
-        conn.execute(
+        finished = conn.execute(
             "UPDATE intake SET state = ?, owner = NULL, error_code = ?, error = ?, updated_at = ?, "
-            "finished_at = ? WHERE id = ?",
-            (FAILED, code, _report_json(dict(refusal)), now, now, claim.id),
-        )
+            "finished_at = ? WHERE id = ? AND state = ? AND generation = ?",
+            (FAILED, code, _report_json(dict(refusal)), now, now, claim.id, APPLYING, claim.generation),
+        ).rowcount
+    if not finished:
+        log.warning("write intake dropped a stale finish of %s", claim.id)
+        return
     _note_finished(vault_root, claim.origin, claim.id, None)
     log.warning("write intake save %s failed with %s", claim.id, code)
 
@@ -933,6 +969,14 @@ class Admission:
         deadline = started + intake_wait_seconds()
         try:
             answer = self._indexed_answer()
+        except TimeoutError as error:
+            # The same save is still being accepted; running it now could land it twice.
+            raise OpError(
+                "MUTATION_BUSY",
+                "the same save is still being queued",
+                "Send it again in a moment with the same idempotency key.",
+                details={"status": "retryable", "committed": False},
+            ) from error
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
             log.warning("write intake could not check a resend of a %s save", self.command.name, exc_info=True)
             answer = None
@@ -998,13 +1042,18 @@ class Admission:
         return _with_store_retry(lambda: self._accept_once(reason=reason, started=started))
 
     def _accept_once(self, *, reason: str, started: float) -> dict[str, Any]:
+        self.drainer.begin_accept(self.origin)
         try:
-            receipt, inserted = self._insert(reason, create=False)
-        except FileNotFoundError:
-            # The first acceptance on this vault creates the store.
-            receipt, inserted = self._insert(reason, create=True)
+            try:
+                receipt, inserted = self._insert(reason, create=False)
+            except FileNotFoundError:
+                # The first acceptance on this vault creates the store.
+                receipt, inserted = self._insert(reason, create=True)
+            if inserted is not None:
+                self.drainer.note_accepted(self.origin, inserted)
+        finally:
+            self.drainer.end_accept(self.origin)
         if inserted is not None:
-            self.drainer.note_accepted(self.origin, inserted)
             _journal_queued(self, inserted, reason, started)
         return receipt
 
